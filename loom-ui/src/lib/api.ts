@@ -20,8 +20,8 @@ export interface Definition {
   lang: string;
   name_hint?: string;
   name?: string;
-  component_hash?: string;
-  component_size?: number;
+  component_hash?: string | null;
+  component_size?: number | null;
 }
 export interface Actor {
   id: string;
@@ -119,4 +119,112 @@ export class Client {
   command(command: string, args: Record<string, unknown> = {}): Promise<Reply> {
     return this.request("command", { command, args });
   }
+}
+
+export interface CasCodec {
+  code: number;
+  name: string;
+  cid: string;
+}
+export interface CasEntry {
+  hash: string;
+  kind: string;
+  size: number;
+  created_at: number;
+  codecs: CasCodec[];
+}
+export interface CasListing {
+  items: CasEntry[];
+  next_cursor: string | null;
+}
+export interface CasLink {
+  path: string;
+  cid: string;
+}
+export interface CasInspection {
+  entry: CasEntry;
+  codec: CasCodec;
+  value?: unknown;
+  links: CasLink[];
+  text?: string;
+  hex: string;
+  truncated: boolean;
+}
+export function resultOf(reply: Reply): unknown {
+  if (!reply.ok)
+    throw new Error(format(reply.result ?? reply.error ?? reply.diagnostics));
+  return reply.result;
+}
+function casEntry(value: unknown): CasEntry {
+  const entry = record(value);
+  if (
+    typeof entry.hash !== "string" ||
+    typeof entry.kind !== "string" ||
+    typeof entry.size !== "number" ||
+    typeof entry.created_at !== "number" ||
+    !Array.isArray(entry.codecs)
+  )
+    throw new Error("Invalid CAS entry from server");
+  return {
+    ...entry,
+    codecs: entry.codecs.map(casCodec),
+  } as unknown as CasEntry;
+}
+function casCodec(value: unknown): CasCodec {
+  const codec = record(value);
+  if (
+    typeof codec.code !== "number" ||
+    typeof codec.name !== "string" ||
+    typeof codec.cid !== "string"
+  )
+    throw new Error("Invalid CAS codec from server");
+  return codec as unknown as CasCodec;
+}
+export function casListing(reply: Reply): CasListing {
+  const value = record(resultOf(reply));
+  if (
+    !Array.isArray(value.items) ||
+    (value.next_cursor !== null && typeof value.next_cursor !== "string")
+  )
+    throw new Error("Invalid CAS listing from server");
+  return { items: value.items.map(casEntry), next_cursor: value.next_cursor };
+}
+export function casInspection(reply: Reply): CasInspection {
+  const value = record(resultOf(reply));
+  if (
+    !Array.isArray(value.links) ||
+    typeof value.hex !== "string" ||
+    typeof value.truncated !== "boolean"
+  )
+    throw new Error("Invalid CAS inspection from server");
+  const links = value.links.map((link) => {
+    const row = record(link);
+    if (typeof row.path !== "string" || typeof row.cid !== "string")
+      throw new Error("Invalid CAS link from server");
+    return { path: row.path, cid: row.cid };
+  });
+  return {
+    entry: casEntry(value.entry),
+    codec: casCodec(value.codec),
+    links,
+    hex: value.hex,
+    truncated: value.truncated,
+    ...("value" in value ? { value: value.value } : {}),
+    ...(typeof value.text === "string" ? { text: value.text } : {}),
+  };
+}
+export function short(value: string, length = 16): string {
+  return value.length > length + 4
+    ? `${value.slice(0, length)}…${value.slice(-4)}`
+    : value;
+}
+export function bytes(size: number): string {
+  return size < 1024
+    ? `${size} B`
+    : size < 1024 * 1024
+      ? `${(size / 1024).toFixed(1)} KB`
+      : `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+export function cid(value: string): boolean {
+  return /^b[a-z2-7]{30,}$/.test(value) || /^[a-f0-9]{64}$/.test(value);
 }

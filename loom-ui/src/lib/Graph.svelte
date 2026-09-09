@@ -68,7 +68,7 @@
         )}{#if from && to}<path
             d={`M${from.x + 210},${from.y + 35} C${from.x + 245},${from.y + 35} ${to.x - 30},${to.y + 35} ${to.x},${to.y + 35}`}
             fill="none"
-            stroke="#88a598"
+            stroke="var(--muted)"
             stroke-width="1.5"
           />{/if}{/each}
       {#each nodes as node}<g transform={`translate(${node.x},${node.y})`}
@@ -76,13 +76,13 @@
             width="210"
             height="72"
             rx="9"
-            fill="#fff"
-            stroke="#d5dcd5"
-          /><text x="14" y="25" fill="#172d24" font-size="13"
+            fill="var(--card)"
+            stroke="var(--line)"
+          /><text x="14" y="25" fill="var(--ink)" font-size="13"
             ><title>{node.name_hint || node.name || node.hash}</title>{label(
               node,
             )}</text
-          ><text x="14" y="50" fill="#718176" font-size="11"
+          ><text x="14" y="50" fill="var(--muted)" font-size="11"
             >{node.lang.toUpperCase()} · {node.hash.slice(0, 14)}</text
           ></g
         >{/each}
@@ -100,7 +100,7 @@
     height: 60vh;
     overflow: hidden;
     overscroll-behavior: contain;
-    background-image: radial-gradient(#cbd4cc 1px, transparent 1px);
+    background-image: radial-gradient(var(--line) 1px, transparent 1px);
     background-size: 20px 20px;
     border: 1px solid var(--line);
     border-radius: 10px;

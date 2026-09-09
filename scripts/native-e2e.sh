@@ -24,6 +24,7 @@ for attempt in $(seq 1 100); do
 done
 if [[ "$ready" != true ]]; then cat "$scratch/daemon.log"; exit 1; fi
 case "${LOOM_E2E_SUITE:-all}" in
+  site) if ! bun scripts/site-e2e.ts; then cat "$scratch/daemon.log"; exit 1; fi ;;
   languages) if ! bun scripts/languages-e2e.ts; then cat "$scratch/daemon.log"; exit 1; fi ;;
   mcp) if ! bun scripts/mcp-e2e.ts; then cat "$scratch/daemon.log"; exit 1; fi ;;
   all)

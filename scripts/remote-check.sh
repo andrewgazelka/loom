@@ -83,8 +83,9 @@ if [[ ${1:-} == --worker ]]; then
     e2e) bash scripts/native-e2e.sh || status=$? ;;
     e2e_mcp) LOOM_E2E_SUITE=mcp bash scripts/native-e2e.sh || status=$? ;;
     e2e_languages) LOOM_E2E_SUITE=languages bash scripts/native-e2e.sh || status=$? ;;
-    container|container_verify)
+    container|container_verify|container_site)
       [[ "$action" != container_verify ]] || export LOOM_SKIP_CONTAINER_BUILD=1 LOOM_CONTAINER_SUITE=vendor
+      [[ "$action" != container_site ]] || export LOOM_SKIP_CONTAINER_BUILD=1 LOOM_CONTAINER_SUITE=site
       export LOOM_IMAGE_POLICY="$base/container-policy.json"
       cat > "$LOOM_IMAGE_POLICY" <<'POLICY'
 {"default":[{"type":"reject"}],"transports":{"docker":{"docker.io/library/rust":[{"type":"insecureAcceptAnything"}],"docker.io/oven/bun":[{"type":"insecureAcceptAnything"}]},"containers-storage":{"":[{"type":"insecureAcceptAnything"}]}}}
@@ -137,7 +138,7 @@ COMPILER
 fi
 
 action=${1:-check}
-case "$action" in prepare|check|test|fetch|tools|targets|machine|e2e|e2e_mcp|e2e_languages|sandbox|acceptance|container|container_verify|vendor|vendor_run|m9|compiler|dag|sdk) ;; *) echo 'Usage: scripts/remote-check.sh [prepare|check|test|fetch|tools|targets|machine|e2e|e2e_mcp|e2e_languages|sandbox|acceptance|container|container_verify|vendor|vendor_run|m9|compiler|dag|sdk]' >&2; exit 64;; esac
+case "$action" in prepare|check|test|fetch|tools|targets|machine|e2e|e2e_mcp|e2e_languages|sandbox|acceptance|container|container_verify|vendor|vendor_run|m9|compiler|dag|sdk|container_site) ;; *) echo 'Usage: scripts/remote-check.sh [prepare|check|test|fetch|tools|targets|machine|e2e|e2e_mcp|e2e_languages|sandbox|acceptance|container|container_verify|vendor|vendor_run|m9|compiler|dag|sdk|container_site]' >&2; exit 64;; esac
 cd "$(dirname "$0")/.."
 bash -n scripts/remote-check.sh
 host=dev-compute-4

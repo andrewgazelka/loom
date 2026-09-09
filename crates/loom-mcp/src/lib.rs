@@ -118,14 +118,14 @@ impl LoomMcp {
         .unwrap()
     }
     #[tool(
-        description = "Run a loom command: defs, actors, events, state, spawn, send, fork, upgrade, call, resolve, deps."
+        description = "Run a loom command. Read CAS with cas.list {limit,after,kind,q} or cas.inspect {hash}; other commands include defs, actors, events, state, spawn, send, fork, upgrade, call, resolve, deps."
     )]
     async fn loom_command(
         &self,
         Parameters(args): Parameters<CommandArgs>,
         context: RequestContext<rmcp::RoleServer>,
     ) -> String {
-        let resolve = args.command == "resolve";
+        let direct = loom_api::command_returns_direct(&args.command);
         let response = self
             .service_for(&context)
             .command(CommandRequest {
@@ -134,7 +134,7 @@ impl LoomMcp {
                 args: args.args,
             })
             .await;
-        serde_json::to_string(&if resolve {
+        serde_json::to_string(&if direct {
             response
         } else {
             self.service.inline(response)

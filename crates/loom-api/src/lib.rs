@@ -1,4 +1,5 @@
 mod auth;
+mod cas_browser;
 use anyhow::{Context, Result, bail, ensure};
 pub use auth::{Access, Authorizer, Scope, TokenConfig};
 use axum::{
@@ -393,6 +394,17 @@ impl Service {
     async fn command_inner(&self, request: CommandRequest) -> Result<Value> {
         let args = &request.args;
         match request.command.as_str() {
+            "cas.list" => {
+                let query = if request.args.is_null() {
+                    loom_proto::CasListRequest::default()
+                } else {
+                    serde_json::from_value(request.args.clone())?
+                };
+                Ok(serde_json::to_value(self.store.cas_list(&query)?)?)
+            }
+            "cas.inspect" => Ok(serde_json::to_value(
+                self.inspect_cas(serde_json::from_value(request.args.clone())?)?,
+            )?),
             "model.state" => Ok(serde_json::to_value(self.runtime.model().state()?)?),
             "model.list" => Ok(serde_json::to_value(self.runtime.model().list()?)?),
             "process.start" => Ok(serde_json::to_value(
@@ -721,9 +733,9 @@ async fn command(
     let service = s.service.scoped(access);
     match request {
         Ok(Json(request)) => {
-            let resolve = request.command == "resolve";
+            let direct = command_returns_direct(&request.command);
             let response = service.command(request).await;
-            if resolve {
+            if direct {
                 protocol_response(response)
             } else {
                 operation_response(&service, response)
@@ -1520,4 +1532,9 @@ fn valid_alias(alias: &str) -> bool {
         .next()
         .is_some_and(|byte| byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'$'))
         && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$'))
+}
+
+/// Bounded metadata reads must not create new CAS blocks while browsing the store.
+pub fn command_returns_direct(command: &str) -> bool {
+    matches!(command, "resolve" | "cas.list" | "cas.inspect")
 }

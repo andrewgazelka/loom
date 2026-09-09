@@ -1,3 +1,4 @@
+mod cas_browser;
 mod dag_migration;
 mod migration;
 use anyhow::{Context, Result, anyhow, ensure};

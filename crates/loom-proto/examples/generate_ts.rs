@@ -4,6 +4,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output = std::env::args().nth(1).ok_or("usage: generate_ts OUTPUT")?;
     let declarations = [
         Lang::decl(),
+        CasCodec::decl(),
+        CasEntry::decl(),
+        CasListRequest::decl(),
+        CasPage::decl(),
+        CasInspectRequest::decl(),
+        CasLink::decl(),
+        CasInspection::decl(),
         LlmRole::decl(),
         LlmMessage::decl(),
         LlmArgs::decl(),

@@ -16,5 +16,10 @@
     "svelte-check": "4.3.1",
     "typescript": "5.9.2",
     "vite": "7.1.4"
+  },
+  "dependencies": {
+    "@fontsource/jetbrains-mono": "5.3.0",
+    "lucide-svelte": "0.468.0",
+    "shiki": "4.4.3"
   }
 }

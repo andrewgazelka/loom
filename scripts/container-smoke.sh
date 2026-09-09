@@ -43,10 +43,15 @@ for attempt in $(seq 1 100); do
   sleep .2
 done
 if [[ "$ready" != true ]]; then podman logs "$name"; exit 1; fi
-if [[ ${LOOM_CONTAINER_SUITE:-all} != vendor ]]; then
+if [[ ${LOOM_CONTAINER_SUITE:-all} == all ]]; then
   if ! bun scripts/e2e.ts; then podman logs "$name"; exit 1; fi
   if ! bun scripts/mcp-e2e.ts; then podman logs "$name"; exit 1; fi
 fi
+if [[ ${LOOM_CONTAINER_SUITE:-all} != vendor ]]; then
+  if ! bun scripts/site-e2e.ts; then podman logs "$name"; exit 1; fi
+fi
+if [[ ${LOOM_CONTAINER_SUITE:-all} != site ]]; then
 if ! bun scripts/container-vendor-smoke.ts; then podman logs "$name"; exit 1; fi
 if ! podman exec --workdir /opt/loom "$name" bash loom-rustc/test-sandbox.sh; then podman logs "$name"; exit 1; fi
+fi
 printf 'Container %s smoke passed for %s\n' "${LOOM_CONTAINER_SUITE:-all}" "$image"

@@ -6,7 +6,7 @@ use serde_json::json;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::sync::Mutex as AsyncMutex;
 use wasmtime::component::{Component, Linker};
@@ -85,7 +85,29 @@ fn encode(value: &Value) -> Result<Vec<u8>> {
 fn decode(bytes: &[u8]) -> Result<Value> {
     loom_proto::decode(bytes).map_err(anyhow::Error::msg)
 }
+#[derive(Debug, Default, serde::Serialize)]
+pub struct RuntimeTiming {
+    pub component_hash: String,
+    pub cache_hit: bool,
+    pub total_ms: f64,
+    pub compile_wait_ms: f64,
+    pub resolve_ms: f64,
+    pub load_ms: f64,
+    pub compile_ms: f64,
+    pub link_ms: f64,
+    pub instantiate_ms: f64,
+    pub run_ms: f64,
+}
+#[derive(Debug, serde::Serialize)]
+pub struct TimedCall {
+    pub value: Value,
+    pub timing: RuntimeTiming,
+}
+fn elapsed_ms(start: Instant) -> f64 {
+    start.elapsed().as_secs_f64() * 1000.0
+}
 struct Instance {
+    timing: RuntimeTiming,
     bindings: Handler,
     store: wasmtime::Store<ContextData>,
 }
@@ -132,6 +154,7 @@ impl Runtime {
         Ok(runtime)
     }
     async fn instance(&self, hash: &str, scope: &str, pure: bool) -> Result<Instance> {
+        let resolve_start = Instant::now();
         let def = self
             .inner
             .store
@@ -153,6 +176,11 @@ impl Runtime {
                     .context("builder did not publish component")?
             }
         };
+        let mut timing = RuntimeTiming {
+            component_hash: component_hash.clone(),
+            resolve_ms: elapsed_ms(resolve_start),
+            ..Default::default()
+        };
         let component_lock = self
             .inner
             .component_locks
@@ -161,7 +189,9 @@ impl Runtime {
             .entry(component_hash.clone())
             .or_default()
             .clone();
+        let wait_start = Instant::now();
         let compile_guard = component_lock.lock().await;
+        timing.compile_wait_ms = elapsed_ms(wait_start);
         let cached = self
             .inner
             .components
@@ -170,16 +200,24 @@ impl Runtime {
             .get(&component_hash)
             .cloned();
         let component = match cached {
-            Some(c) => c,
+            Some(c) => {
+                timing.cache_hit = true;
+                c
+            }
             None => {
+                let load_start = Instant::now();
                 let bytes = self
                     .inner
                     .store
                     .get(&component_hash)?
                     .context("component missing from CAS")?;
+                timing.load_ms = elapsed_ms(load_start);
                 let engine = self.inner.engine.clone();
+                let compile_start = Instant::now();
                 let c =
                     tokio::task::spawn_blocking(move || Component::new(&engine, bytes)).await??;
+                timing.compile_ms = elapsed_ms(compile_start);
+                let link_start = Instant::now();
                 let mut linker = Linker::new(&self.inner.engine);
                 Handler::add_to_linker::<_, wasmtime::component::HasSelf<_>>(
                     &mut linker,
@@ -187,6 +225,7 @@ impl Runtime {
                 )?;
                 linker.define_unknown_imports_as_traps(&c)?;
                 let pre = HandlerPre::new(linker.instantiate_pre(&c)?)?;
+                timing.link_ms = elapsed_ms(link_start);
                 self.inner
                     .components
                     .lock()
@@ -196,6 +235,7 @@ impl Runtime {
             }
         };
         drop(compile_guard);
+        let instantiate_start = Instant::now();
         let mut store = wasmtime::Store::new(
             &self.inner.engine,
             ContextData {
@@ -214,20 +254,39 @@ impl Runtime {
         store.set_epoch_deadline(1);
         store.epoch_deadline_async_yield_and_update(1);
         let bindings = component.instantiate_async(&mut store).await?;
-        Ok(Instance { bindings, store })
+        timing.instantiate_ms = elapsed_ms(instantiate_start);
+        Ok(Instance {
+            bindings,
+            store,
+            timing,
+        })
     }
     pub async fn call_def(&self, hash: &str, args: Value) -> Result<Value> {
-        self.call_scoped(hash, args, &format!("call:{}", uuid::Uuid::new_v4()))
+        Ok(self.call_def_timed(hash, args).await?.value)
+    }
+    pub async fn call_def_timed(&self, hash: &str, args: Value) -> Result<TimedCall> {
+        self.call_scoped_timed(hash, args, &format!("call:{}", uuid::Uuid::new_v4()))
             .await
     }
     async fn call_scoped(&self, hash: &str, args: Value, scope: &str) -> Result<Value> {
-        let mut i = self.instance(hash, scope, false).await?;
-        let result = i
+        Ok(self.call_scoped_timed(hash, args, scope).await?.value)
+    }
+    async fn call_scoped_timed(&self, hash: &str, args: Value, scope: &str) -> Result<TimedCall> {
+        let call_start = Instant::now();
+        let mut instance = self.instance(hash, scope, false).await?;
+        let run_start = Instant::now();
+        let result = instance
             .bindings
-            .call_call(&mut i.store, &encode(&json!(hash))?, &encode(&args)?)
+            .call_call(&mut instance.store, &encode(&json!(hash))?, &encode(&args)?)
             .await?
             .map_err(anyhow::Error::msg)?;
-        decode(&result)
+        let value = decode(&result)?;
+        instance.timing.run_ms = elapsed_ms(run_start);
+        instance.timing.total_ms = elapsed_ms(call_start);
+        Ok(TimedCall {
+            value,
+            timing: instance.timing,
+        })
     }
     pub async fn spawn(&self, hash: &str, initial: Value) -> Result<Actor> {
         self.spawn_identified(hash, initial, uuid::Uuid::new_v4().to_string())

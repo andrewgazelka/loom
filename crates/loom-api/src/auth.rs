@@ -90,8 +90,9 @@ impl Authorizer {
 }
 pub fn command_scope(command: &str) -> Scope {
     match command {
-        "defs" | "actors" | "events" | "state" | "resolve" | "deps" | "build" | "stats"
-        | "process.list" | "process.status" | "model.state" | "model.list" => Scope::Read,
+        "cas.list" | "cas.inspect" | "defs" | "actors" | "events" | "state" | "resolve"
+        | "deps" | "build" | "stats" | "process.list" | "process.status" | "model.state"
+        | "model.list" => Scope::Read,
         "backup" | "compact" | "gc" | "cache_evict" | "machine.create" => Scope::Admin,
         _ => Scope::Execute,
     }
