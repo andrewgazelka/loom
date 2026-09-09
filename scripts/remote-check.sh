@@ -124,8 +124,13 @@ COMPILER
           actual=$(cat /proc/self/cgroup)
           [[ "$actual" == *"$expected"* ]] || { printf "Compiler cgroup escaped: %s\n" "$actual" >&2; exit 1; }
           printf "Direct Nix store compiler cgroup: %s\n" "$actual"
-          bash scripts/nix-check.sh
+          nix build .#default --no-link
         ' || status=$?
+      if [[ "$status" -eq 0 ]]; then
+        [[ $(id -u) -ne 0 ]] || { echo 'Nix execution witness requires a non-root user' >&2; exit 1; }
+        printf 'Packaged execution user: %s\n' "$(id -un)"
+        bash scripts/nix-check.sh || status=$?
+      fi
       ;;
     dag)
       (cd loom-checker && bun install --frozen-lockfile)
