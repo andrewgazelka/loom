@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { signatures } from "./signature";
   import RowPreview from "./RowPreview.svelte";
   import {
     AlignLeft,
@@ -177,7 +178,7 @@
           on:click={() => open(def)}
           ><AlignLeft size={15} />
           <div>
-            <span class="definition-name">{definitionName(def)}</span><code
+            <span class="definition-name">{definitionName(def)}</span>{#each signatures(def.sig) as signature}<span class="definition-signature">{signature}</span>{/each}<code
               >{short(def.hash, 25)}</code
             ><RowPreview code language={def.lang === "rust" ? "rust" : "ts"} load={() => preview(def)} />
           </div>
@@ -260,6 +261,7 @@
     flex: 1;
     min-width: 0;
   }
+  .definition-signature { display:block; margin-top:6px; font:12px/1.7 var(--mono); color:var(--ink); overflow-wrap:anywhere; }
   .definition-name {
     display: block;
     font: 11px var(--mono);
@@ -284,7 +286,8 @@
     .definition-row {
       gap: 8px;
     }
-    .definition-name {
+    .definition-signature { display:block; margin-top:6px; font:12px/1.7 var(--mono); color:var(--ink); overflow-wrap:anywhere; }
+  .definition-name {
       font-size: 10px;
     }
     .definition-row > .quiet {

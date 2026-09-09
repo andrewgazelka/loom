@@ -286,3 +286,17 @@ async fn browsing_large_results_does_not_write_into_the_store() {
     let after = fixture.store.cas_list(&request).unwrap();
     assert_eq!(before.items.len(), after.items.len());
 }
+
+#[tokio::test]
+async fn empty_raw_block_inspects_without_error() {
+    let fixture = Fixture::new();
+    let hash = fixture.store.put("blob", &[]).unwrap();
+    let view = fixture.inspect(&hash).await;
+    assert_eq!(view.entry.size, 0);
+    assert_eq!(view.codec.code, RAW_CODEC);
+    assert_eq!(view.text.as_deref(), Some(""));
+    assert!(view.hex.is_empty());
+    assert!(view.links.is_empty());
+    assert!(view.value.is_none());
+    assert!(!view.truncated);
+}

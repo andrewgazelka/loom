@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { displayNumber } from "./number";
   import { record, cid } from "./api";
   import ObjectFields from "./ObjectFields.svelte";
   import ArrayView from "./ArrayView.svelte";
@@ -41,7 +42,9 @@
           ? label
             ? JSON.stringify(value)
             : value
-          : String(value ?? "null")}</span
+          : typeof value === "number"
+            ? displayNumber(value)
+            : String(value ?? "null")}</span
       >{/if}
   </div>{/if}
 

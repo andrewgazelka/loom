@@ -84,7 +84,7 @@ impl Store {
         Ok(self
             .lock()?
             .query_row(
-                "SELECT substr(bytes,1,?) FROM cas WHERE hash=?",
+                "SELECT coalesce(substr(bytes,1,?),X'') FROM cas WHERE hash=?",
                 params![limit, hash],
                 |row| row.get(0),
             )
@@ -138,4 +138,20 @@ fn codecs(connection: &Connection, hash: &str) -> Result<Vec<CasCodec>> {
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_blob_preview_is_present_but_missing_block_is_absent() {
+        let store = Store::memory().unwrap();
+        let hash = store.put("blob", &[]).unwrap();
+        assert_eq!(store.cas_prefix(&hash, 256).unwrap(), Some(Vec::new()));
+        assert_eq!(store.cas_entry(&hash).unwrap().unwrap().size, 0);
+        let missing = "0".repeat(64);
+        assert_eq!(store.cas_prefix(&missing, 256).unwrap(), None);
+        assert!(store.cas_entry(&missing).unwrap().is_none());
+    }
 }

@@ -16,6 +16,7 @@ export interface Reply {
   error?: unknown;
 }
 export interface Definition {
+  sig?: unknown;
   hash: string;
   lang: string;
   name_hint?: string;
