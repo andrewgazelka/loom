@@ -11,7 +11,7 @@ let
     fileset = lib.fileset.unions [ ../Cargo.toml ../Cargo.lock ../crates ../examples ../loom-wit ../loom-rustc/vendor-config.toml ];
   };
   toolchain = import ./toolchain.nix { inherit pkgs lib; };
-  javascript = import ./javascript.nix { inherit pkgs lib src; };
+  javascript = import ./javascript.nix { inherit pkgs lib; src = ../.; };
   rustPlatform = pkgs.makeRustPlatform { cargo = toolchain; rustc = toolchain; };
   host = rustPlatform.buildRustPackage {
     pname = "loom-host";
