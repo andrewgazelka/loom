@@ -55,13 +55,31 @@ export function items<T>(value: unknown, key: string): T[] {
   const entry = record(value)[key];
   return Array.isArray(entry) ? (entry as T[]) : [];
 }
+export class AuthenticationError extends Error {
+  constructor() { super("Connection rejected. Enter a valid bearer token in Connection settings, then connect again."); this.name = "AuthenticationError"; }
+}
 export class Client {
+  private controller = new AbortController();
+  private rejected = false;
+  dispose() { this.controller.abort(); }
+  private async fetch(input: string, init: RequestInit = {}): Promise<Response> {
+    if (this.rejected) throw new AuthenticationError();
+    const response = await fetch(input, {...init, signal:this.controller.signal});
+    if (response.status === 401) {
+      const error = new AuthenticationError();
+      if (!this.controller.signal.aborted && !this.rejected) { this.rejected = true; this.onUnauthorized?.(error); }
+      throw error;
+    }
+    return response;
+  }
+
   constructor(
     public endpoint: string,
     public token: string,
+    private onUnauthorized?: (error: AuthenticationError) => void,
   ) {}
   async bytes(hash: string, limit = 262144): Promise<Uint8Array> {
-    const response = await fetch(`${this.endpoint.replace(/\/$/, "")}/v1/cas/${encodeURIComponent(hash)}`, {headers:{Accept:"application/octet-stream", ...(this.token ? {Authorization:`Bearer ${this.token}`} : {})}});
+    const response = await this.fetch(`${this.endpoint.replace(/\/$/, "")}/v1/cas/${encodeURIComponent(hash)}`, {headers:{Accept:"application/octet-stream", ...(this.token ? {Authorization:`Bearer ${this.token}`} : {})}});
     if (!response.ok) throw new Error(`Could not read content: HTTP ${response.status}`);
     const reader = response.body?.getReader();
     if (!reader) throw new Error("Content body unavailable");
@@ -80,7 +98,7 @@ export class Client {
     return bytes;
   }
   async text(hash: string): Promise<string> {
-    const response = await fetch(
+    const response = await this.fetch(
       `${this.endpoint.replace(/\/$/, "")}/v1/cas/${encodeURIComponent(hash)}`,
       {
         headers: this.token ? { Authorization: `Bearer ${this.token}` } : {},
@@ -91,7 +109,7 @@ export class Client {
     return response.text();
   }
   async request(path: string, body?: unknown): Promise<Reply> {
-    const response = await fetch(
+    const response = await this.fetch(
       `${this.endpoint.replace(/\/$/, "")}/v1/${path}`,
       {
         method: body === undefined ? "GET" : "POST",
@@ -122,7 +140,7 @@ export class Client {
       typeof reference.$ref === "string" &&
       Object.keys(reference).length === 1
     ) {
-      const resolved = await fetch(
+      const resolved = await this.fetch(
         `${this.endpoint.replace(/\/$/, "")}/v1/cas/${encodeURIComponent(reference.$ref)}`,
         {
           headers: {

@@ -14,6 +14,7 @@
   } from "lucide-svelte";
   import {
     Client,
+    AuthenticationError,
     items,
     record,
     resultOf,
@@ -58,20 +59,35 @@
     reconnectTimer: ReturnType<typeof setTimeout> | undefined,
     disposed = false,
     reconnectAuthorized = false;
-  let client = new Client("", "");
+  let connecting = false;
+  function unauthorized(problem: AuthenticationError) {
+    connected = false;
+    reconnectAuthorized = false;
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    if (socket) { socket.onclose = null; socket.close(); socket = undefined; }
+    settings = true;
+    error = problem.message;
+  }
+  function makeClient(endpoint: string, token: string) {
+    const candidate = new Client(endpoint, token, problem => { if (candidate === client) unauthorized(problem); });
+    return candidate;
+  }
+  let client = makeClient("", "");
   $: sequence = Math.max(
     0,
     ...events.map((event) => event.seq),
     ...entries.map((entry) => entry.reply?.seq ?? 0),
   );
   async function refresh() {
+    const current = client;
     refreshing = true;
     try {
       const results = await Promise.all([
-        client.command("defs"),
-        client.command("actors"),
-        client.request("events?limit=1000"),
+        current.command("defs"),
+        current.command("actors"),
+        current.request("events?limit=1000"),
       ]);
+      if (current !== client) return;
       definitions = items<Definition>(resultOf(results[0]!), "defs");
       actors = items<Actor>(resultOf(results[1]!), "actors");
       const received = items<LogEvent>(resultOf(results[2]!), "events");
@@ -83,9 +99,9 @@
         .slice(-1000);
       error = "";
     } catch (e) {
-      error = String(e);
+      if (current === client) error = e instanceof Error ? e.message : String(e);
     } finally {
-      refreshing = false;
+      if (current === client) refreshing = false;
     }
   }
   function connect() {
@@ -96,24 +112,23 @@
     }
     let url: URL;
     try {
-      url = new URL(`${endpoint || location.origin}/v1/stream`);
+      url = new URL(`${client.endpoint || location.origin}/v1/stream`);
     } catch {
       error = "Enter a valid API endpoint URL.";
       return;
     }
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    const streamToken = client.token;
     const current = new WebSocket(url);
     socket = current;
     current.onopen = () =>
-      current.send(JSON.stringify({ token, after: sequence }));
+      current.send(JSON.stringify({ token: streamToken, after: sequence }));
     current.onmessage = (event) => {
       if (socket !== current) return;
       try {
         const data = record(JSON.parse(String(event.data)));
         if (data.ok === false || data.error) {
-          connected = false;
-          reconnectAuthorized = false;
-          error = String(data.error || "Stream rejected");
+          unauthorized(new AuthenticationError());
           return;
         }
         connected = true;
@@ -144,13 +159,27 @@
       JSON.stringify({ endpoint, token, session }),
     );
   }
-  function save() {
-    client = new Client(endpoint, token);
-    reconnectAuthorized = false;
-    persist();
-    settings = false;
-    void refresh();
-    connect();
+  async function save() {
+    if (connecting) return;
+    connecting = true;
+    const candidate = makeClient(endpoint.trim(), token.trim());
+    try {
+      resultOf(await candidate.command("actors"));
+      client.dispose();
+      client = candidate;
+      endpoint = candidate.endpoint;
+      token = candidate.token;
+      reconnectAuthorized = false;
+      persist();
+      settings = false;
+      error = "";
+      await refresh();
+      if (!settings) connect();
+    } catch (problem) {
+      candidate.dispose();
+      settings = true;
+      error = problem instanceof Error ? problem.message : String(problem);
+    } finally { connecting = false; }
   }
   onMount(() => {
     try {
@@ -163,13 +192,15 @@
     } catch {
       error = "Saved connection settings could not be read.";
     }
-    client = new Client(endpoint, token);
+    client.dispose();
+    client = makeClient(endpoint, token);
     if (token) {
       void refresh();
       connect();
     } else settings = true;
     return () => {
       disposed = true;
+      client.dispose();
       if (reconnectTimer) clearTimeout(reconnectTimer);
       socket?.close();
     };
@@ -363,7 +394,7 @@
           </details>
           <div class="connection-footer">
             <p>Saved in this browser’s local storage.</p>
-            <button class="primary">Connect</button>
+            <button class="primary" disabled={connecting}>{connecting ? "Checking…" : "Connect"}</button>
           </div>
         </form>
       </section>{/if}{#if help}<div class="help-panel">
@@ -380,7 +411,7 @@
           on:click={() => (error = "")}><X size={13} /></button
         >
       </div>{/if}
-    {#if view === "Session"}<SessionJournal
+    {#key client}{#if view === "Session"}<SessionJournal
         {events}
         {entries}
         {inspect}
@@ -412,7 +443,7 @@
         {inspect}
         {runCommand}
         loadSource={(hash) => client.text(hash)}
-      />{:else}<CasBrowser {client} initialHash={inspectHash} />{/if}
+      />{:else}<CasBrowser {client} initialHash={inspectHash} />{/if}{/key}
   </main>
   <footer class="workspace-footer">
     <span>loom</span><span>Content addressed · Event sourced</span>

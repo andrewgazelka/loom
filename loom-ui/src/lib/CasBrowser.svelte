@@ -45,41 +45,45 @@
     "source_bundle",
   ];
   async function list(more = false) {
+    const current = client;
     busy = true;
     error = "";
     try {
       const data = casListing(
-        await client.command("cas.list", {
+        await current.command("cas.list", {
           limit: 50,
           ...(kind ? { kind } : {}),
           ...(query ? { q: query } : {}),
           ...(more && cursor ? { after: cursor } : {}),
         }),
       );
+      if (current !== client) return;
       entries = more ? [...entries, ...data.items] : data.items;
       cursor = data.next_cursor;
       loaded = true;
     } catch (e) {
-      error = String(e);
+      if (current === client) error = e instanceof Error ? e.message : String(e);
     } finally {
-      busy = false;
+      if (current === client) busy = false;
     }
   }
   async function inspect(hash: string, remember = true) {
+    const current = client;
     if (!hash.trim()) return;
     busy = true;
     error = "";
     try {
       const next = casInspection(
-        await client.command("cas.inspect", { hash: hash.trim() }),
+        await current.command("cas.inspect", { hash: hash.trim() }),
       );
+      if (current !== client) return;
       if (remember && selected) history = [...history, selected.codec.cid];
       selected = next;
       lookup = next.codec.cid;
     } catch (e) {
-      error = String(e);
+      if (current === client) error = e instanceof Error ? e.message : String(e);
     } finally {
-      busy = false;
+      if (current === client) busy = false;
     }
   }
   function back() {
@@ -88,10 +92,17 @@
     if (prior) void inspect(prior, false);
     else selected = null;
   }
-  onMount(() => {
+  let mounted = false;
+  let loadedClient: Client | undefined;
+  onMount(() => { mounted = true; });
+  $: if (mounted && client !== loadedClient) {
+    loadedClient = client;
+    error = "";
+    handledInitial = "";
     void list();
-  });
-  $: if (initialHash && initialHash !== handledInitial) {
+    if (selected && !initialHash) void inspect(selected.codec.cid, false);
+  }
+  $: if (mounted && client === loadedClient && initialHash && initialHash !== handledInitial) {
     handledInitial = initialHash;
     lookup = initialHash;
     void inspect(initialHash);
