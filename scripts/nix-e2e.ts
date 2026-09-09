@@ -4,7 +4,7 @@ import {join} from 'node:path';
 const directory=await mkdtemp(join(tmpdir(),'loom-nix-'));
 const port=18787+Math.floor(Math.random()*1000);
 const endpoint=`http://127.0.0.1:${port}`;
-const daemon=Bun.spawn([process.argv[2]!],{env:{...process.env,LOOM_DATA_DIR:directory,LOOM_BIND:`127.0.0.1:${port}`,LOOM_TOKEN:undefined,CARGO_HOME:join(directory,'cargo')},stdout:'inherit',stderr:'inherit'});
+const daemon=Bun.spawn([process.argv[2]!,'--db',join(directory,'explicit.sqlite'),'--bind',`127.0.0.1:${port}`],{env:{...process.env,LOOM_DATA_DIR:directory,LOOM_BIND:'127.0.0.1:1',LOOM_TOKEN:undefined,CARGO_HOME:join(directory,'cargo')},stdout:'inherit',stderr:'inherit'});
 let passed=0;
 try {
   const deadline=Date.now()+30000;
