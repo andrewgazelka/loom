@@ -20,10 +20,10 @@ if [[ -z "${LOOM_URL:-}" ]]; then
   if (cd loom-checker && bun install --frozen-lockfile) &&
      (cd loom-guest-ts && bun install --frozen-lockfile) &&
      cargo build --locked --release -p loomd; then
-    export LOOMD_BINARY="${CARGO_TARGET_DIR:-target}/release/loomd"
-    cp "$LOOMD_BINARY" "$scratch/loomd"
+    cp "${CARGO_TARGET_DIR:-target}/release/loomd" "$scratch/loomd"
+    export LOOMD_BINARY="$scratch/loomd"
     export LOOM_TOKEN=loom-acceptance-test LOOM_URL=http://127.0.0.1:18787
-    "$scratch/loomd" --root "$PWD" --db "$scratch/loom.sqlite" --bind 127.0.0.1:18787 >"$scratch/daemon.log" 2>&1 &
+    "$LOOMD_BINARY" --root "$PWD" --db "$scratch/loom.sqlite" --bind 127.0.0.1:18787 >"$scratch/daemon.log" 2>&1 &
     server_pid=$!
     ready=false
     for attempt in $(seq 1 100); do
