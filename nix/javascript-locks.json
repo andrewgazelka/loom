@@ -2852,8 +2852,116 @@
     ]
   },
   "loom-ui": {
-    "lockHash": "601f99ee54696dba1df0fad1022b230a47f26308e93189313fd888a9c9a0dc1a",
+    "lockHash": "057b1f05d01d7f07d491518e7e89463df45649910acdc2bcbab0ca19f3ab0267",
     "packages": [
+      {
+        "name": "@codemirror/autocomplete",
+        "version": "6.20.3",
+        "path": "node_modules/@codemirror/autocomplete",
+        "installedName": "@codemirror/autocomplete",
+        "binDirectory": "node_modules/.bin",
+        "url": "https://registry.npmjs.org/@codemirror/autocomplete/-/autocomplete-6.20.3.tgz",
+        "hash": "sha512-tlosUqb+3BbxCxZdu4tKeRghPFC+QM7q4X5YhKV2eCmPG+1r2F3f4AaSz5sCrFqUtX4Jh20VFTKecl16MgiV9g==",
+        "os": [],
+        "cpu": [],
+        "bins": {}
+      },
+      {
+        "name": "@codemirror/commands",
+        "version": "6.11.0",
+        "path": "node_modules/@codemirror/commands",
+        "installedName": "@codemirror/commands",
+        "binDirectory": "node_modules/.bin",
+        "url": "https://registry.npmjs.org/@codemirror/commands/-/commands-6.11.0.tgz",
+        "hash": "sha512-/K4Rl5BN0OtTiPWmJCdqODu38XnDMsDxKY5rgrPnCkutPTJf2wVbkoixLfealF5Kwse/s8P8M5jAiURiwSwnFA==",
+        "os": [],
+        "cpu": [],
+        "bins": {}
+      },
+      {
+        "name": "@codemirror/lang-javascript",
+        "version": "6.2.5",
+        "path": "node_modules/@codemirror/lang-javascript",
+        "installedName": "@codemirror/lang-javascript",
+        "binDirectory": "node_modules/.bin",
+        "url": "https://registry.npmjs.org/@codemirror/lang-javascript/-/lang-javascript-6.2.5.tgz",
+        "hash": "sha512-zD4e5mS+50htS7F+TYjBPsiIFGanfVqg4HyUz6WNFikgOPf2BgKlx+TQedI1w6n/IqRBVBbBWmGFdLB/7uxO4A==",
+        "os": [],
+        "cpu": [],
+        "bins": {}
+      },
+      {
+        "name": "@codemirror/lang-json",
+        "version": "6.0.2",
+        "path": "node_modules/@codemirror/lang-json",
+        "installedName": "@codemirror/lang-json",
+        "binDirectory": "node_modules/.bin",
+        "url": "https://registry.npmjs.org/@codemirror/lang-json/-/lang-json-6.0.2.tgz",
+        "hash": "sha512-x2OtO+AvwEHrEwR0FyyPtfDUiloG3rnVTSZV1W8UteaLL8/MajQd8DpvUb2YVzC+/T18aSDv0H9mu+xw0EStoQ==",
+        "os": [],
+        "cpu": [],
+        "bins": {}
+      },
+      {
+        "name": "@codemirror/lang-rust",
+        "version": "6.0.2",
+        "path": "node_modules/@codemirror/lang-rust",
+        "installedName": "@codemirror/lang-rust",
+        "binDirectory": "node_modules/.bin",
+        "url": "https://registry.npmjs.org/@codemirror/lang-rust/-/lang-rust-6.0.2.tgz",
+        "hash": "sha512-EZaGjCUegtiU7kSMvOfEZpaCReowEf3yNidYu7+vfuGTm9ow4mthAparY5hisJqOHmJowVH3Upu+eJlUji6qqA==",
+        "os": [],
+        "cpu": [],
+        "bins": {}
+      },
+      {
+        "name": "@codemirror/language",
+        "version": "6.12.4",
+        "path": "node_modules/@codemirror/language",
+        "installedName": "@codemirror/language",
+        "binDirectory": "node_modules/.bin",
+        "url": "https://registry.npmjs.org/@codemirror/language/-/language-6.12.4.tgz",
+        "hash": "sha512-1q4PaT+o6PbgpkJt4Q8Fv5XJxTy4FUZ4MWETtyiDw3J0Pyr9E2vqcKL+k9wcvjNTIsauxvE7OfmWj3FRPHQ76A==",
+        "os": [],
+        "cpu": [],
+        "bins": {}
+      },
+      {
+        "name": "@codemirror/lint",
+        "version": "6.9.7",
+        "path": "node_modules/@codemirror/lint",
+        "installedName": "@codemirror/lint",
+        "binDirectory": "node_modules/.bin",
+        "url": "https://registry.npmjs.org/@codemirror/lint/-/lint-6.9.7.tgz",
+        "hash": "sha512-28/+iWLYxKxsvGYhSYL7zaCZqLz5+FFFDq9tVsvGv9kv8RY4fFAchJ5WX9M3YrrRlTIsECjsXPqeNgnSmNP2dg==",
+        "os": [],
+        "cpu": [],
+        "bins": {}
+      },
+      {
+        "name": "@codemirror/state",
+        "version": "6.7.4",
+        "path": "node_modules/@codemirror/state",
+        "installedName": "@codemirror/state",
+        "binDirectory": "node_modules/.bin",
+        "url": "https://registry.npmjs.org/@codemirror/state/-/state-6.7.4.tgz",
+        "hash": "sha512-QhQIVRY+xHZDxwOSFrJ1eUMapJBUID3IdeAjf7dHO7zBUzSkyooHiodnalz5MG3iHzwixKMlAAyn7244y537EA==",
+        "os": [],
+        "cpu": [],
+        "bins": {}
+      },
+      {
+        "name": "@codemirror/view",
+        "version": "6.43.11",
+        "path": "node_modules/@codemirror/view",
+        "installedName": "@codemirror/view",
+        "binDirectory": "node_modules/.bin",
+        "url": "https://registry.npmjs.org/@codemirror/view/-/view-6.43.11.tgz",
+        "hash": "sha512-2+esucbQX6wB2JYi1eDvdCPFTA31BN8oSy6xCmk3G6CloV11yOvEjYk+gH7kLrP0MuHG94E8WDhjs5oMiu3+Wg==",
+        "os": [],
+        "cpu": [],
+        "bins": {}
+      },
       {
         "name": "@esbuild/aix-ppc64",
         "version": "0.25.12",
@@ -3234,6 +3342,90 @@
         "binDirectory": "node_modules/.bin",
         "url": "https://registry.npmjs.org/@jridgewell/trace-mapping/-/trace-mapping-0.3.31.tgz",
         "hash": "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==",
+        "os": [],
+        "cpu": [],
+        "bins": {}
+      },
+      {
+        "name": "@lezer/common",
+        "version": "1.5.2",
+        "path": "node_modules/@lezer/common",
+        "installedName": "@lezer/common",
+        "binDirectory": "node_modules/.bin",
+        "url": "https://registry.npmjs.org/@lezer/common/-/common-1.5.2.tgz",
+        "hash": "sha512-sxQE460fPZyU3sdc8lafxiPwJHBzZRy/udNFynGQky1SePYBdhkBl1kOagA9uT3pxR8K09bOrmTUqA9wb/PjSQ==",
+        "os": [],
+        "cpu": [],
+        "bins": {}
+      },
+      {
+        "name": "@lezer/highlight",
+        "version": "1.2.3",
+        "path": "node_modules/@lezer/highlight",
+        "installedName": "@lezer/highlight",
+        "binDirectory": "node_modules/.bin",
+        "url": "https://registry.npmjs.org/@lezer/highlight/-/highlight-1.2.3.tgz",
+        "hash": "sha512-qXdH7UqTvGfdVBINrgKhDsVTJTxactNNxLk7+UMwZhU13lMHaOBlJe9Vqp907ya56Y3+ed2tlqzys7jDkTmW0g==",
+        "os": [],
+        "cpu": [],
+        "bins": {}
+      },
+      {
+        "name": "@lezer/javascript",
+        "version": "1.5.4",
+        "path": "node_modules/@lezer/javascript",
+        "installedName": "@lezer/javascript",
+        "binDirectory": "node_modules/.bin",
+        "url": "https://registry.npmjs.org/@lezer/javascript/-/javascript-1.5.4.tgz",
+        "hash": "sha512-vvYx3MhWqeZtGPwDStM2dwgljd5smolYD2lR2UyFcHfxbBQebqx8yjmFmxtJ/E6nN6u1D9srOiVWm3Rb4tmcUA==",
+        "os": [],
+        "cpu": [],
+        "bins": {}
+      },
+      {
+        "name": "@lezer/json",
+        "version": "1.0.3",
+        "path": "node_modules/@lezer/json",
+        "installedName": "@lezer/json",
+        "binDirectory": "node_modules/.bin",
+        "url": "https://registry.npmjs.org/@lezer/json/-/json-1.0.3.tgz",
+        "hash": "sha512-BP9KzdF9Y35PDpv04r0VeSTKDeox5vVr3efE7eBbx3r4s3oNLfunchejZhjArmeieBH+nVOpgIiBJpEAv8ilqQ==",
+        "os": [],
+        "cpu": [],
+        "bins": {}
+      },
+      {
+        "name": "@lezer/lr",
+        "version": "1.4.10",
+        "path": "node_modules/@lezer/lr",
+        "installedName": "@lezer/lr",
+        "binDirectory": "node_modules/.bin",
+        "url": "https://registry.npmjs.org/@lezer/lr/-/lr-1.4.10.tgz",
+        "hash": "sha512-rnCpTIBafOx4mRp43xOxDJbFipJm/c0cia/V5TiGlhmMa+wsSdoGmUN3w5Bqrks/09Q/D4tNAmWaT8p6NRi77A==",
+        "os": [],
+        "cpu": [],
+        "bins": {}
+      },
+      {
+        "name": "@lezer/rust",
+        "version": "1.0.2",
+        "path": "node_modules/@lezer/rust",
+        "installedName": "@lezer/rust",
+        "binDirectory": "node_modules/.bin",
+        "url": "https://registry.npmjs.org/@lezer/rust/-/rust-1.0.2.tgz",
+        "hash": "sha512-Lz5sIPBdF2FUXcWeCu1//ojFAZqzTQNRga0aYv6dYXqJqPfMdCAI0NzajWUd4Xijj1IKJLtjoXRPMvTKWBcqKg==",
+        "os": [],
+        "cpu": [],
+        "bins": {}
+      },
+      {
+        "name": "@marijn/find-cluster-break",
+        "version": "1.0.4",
+        "path": "node_modules/@marijn/find-cluster-break",
+        "installedName": "@marijn/find-cluster-break",
+        "binDirectory": "node_modules/.bin",
+        "url": "https://registry.npmjs.org/@marijn/find-cluster-break/-/find-cluster-break-1.0.4.tgz",
+        "hash": "sha512-Wy0V7+SGUjnF9/TkiM1hKVDPj7jKXduPNboMVtHTA8dySMURWqfg/JZ9E2Sq8JgSJmkl7k7Qe9FLeMSrSraWmQ==",
         "os": [],
         "cpu": [],
         "bins": {}
@@ -3927,6 +4119,18 @@
         "bins": {}
       },
       {
+        "name": "crelt",
+        "version": "1.0.7",
+        "path": "node_modules/crelt",
+        "installedName": "crelt",
+        "binDirectory": "node_modules/.bin",
+        "url": "https://registry.npmjs.org/crelt/-/crelt-1.0.7.tgz",
+        "hash": "sha512-aK6BbWfhf4U/wCcLHKPJl/xa6VkVstRaPywWtMKGwuOLc/wZTyQYuoxgvZnNsBvv7Kg3YTBQYYBCggcviQczuA==",
+        "os": [],
+        "cpu": [],
+        "bins": {}
+      },
+      {
         "name": "debug",
         "version": "4.4.3",
         "path": "node_modules/debug",
@@ -4497,6 +4701,18 @@
         "bins": {}
       },
       {
+        "name": "style-mod",
+        "version": "4.1.3",
+        "path": "node_modules/style-mod",
+        "installedName": "style-mod",
+        "binDirectory": "node_modules/.bin",
+        "url": "https://registry.npmjs.org/style-mod/-/style-mod-4.1.3.tgz",
+        "hash": "sha512-i/n8VsZydrugj3Iuzll8+x/00GH2vnYsk1eomD8QiRrSAeW6ItbCQDtfXCeJHd0iwiNagqjQkvpvREEPtW3IoQ==",
+        "os": [],
+        "cpu": [],
+        "bins": {}
+      },
+      {
         "name": "svelte",
         "version": "5.38.7",
         "path": "node_modules/svelte",
@@ -4679,6 +4895,18 @@
         "binDirectory": "node_modules/.bin",
         "url": "https://registry.npmjs.org/vitefu/-/vitefu-1.1.3.tgz",
         "hash": "sha512-ub4okH7Z5KLjb6hDyjqrGXqWtWvoYdU3IGm/NorpgHncKoLTCfRIbvlhBm7r0YstIaQRYlp4yEbFqDcKSzXSSg==",
+        "os": [],
+        "cpu": [],
+        "bins": {}
+      },
+      {
+        "name": "w3c-keyname",
+        "version": "2.2.8",
+        "path": "node_modules/w3c-keyname",
+        "installedName": "w3c-keyname",
+        "binDirectory": "node_modules/.bin",
+        "url": "https://registry.npmjs.org/w3c-keyname/-/w3c-keyname-2.2.8.tgz",
+        "hash": "sha512-dpojBhNsCNN7T82Tm7k26A6G9ML3NkhDsnw9n/eoxSRlVBB4CEtIQ/KTCLI2Fwf3ataSXRhYFkQi3SlnFwPvPQ==",
         "os": [],
         "cpu": [],
         "bins": {}

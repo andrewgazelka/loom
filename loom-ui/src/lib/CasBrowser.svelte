@@ -1,4 +1,5 @@
 <script lang="ts">
+  import RowPreview from "./RowPreview.svelte";
   import Select from "./Select.svelte";
   import {
     Search,
@@ -202,7 +203,7 @@
     <div class="list-heading">
       <span>Object</span><span>Kind</span><span>Size</span>
     </div>
-    {#each entries as entry}<button
+    {#each entries as entry (entry.hash)}<div class="cas-item"><button
         class="cas-row"
         on:click={() => inspect(entry.codecs[0]?.cid || entry.hash)}
         ><code title={entry.codecs[0]?.cid || entry.hash}
@@ -210,7 +211,11 @@
         ><span>{entry.kind}</span><span>{bytes(entry.size)}</span><ChevronRight
           size={12}
         /></button
-      >{/each}{#if loaded && !entries.length}<p class="empty">
+      ><RowPreview load={async () => {
+        const data = casInspection(await client.command("cas.inspect", {hash:entry.codecs[0]?.cid || entry.hash}));
+        if (entry.kind === "component" || entry.kind === "source_bundle") return {kind:entry.kind, size:bytes(entry.size), codec:data.codec.name};
+        return data.value ?? data.text ?? {kind:entry.kind, size:bytes(entry.size), codec:data.codec.name};
+      }} {inspect} /></div>{/each}{#if loaded && !entries.length}<p class="empty">
         No objects match these filters.
       </p>{/if}
   </div>
@@ -223,6 +228,8 @@
 {#if busy}<p class="loading" aria-live="polite">Reading content…</p>{/if}
 
 <style>
+  .cas-item { border-bottom: 1px solid var(--line); padding-bottom: 8px; }
+  .cas-item :global(.row-preview) { margin: 0 12px 8px; }
   .lookup {
     display: flex;
     align-items: center;

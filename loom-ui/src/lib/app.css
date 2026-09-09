@@ -533,3 +533,5 @@ main {
     transition: none !important;
   }
 }
+
+.browser-search { border:1px solid var(--line); border-radius:6px; padding:8px 10px; background:var(--card); color:var(--ink); font:11px var(--mono); max-width:100%; }

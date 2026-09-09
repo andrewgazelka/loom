@@ -1,4 +1,5 @@
 <script lang="ts">
+  import RowPreview from "./RowPreview.svelte";
   import Select from "./Select.svelte";
   import {
     Circle,
@@ -25,6 +26,7 @@
   import EventCard from "./EventCard.svelte";
   import { eventRow } from "./journal";
   import type { LogEvent } from "./api";
+  let query = "";
   export let client: Client;
   export let actors: Actor[] = [];
   export let definitions: Definition[] = [];
@@ -215,8 +217,8 @@
         {inspect}
         {loadSource}
       />{:else}<p class="empty">No actor events.</p>{/each}{/if}
-{:else}<div class="actor-list">
-    {#each actors as actor}<button
+{:else}<input class="browser-search" aria-label="Find actors" placeholder="Find actors or behavior…" bind:value={query} /><div class="actor-list">
+    {#each actors.filter(actor => (JSON.stringify(actor) + definitionName(definitions.find(def => def.hash === actor.behavior_hash) || {hash:actor.behavior_hash,lang:actor.lang})).toLowerCase().includes(query.toLowerCase())) as actor (actor.id + ":" + actor.last_seq)}<div class="actor-item"><button
         class="actor-row"
         on:click={() => open(actor)}
         ><Circle size={14} />
@@ -233,12 +235,13 @@
         <span class="badge">{actor.lang === "rust" ? "Rust" : "TS"}</span><span
           class="quiet">seq {actor.last_seq ?? 0}</span
         ><ChevronRight size={13} /></button
-      >{:else}<div class="empty">
+      ><RowPreview load={async () => resultOf(await client.command("state", {actor:actor.id}))} {inspect} /></div>{:else}<div class="empty">
         No actors yet. Spawn one from a definition.
       </div>{/each}
   </div>{/if}
 
 <style>
+  .actor-item :global(.row-preview) { margin:0 38px 16px; }
   .actor-list {
     margin-top: 30px;
     border-top: 1px solid var(--line);

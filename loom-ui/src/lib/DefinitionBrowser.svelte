@@ -1,4 +1,5 @@
 <script lang="ts">
+  import RowPreview from "./RowPreview.svelte";
   import {
     AlignLeft,
     ChevronRight,
@@ -26,6 +27,7 @@
   export let events: LogEvent[] = [];
   export let inspect: (hash: string) => void;
   export let call: (definition: Definition) => void;
+  let query = "";
   let tab = "list",
     selected: Definition | null = null,
     source = "",
@@ -50,6 +52,15 @@
     } catch (e) {
       error = String(e);
     }
+  }
+  async function preview(def: Definition): Promise<string> {
+    const evaluated = events.find(event => reference(record(event.event).def) === def.hash && record(event.event).type === "evaluated");
+    if (typeof record(evaluated?.event).source === "string") return String(record(evaluated?.event).source);
+    const event = events.find(event => reference(record(record(event.event).def).hash) === def.hash);
+    const hash = reference(record(event?.event).source_hash);
+    if (!hash) return definitionName(def);
+    const data = record(resultOf(await client.command("cas.inspect", {hash})));
+    return typeof data.text === "string" ? data.text : definitionName(def);
   }
   async function open(def: Definition) {
     selected = def;
@@ -155,19 +166,20 @@
         >Dependency graph</button
       >
     </div>
+    <input class="browser-search" aria-label="Find definitions" placeholder="Find definitions…" bind:value={query} />
   </div>
   {#if tab === "graph"}<Graph {definitions} {edges} />
     <p class="graph-help">
       Two-finger scroll to pan · Pinch to zoom · Arrow keys to pan · 0 to reset
     </p>{:else}<div class="definition-list">
-      {#each definitions as def}<button
+      {#each definitions.filter(def => JSON.stringify(def).toLowerCase().includes(query.toLowerCase())) as def (def.hash)}<button
           class="definition-row"
           on:click={() => open(def)}
           ><AlignLeft size={15} />
           <div>
             <span class="definition-name">{definitionName(def)}</span><code
               >{short(def.hash, 25)}</code
-            >
+            ><RowPreview code language={def.lang === "rust" ? "rust" : "ts"} load={() => preview(def)} />
           </div>
           <span class="badge">{def.lang === "rust" ? "Rust" : "TS"}</span><span
             class="quiet"

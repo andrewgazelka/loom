@@ -1,4 +1,5 @@
 <script lang="ts">
+  import CodeEditor from "./CodeEditor.svelte";
   import Select from "./Select.svelte";
   import { ArrowUp, ChevronRight, Terminal } from "lucide-svelte";
   export let mode = "eval",
@@ -29,20 +30,7 @@
         >{mode === "eval" ? "TypeScript" : "JSON command"}</span
       >{/if}
   </div>
-  <textarea
-    aria-label="Source code"
-    bind:value={source}
-    spellcheck="false"
-    placeholder={mode === "eval"
-      ? "Evaluate an expression…"
-      : "Write a definition…"}
-    on:keydown={(event) => {
-      if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
-        event.preventDefault();
-        void submit();
-      }
-    }}
-  ></textarea>{#if mode === "define"}<details class="dependency-options">
+  <CodeEditor bind:value={source} language={mode === "command" ? "json" : language === "rust" && mode === "define" ? "rust" : "typescript"} {submit} />{#if mode === "define"}<details class="dependency-options">
       <summary><ChevronRight size={11} /> Dependencies</summary><label
         >Import names → definition hashes<input
           aria-label="Dependency names and hashes"
@@ -97,21 +85,7 @@
     color: var(--ink);
     font: 11px var(--mono);
   }
-  textarea {
-    width: 100%;
-    min-height: 118px;
-    resize: vertical;
-    border: 0;
-    padding: 17px 18px;
-    background: var(--card);
-    color: var(--ink);
-    font: 11px/1.9 var(--mono);
-    display: block;
-    outline: none;
-  }
-  textarea::placeholder {
-    color: var(--muted);
-  }
+
   .composer-footer {
     display: flex;
     align-items: center;
