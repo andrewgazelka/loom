@@ -12,7 +12,8 @@
     ExternalLink,
   } from "lucide-svelte";
   import { format, record, short } from "./api";
-  import type { JournalRow } from "./journal";
+  import { definitionHash, type JournalRow } from "./journal";
+  import ReferenceLink from "./ReferenceLink.svelte";
   import CodeBlock from "./CodeBlock.svelte";
   import type { CodeLanguage } from "./highlight";
   let language: CodeLanguage = "typescript";
@@ -25,6 +26,7 @@
     sourceError = "",
     loading = false;
   $: definition = row.kind === "defined" || row.kind.startsWith("define");
+  $: hash = definitionHash(row);
   $: evaluated = row.kind === "eval" || row.kind === "evaluated";
   $: diagnostic = row.entry?.reply?.diagnostics ?? [];
   $: failed = !!row.entry?.error || row.entry?.reply?.ok === false;
@@ -102,8 +104,7 @@
       </details>
       <div class="event-note">
         {#if pending}<Clock size={11} /><span>Checking and building…</span
-          >{:else if !failed}<Check size={11} /><span>Definition recorded</span
-          >{/if}{#if typeof build.ms === "number"}<span
+          >{/if}{#if hash}<ReferenceLink {hash} {inspect} subtle />{/if}{#if typeof build.ms === "number"}<span
             >{build.ms} ms build</span
           >{/if}{#if row.seq}<span class="right">seq {row.seq}</span>{/if}
       </div>
@@ -154,7 +155,16 @@
           <ValueView value={row.metadata} {inspect} />
         </div>
       </details>{/if}
-    {#if row.metadata && (definition || evaluated || row.entry)}<details
+    {#if row.occurrences}<details class="metadata-disclosure">
+        <summary><ChevronRight size={11} />{row.occurrences.length} recordings</summary>
+        {#each row.occurrences as occurrence (occurrence.id)}
+          <details class="metadata-disclosure">
+            <summary><ChevronRight size={11} />seq {occurrence.seq}</summary>
+            <div class="structured"><ValueView value={occurrence.metadata} {inspect} /></div>
+          </details>
+        {/each}
+      </details>{/if}
+    {#if row.metadata && !row.occurrences && (definition || evaluated || row.entry)}<details
         class="metadata-disclosure"
       >
         <summary

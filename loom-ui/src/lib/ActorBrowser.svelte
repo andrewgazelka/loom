@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Select from "./Select.svelte";
   import {
     Circle,
     ArrowLeft,
@@ -147,12 +148,7 @@
             : "Upgrade behavior"}
     </h2>
     {#if action === "spawn" || action === "upgrade"}<label
-        >Definition<select required bind:value={behavior}
-          ><option value="" disabled>Choose a definition</option
-          >{#each definitions.filter((def) => action === "spawn" || def.lang === selected?.lang) as def}<option
-              value={def.hash}>{definitionName(def)} · {def.lang}</option
-            >{/each}</select
-        ></label
+        >Definition<Select label="Definition" bind:value={behavior} placeholder="Choose a definition" options={definitions.filter(def => action === "spawn" || def.lang === selected?.lang).map(def => ({value:def.hash,label:`${definitionName(def)} · ${def.lang}`}))} /></label
       >{/if}{#if action === "send" || action === "spawn"}<label
         >{action === "send" ? "Message" : "Initial state"}<textarea
           bind:value={message}
@@ -166,7 +162,7 @@
         The new actor starts from this actor’s current state and event history.
       </p>{/if}
     <div>
-      <button class="primary" disabled={busy}
+      <button class="primary" disabled={busy || ((action === "spawn" || action === "upgrade") && !behavior)}
         >{busy
           ? "Working…"
           : action === "spawn"
@@ -331,7 +327,7 @@
     margin: 12px 0;
     color: var(--muted);
   }
-  .action-form select,
+  .action-form :global(.select),
   .action-form textarea {
     display: block;
     width: 100%;

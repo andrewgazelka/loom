@@ -3,7 +3,7 @@
   export let value: unknown[];
   export let depth = 0;
   export let inspect: (hash: string) => void;
-  let limit = 50;
+  let limit = 10;
 </script>
 
 <ol class="array-values">

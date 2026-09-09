@@ -20,6 +20,7 @@ export interface JournalRow {
   entry?: Entry;
   timestamp?: number;
   sourceRef?: string;
+  occurrences?: JournalRow[];
 }
 export function reference(value: unknown): string {
   return typeof value === "string"
@@ -81,4 +82,32 @@ export function localRow(entry: Entry): JournalRow {
     seq: entry.reply?.seq,
     entry,
   };
+}
+
+export function definitionHash(row: JournalRow): string {
+  if (row.kind === "defined") return reference(record(row.value).hash);
+  if (row.kind.startsWith("define") && row.entry?.reply?.ok)
+    return reference(record(record(row.entry.reply.result).def).hash);
+  return "";
+}
+
+/** Collapse only identical named identities; retain every original event. */
+export function groupDefinitions(rows: JournalRow[]): JournalRow[] {
+  const groups = new Map<string, JournalRow[]>();
+  for (const row of rows) {
+    const hash = definitionHash(row);
+    if (!hash) continue;
+    const key = JSON.stringify({ hash, name: row.title });
+    const group = groups.get(key) ?? [];
+    group.push(row);
+    groups.set(key, group);
+  }
+  return rows.flatMap(row => {
+    const hash = definitionHash(row);
+    if (!hash) return [row];
+    const group = groups.get(JSON.stringify({ hash, name: row.title }))!;
+    return group[group.length - 1] === row
+      ? [{ ...row, occurrences: group.length > 1 ? group : undefined }]
+      : [];
+  });
 }

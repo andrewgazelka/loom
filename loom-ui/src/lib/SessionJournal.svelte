@@ -1,7 +1,7 @@
 <script lang="ts">
   import { Search } from "lucide-svelte";
   import { record, type LogEvent } from "./api";
-  import { eventRow, localRow, type Entry } from "./journal";
+  import { eventRow, localRow, groupDefinitions, type Entry } from "./journal";
   import EventCard from "./EventCard.svelte";
   export let events: LogEvent[] = [];
   export let entries: Entry[] = [];
@@ -49,7 +49,8 @@
     (a, b) =>
       (a.seq ?? Number.MAX_SAFE_INTEGER) - (b.seq ?? Number.MAX_SAFE_INTEGER),
   );
-  $: visible = rows.filter(
+  $: grouped = groupDefinitions(rows);
+  $: visible = (filter === "system" ? rows : grouped).filter(
     (row) =>
       ((filter === "all" && primary(row)) ||
         filter === "system" ||
@@ -62,7 +63,7 @@
 <div class="toolbar">
   <div class="tabs" aria-label="Filter journal">
     <button aria-pressed={filter === "all"} on:click={() => (filter = "all")}
-      >Journal <span>{rows.filter(primary).length}</span></button
+      >Journal <span>{grouped.filter(primary).length}</span></button
     ><button
       aria-pressed={filter === "definitions"}
       on:click={() => (filter = "definitions")}>Definitions</button

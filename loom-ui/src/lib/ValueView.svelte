@@ -7,7 +7,7 @@
   export let label = "";
   export let depth = 0;
   export let inspect: (hash: string) => void;
-  let expanded = depth < 1;
+  let expanded = depth < 2;
   $: object = record(value);
   $: reference = typeof object.$ref === "string" ? object.$ref : null;
   $: expandable = !reference && value !== null && typeof value === "object";

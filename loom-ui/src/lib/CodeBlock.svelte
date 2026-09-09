@@ -44,13 +44,14 @@
   .code-block :global(.shiki),
   .code-block :global(.shiki span) {
     color: var(--shiki-light);
-    background-color: var(--shiki-light-bg);
+  }
+  .code-block :global(.shiki span) {
+    background: transparent;
   }
   @media (prefers-color-scheme: dark) {
     .code-block :global(.shiki),
     .code-block :global(.shiki span) {
       color: var(--shiki-dark);
-      background-color: var(--shiki-dark-bg);
     }
   }
 </style>

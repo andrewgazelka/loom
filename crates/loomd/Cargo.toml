@@ -13,3 +13,8 @@ loom-store = { path = "../loom-store" }
 loom-proto = { path = "../loom-proto" }
 tower-http = { version = "0.6", features = ["fs"] }
 serde_json = "1"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+tempfile = "3"

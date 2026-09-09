@@ -1665,12 +1665,15 @@ dependencies = [
  "anyhow",
  "axum",
  "clap",
+ "http-body-util",
  "loom-api",
  "loom-mcp",
  "loom-proto",
  "loom-store",
  "serde_json",
+ "tempfile",
  "tokio",
+ "tower",
  "tower-http",
 ]
 

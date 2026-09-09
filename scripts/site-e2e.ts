@@ -1,3 +1,4 @@
+import { validateSiteAssets } from "./site-assets";
 /** Production HTTP path. All linked browser data is created by a real TS guest. */
 const endpoint = process.env.LOOM_URL;
 const token = process.env.LOOM_TOKEN;
@@ -26,15 +27,8 @@ let definitionHash = '';
 let parentCid = '';
 let leafCid = '';
 try {
-  await check('production UI HTML and entry module are served', async () => {
-    const response = await fetch(endpoint);
-    assert(response.ok && response.headers.get('content-type')?.includes('text/html'), 'UI document not served');
-    const html = await response.text();
-    const script = html.match(/(?:src|href)="([^"\s]+\.js)"/);
-    assert(script?.[1], 'UI document has no JavaScript entry');
-    const asset = await fetch(new URL(script[1], endpoint));
-    assert(asset.ok && (asset.headers.get('content-type')?.includes('javascript') || asset.headers.get('content-type')?.includes('ecmascript')), 'UI entry module not served');
-    await asset.body?.cancel();
+  await check('production UI reload and all startup modules are served', async () => {
+    await validateSiteAssets(endpoint);
   });
   await check('CAS browser requires authentication', async () => {
     const response = await fetch(`${endpoint}/v1/command`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ command: 'cas.list', args: {} }) });

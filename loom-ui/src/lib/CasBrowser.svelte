@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Select from "./Select.svelte";
   import {
     Search,
     ArrowLeft,
@@ -186,15 +187,8 @@
       </p>{/if}
   </section>
 {:else}<div class="toolbar">
-    <label class="filter"
-      ><span>Kind</span><select
-        aria-label="Filter content by kind"
-        bind:value={kind}
-        on:change={() => list()}
-        ><option value="">All objects</option>{#each kinds as item}<option
-            value={item}>{item}</option
-          >{/each}</select
-      ></label
+    <div class="filter"
+      ><span>Kind</span><Select label="Filter content by kind" bind:value={kind} on:change={() => list()} options={[{value:"",label:"All objects"},...kinds.map(item => ({value:item,label:item}))]} /></div
     >
     <form class="search" on:submit|preventDefault={() => list()}>
       <Search size={13} /><input
@@ -421,7 +415,7 @@
     font-size: 11px;
     color: var(--muted);
   }
-  .filter select {
+  .filter :global(.select) {
     border: 0;
     background: transparent;
     color: var(--ink);

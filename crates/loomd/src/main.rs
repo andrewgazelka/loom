@@ -1,3 +1,4 @@
+mod static_files;
 use clap::Parser;
 use std::{path::PathBuf, sync::Arc};
 #[derive(Parser)]
@@ -69,7 +70,7 @@ async fn main() -> anyhow::Result<()> {
     let mcp = loom_api::protect(loom_mcp::router(service.clone()), authorizer.clone());
     let app = loom_api::router(service, authorizer)
         .merge(mcp)
-        .fallback_service(tower_http::services::ServeDir::new(ui));
+        .fallback_service(static_files::router(ui));
     let listener = tokio::net::TcpListener::bind(args.bind).await?;
     eprintln!("loomd listening on {}", listener.local_addr()?);
     axum::serve(listener, app)

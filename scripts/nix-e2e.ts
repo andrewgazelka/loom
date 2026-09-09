@@ -1,3 +1,4 @@
+import { validateSiteAssets } from './site-assets';
 import {mkdtemp,readFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
@@ -16,8 +17,7 @@ try {
   }
   const token=(await readFile(join(directory,'token'),'utf8')).trim();
   if(token.length!==64) throw new Error('persisted token missing');
-  const html=await (await fetch(endpoint)).text();
-  if(!html.includes('<html')) throw new Error('static UI missing');
+  await validateSiteAssets(endpoint);
   passed++;
   async function request(operation:string,body:unknown) {
     const response=await fetch(`${endpoint}/v1/${operation}`,{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify(body)});

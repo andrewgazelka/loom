@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Select from "./Select.svelte";
   import { ArrowUp, ChevronRight, Terminal } from "lucide-svelte";
   export let mode = "eval",
     language = "ts",
@@ -20,24 +21,11 @@
 
 <section class="composer" aria-label="Session prompt">
   <div class="composer-toolbar">
-    <Terminal size={13} /><select
-      aria-label="Operation"
-      bind:value={mode}
-      on:change={changeMode}
-      ><option value="eval">Evaluate</option><option value="define"
-        >Define</option
-      ><option value="command">Command</option></select
-    >{#if mode === "define"}<input
+    <Terminal size={13} /><Select label="Operation" bind:value={mode} on:change={changeMode} options={[{value:"eval",label:"Evaluate"},{value:"define",label:"Define"},{value:"command",label:"Command"}]} />{#if mode === "define"}<input
         aria-label="Definition name"
         bind:value={name}
         placeholder="Definition name"
-      /><select
-        aria-label="Guest language"
-        bind:value={language}
-        on:change={changeMode}
-        ><option value="ts">TypeScript</option><option value="rust">Rust</option
-        ></select
-      >{:else}<span class="quiet right"
+      /><Select label="Guest language" bind:value={language} on:change={changeMode} options={[{value:"ts",label:"TypeScript"},{value:"rust",label:"Rust"}]} />{:else}<span class="quiet right"
         >{mode === "eval" ? "TypeScript" : "JSON command"}</span
       >{/if}
   </div>
@@ -94,7 +82,7 @@
     border-bottom: 1px solid var(--line);
     color: var(--muted);
   }
-  .composer-toolbar select {
+  .composer-toolbar :global(.select) {
     border: 0;
     background: transparent;
     color: var(--ink);
