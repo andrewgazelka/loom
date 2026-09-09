@@ -202,3 +202,61 @@ fn queued_effect_hash_matches_cas_and_encoding_failure_leaves_no_pending_result(
     assert_eq!(store.effect_get("invalid", "scope", 0)?, Some(json!(1)));
     Ok(())
 }
+
+#[test]
+fn mixed_sync_and_queued_results_during_commits_never_poison_the_writer() -> Result<()> {
+    use std::sync::{
+        Barrier,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let store = Store::memory()?;
+    let start = Barrier::new(5);
+    let completed = AtomicUsize::new(0);
+    std::thread::scope(|scope| -> Result<()> {
+        let mut workers = Vec::new();
+        for worker in 0..4 {
+            let start = &start;
+            let completed = &completed;
+            let store = &store;
+            workers.push(scope.spawn(move || -> Result<()> {
+                start.wait();
+                let result = (|| -> Result<()> {
+                    for occurrence in 0..200 {
+                        let outcome = if worker == 0 {
+                            store.effect_put("race", "scope", occurrence, &json!(worker % 2))
+                        } else {
+                            store
+                                .enqueue_effect("race", "scope", occurrence, &json!(worker % 2))
+                                .map(|_| ())
+                        };
+                        if let Err(error) = outcome {
+                            anyhow::ensure!(
+                                error.to_string() == "effect cache result conflict",
+                                "unexpected enqueue failure: {error:#}"
+                            );
+                        }
+                    }
+                    Ok(())
+                })();
+                completed.fetch_add(1, Ordering::Release);
+                result
+            }));
+        }
+        start.wait();
+        while completed.load(Ordering::Acquire) != 4 {
+            store.flush()?;
+            std::thread::yield_now();
+        }
+        for worker in workers {
+            worker.join().expect("effect race worker panicked")?;
+        }
+        Ok(())
+    })?;
+    store.flush()?;
+    assert!(store.events(None, 0, 1000)?.len() >= 200);
+    for occurrence in 0..200 {
+        let result = store.effect_get("race", "scope", occurrence)?.unwrap();
+        assert!(result == json!(0) || result == json!(1));
+    }
+    Ok(())
+}

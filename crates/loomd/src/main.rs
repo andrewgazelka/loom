@@ -1,6 +1,43 @@
 mod static_files;
 use clap::Parser;
-use std::{path::PathBuf, sync::Arc};
+use std::{path::PathBuf, process::ExitCode, sync::Arc};
+
+#[derive(Parser)]
+struct CompilerCacheArgs {
+    #[arg(value_enum)]
+    operation: CompilerCacheOperation,
+    recipe: PathBuf,
+    mirror: PathBuf,
+}
+
+#[derive(Clone, clap::ValueEnum)]
+enum CompilerCacheOperation {
+    Lookup,
+    Record,
+}
+
+fn main() -> anyhow::Result<ExitCode> {
+    // Cargo invokes this internal mode once per compilation unit. Dispatch
+    // before starting the daemon's executor or opening its application store.
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("__compiler-cache")) {
+        let args = CompilerCacheArgs::parse_from(std::env::args_os().skip(1));
+        let operation = match args.operation {
+            CompilerCacheOperation::Lookup => "lookup",
+            CompilerCacheOperation::Record => "record",
+        };
+        let hit = loom_build::compiler_cache_main(operation, &args.recipe, &args.mirror)?;
+        return Ok(if hit {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(3)
+        });
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(serve())?;
+    Ok(ExitCode::SUCCESS)
+}
 #[derive(Parser)]
 struct Args {
     #[arg(long, default_value = "loom.sqlite")]
@@ -25,8 +62,7 @@ struct Args {
     #[arg(long, env = "LOOM_BACKUP_DIR")]
     backup_dir: Option<PathBuf>,
 }
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn serve() -> anyhow::Result<()> {
     let args = Args::parse();
     let shutdown = Shutdown::new()?;
     let authorizer = if let Some(path) = args.tokens_file {

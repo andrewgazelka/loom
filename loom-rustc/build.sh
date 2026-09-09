@@ -14,7 +14,7 @@ export CARGO_PROFILE_RELEASE_INCREMENTAL=true
 export CARGO_PROFILE_RELEASE_DEBUG=false
 export RUSTC_WRAPPER="$(dirname "$0")/capture.sh"
 export LOOM_RUSTC_CAPTURE="$CARGO_TARGET_DIR/root-rustc.recipe"
-export LOOM_COMPILER_LIB="$(rustc --print sysroot)/lib"
+export LOOM_COMPILER_LIB="$("${RUSTC:-rustc}" --print sysroot)/lib"
 mkdir -p "$CARGO_TARGET_DIR"
 locked=
 if [ "${LOOM_LOCKED:-0}" = 1 ]; then locked=--locked; fi

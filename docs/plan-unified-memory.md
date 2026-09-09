@@ -5,6 +5,8 @@ Status: implementation in progress, 2026-09-09. The consolidated command is
 It prints the passing gate count and first failure. Performance targets below
 remain acceptance criteria until that command verifies them.
 
+The desired end-state scan latency is about 7 ms while retaining separate Wasm memories and DAG-CBOR. That target is unverified. The 55/70 ms recording targets below are intermediate milestones; passing them would not establish the desired end-state performance. The canceled shared-memory proposal provides no performance evidence for the retained design.
+
 Baseline (7 warm runs, ~10,000 files, over MCP): native sequential 26 ms,
 Loom `all` 162 ms, Loom recursive fork/join 314 ms.
 
@@ -111,6 +113,8 @@ The shared-memory fiber tier is canceled at the user's request. Each execution i
 Rust's [issue #25860](https://github.com/rust-lang/rust/issues/25860) documents a lifetime/variance soundness hole. The issue notes that non-higher-ranked variants were fixed while the underlying issue persists. [cve-rs](https://github.com/Speykious/cve-rs) demonstrates memory vulnerabilities using safe Rust. The [Rust Reference](https://doc.rust-lang.org/reference/behavior-considered-undefined.html) also explains how unsound internals can let safe callers trigger undefined behavior and says its undefined-behavior model is incomplete. These are reasons to retain memory isolation, not promises that a particular demonstration works on every compiler release.
 
 Under a correct Wasm engine and host interface, corruption within a guest stays within that instance's memory. The isolation boundary depends on Wasm validation, the engine, and checked host interfaces. We must validate CBOR, sizes, and references at the host boundary rather than trust the guest compiler's safety checks. Shared-memory imports and the proposed `#[loom::def(threads)]` mode are not admitted.
+
+The long-term goal is a formally verified guest language whose guarantees survive compilation and execution. That requires a verified compiler and runtime contract, including the memory model and trusted library operations. With those proof obligations established and checked, we could reconsider direct memory interaction, including shared memory where the proof covers it. A proof of a language fragment alone would not justify removing isolation. Separate Wasm memories and DAG-CBOR remain the current design until that stronger foundation exists.
 
 ## Remaining integration
 

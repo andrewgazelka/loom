@@ -9,7 +9,9 @@ use std::{
     path::{Path, PathBuf},
 };
 use tokio::{fs, process::Command};
-mod artifacts;
+pub(crate) mod artifacts;
+pub(crate) mod compiler_cache;
+mod trusted_sources;
 
 pub(crate) struct Built {
     pub bytes: Vec<u8>,
@@ -35,6 +37,7 @@ struct Recipe {
 struct Layout {
     root: PathBuf,
     cache: PathBuf,
+    sysroot: PathBuf,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -134,6 +137,14 @@ impl Recipe {
             "-C".into(),
             format!("incremental={}", incremental.display()),
         ]);
+        let mut previous = std::mem::take(&mut self.arguments).into_iter();
+        while let Some(argument) = previous.next() {
+            if argument == "--cap-lints" {
+                previous.next();
+            } else if !argument.starts_with("--cap-lints=") {
+                self.arguments.push(argument);
+            }
+        }
         self.arguments.push("-Funsafe-code".into());
         self.source = directory.into();
         Ok(())
@@ -247,12 +258,27 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
     let cache = cache_path.as_path();
     let directory = directory_path.as_path();
     let target_name = "wasm32-wasip1";
-    let mut compiler_command = Command::new("rustc");
+    let compiler_owner = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".into());
+    let mut compiler_command = Command::new(&compiler_owner);
     compiler_environment(&mut compiler_command);
     let compiler = compiler_command.arg("-vV").output().await?;
     if !compiler.status.success() {
         return Err(rejected(String::from_utf8_lossy(&compiler.stderr)));
     }
+    let mut sysroot_command = Command::new(&compiler_owner);
+    compiler_environment(&mut sysroot_command);
+    let sysroot_output = sysroot_command
+        .args(["--print", "sysroot"])
+        .output()
+        .await?;
+    if !sysroot_output.status.success() {
+        return Err(rejected(String::from_utf8_lossy(&sysroot_output.stderr)));
+    }
+    let sysroot = PathBuf::from(
+        String::from_utf8(sysroot_output.stdout)
+            .map_err(rejected)?
+            .trim(),
+    );
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"loom-rustc-contract-v2-opt2-cgu16-no-lto-forbid-user-unsafe");
     let manifest_bytes = fs::read_to_string(directory.join("Cargo.toml"))
@@ -300,7 +326,13 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
     if !root_build_script && let Some(mut recipe) = read_graph(store, &key)? {
         let setup_ms = started.elapsed().as_millis();
         let restore_started = std::time::Instant::now();
-        recipe.rebase_graph(root, cache, directory)?;
+        let replay_compiler = if isolated {
+            sysroot.join("bin/rustc").to_string_lossy().into_owned()
+        } else {
+            compiler_owner.clone()
+        };
+        recipe.rebase_graph(root, cache, directory, &sysroot, &replay_compiler)?;
+        recipe.restore_sources(store, cache, &graph)?;
         let restored = recipe.restore_artifacts(store)?;
         let repairs = if restored {
             0
@@ -351,7 +383,10 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
             let diagnostics = rustc_diagnostics(&stderr);
             let stages = serde_json::json!({"build_stages":{"compiler_setup_ms":setup_ms,
                 "artifact_restore_ms":restore_ms,"root_rustc_ms":compiler_ms}});
-            let logs = format!("direct rustc; dependency graph {key}\n{stages}\n{stderr}");
+            let graph_identity = serde_json::json!({"dependency_graph":key});
+            let logs = format!(
+                "{graph_identity}\ndirect rustc; dependency graph {key}\n{stages}\n{stderr}"
+            );
             if !output.status.success() {
                 if diagnostics.is_empty() {
                     return Err(rejected(logs));
@@ -371,6 +406,13 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
             });
         }
     }
+    artifacts::initialize_index(store)?;
+    let shareable = graph_shareable(root, cache, directory, &target, isolated).await?;
+    let mirror = graph.join("unit-cache");
+    compiler_cache::prepare(store, &mirror, &target, &compiler_identity)?;
+    let helper_owner = std::env::var_os("LOOM_COMPILER_CACHE_OWNER")
+        .map(PathBuf::from)
+        .unwrap_or(std::env::current_exe()?);
     let mut command = if isolated {
         let mut command = Command::new(root.join("loom-rustc/sandbox.sh"));
         // Sandbox target must be under its writable source root.
@@ -389,11 +431,15 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
     compiler_environment(&mut command);
     command
         .env("LOOM_LOCKED", "1")
-        .env("LOOM_RUST_TARGET", target_name);
+        .env("LOOM_RUST_TARGET", target_name)
+        .env("LOOM_CAS_SOURCES", cache.join("source-trees"))
+        .env("LOOM_COMPILER_CACHE_OWNER", helper_owner)
+        .env("LOOM_COMPILER_CACHE_MIRROR", &mirror);
     let output = run(command).await?;
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let graph_identity = serde_json::json!({"dependency_graph":key});
     let logs = format!(
-        "cargo dependency bootstrap; graph {key}\n{stdout}{}",
+        "{graph_identity}\ncargo dependency bootstrap; graph {key}; cross-graph publication {shareable}\n{stdout}{}",
         String::from_utf8_lossy(&output.stderr)
     );
     let diagnostics = cargo_diagnostics(&stdout);
@@ -434,12 +480,19 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
         for source_root in &mut source_roots {
             *source_root = std::fs::canonicalize(&*source_root)?;
         }
-        recipe.units =
-            artifacts::capture(store, &target, &compiler_identity, &stdout, &source_roots)?;
+        recipe.units = artifacts::capture(
+            store,
+            &target,
+            &compiler_identity,
+            &stdout,
+            &source_roots,
+            shareable,
+        )?;
         recipe.capture_artifacts(store, &target)?;
         recipe.layout = Some(Layout {
             root: root.into(),
             cache: cache.into(),
+            sysroot,
         });
         write_graph(store, &key, &recipe)?;
     }
@@ -469,6 +522,7 @@ fn compiler_environment(command: &mut Command) {
         "RUSTUP_TOOLCHAIN",
         "CARGO_HOME",
         "TMPDIR",
+        "RUSTC",
     ];
     command.env_clear();
     for name in preserved {
@@ -485,6 +539,8 @@ impl Recipe {
         root: &Path,
         cache: &Path,
         directory: &Path,
+        sysroot: &Path,
+        compiler: &str,
     ) -> Result<(), BuildError> {
         let layout = self
             .layout
@@ -504,6 +560,10 @@ impl Recipe {
                 .replace(
                     layout.root.to_string_lossy().as_ref(),
                     root.to_string_lossy().as_ref(),
+                )
+                .replace(
+                    layout.sysroot.to_string_lossy().as_ref(),
+                    sysroot.to_string_lossy().as_ref(),
                 )
         };
         fn rebase(recipe: &mut Recipe, replace: &impl Fn(&str) -> String) {
@@ -525,8 +585,10 @@ impl Recipe {
                 .collect();
         }
         rebase(self, &replace);
+        self.compiler = compiler.into();
         for unit in &mut self.units {
             rebase(&mut unit.recipe, &replace);
+            unit.recipe.compiler = compiler.into();
             for output in &mut unit.outputs {
                 output.path = PathBuf::from(replace(output.path.to_string_lossy().as_ref()));
             }
@@ -534,7 +596,41 @@ impl Recipe {
         self.layout = Some(Layout {
             root: root.into(),
             cache: cache.into(),
+            sysroot: sysroot.into(),
         });
+        Ok(())
+    }
+
+    fn restore_sources(
+        &mut self,
+        store: &Store,
+        cache: &Path,
+        graph: &Path,
+    ) -> Result<(), BuildError> {
+        #[derive(serde::Deserialize)]
+        struct SourceIdentity {
+            source_tree: String,
+        }
+        for unit in &mut self.units {
+            if unit.recipe.source.is_dir() {
+                continue;
+            }
+            let inputs: SourceIdentity = store
+                .get_value(&unit.key)
+                .map_err(rejected)?
+                .ok_or_else(|| rejected("compilation source identity missing"))?;
+            let directory = graph.join("sources").join(&unit.key);
+            crate::preparation::materialize_tree(store, cache, &directory, &inputs.source_tree)?;
+            let old = unit.recipe.source.to_string_lossy().into_owned();
+            let new = std::fs::canonicalize(directory)?;
+            for argument in &mut unit.recipe.arguments {
+                *argument = argument.replace(&old, new.to_string_lossy().as_ref());
+            }
+            for value in unit.recipe.environment.values_mut() {
+                *value = value.replace(&old, new.to_string_lossy().as_ref());
+            }
+            unit.recipe.source = new;
+        }
         Ok(())
     }
 
@@ -686,6 +782,106 @@ fn rustc_diagnostics(stderr: &str) -> Vec<Diagnostic> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn host_execution_is_admitted_before_build_scripts_run() {
+        let directory =
+            std::env::temp_dir().join(format!("loom-host-admission-{}", std::process::id()));
+        std::fs::create_dir_all(directory.join("src")).unwrap();
+        std::fs::write(directory.join("Cargo.toml"), "[package]\nname='unreviewed-host-code'\nversion='0.1.0'\nedition='2024'\n[workspace]\n").unwrap();
+        std::fs::write(
+            directory.join("Cargo.lock"),
+            "version = 4\n[[package]]\nname = \"unreviewed-host-code\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(directory.join("src/lib.rs"), "pub fn value() -> u8 { 1 }").unwrap();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+        assert!(
+            graph_shareable(
+                root,
+                &directory,
+                &directory,
+                &directory.join("target"),
+                false
+            )
+            .await
+            .unwrap()
+        );
+        std::fs::write(
+            directory.join("build.rs"),
+            "fn main() { std::fs::write(\"executed\", b\"bad\").unwrap(); }",
+        )
+        .unwrap();
+        assert!(
+            !graph_shareable(
+                root,
+                &directory,
+                &directory,
+                &directory.join("target"),
+                false
+            )
+            .await
+            .unwrap()
+        );
+        assert!(!directory.join("executed").exists());
+        let store = Store::memory().unwrap();
+        artifacts::initialize_index(&store).unwrap();
+        let key = "ab".repeat(32);
+        let mut unit = artifacts::Unit {
+            key: key.clone(),
+            name: "known_dependency".into(),
+            recipe: Recipe::parse(b"LOOM_RUSTC_ARGUMENTS\0rustc\0", &directory).unwrap(),
+            outputs: vec![artifacts::Output {
+                path: directory.join("dependency.rlib"),
+                hash: store
+                    .put("rust-artifact", b"original compiler output")
+                    .unwrap(),
+                executable: false,
+            }],
+            dependencies: Vec::new(),
+        };
+        artifacts::publish_units(&store, true, &[unit.clone()]).unwrap();
+        let original = store
+            .with_connection(|connection| {
+                Ok(connection.query_row(
+                    "SELECT artifact_hash FROM rust_artifacts WHERE key=?",
+                    [&key],
+                    |row| row.get::<_, String>(0),
+                )?)
+            })
+            .unwrap();
+        unit.outputs[0].hash = store
+            .put("rust-artifact", b"poisoned sibling output")
+            .unwrap();
+        let admitted = graph_shareable(
+            root,
+            &directory,
+            &directory,
+            &directory.join("target"),
+            false,
+        )
+        .await
+        .unwrap();
+        artifacts::publish_units(&store, admitted, &[unit]).unwrap();
+        let after = store
+            .with_connection(|connection| {
+                Ok(connection.query_row(
+                    "SELECT artifact_hash FROM rust_artifacts WHERE key=?",
+                    [&key],
+                    |row| row.get::<_, String>(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(
+            after, original,
+            "unreviewed host code replaced a shared artifact"
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn capture_preserves_spaces_and_package_values() {
         let recipe = Recipe::parse(b"CARGO_PKG_DESCRIPTION=a = b\0LOOM_RUSTC_ARGUMENTS\0/opt/rust c\0--crate-name\0loom_definition\0--out-dir\0/a b\0", Path::new("/old")).unwrap();
@@ -759,4 +955,93 @@ mod tests {
         );
         std::fs::remove_dir_all(directory).unwrap();
     }
+}
+
+async fn graph_shareable(
+    root: &Path,
+    cache: &Path,
+    directory: &Path,
+    target: &Path,
+    isolated: bool,
+) -> Result<bool, BuildError> {
+    let mut command = if isolated {
+        let mut command = Command::new(root.join("loom-rustc/sandbox.sh"));
+        command
+            .arg("metadata")
+            .arg(cache)
+            .arg(directory)
+            .arg(target)
+            .arg(root);
+        command
+    } else {
+        let mut command = Command::new("cargo");
+        command.current_dir(directory).args([
+            "metadata",
+            "--locked",
+            "--offline",
+            "--format-version=1",
+        ]);
+        command
+    };
+    compiler_environment(&mut command);
+    let output = run(command).await?;
+    if !output.status.success() {
+        return Err(rejected(String::from_utf8_lossy(&output.stderr)));
+    }
+    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(rejected)?;
+    let packages = metadata["packages"]
+        .as_array()
+        .ok_or_else(|| rejected("Cargo metadata has no packages"))?;
+    let nodes = metadata["resolve"]["nodes"]
+        .as_array()
+        .ok_or_else(|| rejected("Cargo metadata has no resolved graph"))?;
+    let mut pending = Vec::new();
+    for package in packages {
+        let targets = package["targets"]
+            .as_array()
+            .ok_or_else(|| rejected("Cargo package has no targets"))?;
+        if targets.iter().any(|target| {
+            target["kind"].as_array().is_some_and(|kinds| {
+                kinds
+                    .iter()
+                    .any(|kind| kind == "proc-macro" || kind == "custom-build")
+            })
+        }) {
+            pending.push(
+                package["id"]
+                    .as_str()
+                    .ok_or_else(|| rejected("Cargo package has no identity"))?
+                    .to_owned(),
+            );
+        }
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        let package = packages
+            .iter()
+            .find(|package| package["id"] == id)
+            .ok_or_else(|| rejected("Cargo host dependency is missing"))?;
+        let manifest = package["manifest_path"]
+            .as_str()
+            .ok_or_else(|| rejected("Cargo host dependency has no source"))?;
+        if !trusted_sources::approved(root, Path::new(manifest))? {
+            return Ok(false);
+        }
+        let node = nodes
+            .iter()
+            .find(|node| node["id"] == id)
+            .ok_or_else(|| rejected("Cargo host dependency has no resolution"))?;
+        for dependency in node["deps"]
+            .as_array()
+            .ok_or_else(|| rejected("Cargo host node has no dependencies"))?
+        {
+            if let Some(id) = dependency["pkg"].as_str() {
+                pending.push(id.into());
+            }
+        }
+    }
+    Ok(true)
 }

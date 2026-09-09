@@ -17,7 +17,28 @@ if [ "$compile" = no ]; then exec "$@"; fi
 # Every user definition, including definition dependencies, gets a correctness
 # lint. The isolated Wasm runtime remains the execution boundary.
 case "${CARGO_PRIMARY_PACKAGE:-}:${CARGO_PKG_NAME:-}" in
-  1:*|*:loom-definition-*) set -- "$@" -Funsafe-code ;;
+  1:*|*:loom-definition-*)
+    # A dependency's Cargo cap-lints=allow otherwise downgrades even forbid.
+    remaining=$#
+    while [ "$remaining" -gt 0 ]; do
+      argument=$1
+      shift
+      remaining=$((remaining - 1))
+      case "$argument" in
+        --cap-lints) shift; remaining=$((remaining - 1)) ;;
+        --cap-lints=*) ;;
+        *) set -- "$@" "$argument" ;;
+      esac
+    done
+    set -- "$@" -Funsafe-code
+    ;;
+  *)
+    # A content-addressed external source is still an external dependency. Give
+    # it Cargo's registry lint cap, rather than workspace path lint semantics.
+    if [ -n "${LOOM_CAS_SOURCES:-}" ]; then
+      case "$CARGO_MANIFEST_DIR/" in "$LOOM_CAS_SOURCES/"*|*/loom-crates/*) set -- "$@" --cap-lints allow ;; esac
+    fi
+    ;;
 esac
 set -- "$@" "--remap-path-prefix=${CARGO_MANIFEST_DIR:?missing package source}=/loom/source"
 capture=${LOOM_RUSTC_CAPTURE:?missing capture destination}
@@ -28,14 +49,38 @@ temporary="$capture.units/unit-$$.pending"
   if [ "${DYLD_LIBRARY_PATH+x}" = x ]; then printf '%s\000' "DYLD_LIBRARY_PATH=$DYLD_LIBRARY_PATH"; fi
   printf '%s\000' LOOM_RUSTC_ARGUMENTS "$@"
 } > "$temporary"
-printf '%s\n' loom-rustc-invocation >&2
-if "$@" 2> "$capture.units/unit-$$.stderr"; then
-  status=0
-else
-  status=$?
+cache_status=3
+if [ -n "${LOOM_COMPILER_CACHE_OWNER:-}" ] && [ "${CARGO_PRIMARY_PACKAGE:-}" != 1 ]; then
+  if "$LOOM_COMPILER_CACHE_OWNER" __compiler-cache lookup "$temporary" "$LOOM_COMPILER_CACHE_MIRROR" 2> "$capture.units/unit-$$.stderr"; then
+    cache_status=0
+  else
+    cache_status=$?
+  fi
+  if [ "$cache_status" != 0 ] && [ "$cache_status" != 3 ]; then
+    cat "$capture.units/unit-$$.stderr" >&2
+    exit "$cache_status"
+  fi
 fi
-cat "$capture.units/unit-$$.stderr" >&2
-if [ "$status" -ne 0 ]; then exit "$status"; fi
+if [ "$cache_status" = 3 ]; then
+  printf '%s\n' loom-rustc-invocation >&2
+  if "$@" 2> "$capture.units/unit-$$.stderr"; then
+    status=0
+  else
+    status=$?
+  fi
+  if [ "$status" -ne 0 ]; then
+    cat "$capture.units/unit-$$.stderr" >&2
+    exit "$status"
+  fi
+  if [ -n "${LOOM_COMPILER_CACHE_OWNER:-}" ] && [ "${CARGO_PRIMARY_PACKAGE:-}" != 1 ]; then
+    "$LOOM_COMPILER_CACHE_OWNER" __compiler-cache record "$temporary" "$LOOM_COMPILER_CACHE_MIRROR"
+  fi
+  # Cargo may schedule dependents as soon as metadata is announced. Publish
+  # their ownership keys before forwarding that announcement.
+  cat "$capture.units/unit-$$.stderr" >&2
+else
+  cat "$capture.units/unit-$$.stderr" >&2
+fi
 mv "$temporary" "$capture.units/unit-$$.recipe"
 if [ "${CARGO_PRIMARY_PACKAGE:-}" = 1 ]; then
   cp "$capture.units/unit-$$.recipe" "$capture"

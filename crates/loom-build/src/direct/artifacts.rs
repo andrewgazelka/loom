@@ -26,8 +26,8 @@ pub(super) struct Output {
     pub executable: bool,
 }
 
-#[derive(Serialize)]
-struct Inputs {
+#[derive(Serialize, Deserialize)]
+pub(super) struct Inputs {
     source_tree: String,
     build_output_tree: Option<String>,
     compiler: String,
@@ -42,7 +42,7 @@ struct Pending {
     outputs: Vec<PathBuf>,
 }
 
-fn argument<'a>(recipe: &'a Recipe, flag: &str) -> Result<&'a str, BuildError> {
+pub(super) fn argument<'a>(recipe: &'a Recipe, flag: &str) -> Result<&'a str, BuildError> {
     recipe
         .arguments
         .windows(2)
@@ -51,7 +51,7 @@ fn argument<'a>(recipe: &'a Recipe, flag: &str) -> Result<&'a str, BuildError> {
         .ok_or_else(|| rejected(format!("compilation unit missing {flag}")))
 }
 
-fn external_paths(recipe: &Recipe) -> Vec<PathBuf> {
+pub(super) fn external_paths(recipe: &Recipe) -> Vec<PathBuf> {
     recipe
         .arguments
         .windows(2)
@@ -66,6 +66,7 @@ pub(super) fn capture(
     compiler: &str,
     cargo_output: &str,
     source_roots: &[PathBuf],
+    shareable: bool,
 ) -> Result<Vec<Unit>, BuildError> {
     let reports = cargo_output
         .lines()
@@ -186,63 +187,15 @@ pub(super) fn capture(
             .iter()
             .map(|path| (path.to_string_lossy().into_owned(), owners[path].clone()))
             .collect();
-        let normalize = |value: &str| {
-            let mut value = value.to_owned();
-            for (path, key) in &dependencies {
-                value = value.replace(path, &format!("$DEP/{key}"));
-            }
-            value = value.replace(unit.recipe.source.to_string_lossy().as_ref(), "$SOURCE");
-            if let Some(sysroot) = Path::new(&unit.recipe.compiler)
-                .parent()
-                .and_then(Path::parent)
-            {
-                value = value.replace(sysroot.to_string_lossy().as_ref(), "$SYSROOT");
-            }
-            if let Some(path) = unit.recipe.environment.get("OUT_DIR") {
-                value = value.replace(path, "$BUILD_OUTPUT");
-            }
-            value.replace(target.to_string_lossy().as_ref(), "$ARTIFACTS")
-        };
-        let environment = unit
-            .recipe
-            .environment
-            .iter()
-            .filter(|entry| {
-                ![
-                    "PATH",
-                    "HOME",
-                    "TMPDIR",
-                    "PWD",
-                    "OLDPWD",
-                    "SHLVL",
-                    "_",
-                    "RUSTUP_HOME",
-                    "CARGO_HOME",
-                    "RUSTC_WRAPPER",
-                ]
-                .contains(&entry.0.as_str())
-                    && !entry.0.starts_with("LOOM_")
-            })
-            .map(|entry| (entry.0.clone(), normalize(entry.1)))
-            .collect();
-        let arguments = unit
-            .recipe
-            .arguments
-            .iter()
-            .map(|value| normalize(value))
-            .collect();
         let dependency_keys: Vec<_> = dependencies.values().cloned().collect();
-        let inputs = Inputs {
+        let inputs = inputs(
+            &unit.recipe,
+            target,
+            compiler,
             source_tree,
             build_output_tree,
-            compiler: compiler.into(),
-            arguments,
-            environment,
-            dependencies: dependency_keys
-                .iter()
-                .map(|key| (key.clone(), key.clone()))
-                .collect(),
-        };
+            &dependencies,
+        );
         let key = store
             .put_value("rust-compilation-inputs", &inputs)
             .map_err(rejected)?;
@@ -266,17 +219,105 @@ pub(super) fn capture(
             outputs,
             dependencies: dependency_keys,
         };
+        units.push(artifact);
+    }
+    publish_units(store, shareable, &units)?;
+    Ok(units)
+}
+
+pub(super) fn initialize_index(store: &Store) -> Result<(), BuildError> {
+    store.with_connection(|connection| {
+        let initialized: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='rust_artifact_policy')", [], |row| row.get(0))?;
+        if !initialized {
+            connection.execute_batch("CREATE TABLE IF NOT EXISTS rust_artifacts (key TEXT PRIMARY KEY, artifact_hash TEXT NOT NULL); DELETE FROM rust_artifacts; CREATE TABLE rust_artifact_policy (version INTEGER PRIMARY KEY); INSERT INTO rust_artifact_policy VALUES (1)")?;
+        }
+        Ok(())
+    }).map_err(rejected)
+}
+
+pub(super) fn publish_units(
+    store: &Store,
+    shareable: bool,
+    units: &[Unit],
+) -> Result<(), BuildError> {
+    // Admission is computed from Cargo metadata BEFORE any build script or
+    // proc macro executes. Captured compiler recipes are not trust evidence.
+    if !shareable {
+        return Ok(());
+    }
+    for artifact in units {
         let hash = store
-            .put_value("rust-compilation-artifact", &artifact)
+            .put_value("rust-compilation-artifact", artifact)
             .map_err(rejected)?;
         store.with_connection(|connection| {
             connection.execute_batch("CREATE TABLE IF NOT EXISTS rust_artifacts (key TEXT PRIMARY KEY, artifact_hash TEXT NOT NULL)")?;
             connection.execute("INSERT INTO rust_artifacts VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET artifact_hash=excluded.artifact_hash", [&artifact.key, &hash])?;
             Ok(())
         }).map_err(rejected)?;
-        units.push(artifact);
     }
-    Ok(units)
+    Ok(())
+}
+
+pub(super) fn inputs(
+    recipe: &Recipe,
+    target: &Path,
+    compiler: &str,
+    source_tree: String,
+    build_output_tree: Option<String>,
+    dependencies: &BTreeMap<String, String>,
+) -> Inputs {
+    let normalize = |value: &str| {
+        let mut value = value.to_owned();
+        for (path, key) in dependencies {
+            value = value.replace(path, &format!("$DEP/{key}"));
+        }
+        value = value.replace(recipe.source.to_string_lossy().as_ref(), "$SOURCE");
+        if let Some(sysroot) = Path::new(&recipe.compiler).parent().and_then(Path::parent) {
+            value = value.replace(sysroot.to_string_lossy().as_ref(), "$SYSROOT");
+        }
+        if let Some(path) = recipe.environment.get("OUT_DIR") {
+            value = value.replace(path, "$BUILD_OUTPUT");
+        }
+        value.replace(target.to_string_lossy().as_ref(), "$ARTIFACTS")
+    };
+    let environment = recipe
+        .environment
+        .iter()
+        .filter(|entry| {
+            ![
+                "PATH",
+                "HOME",
+                "TMPDIR",
+                "PWD",
+                "OLDPWD",
+                "SHLVL",
+                "_",
+                "RUSTUP_HOME",
+                "CARGO_HOME",
+                "RUSTC_WRAPPER",
+            ]
+            .contains(&entry.0.as_str())
+                && !entry.0.starts_with("LOOM_")
+        })
+        .map(|entry| (entry.0.clone(), normalize(entry.1)))
+        .collect();
+    let arguments = recipe
+        .arguments
+        .iter()
+        .map(|value| normalize(value))
+        .collect();
+    let dependency_keys: Vec<_> = dependencies.values().cloned().collect();
+    Inputs {
+        source_tree,
+        build_output_tree,
+        compiler: compiler.into(),
+        arguments,
+        environment,
+        dependencies: dependency_keys
+            .iter()
+            .map(|key| (key.clone(), key.clone()))
+            .collect(),
+    }
 }
 
 fn source_tree_fn(store: &Store, path: &Path) -> Result<String, BuildError> {
@@ -284,6 +325,10 @@ fn source_tree_fn(store: &Store, path: &Path) -> Result<String, BuildError> {
 }
 
 fn source_tree(store: &Store, path: &Path) -> Result<String, BuildError> {
+    tree_hash(Some(store), path)
+}
+
+pub(super) fn tree_hash(store: Option<&Store>, path: &Path) -> Result<String, BuildError> {
     let mut entries = Vec::new();
     for entry in std::fs::read_dir(path)? {
         let entry = entry?;
@@ -291,9 +336,6 @@ fn source_tree(store: &Store, path: &Path) -> Result<String, BuildError> {
             .file_name()
             .into_string()
             .map_err(|_| rejected("non-UTF8 crate source filename"))?;
-        if ["target", ".git", ".cargo-ok"].contains(&name.as_str()) {
-            continue;
-        }
         let path = entry.path();
         let kind = entry.file_type()?;
         if kind.is_symlink() {
@@ -304,23 +346,33 @@ fn source_tree(store: &Store, path: &Path) -> Result<String, BuildError> {
         }
         let directory = kind.is_dir();
         let hash = if directory {
-            source_tree(store, &path)?
+            tree_hash(store, &path)?
         } else {
-            store
-                .put("blob", &std::fs::read(&path)?)
-                .map_err(rejected)?
+            let bytes = std::fs::read(&path)?;
+            match store {
+                Some(store) => store.put("blob", &bytes).map_err(rejected)?,
+                None => blake3::hash(&bytes).to_hex().to_string(),
+            }
         };
         entries.push(TreeEntry {
             name,
             directory,
             executable: !directory && executable(&path)?,
-            reference: store
-                .reference(&hash, if directory { DAG_CBOR_CODEC } else { RAW_CODEC })
-                .map_err(rejected)?,
+            reference: loom_proto::reference(
+                &hash,
+                if directory { DAG_CBOR_CODEC } else { RAW_CODEC },
+            )
+            .map_err(rejected)?,
         });
     }
     entries.sort_by(|left, right| left.name.cmp(&right.name));
-    store.put_value("tree", &Tree { entries }).map_err(rejected)
+    let tree = Tree { entries };
+    match store {
+        Some(store) => store.put_value("tree", &tree).map_err(rejected),
+        None => Ok(blake3::hash(&loom_proto::encode(&tree).map_err(rejected)?)
+            .to_hex()
+            .to_string()),
+    }
 }
 
 pub(super) fn executable(path: &Path) -> Result<bool, BuildError> {

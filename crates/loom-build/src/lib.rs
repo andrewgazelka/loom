@@ -1,8 +1,8 @@
 //! Component builders. No successful response exists without component bytes.
-pub mod registry;
-mod sdk;
 mod direct;
 mod preparation;
+pub mod registry;
+mod sdk;
 use loom_check::{CheckedDef, SourceBundle, SourceFile};
 use loom_proto::{Diagnostic, Lang};
 use std::{
@@ -115,25 +115,35 @@ impl Builder {
                 })
             })
         }
-        let isolated = manifest.get("loom").and_then(|loom| loom.get("crates")).is_some() || untrusted(&manifest)
+        let isolated = manifest
+            .get("loom")
+            .and_then(|loom| loom.get("crates"))
+            .is_some()
+            || untrusted(&manifest)
             || bundle.files.contains_key("build.rs")
             || manifest
                 .get("package")
                 .is_some_and(|package| package.get("build").is_some())
             || dependencies.values().any(is_vendored);
         let preparation_inputs = serde_json::json!({
+            "contract": "loom-preparation-v2-registry-identity",
             "manifest": manifest,
             "lock": bundle.files.get("Cargo.lock"),
             "definitions": definition.deps,
             "sdk": build_fingerprint(&self.root, Lang::Rust)?,
             "isolated": isolated,
         });
-        let preparation_key = blake3::hash(&serde_json::to_vec(&preparation_inputs)
-            .map_err(|error| BuildError::Rejected(error.to_string()))?).to_hex().to_string();
+        let preparation_key = blake3::hash(
+            &serde_json::to_vec(&preparation_inputs)
+                .map_err(|error| BuildError::Rejected(error.to_string()))?,
+        )
+        .to_hex()
+        .to_string();
         if let Some(overlay) = preparation::load(&self.store, &preparation_key)? {
             bundle.files.extend(overlay);
             bundle.validate().map_err(BuildError::Rejected)?;
-            return serde_json::to_string(&bundle).map_err(|error| BuildError::Rejected(error.to_string()));
+            return serde_json::to_string(&bundle)
+                .map_err(|error| BuildError::Rejected(error.to_string()));
         }
         let staging = self.cache.join("intake").join(&definition.hash);
         if staging.exists() {
@@ -160,7 +170,7 @@ impl Builder {
             .await?;
         }
         materialize_rust(
-                &self.store,
+            &self.store,
             &self.root,
             &staging,
             &crate_dir,
@@ -214,7 +224,9 @@ impl Builder {
         if isolated {
             let hash = registry::snapshot_directory(&self.store, &crate_dir.join("vendor"))
                 .map_err(|error| BuildError::Rejected(error.to_string()))?;
-            bundle.files.insert(preparation::VENDOR_TREE.into(), SourceFile::Text(hash));
+            bundle
+                .files
+                .insert(preparation::VENDOR_TREE.into(), SourceFile::Text(hash));
         }
         preparation::save(&self.store, &preparation_key, &bundle.files)?;
         bundle.validate().map_err(BuildError::Rejected)?;
@@ -348,10 +360,16 @@ impl Builder {
                     definition,
                     sdk_fingerprint: &inputs,
                     store: &self.store,
-                }).await?;
+                })
+                .await?;
                 if !built.diagnostics.is_empty() {
-                    return Ok(BuildOutput { component: Vec::new(), ms: started.elapsed().as_millis() as u64,
-                        logs: built.logs, diagnostics: built.diagnostics, rustc_invocations: built.rustc_invocations });
+                    return Ok(BuildOutput {
+                        component: Vec::new(),
+                        ms: started.elapsed().as_millis() as u64,
+                        logs: built.logs,
+                        diagnostics: built.diagnostics,
+                        rustc_invocations: built.rustc_invocations,
+                    });
                 }
                 let encoding_started = Instant::now();
                 let component = {
@@ -362,15 +380,23 @@ impl Builder {
                         .map_err(|error| BuildError::Rejected(error.to_string()))?
                         .validate(true).encode().map_err(|error| BuildError::Rejected(error.to_string()))?
                 };
-                built.logs.push_str(&format!("\n{}\n", serde_json::json!({"build_stages":{
+                built.logs.push_str(&format!(
+                    "\n{}\n",
+                    serde_json::json!({"build_stages":{
                     "input_materialization_ms":materialization_ms,
-                    "component_encode_ms":encoding_started.elapsed().as_millis()}})));
+                    "component_encode_ms":encoding_started.elapsed().as_millis()}})
+                ));
                 validate_component(&component)?;
                 fs::write(&component_path, &component).await?;
                 fs::write(directory.join("component.inputs"), inputs).await?;
                 fs::write(directory.join("build.log"), &built.logs).await?;
-                return Ok(BuildOutput { component, ms: started.elapsed().as_millis() as u64,
-                    logs: built.logs, diagnostics: built.diagnostics, rustc_invocations: built.rustc_invocations });
+                return Ok(BuildOutput {
+                    component,
+                    ms: started.elapsed().as_millis() as u64,
+                    logs: built.logs,
+                    diagnostics: built.diagnostics,
+                    rustc_invocations: built.rustc_invocations,
+                });
             }
         };
         let output = tokio::time::timeout(
@@ -424,8 +450,12 @@ fn trusted_dependency(name: &str, value: &toml::Value) -> bool {
 }
 
 fn is_vendored(definition: &CheckedDef) -> bool {
-    serde_json::from_str::<SourceBundle>(&definition.source)
-        .is_ok_and(|bundle| bundle.files.keys().any(|name| name.starts_with("vendor/") || name == preparation::VENDOR_TREE))
+    serde_json::from_str::<SourceBundle>(&definition.source).is_ok_and(|bundle| {
+        bundle
+            .files
+            .keys()
+            .any(|name| name.starts_with("vendor/") || name == preparation::VENDOR_TREE)
+    })
 }
 
 const VENDOR_CONFIG: &str = include_str!("../../../loom-rustc/vendor-config.toml");
@@ -477,6 +507,8 @@ fn build_fingerprint(root: &Path, lang: Lang) -> Result<String, BuildError> {
     hash.update(b"loom-component-build-v2-dag-cbor");
     hash.update(include_bytes!("direct.rs"));
     hash.update(include_bytes!("direct/artifacts.rs"));
+    hash.update(include_bytes!("direct/compiler_cache.rs"));
+    hash.update(include_bytes!("direct/trusted_sources.rs"));
     hash.update(include_bytes!("preparation.rs"));
     for path in files {
         let relative = path
@@ -514,7 +546,9 @@ async fn materialize_rust(
         )])
     };
     if files.keys().any(|name| name.starts_with("loom-crates/")) {
-        return Err(BuildError::Rejected("loom-crates source paths are host-owned".into()));
+        return Err(BuildError::Rejected(
+            "loom-crates source paths are host-owned".into(),
+        ));
     }
     let mut manifest = if let Some(source) = files.remove("Cargo.toml") {
         source
@@ -564,28 +598,120 @@ async fn materialize_rust(
         Ok(())
     }
     validate_manifest(&toml::Value::Table(table.clone()), isolated)?;
-    let crates = loom_check::crate_dependencies(&toml::to_string(&toml::Value::Table(table.clone())).map_err(|error| BuildError::Rejected(error.to_string()))?)
-        .map_err(BuildError::Rejected)?;
+    let crates = loom_check::crate_dependencies(
+        &toml::to_string(&toml::Value::Table(table.clone()))
+            .map_err(|error| BuildError::Rejected(error.to_string()))?,
+    )
+    .map_err(BuildError::Rejected)?;
     let crate_aliases: std::collections::BTreeSet<_> = crates.keys().cloned().collect();
+    struct CratePin {
+        alias: Option<String>,
+        dependency: loom_check::CrateDependency,
+    }
+    let mut pins: Vec<CratePin> = crates
+        .into_iter()
+        .map(|entry| CratePin {
+            alias: Some(entry.0),
+            dependency: entry.1,
+        })
+        .collect();
+    // Cargo applies patches only from the root package. Include the exact pins
+    // of definition dependencies so their SDK types keep one package identity.
+    if !dependency {
+        for checked in dependencies.values() {
+            if let Ok(bundle) = serde_json::from_str::<SourceBundle>(&checked.source)
+                && let Some(manifest) = bundle.files.get("Cargo.toml").and_then(SourceFile::as_text)
+            {
+                pins.extend(
+                    loom_check::crate_dependencies(manifest)
+                        .map_err(BuildError::Rejected)?
+                        .into_values()
+                        .map(|dependency| CratePin {
+                            alias: None,
+                            dependency,
+                        }),
+                );
+            }
+        }
+    }
     let mut materialized_crates = std::collections::BTreeSet::new();
-    for (alias, dependency) in crates {
+    let mut crate_patches = toml::map::Map::new();
+    let mut package_sources = BTreeMap::new();
+    for pin in pins {
+        let dependency = pin.dependency;
         let relative = format!("loom-crates/{}", dependency.hash);
         let destination = directory.join(&relative);
         if materialized_crates.insert(dependency.hash.clone()) {
             preparation::materialize_tree(store, cache, &destination, &dependency.hash)?;
         }
         let source = std::fs::read_to_string(destination.join("Cargo.toml"))?;
-        let crate_manifest: toml::Value = source.parse().map_err(|error: toml::de::Error| BuildError::Rejected(error.to_string()))?;
-        let package = crate_manifest.get("package").and_then(|package| package.get("name")).and_then(toml::Value::as_str).ok_or_else(|| BuildError::Rejected("crate package name missing".into()))?;
-        let mut specification = toml::map::Map::new();
-        specification.insert("path".into(), toml::Value::String(relative));
-        specification.insert("package".into(), toml::Value::String(package.into()));
-        specification.insert("features".into(), toml::Value::Array(dependency.features.into_iter().map(toml::Value::String).collect()));
-        specification.insert("default-features".into(), toml::Value::Boolean(dependency.default_features));
-        let dependencies = table.entry("dependencies").or_insert_with(|| toml::Value::Table(Default::default())).as_table_mut().ok_or_else(|| BuildError::Rejected("dependencies must be a table".into()))?;
-        if dependencies.insert(alias.clone(), toml::Value::Table(specification)).is_some() {
-            return Err(BuildError::Rejected(format!("crate alias {alias} declared twice")));
+        let crate_manifest: toml::Value = source
+            .parse()
+            .map_err(|error: toml::de::Error| BuildError::Rejected(error.to_string()))?;
+        let package = crate_manifest
+            .get("package")
+            .and_then(|package| package.get("name"))
+            .and_then(toml::Value::as_str)
+            .ok_or_else(|| BuildError::Rejected("crate package name missing".into()))?;
+        let version = crate_manifest
+            .get("package")
+            .and_then(|package| package.get("version"))
+            .and_then(toml::Value::as_str)
+            .ok_or_else(|| BuildError::Rejected("crate package version missing".into()))?;
+        let identity = format!("{package}@{version}");
+        if let Some(previous) = package_sources.insert(identity.clone(), dependency.hash.clone())
+            && previous != dependency.hash
+        {
+            return Err(BuildError::Rejected(format!(
+                "conflicting source hashes for {identity}: {previous} and {}",
+                dependency.hash
+            )));
         }
+        let mut patch = toml::map::Map::new();
+        patch.insert("path".into(), toml::Value::String(relative));
+        patch.insert("package".into(), toml::Value::String(package.into()));
+        crate_patches.insert(
+            format!("loom-pin-{}", dependency.hash),
+            toml::Value::Table(patch),
+        );
+        let Some(alias) = pin.alias else {
+            continue;
+        };
+        let mut specification = toml::map::Map::new();
+        specification.insert("version".into(), toml::Value::String(format!("={version}")));
+        specification.insert("package".into(), toml::Value::String(package.into()));
+        specification.insert(
+            "features".into(),
+            toml::Value::Array(
+                dependency
+                    .features
+                    .into_iter()
+                    .map(toml::Value::String)
+                    .collect(),
+            ),
+        );
+        specification.insert(
+            "default-features".into(),
+            toml::Value::Boolean(dependency.default_features),
+        );
+        let dependencies = table
+            .entry("dependencies")
+            .or_insert_with(|| toml::Value::Table(Default::default()))
+            .as_table_mut()
+            .ok_or_else(|| BuildError::Rejected("dependencies must be a table".into()))?;
+        if dependencies
+            .insert(alias.clone(), toml::Value::Table(specification))
+            .is_some()
+        {
+            return Err(BuildError::Rejected(format!(
+                "crate alias {alias} declared twice"
+            )));
+        }
+    }
+    if !crate_patches.is_empty() {
+        let mut patches = toml::map::Map::new();
+        patches.insert("crates-io".into(), toml::Value::Table(crate_patches));
+        table.insert("patch".into(), toml::Value::Table(patches));
     }
     table.remove("loom");
     table.insert("workspace".into(), toml::Value::Table(Default::default()));
@@ -645,7 +771,9 @@ async fn materialize_rust(
         .as_table_mut()
         .ok_or_else(|| BuildError::Rejected("[dependencies] must be a table".into()))?;
     for (name, value) in manifest_deps.iter() {
-        if crate_aliases.contains(name) { continue; }
+        if crate_aliases.contains(name) {
+            continue;
+        }
         if value.get("path").is_some()
             || value.get("git").is_some()
             || value.get("registry").is_some()
@@ -705,7 +833,10 @@ async fn materialize_rust(
         );
         manifest_deps.insert(name.clone(), toml::Value::Table(entry));
     }
-    if files.keys().any(|name| name.starts_with("vendor/") || name == preparation::VENDOR_TREE) {
+    if files
+        .keys()
+        .any(|name| name.starts_with("vendor/") || name == preparation::VENDOR_TREE)
+    {
         files.insert(
             ".cargo/config.toml".into(),
             SourceFile::Text(VENDOR_CONFIG.into()),
@@ -745,7 +876,9 @@ async fn materialize_rust(
     }
     fs::create_dir_all(directory).await?;
     if let Some(tree) = files.get(preparation::VENDOR_TREE) {
-        let hash = tree.as_text().ok_or_else(|| BuildError::Rejected("vendor tree must be a hash".into()))?;
+        let hash = tree
+            .as_text()
+            .ok_or_else(|| BuildError::Rejected("vendor tree must be a hash".into()))?;
         preparation::materialize_tree(store, cache, &directory.join("vendor"), hash)?;
     }
     for (name, source) in files {
@@ -881,29 +1014,137 @@ mod tests {
     #[tokio::test]
     async fn crate_pins_materialize_but_caller_paths_and_overlays_are_rejected() {
         let store = loom_store::Store::memory().unwrap();
-        let manifest_hash = store.put("blob", b"[package]\nname='tiny'\nversion='1.0.0'\n").unwrap();
-        let tree = loom_proto::Tree { entries: vec![loom_proto::TreeEntry { name: "Cargo.toml".into(), reference: store.reference(&manifest_hash, loom_proto::RAW_CODEC).unwrap(), directory: false, executable: false }] };
+        let manifest_hash = store
+            .put("blob", b"[package]\nname='tiny'\nversion='1.0.0'\n")
+            .unwrap();
+        let tree = loom_proto::Tree {
+            entries: vec![loom_proto::TreeEntry {
+                name: "Cargo.toml".into(),
+                reference: store
+                    .reference(&manifest_hash, loom_proto::RAW_CODEC)
+                    .unwrap(),
+                directory: false,
+                executable: false,
+            }],
+        };
         let hash = store.put_value("tree", &tree).unwrap();
-        let manifest = format!("[package]\nname='loom-definition'\nversion='0.1.0'\nedition='2024'\n[loom.crates]\ntiny={{hash='{hash}'}}\n");
+        let manifest = format!(
+            "[package]\nname='loom-definition'\nversion='0.1.0'\nedition='2024'\n[loom.crates]\ntiny={{hash='{hash}'}}\n"
+        );
         let mut files = BTreeMap::new();
         files.insert("Cargo.toml".into(), SourceFile::Text(manifest));
-        files.insert("src/lib.rs".into(), SourceFile::Text("pub fn main() -> i64 { 42 }".into()));
+        files.insert(
+            "src/lib.rs".into(),
+            SourceFile::Text("pub fn main() -> i64 { 42 }".into()),
+        );
         let mut bundle = SourceBundle { files };
-        let mut definition = CheckedDef { hash: "a".repeat(64), lang: Lang::Rust, name: "test".into(), source: serde_json::to_string(&bundle).unwrap(), deps: BTreeMap::new(), sig: Default::default(), diagnostics: vec![] };
+        let mut definition = CheckedDef {
+            hash: "a".repeat(64),
+            lang: Lang::Rust,
+            name: "test".into(),
+            source: serde_json::to_string(&bundle).unwrap(),
+            deps: BTreeMap::new(),
+            sig: Default::default(),
+            diagnostics: vec![],
+        };
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let directory = std::env::temp_dir().join(format!("loom-crate-paths-{}", std::process::id()));
-        if directory.exists() { fs::remove_dir_all(&directory).await.unwrap(); }
-        materialize_rust(&store, &root, &directory, &directory, &definition, &BTreeMap::new(), false, true).await.unwrap();
-        let emitted: toml::Value = fs::read_to_string(directory.join("Cargo.toml")).await.unwrap().parse().unwrap();
-        assert_eq!(emitted["dependencies"]["tiny"]["path"].as_str(), Some(format!("loom-crates/{hash}").as_str()));
-        assert_eq!(fs::read(directory.join(format!("loom-crates/{hash}/Cargo.toml"))).await.unwrap(), store.get(&manifest_hash).unwrap().unwrap());
-        bundle.files.insert(format!("loom-crates/{hash}/Cargo.toml"), SourceFile::Text("tampered".into()));
+        let directory =
+            std::env::temp_dir().join(format!("loom-crate-paths-{}", std::process::id()));
+        if directory.exists() {
+            fs::remove_dir_all(&directory).await.unwrap();
+        }
+        materialize_rust(
+            &store,
+            &root,
+            &directory,
+            &directory,
+            &definition,
+            &BTreeMap::new(),
+            false,
+            true,
+        )
+        .await
+        .unwrap();
+        let emitted: toml::Value = fs::read_to_string(directory.join("Cargo.toml"))
+            .await
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(
+            emitted["dependencies"]["tiny"]["version"].as_str(),
+            Some("=1.0.0")
+        );
+        assert!(emitted["dependencies"]["tiny"].get("path").is_none());
+        assert_eq!(
+            emitted["patch"]["crates-io"][format!("loom-pin-{hash}")]["path"].as_str(),
+            Some(format!("loom-crates/{hash}").as_str())
+        );
+        assert_eq!(
+            fs::read(directory.join(format!("loom-crates/{hash}/Cargo.toml")))
+                .await
+                .unwrap(),
+            store.get(&manifest_hash).unwrap().unwrap()
+        );
+        bundle.files.insert(
+            format!("loom-crates/{hash}/Cargo.toml"),
+            SourceFile::Text("tampered".into()),
+        );
         definition.source = serde_json::to_string(&bundle).unwrap();
-        assert!(materialize_rust(&store, &root, &directory, &directory, &definition, &BTreeMap::new(), false, true).await.unwrap_err().to_string().contains("host-owned"));
-        bundle.files.remove(&format!("loom-crates/{hash}/Cargo.toml"));
+        assert!(
+            materialize_rust(
+                &store,
+                &root,
+                &directory,
+                &directory,
+                &definition,
+                &BTreeMap::new(),
+                false,
+                true
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("host-owned")
+        );
+        bundle
+            .files
+            .remove(&format!("loom-crates/{hash}/Cargo.toml"));
         bundle.files.insert("Cargo.toml".into(), SourceFile::Text(format!("[package]\nname='loom-definition'\nversion='0.1.0'\n[dependencies]\ntiny={{path='loom-crates/{hash}'}}\n")));
         definition.source = serde_json::to_string(&bundle).unwrap();
-        assert!(materialize_rust(&store, &root, &directory, &directory, &definition, &BTreeMap::new(), false, true).await.unwrap_err().to_string().contains("not path/git"));
+        assert!(
+            materialize_rust(
+                &store,
+                &root,
+                &directory,
+                &directory,
+                &definition,
+                &BTreeMap::new(),
+                false,
+                true
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("not path/git")
+        );
+        bundle.files.insert("Cargo.toml".into(), SourceFile::Text(format!("[package]\nname='loom-definition'\nversion='0.1.0'\n[patch.crates-io]\ntiny={{path='loom-crates/{hash}'}}\n")));
+        definition.source = serde_json::to_string(&bundle).unwrap();
+        assert!(
+            materialize_rust(
+                &store,
+                &root,
+                &directory,
+                &directory,
+                &definition,
+                &BTreeMap::new(),
+                false,
+                true
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("overrides are unavailable")
+        );
         fs::remove_dir_all(directory).await.unwrap();
     }
     #[cfg(unix)]
@@ -967,4 +1208,13 @@ mod tests {
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].code, "E0308");
     }
+}
+
+/// Internal native compiler-cache protocol, shared by the daemon and build tools.
+pub fn compiler_cache_main(
+    operation: &str,
+    recipe: &std::path::Path,
+    mirror: &std::path::Path,
+) -> Result<bool, BuildError> {
+    direct::compiler_cache::main(operation, recipe, mirror)
 }

@@ -4,6 +4,8 @@ Loom runs TypeScript and Rust WebAssembly components behind one Rust actor host.
 
 **Memory isolation is a security requirement. Rust safety checks are not a formally proven boundary against adversarial code.** Compiler and library soundness bugs can expose undefined behavior through safe Rust; denying `unsafe` does not close that class of bug. Loom keeps separate Wasm memories and exchanges DAG-CBOR values instead of sharing guest pointers. Wasm validation, the engine, and checked host interfaces remain trusted, and the complete system has no end-to-end formal proof. See the [memory isolation decision](plan-unified-memory.md#memory-isolation-decision) for the concrete Rust soundness issue and supporting sources.
 
+The long-term goal is a formally verified guest language, compiler, and runtime contract. If their checked guarantees cover direct memory interaction, we can revisit the isolation design on that basis. Until then, separate Wasm memories and DAG-CBOR remain the execution model.
+
 ## Run locally
 
 On Apple Silicon macOS or x86-64 Linux, Nix supplies the daemon, Svelte app, checker, and both guest toolchains:

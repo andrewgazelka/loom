@@ -64,7 +64,7 @@ impl Store {
         connection.execute_batch(include_str!("schema.sql"))?;
         migration::run(&mut connection)?;
         effect_index::rebuild(&mut connection)?;
-        connection.execute_batch("PRAGMA synchronous=NORMAL;")?;
+        connection.execute_batch("PRAGMA synchronous=NORMAL; PRAGMA cache_size=-65536;")?;
         let connection = Arc::new(Mutex::new(connection));
         let recording = Arc::new(recording::Writer::new(connection.clone())?);
         Ok(Self {
@@ -82,8 +82,13 @@ impl Store {
         &self,
         operation: impl FnOnce(&mut Connection) -> Result<T>,
     ) -> Result<T> {
+        let _publication = self.recording.publication()?;
         self.recording.barrier(false)?;
-        operation(&mut *self.lock()?)
+        let mut connection = self.lock()?;
+        let result = operation(&mut connection);
+        // The callback may alter effect projections, including before an error.
+        self.recording.effects_changed();
+        result
     }
     pub fn put(&self, kind: &str, bytes: &[u8]) -> Result<String> {
         self.recording.barrier(false)?;
@@ -276,6 +281,7 @@ impl Store {
     }
     /// Reconstruct durable projections from the append-only log. Snapshots are disposable.
     pub fn rebuild_views(&self) -> Result<()> {
+        let _publication = self.recording.publication()?;
         self.recording.barrier(false)?;
         let mut c = self.lock()?;
         let tx = c.transaction()?;
@@ -414,6 +420,7 @@ impl Store {
             }
         }
         tx.commit()?;
+        self.recording.effects_changed();
         Ok(())
     }
     pub fn definition_name(&self, hash: &str) -> Result<Option<String>> {
@@ -943,6 +950,7 @@ impl Store {
         occurrence: i64,
         result: &Value,
     ) -> Result<()> {
+        let _publication = self.recording.publication()?;
         self.recording.barrier(false)?;
         let mut c = self.lock()?;
         let tx = c.transaction()?;
@@ -966,6 +974,7 @@ impl Store {
             params![desc_hash, scope, occurrence, hash],
         )?;
         tx.commit()?;
+        self.recording.effects_changed();
         Ok(())
     }
 }

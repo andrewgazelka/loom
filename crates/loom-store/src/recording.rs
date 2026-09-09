@@ -20,6 +20,11 @@ pub(crate) struct EffectKey {
     pub occurrence: i64,
 }
 
+struct ObservedEffect {
+    hash: Option<String>,
+    generation: u64,
+}
+
 enum Record {
     Event {
         event: Value,
@@ -50,6 +55,7 @@ struct Shared {
     submission: Mutex<()>,
     error: Mutex<Option<String>>,
     commits: AtomicU64,
+    effects_generation: AtomicU64,
 }
 pub(crate) struct Writer {
     sender: Option<mpsc::SyncSender<Message>>,
@@ -121,6 +127,7 @@ impl Writer {
         Ok(hash)
     }
     pub fn pending(&self, key: &EffectKey) -> Result<Option<Value>> {
+        let _submission = self.publication()?;
         self.check()?;
         Ok(self
             .shared
@@ -139,40 +146,53 @@ impl Writer {
         self.check()?;
         let bytes = encode(result)?;
         let hash = blake3::hash(&bytes).to_hex().to_string();
-        let _submission = self
-            .shared
-            .submission
-            .lock()
-            .map_err(|_| anyhow!("effect submission lock poisoned"))?;
-        self.check()?;
-        let mut pending = self
-            .shared
-            .pending
-            .lock()
-            .map_err(|_| anyhow!("pending effects lock poisoned"))?;
-        if let Some(existing) = pending.get(&key) {
-            ensure!(existing == result, "effect cache result conflict");
-            return Ok(hash);
-        }
-        {
-            let connection = connection
+        loop {
+            // Never hold publication or pending locks while waiting on SQLite:
+            // a checkpoint may own that connection for the entire durable sync.
+            let observed = {
+                let connection = connection
+                    .lock()
+                    .map_err(|_| anyhow!("store lock poisoned"))?;
+                let hash = connection.query_row("SELECT result_hash FROM effect_results WHERE desc_hash=? AND scope=? AND occurrence=?", params![key.desc_hash, key.scope, key.occurrence], |row| row.get(0)).optional()?;
+                ObservedEffect {
+                    hash,
+                    generation: self.shared.effects_generation.load(Ordering::Acquire),
+                }
+            };
+            let _submission = self.publication()?;
+            self.check()?;
+            let mut pending = self
+                .shared
+                .pending
                 .lock()
-                .map_err(|_| anyhow!("store lock poisoned"))?;
-            let existing: Option<String> = connection.query_row("SELECT result_hash FROM effect_results WHERE desc_hash=? AND scope=? AND occurrence=?", params![key.desc_hash, key.scope, key.occurrence], |row| row.get(0)).optional()?;
-            if let Some(existing) = existing {
+                .map_err(|_| anyhow!("pending effects lock poisoned"))?;
+            if let Some(existing) = pending.get(&key) {
+                ensure!(existing == result, "effect cache result conflict");
+                return Ok(hash);
+            }
+            // If the writer committed and removed a pending value after our
+            // query, repeat that query before publishing a potentially conflicting
+            // result. Every projection writer advances the generation under SQLite
+            // ownership; the queue writer does so before clearing pending.
+            if self.shared.effects_generation.load(Ordering::Acquire) != observed.generation {
+                continue;
+            }
+            if let Some(existing) = observed.hash {
                 ensure!(existing == hash, "effect cache result conflict");
                 return Ok(hash);
             }
+            pending.insert(key.clone(), result.clone());
+            // The bounded send may wait, but the writer can still clear pending.
+            // Keep submission until send completes so a duplicate cannot return
+            // before the original record has entered the barrier-ordered queue.
+            drop(pending);
+            self.send(Record::Effect {
+                key,
+                bytes,
+                hash: hash.clone(),
+            })?;
+            return Ok(hash);
         }
-        pending.insert(key.clone(), result.clone());
-        // Do not block a full queue while holding the lock the writer needs.
-        drop(pending);
-        self.send(Record::Effect {
-            key,
-            bytes,
-            hash: hash.clone(),
-        })?;
-        Ok(hash)
     }
     pub fn barrier(&self, durable: bool) -> Result<()> {
         self.check()?;
@@ -186,6 +206,17 @@ impl Writer {
             .recv()
             .map_err(|_| anyhow!("recording writer disconnected"))?
             .map_err(anyhow::Error::msg)
+    }
+    pub fn publication(&self) -> Result<std::sync::MutexGuard<'_, ()>> {
+        self.shared
+            .submission
+            .lock()
+            .map_err(|_| anyhow!("effect submission lock poisoned"))
+    }
+    pub fn effects_changed(&self) {
+        self.shared
+            .effects_generation
+            .fetch_add(1, Ordering::Release);
     }
     pub fn commits(&self) -> u64 {
         self.shared.commits.load(Ordering::Relaxed)
@@ -260,6 +291,7 @@ fn commit(
         }
         transaction.commit()?;
         shared.commits.fetch_add(1, Ordering::Relaxed);
+        shared.effects_generation.fetch_add(1, Ordering::Release);
     }
     if durable {
         checkpoint(&connection)?;
@@ -332,5 +364,66 @@ fn run(connection: Arc<Mutex<Connection>>, receiver: mpsc::Receiver<Message>, sh
         if stop {
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Store;
+
+    #[test]
+    fn pending_reader_waits_until_a_full_queue_accepts_the_effect() -> Result<()> {
+        let store = Store::memory()?;
+        let connection = store.connection.lock().unwrap();
+        let bytes = encode(&Value::Null)?;
+        let hash = blake3::hash(&bytes).to_hex().to_string();
+        // One batch waits on SQLite; the bounded channel is then completely full.
+        for _ in 0..4096 + 8192 {
+            store.recording.send(Record::Value {
+                kind: "desc".into(),
+                bytes: bytes.clone(),
+                hash: hash.clone(),
+            })?;
+        }
+        let (published, publication) = mpsc::channel();
+        let (observed, observation) = mpsc::channel();
+        let (completed, completion) = mpsc::channel();
+        thread::scope(|scope| -> Result<()> {
+            let producer = scope.spawn(|| -> Result<()> {
+                let writer = &store.recording;
+                let _submission = writer.publication()?;
+                let key = EffectKey {
+                    desc_hash: "full".into(),
+                    scope: "scope".into(),
+                    occurrence: 0,
+                };
+                writer
+                    .shared
+                    .pending
+                    .lock()
+                    .unwrap()
+                    .insert(key.clone(), Value::Null);
+                published.send(())?;
+                writer.send(Record::Effect { key, bytes, hash })
+            });
+            publication.recv()?;
+            let reader = scope.spawn(|| -> Result<()> {
+                let value = store.effect_get("full", "scope", 0)?;
+                observed.send(())?;
+                store.flush()?;
+                completed.send(value)?;
+                Ok(())
+            });
+            let early = observation.recv_timeout(Duration::from_millis(20));
+            drop(connection);
+            producer.join().expect("producer panicked")?;
+            reader.join().expect("reader panicked")?;
+            assert!(matches!(early, Err(mpsc::RecvTimeoutError::Timeout)));
+            assert_eq!(completion.recv()?, Some(Value::Null));
+            Ok(())
+        })?;
+        assert_eq!(store.effect_get("full", "scope", 0)?, Some(Value::Null));
+        Ok(())
     }
 }

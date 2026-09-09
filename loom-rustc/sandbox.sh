@@ -2,8 +2,8 @@
 # Linux-only build boundary. Source roots must contain only materialized CAS input.
 # Toolchains are public, immutable inputs; no caller home/config/credentials enter.
 set -euo pipefail
-if [[ $# != 5 || ( $1 != vendor && $1 != build && $1 != rustc ) ]]; then
-  echo 'usage: sandbox.sh vendor|build|rustc SOURCE_ROOT CRATE_DIR TARGET_DIR REPO_ROOT' >&2
+if [[ $# != 5 || ( $1 != vendor && $1 != build && $1 != rustc && $1 != metadata ) ]]; then
+  echo 'usage: sandbox.sh vendor|build|rustc|metadata SOURCE_ROOT CRATE_DIR TARGET_DIR REPO_ROOT' >&2
   exit 64
 fi
 mode=$1
@@ -92,10 +92,18 @@ else
     echo 'offline Cargo configuration differs from the fixed vendor contract' >&2; exit 65;
   }
   args+=(--setenv CARGO_NET_OFFLINE true --setenv LOOM_LOCKED 1
-    --setenv LOOM_RUST_TARGET "${LOOM_RUST_TARGET:-wasm32-wasip1}")
+    --setenv LOOM_RUST_TARGET "${LOOM_RUST_TARGET:-wasm32-wasip1}"
+    --setenv LOOM_CAS_SOURCES "$source_root/source-trees")
+  if [[ $mode == build && -n ${LOOM_COMPILER_CACHE_OWNER:-} ]]; then
+    args+=(--ro-bind "$LOOM_COMPILER_CACHE_OWNER" "$LOOM_COMPILER_CACHE_OWNER"
+      --setenv LOOM_COMPILER_CACHE_OWNER "$LOOM_COMPILER_CACHE_OWNER"
+      --setenv LOOM_COMPILER_CACHE_MIRROR "$LOOM_COMPILER_CACHE_MIRROR")
+  fi
   run=(/bin/sh /opt/build.sh "$crate_dir" "$target_dir")
   if [[ $mode == rustc ]]; then
     run=(/bin/sh "$target_dir/direct.sh")
+  elif [[ $mode == metadata ]]; then
+    run=(cargo metadata --locked --offline --format-version=1)
   fi
 fi
 # Per-process limits supplement the worker cgroup (MemoryMax/CPUQuota/TasksMax).

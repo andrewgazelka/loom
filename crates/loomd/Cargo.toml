@@ -8,6 +8,7 @@ clap = { version = "4", features = ["derive", "env"] }
 tokio = { version = "1", features = ["full"] }
 axum = "0.8"
 loom-api = { path = "../loom-api" }
+loom-build = { path = "../loom-build" }
 loom-mcp = { path = "../loom-mcp" }
 loom-store = { path = "../loom-store" }
 loom-proto = { path = "../loom-proto" }
