@@ -83,7 +83,8 @@ if [[ ${1:-} == --worker ]]; then
     e2e) bash scripts/native-e2e.sh || status=$? ;;
     e2e_mcp) LOOM_E2E_SUITE=mcp bash scripts/native-e2e.sh || status=$? ;;
     e2e_languages) LOOM_E2E_SUITE=languages bash scripts/native-e2e.sh || status=$? ;;
-    container)
+    container|container_verify)
+      [[ "$action" != container_verify ]] || export LOOM_SKIP_CONTAINER_BUILD=1 LOOM_CONTAINER_SUITE=vendor
       export LOOM_IMAGE_POLICY="$base/container-policy.json"
       cat > "$LOOM_IMAGE_POLICY" <<'POLICY'
 {"default":[{"type":"reject"}],"transports":{"docker":{"docker.io/library/rust":[{"type":"insecureAcceptAnything"}],"docker.io/oven/bun":[{"type":"insecureAcceptAnything"}]},"containers-storage":{"":[{"type":"insecureAcceptAnything"}]}}}
@@ -93,6 +94,18 @@ POLICY
     vendor)
       cargo run --locked -p loom-build --example build_smoke -- "$PWD" rust examples/bundles/itoa.json "$base/itoa.wasm" || status=$?
       [[ "$status" -ne 0 ]] || test -s "$base/itoa.wasm" || status=$?
+      ;;
+    compiler)
+      podman run --rm --memory=1g --cpus=1 --security-opt 'unmask=/proc/*' --entrypoint bash -i localhost/loom:local <<'COMPILER' || status=$?
+set -euo pipefail
+compiler=$(realpath "$(command -v cc)")
+bwrap --unshare-all --clearenv --proc /proc --dev /dev --tmpfs /tmp \
+  --ro-bind /usr /usr --ro-bind /bin /bin --ro-bind /lib /lib --ro-bind /lib64 /lib64 \
+  --dir /opt/loom-bin --symlink "$compiler" /opt/loom-bin/cc \
+  --setenv PATH /opt/loom-bin:/usr/bin:/bin /bin/sh -c \
+  'printf "int main(void) { return 0; }\n" | cc -x c -o /tmp/compiler-witness - && /tmp/compiler-witness'
+printf '1/1 canonical compiler link/run in nested sandbox passed\n'
+COMPILER
       ;;
     vendor_run) cargo run --locked -p loom-rt --example component_smoke -- "$base/itoa.wasm" rust itoa || status=$? ;;
     sandbox) bash loom-rustc/test-sandbox.sh || status=$? ;;
@@ -113,7 +126,7 @@ POLICY
 fi
 
 action=${1:-check}
-case "$action" in prepare|check|test|fetch|tools|targets|machine|e2e|e2e_mcp|e2e_languages|sandbox|acceptance|container|vendor|vendor_run|m9) ;; *) echo 'Usage: scripts/remote-check.sh [prepare|check|test|fetch|tools|targets|machine|e2e|e2e_mcp|e2e_languages|sandbox|acceptance|container|vendor|vendor_run|m9]' >&2; exit 64;; esac
+case "$action" in prepare|check|test|fetch|tools|targets|machine|e2e|e2e_mcp|e2e_languages|sandbox|acceptance|container|container_verify|vendor|vendor_run|m9|compiler) ;; *) echo 'Usage: scripts/remote-check.sh [prepare|check|test|fetch|tools|targets|machine|e2e|e2e_mcp|e2e_languages|sandbox|acceptance|container|container_verify|vendor|vendor_run|m9|compiler]' >&2; exit 64;; esac
 cd "$(dirname "$0")/.."
 bash -n scripts/remote-check.sh
 host=dev-compute-4

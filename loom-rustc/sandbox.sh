@@ -41,6 +41,14 @@ else
   args+=(--setenv PATH "/opt/loom-rust/bin:$(dirname "$(command -v cargo)"):/opt/loom-bin:$cc_dir:/run/current-system/sw/bin:/usr/local/bin:/usr/bin:/bin")
 fi
 args+=(--dir /opt/loom-bin)
+# Debian's cc symlink crosses /etc/alternatives, which is deliberately absent.
+# Link to its canonical public path so GCC still finds its installed plugins.
+# Nix wrappers retain their original invocation path and adjacent nix-support.
+cc_executable=$(realpath "$(command -v cc)")
+case "$cc_executable" in
+  /nix/store/*) ;;
+  *) args+=(--symlink "$cc_executable" /opt/loom-bin/cc) ;;
+esac
 if command -v cargo-component >/dev/null; then
   args+=(--ro-bind "$(realpath "$(command -v cargo-component)")" /opt/loom-bin/cargo-component)
 fi
@@ -68,11 +76,7 @@ else
   [[ -f $crate_dir/Cargo.lock && -f $crate_dir/.cargo/config.toml && -d $crate_dir/vendor ]] || {
     echo 'offline build requires locked, vendored sources' >&2; exit 65;
   }
-  expected_config='[source.crates-io]
-replace-with = "vendored-sources"
-
-[source.vendored-sources]
-directory = "vendor"'
+  expected_config=$(cat "$repo_root/loom-rustc/vendor-config.toml")
   [[ ! -e $crate_dir/.cargo/config && $(cat "$crate_dir/.cargo/config.toml") == "$expected_config" ]] || {
     echo 'offline Cargo configuration differs from the fixed vendor contract' >&2; exit 65;
   }

@@ -8,6 +8,10 @@ services:
       LOOM_TOKEN: ${LOOM_TOKEN:?Set LOOM_TOKEN before starting Loom}
     volumes:
       - loom-data:/data
+    # Nested user namespaces must mount their own procfs; bwrap keeps its private
+    # PID/network/mount namespaces and cleared environment.
+    security_opt:
+      - "unmask=/proc/*"
     restart: unless-stopped
     mem_limit: 8g
     cpus: 4
