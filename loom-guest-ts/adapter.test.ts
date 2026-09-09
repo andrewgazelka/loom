@@ -1,15 +1,26 @@
 import {test, expect} from 'bun:test';
-import {Encoder, Decoder} from 'cbor-x';
+import {encode, decode} from './codec';
 import {handler} from './adapter';
-const encoder = new Encoder({useRecords:false,mapsAsObjects:true});
-const decoder = new Decoder({mapsAsObjects:true});
-test('actor executes and folds CBOR events',()=>{
+import { CID } from 'multiformats/cid';
+import { create } from 'multiformats/hashes/digest';
+test('actor executes and folds DAG-CBOR events',()=>{
  const guest=handler({init:()=>0,run:(_state,msg)=>[msg],fold:(state,event)=>Number(state)+Number(event)});
- expect(decoder.decode(guest.run(encoder.encode(null),encoder.encode(7)))).toEqual([7]);
- expect(decoder.decode(guest.fold(encoder.encode(null),encoder.encode(7)))).toBe(7);
+ expect(decode(guest.run(encode(null),encode(7)))).toEqual([7]);
+ expect(decode(guest.fold(encode(null),encode(7)))).toBe(7);
 });
-test('free function values preserve references and objects without CBOR extension tags',()=>{
+test('free function preserves nested CID references through shared codec',()=>{
  const guest=handler({default:value=>value});
- const value={$ref:'abc',nested:[null,true,3]};
- expect(decoder.decode(guest.call(new Uint8Array(),encoder.encode([value])))).toEqual(value);
+ const cid=CID.createV1(0x71,create(0x1e,new Uint8Array(32))).toString();
+ const value={reference:{$ref:cid},nested:[null,true,3]};
+ expect(decode(guest.call(new Uint8Array(),encode([value])))).toEqual(value);
+});
+test('adapter rejects malformed wire and nonvalues from user code',()=>{
+ const guest=handler({default:()=>undefined});
+ expect(()=>guest.call(new Uint8Array(),encode([]))).toThrow();
+ expect(()=>guest.call(new Uint8Array(),new Uint8Array([0x18,0x01]))).toThrow();
+});
+test('WIT result errors carry payload strings instead of trapping',()=>{
+ const guest=handler({default:()=>undefined});
+ try { guest.call(new Uint8Array(),encode([])); throw new Error('expected call failure'); }
+ catch(error) { expect((error as {payload?:string}).payload).toBe('call.encode: Value must be JSON or a CID reference'); }
 });

@@ -155,7 +155,9 @@ mod tests {
     use super::*;
     #[test]
     fn wire_values_roundtrip_and_reject_trailing_data() {
-        let value = serde_json::json!({"ref":{"$ref":"abc"},"nested":[null,true,-3,1.5]});
+        let reference =
+            loom_proto::reference(&"ab".repeat(32), loom_proto::DAG_CBOR_CODEC).unwrap();
+        let value = serde_json::json!({"ref":reference,"nested":[null,true,-3,1.5]});
         let mut bytes = encode(&value).unwrap();
         assert_eq!(decode::<Value>(&bytes).unwrap(), value);
         bytes.push(0);

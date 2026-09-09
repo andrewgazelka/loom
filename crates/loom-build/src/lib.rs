@@ -1,4 +1,5 @@
 //! Component builders. No successful response exists without component bytes.
+mod sdk;
 use loom_check::{CheckedDef, SourceBundle, SourceFile};
 use loom_proto::{Diagnostic, Lang};
 use std::{
@@ -341,6 +342,14 @@ impl Builder {
                     isolated,
                 )
                 .await?;
+                sdk::reconcile(sdk::Rebuild {
+                    root: &self.root,
+                    cache: &self.cache,
+                    directory: &directory,
+                    definition,
+                    isolated,
+                })
+                .await?;
                 // cargo-component consumes a core wasip1 module and adapts it to a component.
                 let mut command = if directory.join("vendor").is_dir() {
                     let mut command = Command::new(self.root.join("loom-rustc/sandbox.sh"));
@@ -470,7 +479,7 @@ fn build_fingerprint(root: &Path, lang: Lang) -> Result<String, BuildError> {
     }
     files.sort();
     let mut hash = blake3::Hasher::new();
-    hash.update(b"loom-component-build-v1");
+    hash.update(b"loom-component-build-v2-dag-cbor");
     for path in files {
         let relative = path
             .strip_prefix(root)
@@ -530,7 +539,10 @@ async fn materialize_rust(
                 {
                     if let Some(deps) = value.as_table() {
                         for (name, dependency) in deps {
-                            if dependency.get("path").is_some() || dependency.get("git").is_some() {
+                            if dependency.get("path").is_some()
+                                || dependency.get("git").is_some()
+                                || dependency.get("registry").is_some()
+                            {
                                 return Err(BuildError::Rejected(format!(
                                     "{name}: use locked crates.io or loom.deps, not path/git"
                                 )));
@@ -608,7 +620,10 @@ async fn materialize_rust(
         .as_table_mut()
         .ok_or_else(|| BuildError::Rejected("[dependencies] must be a table".into()))?;
     for (name, value) in manifest_deps.iter() {
-        if value.get("path").is_some() || value.get("git").is_some() {
+        if value.get("path").is_some()
+            || value.get("git").is_some()
+            || value.get("registry").is_some()
+        {
             return Err(BuildError::Rejected(format!(
                 "dependency {name}: use loom.deps hashes or locked crates.io sources"
             )));

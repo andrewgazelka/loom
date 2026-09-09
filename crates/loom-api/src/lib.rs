@@ -7,7 +7,7 @@ use axum::{
         DefaultBodyLimit, Path, Query, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
-    http::{Request, StatusCode},
+    http::{HeaderMap, Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response as HttpResponse},
     routing::{get, post},
@@ -61,6 +61,10 @@ impl Service {
         self
     }
     pub fn response(&self, result: Result<Value>) -> Response {
+        let result = result.and_then(|value| {
+            loom_proto::encode(&value).map_err(anyhow::Error::msg)?;
+            Ok(value)
+        });
         let seq = match self.store.latest_seq() {
             Ok(seq) => seq,
             Err(error) => {
@@ -378,6 +382,9 @@ impl Service {
         Ok(self.response(Ok(json!({"session":session,"actor":actor,"value":result}))))
     }
     pub async fn command(&self, request: CommandRequest) -> Response {
+        if let Err(error) = loom_proto::encode(&request.args) {
+            return self.response(Err(anyhow::Error::msg(error)));
+        }
         if let Err(error) = self.access.require(auth::command_scope(&request.command)) {
             return self.response(Err(error));
         }
@@ -533,8 +540,8 @@ impl Service {
                     Ok(serde_json::to_value(def)?)
                 } else {
                     self.store
-                        .get_json(hash)?
-                        .context("CAS value not found or not JSON")
+                        .get_value::<Value>(hash)?
+                        .context("CAS value not found")
                 }
             }
             "deps" => Ok(serde_json::to_value(
@@ -580,8 +587,12 @@ impl Service {
         if let Ok(bytes) = serde_json::to_vec(&response.result)
             && bytes.len() > 8192
         {
-            match self.store.put("result", &bytes) {
-                Ok(hash) => response.result = json!({"$ref":hash,"size":bytes.len()}),
+            match self
+                .store
+                .put_value("result", &response.result)
+                .and_then(|hash| self.store.reference(&hash, loom_proto::DAG_CBOR_CODEC))
+            {
+                Ok(reference) => response.result = reference,
                 Err(error) => return self.response(Err(error)),
             }
         }
@@ -648,8 +659,11 @@ async fn authorize_token(
     next.run(request).await
 }
 fn operation_response(service: &Service, response: Response) -> HttpResponse {
+    protocol_response(service.inline(response))
+}
+fn protocol_response(response: Response) -> HttpResponse {
     let forbidden = response.result["code"] == "forbidden";
-    let mut response = Json(service.inline(response)).into_response();
+    let mut response = Json(response).into_response();
     if forbidden {
         *response.status_mut() = StatusCode::FORBIDDEN;
     }
@@ -706,7 +720,15 @@ async fn command(
 ) -> HttpResponse {
     let service = s.service.scoped(access);
     match request {
-        Ok(Json(request)) => operation_response(&service, service.command(request).await),
+        Ok(Json(request)) => {
+            let resolve = request.command == "resolve";
+            let response = service.command(request).await;
+            if resolve {
+                protocol_response(response)
+            } else {
+                operation_response(&service, response)
+            }
+        }
         Err(error) => json_rejection(&service, error),
     }
 }
@@ -720,13 +742,84 @@ fn json_rejection(
     *response.status_mut() = status;
     response
 }
-async fn cas(State(s): State<ApiState>, Path(hash): Path<String>) -> HttpResponse {
-    match s.service.store.get(&hash) {
-        Ok(Some(bytes)) => bytes.into_response(),
+async fn cas(
+    State(s): State<ApiState>,
+    Path(hash): Path<String>,
+    headers: HeaderMap,
+) -> HttpResponse {
+    let result = (|| -> Result<Option<CasBlock>> {
+        let Some(codec) = s.service.store.codec(&hash)? else {
+            return Ok(None);
+        };
+        let bytes = s
+            .service
+            .store
+            .get(&hash)?
+            .context("CAS block disappeared")?;
+        Ok(Some(CasBlock { codec, bytes }))
+    })();
+    match result {
+        Ok(Some(block)) => {
+            let wants_json = headers
+                .get(axum::http::header::ACCEPT)
+                .and_then(|header| header.to_str().ok())
+                .is_some_and(|accept| {
+                    accept
+                        .split(',')
+                        .any(|item| item.trim().split(';').next() == Some("application/json"))
+                });
+            let mut response = if wants_json {
+                if block.codec != loom_proto::DAG_CBOR_CODEC {
+                    let mut failure = s.service.response(Err(anyhow::anyhow!(
+                        "raw CAS blocks have no JSON representation"
+                    )));
+                    failure.result["code"] = json!("unsupported_representation");
+                    let mut response = Json(failure).into_response();
+                    *response.status_mut() = StatusCode::NOT_ACCEPTABLE;
+                    return response;
+                }
+                match loom_proto::decode::<Value>(&block.bytes) {
+                    Ok(value) => Json(value).into_response(),
+                    Err(error) => {
+                        let mut response = Json(s.service.response(Err(anyhow::Error::msg(error))))
+                            .into_response();
+                        *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                        return response;
+                    }
+                }
+            } else {
+                let mut response = block.bytes.into_response();
+                response.headers_mut().insert(
+                    axum::http::header::CONTENT_TYPE,
+                    axum::http::HeaderValue::from_static(
+                        if block.codec == loom_proto::DAG_CBOR_CODEC {
+                            "application/vnd.ipld.dag-cbor"
+                        } else {
+                            "application/octet-stream"
+                        },
+                    ),
+                );
+                response
+            };
+            response.headers_mut().insert(
+                axum::http::header::VARY,
+                axum::http::HeaderValue::from_static("Accept"),
+            );
+            response
+        }
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
-        Err(e) => Json(s.service.response(Err(e))).into_response(),
+        Err(error) => {
+            let mut response = Json(s.service.response(Err(error))).into_response();
+            *response.status_mut() = StatusCode::BAD_REQUEST;
+            response
+        }
     }
 }
+struct CasBlock {
+    codec: u64,
+    bytes: Vec<u8>,
+}
+
 #[derive(Deserialize)]
 struct EventQuery {
     actor: Option<String>,
@@ -1070,6 +1163,129 @@ mod tests {
                 .to_string()
                 .contains("invalid source archive path")
         );
+    }
+    #[tokio::test]
+    async fn inline_dag_reference_resolves_as_json_and_serves_canonical_bytes() {
+        use http_body_util::BodyExt;
+        let service = Arc::new(
+            Service::new(
+                Store::memory().unwrap(),
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
+                vec![Lang::Ts],
+            )
+            .unwrap(),
+        );
+        let value = json!({"large":"x".repeat(9000)});
+        let response = service.inline(service.response(Ok(value.clone())));
+        assert!(response.ok, "{response:?}");
+        assert_eq!(response.result.as_object().unwrap().len(), 1);
+        let cid = response.result["$ref"].as_str().unwrap();
+        assert_eq!(
+            loom_proto::parse_reference(cid).unwrap().codec,
+            loom_proto::DAG_CBOR_CODEC
+        );
+        assert_eq!(
+            service.store.get_value::<Value>(cid).unwrap(),
+            Some(value.clone())
+        );
+        let app = router(
+            service.clone(),
+            Authorizer::single("test-secret".into()).unwrap(),
+        );
+        let resolved = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/command")
+                    .header("authorization", "Bearer test-secret")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        json!({"command":"resolve","args":{"hash":cid}}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let resolved: Response =
+            serde_json::from_slice(&resolved.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(resolved.result, value);
+        let raw = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/cas/{cid}"))
+                    .header("authorization", "Bearer test-secret")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            raw.headers()["content-type"],
+            "application/vnd.ipld.dag-cbor"
+        );
+        assert_eq!(
+            loom_proto::decode::<Value>(&raw.into_body().collect().await.unwrap().to_bytes())
+                .unwrap(),
+            value
+        );
+        let json = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/cas/{cid}"))
+                    .header("authorization", "Bearer test-secret")
+                    .header("accept", "application/json")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(json.headers()["content-type"], "application/json");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&json.into_body().collect().await.unwrap().to_bytes())
+                .unwrap(),
+            value
+        );
+    }
+    #[tokio::test]
+    async fn invalid_refs_are_structured_rejections_before_commands_run() {
+        use http_body_util::BodyExt;
+        let service = Arc::new(
+            Service::new(
+                Store::memory().unwrap(),
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
+                vec![Lang::Ts],
+            )
+            .unwrap(),
+        );
+        let response = service
+            .command(CommandRequest {
+                session: None,
+                command: "stats".into(),
+                args: json!({"nested":{"$ref":"not-a-cid"}}),
+            })
+            .await;
+        assert!(!response.ok);
+        assert_eq!(response.result["code"], "operation_failed");
+        assert_eq!(service.store.latest_seq().unwrap(), 0);
+        let app = router(service, Authorizer::single("test-secret".into()).unwrap());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/cas/not-a-cid")
+                    .header("authorization", "Bearer test-secret")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let response: Response =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert!(!response.ok);
     }
     #[tokio::test]
     async fn auth_gates_every_operation_and_health_is_public() {

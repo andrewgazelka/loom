@@ -14,8 +14,8 @@ async function operation<T>(name: string, body: unknown): Promise<T> {
   if (!response.ok) throw new Error(`${name}: HTTP ${response.status}: ${await response.text()}`);
   const reply = await response.json() as Reply;
   if (!reply.ok) {
-    if (typeof reply.result === 'object' && reply.result !== null && '$ref' in reply.result && typeof reply.result.$ref === 'string') {
-      const stored = await fetch(`${endpoint}/v1/cas/${reply.result.$ref}`, { headers: { Authorization: `Bearer ${token}` } });
+    if (typeof reply.result === 'object' && reply.result !== null && Object.keys(reply.result).length === 1 && '$ref' in reply.result && typeof reply.result.$ref === 'string') {
+      const stored = await fetch(`${endpoint}/v1/cas/${reply.result.$ref}`, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
       throw new Error(`${JSON.stringify(reply)}\nResolved build details: ${await stored.text()}`);
     }
     throw new Error(JSON.stringify(reply));

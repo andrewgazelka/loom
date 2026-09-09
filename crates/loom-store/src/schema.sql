@@ -1,6 +1,7 @@
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
-CREATE TABLE IF NOT EXISTS cas(hash TEXT PRIMARY KEY,kind TEXT NOT NULL,bytes BLOB NOT NULL,created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS cas(hash TEXT PRIMARY KEY,kind TEXT NOT NULL,bytes BLOB NOT NULL,created_at INTEGER NOT NULL,codec INTEGER NOT NULL CHECK(codec IN (85,113)));
+CREATE TABLE IF NOT EXISTS cas_codecs(hash TEXT NOT NULL REFERENCES cas(hash) ON DELETE CASCADE,codec INTEGER NOT NULL CHECK(codec IN (85,113)),PRIMARY KEY(hash,codec));
 CREATE TABLE IF NOT EXISTS log(seq INTEGER PRIMARY KEY AUTOINCREMENT,actor TEXT NOT NULL,event_hash TEXT NOT NULL REFERENCES cas(hash),handler_seq INTEGER NOT NULL,ts INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS actor_log ON log(actor,seq);
 CREATE TABLE IF NOT EXISTS defs(hash TEXT PRIMARY KEY,lang TEXT NOT NULL,name_hint TEXT,type_sig TEXT NOT NULL,component_hash TEXT,source_hash TEXT NOT NULL REFERENCES cas(hash));
@@ -15,7 +16,7 @@ DROP VIEW IF EXISTS effects;
 DROP VIEW IF EXISTS messages;
 DROP VIEW IF EXISTS events;
 CREATE VIEW events AS
-SELECT l.seq,l.actor,l.event_hash,l.handler_seq,l.ts,c.bytes FROM log l JOIN cas c ON c.hash=l.event_hash WHERE NOT EXISTS(SELECT 1 FROM archive_segments a WHERE l.seq BETWEEN a.first_seq AND a.last_seq)
+SELECT l.seq,l.actor,l.event_hash,l.handler_seq,l.ts,loom_json(c.bytes) AS bytes FROM log l JOIN cas c ON c.hash=l.event_hash WHERE NOT EXISTS(SELECT 1 FROM archive_segments a WHERE l.seq BETWEEN a.first_seq AND a.last_seq)
 UNION ALL
 SELECT json_extract(j.value,'$.seq'),json_extract(j.value,'$.actor'),NULL,json_extract(j.value,'$.handler_seq'),json_extract(j.value,'$.ts'),CAST(j.value -> '$.event' AS BLOB)
 FROM archive_segments a JOIN cas c ON c.hash=a.hash JOIN json_each(loom_archive(c.bytes)) j;

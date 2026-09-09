@@ -1,3 +1,4 @@
+mod dag_migration;
 mod migration;
 use anyhow::{Context, Result, anyhow, ensure};
 use loom_proto::{Actor, Def, Event, Snapshot, Value};
@@ -37,10 +38,24 @@ impl Store {
                 let bytes: Vec<u8> = context.get(0)?;
                 let decoded = zstd::stream::decode_all(bytes.as_slice())
                     .map_err(|e| rusqlite::Error::UserFunctionError(Box::new(e)))?;
-                String::from_utf8(decoded)
-                    .map_err(|e| rusqlite::Error::UserFunctionError(Box::new(e)))
+                decode::<Value>(&decoded)
+                    .and_then(|value| Ok(serde_json::to_string(&value)?))
+                    .map_err(|e| rusqlite::Error::UserFunctionError(e.into()))
             },
         )?;
+        connection.create_scalar_function(
+            "loom_json",
+            1,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+            |context| {
+                let bytes: Vec<u8> = context.get(0)?;
+                decode::<Value>(&bytes)
+                    .and_then(|value| Ok(serde_json::to_vec(&value)?))
+                    .map_err(|e| rusqlite::Error::UserFunctionError(e.into()))
+            },
+        )?;
+        dag_migration::run(&mut connection)?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         connection.execute_batch(include_str!("schema.sql"))?;
         migration::run(&mut connection)?;
@@ -63,7 +78,29 @@ impl Store {
         put(&*self.lock()?, kind, bytes)
     }
     pub fn get(&self, hash: &str) -> Result<Option<Vec<u8>>> {
+        let address = if hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+            None
+        } else {
+            Some(loom_proto::parse_reference(hash).map_err(anyhow::Error::msg)?)
+        };
+        let hash = address.as_ref().map_or(hash, |a| a.hash.as_str());
         let c = self.lock()?;
+        if let Some(address) = &address {
+            let exists: bool = c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM cas WHERE hash=?)",
+                [hash],
+                |r| r.get(0),
+            )?;
+            let registered: bool = c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM cas_codecs WHERE hash=? AND codec=?)",
+                params![hash, address.codec],
+                |r| r.get(0),
+            )?;
+            ensure!(
+                !exists || registered,
+                "CID codec is not registered for stored object"
+            );
+        }
         if let Some(bytes) = c
             .query_row("SELECT bytes FROM cas WHERE hash=?", [hash], |r| r.get(0))
             .optional()?
@@ -74,23 +111,73 @@ impl Store {
         let Some(archive) = archive else {
             return Ok(None);
         };
+        ensure!(
+            address.as_ref().is_none_or(|a| a.codec == 113),
+            "archived event requires DAG-CBOR CID"
+        );
         let decoded = zstd::stream::decode_all(archive.as_slice())?;
-        let records: Vec<Event> = serde_json::from_slice(&decoded)?;
+        let records: Vec<Event> = decode(&decoded)?;
         for record in records {
-            let bytes = serde_json::to_vec(&record.event)?;
+            let bytes = encode(&record.event)?;
             if blake3::hash(&bytes).to_hex().as_str() == hash {
                 return Ok(Some(bytes));
             }
         }
         anyhow::bail!("archive index refers to missing event {hash}")
     }
-    pub fn put_json(&self, kind: &str, value: &Value) -> Result<String> {
-        self.put(kind, &serde_json::to_vec(value)?)
+    pub fn put_value<T: serde::Serialize>(&self, kind: &str, value: &T) -> Result<String> {
+        put_value(&*self.lock()?, kind, value)
     }
-    pub fn get_json(&self, hash: &str) -> Result<Option<Value>> {
-        self.get(hash)?
-            .map(|b| serde_json::from_slice(&b).context("invalid CAS JSON"))
-            .transpose()
+    pub fn get_value<T: serde::de::DeserializeOwned>(&self, hash: &str) -> Result<Option<T>> {
+        // A typed lookup selects DAG-CBOR for internal hex identities, while an
+        // explicit CID must retain its caller-selected codec.
+        let dag = if hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+            Some(loom_proto::cid_for_hash(hash, 113).map_err(anyhow::Error::msg)?)
+        } else {
+            None
+        };
+        let hash = dag.as_deref().unwrap_or(hash);
+        ensure!(
+            self.codec(hash)?.is_none_or(|codec| codec == 113),
+            "CAS object is raw bytes, not DAG-CBOR"
+        );
+        self.get(hash)?.map(|b| decode(&b)).transpose()
+    }
+    pub fn codec(&self, hash: &str) -> Result<Option<u64>> {
+        let address = if hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+            None
+        } else {
+            Some(loom_proto::parse_reference(hash).map_err(anyhow::Error::msg)?)
+        };
+        let hash = address.as_ref().map_or(hash, |a| a.hash.as_str());
+        let c = self.lock()?;
+        let codec: Option<u64> = c.query_row("SELECT codec FROM cas WHERE hash=? UNION ALL SELECT 113 FROM archive_entries WHERE event_hash=? LIMIT 1", params![hash,hash], |r| r.get(0)).optional()?;
+        if let Some(address) = &address {
+            if codec.is_none() {
+                return Ok(None);
+            }
+            let registered: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM cas_codecs WHERE hash=? AND codec=? UNION ALL SELECT 1 FROM archive_entries WHERE event_hash=? AND ?=113)",params![hash,address.codec,hash,address.codec],|r|r.get(0))?;
+            ensure!(registered, "CID codec is not registered for stored object");
+            return Ok(Some(address.codec));
+        }
+        Ok(codec)
+    }
+    pub fn reference(&self, hash: &str, codec: u64) -> Result<Value> {
+        let hash = if hash.len() == 64 {
+            hash.to_owned()
+        } else {
+            loom_proto::parse_reference(hash)
+                .map_err(anyhow::Error::msg)?
+                .hash
+        };
+        let reference = loom_proto::reference(&hash, codec).map_err(anyhow::Error::msg)?;
+        self.codec(
+            reference["$ref"]
+                .as_str()
+                .context("invalid generated reference")?,
+        )?
+        .context("CAS object not found")?;
+        Ok(reference)
     }
     pub fn latest_seq(&self) -> Result<i64> {
         Ok(self
@@ -185,9 +272,12 @@ impl Store {
                 continue;
             }
             match e.get("type").and_then(Value::as_str) {
+                Some("dag_cbor_migrated") => {
+                    tx.execute_batch("UPDATE defs SET component_hash=NULL; UPDATE actors SET component_hash=NULL;")?;
+                }
                 Some("message_enqueued") => {
                     if let Some(key) = e["key"].as_str() {
-                        let hash = put(&tx, "message", &serde_json::to_vec(&e["msg"])?)?;
+                        let hash = put_value(&tx, "message", &e["msg"])?;
                         tx.execute(
                             "INSERT INTO message_keys VALUES (?,?,?,?)",
                             params![
@@ -318,7 +408,7 @@ impl Store {
                 let receipt = PendingMessage {
                     actor: r.get(0)?,
                     handler_seq: r.get(1)?,
-                    msg: serde_json::from_slice(&r.get::<_, Vec<u8>>(2)?)?,
+                    msg: decode(&r.get::<_, Vec<u8>>(2)?)?,
                 };
                 ensure!(
                     receipt.actor == actor && receipt.msg == *msg,
@@ -346,7 +436,7 @@ impl Store {
             params![actor, seq, serde_json::to_string(msg)?],
         )?;
         if let Some(key) = key {
-            let hash = put(&tx, "message", &serde_json::to_vec(msg)?)?;
+            let hash = put_value(&tx, "message", msg)?;
             tx.execute(
                 "INSERT INTO message_keys VALUES (?,?,?,?)",
                 params![key, actor, seq, hash],
@@ -425,7 +515,7 @@ impl Store {
         let mut records = Vec::new();
         let mut hashes = Vec::new();
         {
-            let mut q=tx.prepare("SELECT l.seq,l.actor,c.bytes,l.handler_seq,l.ts,l.event_hash FROM log l JOIN cas c ON c.hash=l.event_hash WHERE l.seq<=? AND NOT EXISTS(SELECT 1 FROM archive_segments a WHERE l.seq BETWEEN a.first_seq AND a.last_seq) ORDER BY l.seq LIMIT ?")?;
+            let mut q=tx.prepare("SELECT l.seq,l.actor,loom_json(c.bytes),l.handler_seq,l.ts,l.event_hash FROM log l JOIN cas c ON c.hash=l.event_hash WHERE l.seq<=? AND NOT EXISTS(SELECT 1 FROM archive_segments a WHERE l.seq BETWEEN a.first_seq AND a.last_seq) ORDER BY l.seq LIMIT ?")?;
             let mut rows = q.query(params![through_seq, limit as i64])?;
             while let Some(r) = rows.next()? {
                 records.push(Event {
@@ -443,11 +533,11 @@ impl Store {
         };
         let first_seq = first.seq;
         let last_seq = records.last().context("missing last event")?.seq;
-        let encoded = serde_json::to_vec(&records)?;
+        let encoded = encode(&records)?;
         let compressed = zstd::stream::encode_all(encoded.as_slice(), 3)?;
         let decoded = zstd::stream::decode_all(compressed.as_slice())?;
         ensure!(decoded == encoded, "archive verification failed");
-        let verified: Vec<Event> = serde_json::from_slice(&decoded)?;
+        let verified: Vec<Event> = decode(&decoded)?;
         ensure!(verified.len() == records.len(), "archive count mismatch");
         let before_bytes: i64 =
             tx.query_row("SELECT coalesce(sum(length(bytes)),0) FROM cas", [], |r| {
@@ -469,7 +559,7 @@ impl Store {
             )?;
         }
         for old in hashes {
-            tx.execute("DELETE FROM cas WHERE kind='event' AND hash=? AND NOT EXISTS(SELECT 1 FROM log WHERE event_hash=cas.hash) AND NOT EXISTS(SELECT 1 FROM defs WHERE source_hash=cas.hash OR component_hash=cas.hash) AND NOT EXISTS(SELECT 1 FROM snapshots WHERE state_hash=cas.hash) AND NOT EXISTS(SELECT 1 FROM effect_results WHERE result_hash=cas.hash) AND NOT EXISTS(SELECT 1 FROM message_keys WHERE msg_hash=cas.hash) AND NOT EXISTS(SELECT 1 FROM archive_segments WHERE hash=cas.hash)",[old])?;
+            tx.execute("DELETE FROM cas WHERE kind='event' AND hash=? AND NOT EXISTS(SELECT 1 FROM cas_codecs WHERE cas_codecs.hash=cas.hash AND codec=85) AND NOT EXISTS(SELECT 1 FROM log WHERE event_hash=cas.hash) AND NOT EXISTS(SELECT 1 FROM defs WHERE source_hash=cas.hash OR component_hash=cas.hash) AND NOT EXISTS(SELECT 1 FROM snapshots WHERE state_hash=cas.hash) AND NOT EXISTS(SELECT 1 FROM effect_results WHERE result_hash=cas.hash) AND NOT EXISTS(SELECT 1 FROM message_keys WHERE msg_hash=cas.hash) AND NOT EXISTS(SELECT 1 FROM archive_segments WHERE hash=cas.hash)",[old])?;
         }
         let after_bytes: i64 =
             tx.query_row("SELECT coalesce(sum(length(bytes)),0) FROM cas", [], |r| {
@@ -590,7 +680,7 @@ impl Store {
             "UPDATE actors SET last_seq=? WHERE id=?",
             params![last_seq, actor.id],
         )?;
-        let state_hash = put(&tx, "state", &serde_json::to_vec(initial)?)?;
+        let state_hash = put_value(&tx, "state", initial)?;
         tx.execute(
             "INSERT INTO snapshots VALUES (?,?,?,?)",
             params![actor.id, actor.behavior_hash, last_seq, state_hash],
@@ -725,7 +815,7 @@ impl Store {
     pub fn snapshot(&self, actor: &str, fold_hash: &str, seq: i64, state: &Value) -> Result<()> {
         let mut c = self.lock()?;
         let tx = c.transaction()?;
-        let hash = put(&tx, "state", &serde_json::to_vec(state)?)?;
+        let hash = put_value(&tx, "state", state)?;
         tx.execute(
             "INSERT OR REPLACE INTO snapshots VALUES (?,?,?,?)",
             params![actor, fold_hash, seq, hash],
@@ -740,7 +830,7 @@ impl Store {
         match rows.next()? {
             Some(r) => Ok(Some(Snapshot {
                 seq: r.get(0)?,
-                state: serde_json::from_slice(&r.get::<_, Vec<u8>>(1)?)?,
+                state: decode(&r.get::<_, Vec<u8>>(1)?)?,
             })),
             None => Ok(None),
         }
@@ -753,9 +843,7 @@ impl Store {
     ) -> Result<Option<Value>> {
         let c = self.lock()?;
         let bytes:Option<Vec<u8>>=c.query_row("SELECT bytes FROM cas WHERE hash=(SELECT result_hash FROM (SELECT coalesce((SELECT result_hash FROM effect_results WHERE desc_hash=?1 AND scope=?2 AND occurrence=?3), (SELECT json_extract(bytes, '$.result_hash') FROM effects WHERE json_extract(bytes, '$.desc_hash')=?1 AND json_extract(bytes, '$.scope')=?2 AND json_extract(bytes, '$.occurrence')=?3 ORDER BY seq DESC LIMIT 1)) AS result_hash) WHERE result_hash IS NOT NULL)",params![desc_hash,scope,occurrence],|r|r.get(0)).optional()?;
-        bytes
-            .map(|b| serde_json::from_slice(&b).map_err(Into::into))
-            .transpose()
+        bytes.map(|b| decode(&b)).transpose()
     }
     pub fn effect_put(
         &self,
@@ -766,7 +854,7 @@ impl Store {
     ) -> Result<()> {
         let mut c = self.lock()?;
         let tx = c.transaction()?;
-        let hash = put(&tx, "result", &serde_json::to_vec(result)?)?;
+        let hash = put_value(&tx, "result", result)?;
         let existing:Option<String>=tx.query_row("SELECT result_hash FROM (SELECT coalesce((SELECT result_hash FROM effect_results WHERE desc_hash=?1 AND scope=?2 AND occurrence=?3), (SELECT json_extract(bytes, '$.result_hash') FROM effects WHERE json_extract(bytes, '$.desc_hash')=?1 AND json_extract(bytes, '$.scope')=?2 AND json_extract(bytes, '$.occurrence')=?3 ORDER BY seq DESC LIMIT 1)) AS result_hash) WHERE result_hash IS NOT NULL",params![desc_hash,scope,occurrence],|r|r.get(0)).optional()?;
         ensure!(
             existing.as_ref().is_none_or(|h| h == &hash),
@@ -787,15 +875,30 @@ impl Store {
     }
 }
 fn put(c: &Connection, kind: &str, bytes: &[u8]) -> Result<String> {
+    ensure!(
+        !matches!(
+            kind,
+            "event" | "result" | "state" | "message" | "tree" | "desc"
+        ),
+        "structured CAS kind requires put_value"
+    );
     let hash = blake3::hash(bytes).to_hex().to_string();
     c.execute(
-        "INSERT OR IGNORE INTO cas VALUES (?,?,?,unixepoch())",
+        "INSERT OR IGNORE INTO cas(hash,kind,bytes,created_at,codec) VALUES (?,?,?,unixepoch(),85)",
         params![hash, kind, bytes],
     )?;
+    c.execute("INSERT OR IGNORE INTO cas_codecs VALUES (?,85)", [&hash])?;
+    Ok(hash)
+}
+fn put_value<T: serde::Serialize>(c: &Connection, kind: &str, value: &T) -> Result<String> {
+    let bytes = encode(value)?;
+    let hash = blake3::hash(&bytes).to_hex().to_string();
+    c.execute("INSERT OR IGNORE INTO cas(hash,kind,bytes,created_at,codec) VALUES (?,?,?,unixepoch(),113)", params![hash,kind,bytes])?;
+    c.execute("INSERT OR IGNORE INTO cas_codecs VALUES (?,113)", [&hash])?;
     Ok(hash)
 }
 fn append(c: &Connection, actor: &str, event: &Value, handler_seq: i64) -> Result<i64> {
-    let hash = put(c, "event", &serde_json::to_vec(event)?)?;
+    let hash = put_value(c, "event", event)?;
     c.execute(
         "INSERT INTO log(actor,event_hash,handler_seq,ts) VALUES (?,?,?,unixepoch())",
         params![actor, hash, handler_seq],
@@ -1016,16 +1119,14 @@ mod tests {
         store.create_actor(&actor())?;
         store.append("a", &json!(3), 0)?;
         store.create_session("session", "a", "owner")?;
-        let old_event_hash = blake3::hash(&serde_json::to_vec(&event)?)
-            .to_hex()
-            .to_string();
+        let old_event_hash = blake3::hash(&encode(&event)?).to_hex().to_string();
         drop(store);
         let store = Store::open(&path)?;
         assert_eq!(
             store.definition(&hash)?.unwrap().sig.exports[0].returns,
             loom_proto::ValueShape::Number
         );
-        assert_eq!(store.get_json(&old_event_hash)?, Some(event));
+        assert_eq!(store.get_value::<Value>(&old_event_hash)?, Some(event));
         assert_eq!(
             store.get(&hash)?,
             Some(loom_proto::definition_identity(
@@ -1077,8 +1178,7 @@ mod tests {
         store.effect_put("desc", "global", 0, &json!(123))?;
         let message = store.enqueue("a", &json!({"msg":1}))?;
         let before = serde_json::to_value(store.events(None, 0, 1000)?)?;
-        let event_bytes =
-            serde_json::to_vec(&json!({"n":0,"data":"repeat this text to compress"}))?;
+        let event_bytes = encode(&json!({"n":0,"data":"repeat this text to compress"}))?;
         let event_hash = blake3::hash(&event_bytes).to_hex().to_string();
         let first = store.compact_log(50, 1000)?;
         assert!(first.events > 0);
@@ -1163,4 +1263,11 @@ fn pending(c: &Connection, actor: &str) -> Result<Option<PendingMessage>> {
         })),
         None => Ok(None),
     }
+}
+
+fn encode<T: serde::Serialize>(value: &T) -> Result<Vec<u8>> {
+    loom_proto::encode(value).map_err(anyhow::Error::msg)
+}
+fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
+    loom_proto::decode(bytes).map_err(anyhow::Error::msg)
 }

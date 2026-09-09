@@ -1,1 +1,15 @@
-{"name":"@loom/guest","version":"0.1.0","private":true,"type":"module","dependencies":{"cbor-x":"1.6.0"},"exports":{".":"./index.ts","./adapter":"./adapter.ts"}}
+{
+  "name": "@loom/guest",
+  "version": "0.1.0",
+  "exports": {
+    ".": "./index.ts",
+    "./adapter": "./adapter.ts"
+  },
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@ipld/dag-cbor": "10.0.2",
+    "cborg": "6.1.2",
+    "multiformats": "14.0.5"
+  }
+}

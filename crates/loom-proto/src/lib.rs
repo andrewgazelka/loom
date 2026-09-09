@@ -183,25 +183,20 @@ impl<T> Desc<T> {
     }
 }
 
-pub fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, String> {
-    let mut bytes = Vec::new();
-    ciborium::into_writer(value, &mut bytes).map_err(|error| error.to_string())?;
-    Ok(bytes)
-}
-pub fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
-    let mut input = bytes;
-    let value = ciborium::from_reader(&mut input).map_err(|error| error.to_string())?;
-    if !input.is_empty() {
-        return Err("trailing bytes after CBOR value".into());
-    }
-    Ok(value)
-}
+mod codec;
+pub use codec::{
+    ContentAddress, DAG_CBOR_CODEC, RAW_CODEC, cid_for_hash, decode, encode, parse_reference,
+    reference,
+};
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn shared_descriptor_codec_rejects_trailing_input() {
-        let desc = Desc::<Value>::new("random", serde_json::json!({"$ref":"abc"}));
+        let desc = Desc::<Value>::new(
+            "random",
+            reference(&"ab".repeat(32), DAG_CBOR_CODEC).unwrap(),
+        );
         let mut bytes = encode(&desc).unwrap();
         let decoded: Desc = decode(&bytes).unwrap();
         assert_eq!(decoded.op, "random");

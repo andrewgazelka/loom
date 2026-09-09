@@ -107,8 +107,19 @@ bwrap --unshare-all --clearenv --proc /proc --dev /dev --tmpfs /tmp \
 printf '1/1 canonical compiler link/run in nested sandbox passed\n'
 COMPILER
       ;;
+    sdk)
+      mkdir -p "$base/legacy-sdk"
+      tar -xf "$base/legacy-sdk.tar" -C "$base/legacy-sdk"
+      LOOM_BUILD_DIR="$base/sdk-rebuild-cache" cargo run --locked -p loom-build --example sdk_rebuild_smoke -- "$PWD" "$base/legacy-sdk" "$base/sdk-rebuilt.wasm" || status=$?
+      [[ "$status" -ne 0 ]] || cargo run --locked -p loom-rt --example component_smoke -- "$base/sdk-rebuilt.wasm" rust itoa || status=$?
+      ;;
     vendor_run) cargo run --locked -p loom-rt --example component_smoke -- "$base/itoa.wasm" rust itoa || status=$? ;;
     sandbox) bash loom-rustc/test-sandbox.sh || status=$? ;;
+    dag)
+      (cd loom-checker && bun install --frozen-lockfile)
+      (cd loom-guest-ts && bun install --frozen-lockfile)
+      bash scripts/dag-cbor-check.sh || status=$?
+      ;;
     acceptance)
       export LOOM_STATIC_BUSYBOX="$base/static-busybox/bin/busybox"
       bash scripts/acceptance.sh || status=$?
@@ -126,7 +137,7 @@ COMPILER
 fi
 
 action=${1:-check}
-case "$action" in prepare|check|test|fetch|tools|targets|machine|e2e|e2e_mcp|e2e_languages|sandbox|acceptance|container|container_verify|vendor|vendor_run|m9|compiler) ;; *) echo 'Usage: scripts/remote-check.sh [prepare|check|test|fetch|tools|targets|machine|e2e|e2e_mcp|e2e_languages|sandbox|acceptance|container|container_verify|vendor|vendor_run|m9|compiler]' >&2; exit 64;; esac
+case "$action" in prepare|check|test|fetch|tools|targets|machine|e2e|e2e_mcp|e2e_languages|sandbox|acceptance|container|container_verify|vendor|vendor_run|m9|compiler|dag|sdk) ;; *) echo 'Usage: scripts/remote-check.sh [prepare|check|test|fetch|tools|targets|machine|e2e|e2e_mcp|e2e_languages|sandbox|acceptance|container|container_verify|vendor|vendor_run|m9|compiler|dag|sdk]' >&2; exit 64;; esac
 cd "$(dirname "$0")/.."
 bash -n scripts/remote-check.sh
 host=dev-compute-4

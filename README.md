@@ -40,15 +40,23 @@ The returned definition hash identifies the callable. Invoke `POST /v1/command` 
 pub fn add(a: i64, b: i64) -> i64 { a + b }
 ```
 
-Actors export `run` and `fold` in TS or implement `loom::Actor` under `#[loom::actor]` in Rust. `examples/` contains executable fixtures. Actor commands include `spawn`, `send`, `state`, `fork`, and `upgrade`. Cross-language calls use the same CBOR values and host effect dispatcher.
+Actors export `run` and `fold` in TS or implement `loom::Actor` under `#[loom::actor]` in Rust. `examples/` contains executable fixtures. Actor commands include `spawn`, `send`, `state`, `fork`, and `upgrade`. Cross-language calls use the same DAG-CBOR values and host effect dispatcher.
 
 Client responses contain `ok`, `seq`, `result`, and `diagnostics`. Results above 8 KB become CAS references. Use the `resolve` command to retrieve a reference. WebSocket clients connect to `/v1/stream` and send `{ "token": "...", "after": 0 }` as their first message; the server streams durable events after that cursor.
+
+## DAG-CBOR and links
+
+The Rust and TS guests use deterministic DAG-CBOR at the WIT boundary. Structured CAS values use the same codec; component binaries, source bundles, and other raw bytes retain the raw codec. JSON clients represent a link as exactly `{ "$ref": "<CID>" }`. In DAG-CBOR this becomes tag 42 containing the zero-prefixed binary CID. Local links use CIDv1 with a BLAKE3-256 digest and distinguish DAG-CBOR (`0x71`) from raw bytes (`0x55`). Definition identities remain source hashes.
+
+Maps have string keys ordered by encoded length and then bytes. Decoders reject duplicate keys, nonminimal or indefinite encodings, other tags, malformed CIDs, undefined, nonfinite floats, and trailing bytes. Floats use 64 bits. The shared JSON value model encodes safe integral numbers as integers; Rust integers outside JavaScript's safe range are rejected instead of losing precision across languages.
+
+Opening an older database performs a transactional migration of structured values and links and invalidates compiled guests that used the old codec. The migration preserves event sequence numbers and verifies references before committing. Older databases with recorded effects whose descriptors were never stored, or pending handlers, require explicit recovery before migration: opening fails without changing the database rather than risking duplicate external effects. Back up the database before upgrading.
 
 ## Crate ownership
 
 | Crate | Responsibility |
 | --- | --- |
-| `loom-proto` | Shared values, signatures, protocol, CBOR and TS declarations |
+| `loom-proto` | Shared values, signatures, protocol, DAG-CBOR and TS declarations |
 | `loom-store` | CAS, SQLite event history, projections, names, snapshots, effects |
 | `loom-check` | Language checking and definition identity |
 | `loom-build` | Component compiler sidecars and build cache |
@@ -72,6 +80,7 @@ cargo test --workspace --locked
 LOOM_TOKEN="$LOOM_TOKEN" bun scripts/e2e.ts
 LOOM_TOKEN="$LOOM_TOKEN" bun scripts/mcp-e2e.ts
 ./scripts/acceptance.sh
+./scripts/dag-cbor-check.sh
 ```
 
 The HTTP and MCP scripts require a running daemon and real language toolchains. They build and execute guest components. `acceptance.sh` reports how many complete specification milestones pass; a missing or failing milestone remains a failure. A passing unit test suite alone does not imply all 11 milestones are delivered. Debug builds of the Wasmtime compiler are substantially slower than release builds when compiling a new TS component.

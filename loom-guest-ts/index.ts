@@ -1,6 +1,4 @@
-import { Encoder, Decoder } from "cbor-x";
-const encoder = new Encoder({useRecords:false, mapsAsObjects:true});
-const decoder = new Decoder({mapsAsObjects:true});
+import {encode, decode} from "./codec";
 // The component builder leaves this import for the component linker.
 import { perform as hostPerform } from "loom:host/abilities";
 import type { JsonValue, Desc as WireDesc } from "./protocol.generated";
@@ -10,7 +8,7 @@ export type Desc<T = Value> = WireDesc & { readonly __result?: T };
 declare const defBrand: unique symbol;
 export interface Def<A = Value, R = Value> { readonly hash: string; readonly [defBrand]: { readonly args: A; readonly result: R } }
 export interface Fiber<R = Value> { readonly id: Value; readonly __result?: R }
-export function perform<T = Value>(desc: Desc<T>): T { return decoder.decode(hostPerform(encoder.encode(desc))) as T; }
+export function perform<T = Value>(desc: Desc<T>): T { return decode(hostPerform(encode(desc))) as T; }
 function ability<A extends Value, R>(op: string) {
   const desc = (args: A): Desc<R> => ({op, args});
   return Object.assign((args: A): R => perform(desc(args)), {desc});

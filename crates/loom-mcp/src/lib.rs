@@ -125,19 +125,23 @@ impl LoomMcp {
         Parameters(args): Parameters<CommandArgs>,
         context: RequestContext<rmcp::RoleServer>,
     ) -> String {
-        serde_json::to_string(
-            &self.service.inline(
-                self.service_for(&context)
-                    .command(CommandRequest {
-                        session: Some(args.session.unwrap_or_else(|| self.session.clone())),
-                        command: args.command,
-                        args: args.args,
-                    })
-                    .await,
-            ),
-        )
+        let resolve = args.command == "resolve";
+        let response = self
+            .service_for(&context)
+            .command(CommandRequest {
+                session: Some(args.session.unwrap_or_else(|| self.session.clone())),
+                command: args.command,
+                args: args.args,
+            })
+            .await;
+        serde_json::to_string(&if resolve {
+            response
+        } else {
+            self.service.inline(response)
+        })
         .unwrap()
     }
+
     #[tool(description = "Resolve a definition name, hash, or JSON CAS reference.")]
     async fn loom_resolve(
         &self,

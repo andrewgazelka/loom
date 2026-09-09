@@ -468,6 +468,7 @@ impl Runtime {
                 .and_then(Value::as_str)
                 .context("descriptor op required")?;
             let args = desc.get("args").cloned().unwrap_or(Value::Null);
+            let hash = self.inner.store.put_value("desc", &desc)?;
             match op {
                 "all" | "race" => {
                     let descs = args
@@ -534,7 +535,7 @@ impl Runtime {
                     return Ok(json!(out));
                 }
                 "send" => {
-                    let key = format!("{scope}:{occurrence}:{}", blake3::hash(&encode(&desc)?));
+                    let key = format!("{scope}:{occurrence}:{hash}");
                     let message = self.inner.store.enqueue_once(
                         required_str(&args, "actor")?,
                         &args.get("msg").cloned().unwrap_or(Value::Null),
@@ -543,7 +544,6 @@ impl Runtime {
                     return self.schedule_message(message);
                 }
                 "spawn" => {
-                    let hash = blake3::hash(&encode(&desc)?).to_hex().to_string();
                     let key = format!("spawn:{scope}:{occurrence}:{hash}");
                     let lock = self
                         .inner
@@ -573,7 +573,6 @@ impl Runtime {
                 }
                 _ => {}
             }
-            let hash = blake3::hash(&encode(&desc)?).to_hex().to_string();
             let class = match op {
                 "cas.get" | "cas.put" => "hermetic",
                 "exec" if args.get("tree").and_then(Value::as_str).is_some() => "hermetic",
@@ -634,11 +633,16 @@ impl Runtime {
                     (uuid::Uuid::new_v4().as_u128() as u64 & ((1u64 << 53) - 1)) as f64
                         / ((1u64 << 53) as f64)
                 ),
-                "cas.put" => json!({"$ref":self.inner.store.put_json("blob",&args)?}),
+                "cas.put" => {
+                    let hash = self.inner.store.put_value("blob", &args)?;
+                    self.inner
+                        .store
+                        .reference(&hash, loom_proto::DAG_CBOR_CODEC)?
+                }
                 "cas.get" => self
                     .inner
                     .store
-                    .get_json(required_str(&args, "hash")?)?
+                    .get_value(required_str(&args, "hash")?)?
                     .context("CAS value not found")?,
                 "exec" if args.get("tree").is_some() => self.hermetic_exec(&args).await?,
                 "exec" => {

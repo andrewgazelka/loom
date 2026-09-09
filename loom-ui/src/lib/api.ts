@@ -98,14 +98,18 @@ export class Client {
     if (
       reply.ok &&
       typeof reference.$ref === "string" &&
-      typeof reference.size === "number"
+      Object.keys(reference).length === 1
     ) {
       const resolved = await fetch(
         `${this.endpoint.replace(/\/$/, "")}/v1/cas/${encodeURIComponent(reference.$ref)}`,
         {
-          headers: this.token ? { Authorization: `Bearer ${this.token}` } : {},
+          headers: {
+            Accept: "application/json",
+            ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
+          },
         },
       );
+      if (resolved.status === 406) return reply;
       if (!resolved.ok)
         throw new Error(`Could not resolve result: HTTP ${resolved.status}`);
       reply.result = await resolved.json();

@@ -12,7 +12,7 @@ struct Tree {
 #[derive(Serialize, Deserialize)]
 struct TreeEntry {
     name: String,
-    hash: String,
+    reference: Value,
     directory: bool,
     executable: bool,
 }
@@ -149,7 +149,9 @@ impl Runtime {
         let path = self.machine_path(args)?;
         let store = self.inner.store.clone();
         let hash = tokio::task::spawn_blocking(move || snapshot(&store, &path, &mut 0)).await??;
-        Ok(json!({"$ref":hash}))
+        self.inner
+            .store
+            .reference(&hash, loom_proto::DAG_CBOR_CODEC)
     }
     pub(crate) async fn hermetic_exec(&self, args: &Value) -> Result<Value> {
         ensure!(
@@ -237,16 +239,23 @@ fn snapshot(store: &loom_store::Store, path: &Path, count: &mut usize) -> Result
                 .file_name()
                 .into_string()
                 .map_err(|_| anyhow::anyhow!("non-UTF8 tree entry"))?,
-            hash,
+            reference: store.reference(
+                &hash,
+                if directory {
+                    loom_proto::DAG_CBOR_CODEC
+                } else {
+                    loom_proto::RAW_CODEC
+                },
+            )?,
             directory,
             executable,
         });
     }
-    store.put("tree", &serde_json::to_vec(&Tree { entries })?)
+    store.put_value("tree", &Tree { entries })
 }
 fn materialize(store: &loom_store::Store, hash: &str, path: &Path, depth: usize) -> Result<()> {
     ensure!(depth < 128, "tree depth limit exceeded");
-    let tree: Tree = serde_json::from_slice(&store.get(hash)?.context("tree missing")?)?;
+    let tree: Tree = store.get_value(hash)?.context("tree missing")?;
     for entry in tree.entries {
         if entry.name.is_empty()
             || entry.name == "."
@@ -259,11 +268,18 @@ fn materialize(store: &loom_store::Store, hash: &str, path: &Path, depth: usize)
         let target = path.join(&entry.name);
         if entry.directory {
             std::fs::create_dir(&target)?;
-            materialize(store, &entry.hash, &target, depth + 1)?;
+            materialize(
+                store,
+                required_str(&entry.reference, "$ref")?,
+                &target,
+                depth + 1,
+            )?;
         } else {
             std::fs::write(
                 &target,
-                store.get(&entry.hash)?.context("tree blob missing")?,
+                store
+                    .get(required_str(&entry.reference, "$ref")?)?
+                    .context("tree blob missing")?,
             )?;
             #[cfg(unix)]
             {
