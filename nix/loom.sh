@@ -27,6 +27,7 @@ fi
 has_db=false
 has_bind=false
 has_auth=false
+using_token_file=false
 for argument in "$@"; do
   case "$argument" in
     --db|--db=*) has_db=true ;;
@@ -45,6 +46,7 @@ if ! $has_auth && [[ -z ${LOOM_TOKEN:-} ]]; then
       fi
     fi
   fi
+  using_token_file=true
   LOOM_TOKEN=$(cat "$state/token")
   export LOOM_TOKEN
 fi
@@ -55,5 +57,5 @@ if ! $has_bind; then
   defaults+=(--bind "$bind")
   printf 'Loom: http://%s\n' "$bind" >&2
 fi
-if [[ -s "$state/token" ]]; then printf 'Token file: %s/token\n' "$state" >&2; fi
+if $using_token_file; then printf 'Token file: %s/token\n' "$state" >&2; fi
 exec '@daemon@' "${defaults[@]}" "$@"
