@@ -20,6 +20,10 @@ export LOOM_BUILD_DIR=${LOOM_BUILD_DIR:-"$state/builds"}
 export CARGO_HOME=${CARGO_HOME:-"$state/cargo"}
 export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-4}
 mkdir -p "$LOOM_BUILD_DIR" "$CARGO_HOME"
+if [[ ! -w "$LOOM_BUILD_DIR" || ! -w "$CARGO_HOME" ]]; then
+  printf 'LOOM_BUILD_DIR and CARGO_HOME must be writable directories\n' >&2
+  exit 1
+fi
 has_db=false
 has_bind=false
 has_auth=false
@@ -34,7 +38,12 @@ if $has_auth; then unset LOOM_TOKEN; fi
 if ! $has_auth && [[ -z ${LOOM_TOKEN:-} ]]; then
   if [[ ! -s "$state/token" ]]; then
     token=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
-    (set -o noclobber; printf '%s\n' "$token" > "$state/token") 2>/dev/null || true
+    if ! (set -o noclobber; printf '%s\n' "$token" > "$state/token"); then
+      if [[ ! -s "$state/token" ]]; then
+        printf 'Cannot create token file: %s/token\n' "$state" >&2
+        exit 1
+      fi
+    fi
   fi
   LOOM_TOKEN=$(cat "$state/token")
   export LOOM_TOKEN
