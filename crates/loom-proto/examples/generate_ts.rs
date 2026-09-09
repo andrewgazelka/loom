@@ -20,6 +20,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ParamSig::decl(),
         ExportSig::decl(),
         TypeSig::decl(),
+        EffectSet::decl(),
         Def::decl(),
         Diagnostic::decl(),
         DefineRequest::decl(),

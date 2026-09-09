@@ -5,6 +5,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
+#[derive(Serialize)]
+struct DirectoryEntry {
+    name: String,
+    size: u64,
+    is_dir: bool,
+    is_file: bool,
+    is_symlink: bool,
+}
+
 #[derive(Serialize, Deserialize)]
 struct Tree {
     entries: Vec<TreeEntry>,
@@ -83,6 +92,7 @@ impl Runtime {
             .processes
             .start(loom_process::ProcessSpec {
                 machine,
+                capture_paths: super::capture_paths(&args)?,
                 root,
                 cwd,
                 env,
@@ -126,6 +136,32 @@ impl Runtime {
             .canonicalize()?;
         ensure!(path.starts_with(&root), "path escapes machine root");
         Ok(path)
+    }
+    pub(crate) async fn list_machine_directory(&self, args: &Value) -> Result<Value> {
+        let path = self.machine_path(args)?;
+        let entries = tokio::task::spawn_blocking(move || -> Result<Vec<DirectoryEntry>> {
+            let mut entries = Vec::new();
+            for entry in std::fs::read_dir(&path)? {
+                ensure!(entries.len() < 100_000, "directory entry limit exceeded");
+                let entry = entry?;
+                // DirEntry::metadata does not follow symlinks.
+                let metadata = entry.metadata()?;
+                entries.push(DirectoryEntry {
+                    name: entry
+                        .file_name()
+                        .into_string()
+                        .map_err(|_| anyhow::anyhow!("directory entry name is not UTF8"))?,
+                    size: metadata.len(),
+                    is_dir: metadata.is_dir(),
+                    is_file: metadata.is_file(),
+                    is_symlink: metadata.file_type().is_symlink(),
+                });
+            }
+            entries.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+            Ok(entries)
+        })
+        .await??;
+        Ok(serde_json::to_value(entries)?)
     }
     pub(crate) async fn read_machine_file(&self, args: &Value) -> Result<Value> {
         use tokio::io::AsyncReadExt;
@@ -201,7 +237,7 @@ impl Runtime {
                 );
             }
         }
-        self.execute_command(command).await
+        self.execute_command(command, Vec::new()).await
     }
 }
 fn snapshot(store: &loom_store::Store, path: &Path, count: &mut usize) -> Result<String> {
@@ -297,6 +333,118 @@ fn materialize(store: &loom_store::Store, hash: &str, path: &Path, depth: usize)
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn directory_listing_classifies_links_without_following_them() -> Result<()> {
+        use std::os::unix::{fs::symlink, net::UnixListener};
+        let root = tempfile::tempdir()?;
+        let outside = tempfile::tempdir()?;
+        std::fs::create_dir(root.path().join("sub"))?;
+        std::fs::write(root.path().join("small"), b"123")?;
+        std::fs::write(root.path().join("sub/largest"), b"123456789")?;
+        std::fs::File::create(outside.path().join("huge"))?.set_len(1_000_000)?;
+        symlink(outside.path(), root.path().join("external-dir"))?;
+        symlink(
+            outside.path().join("huge"),
+            root.path().join("external-file"),
+        )?;
+        symlink(root.path(), root.path().join("sub/cycle"))?;
+        let _socket = UnixListener::bind(root.path().join("socket"))?;
+        let runtime = Runtime::new(loom_store::Store::memory()?)?;
+        let machine = runtime.create_machine(root.path())?;
+        let top = runtime
+            .perform(
+                json!({"op":"fs.list","args":{"machine":machine.id,"path":"/"}}),
+                "classification",
+                0,
+            )
+            .await?;
+        let top = top.as_array().context("listing array")?;
+        let names = top
+            .iter()
+            .map(|entry| entry["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec!["external-dir", "external-file", "small", "socket", "sub"]
+        );
+        for name in ["external-dir", "external-file"] {
+            let entry = top.iter().find(|entry| entry["name"] == name).unwrap();
+            assert_eq!(entry["is_symlink"], true);
+            assert_eq!(entry["is_dir"], false);
+            assert_eq!(entry["is_file"], false);
+        }
+        let socket = top.iter().find(|entry| entry["name"] == "socket").unwrap();
+        assert_eq!(socket["is_file"], false);
+        assert_eq!(socket["is_dir"], false);
+        assert_eq!(socket["is_symlink"], false);
+        struct FoundFile {
+            path: String,
+            size: u64,
+        }
+        let mut largest: Option<FoundFile> = None;
+        let mut pending = vec!["/".to_owned()];
+        let mut directories = 0;
+        while let Some(path) = pending.pop() {
+            directories += 1;
+            assert!(
+                directories <= 2,
+                "followed a cyclic or external directory link"
+            );
+            let entries = runtime
+                .perform(
+                    json!({"op":"fs.list","args":{"machine":machine.id,"path":path}}),
+                    "traversal",
+                    directories,
+                )
+                .await?;
+            for entry in entries.as_array().context("entries")? {
+                let path = format!(
+                    "{}/{}",
+                    path.trim_end_matches('/'),
+                    entry["name"].as_str().unwrap()
+                );
+                if entry["is_dir"] == true {
+                    pending.push(path);
+                } else if entry["is_file"] == true {
+                    let size = entry["size"].as_u64().unwrap();
+                    if largest.as_ref().is_none_or(|file| size > file.size) {
+                        largest = Some(FoundFile { path, size });
+                    }
+                }
+            }
+        }
+        let largest = largest.context("regular file missing")?;
+        assert_eq!(largest.path, "/sub/largest");
+        assert_eq!(largest.size, 9);
+        assert_eq!(directories, 2);
+        assert!(
+            runtime
+                .perform(
+                    json!({"op":"fs.list","args":{"machine":machine.id,"path":"/external-dir"}}),
+                    "escape",
+                    0
+                )
+                .await
+                .is_err()
+        );
+        Ok(())
+    }
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn directory_listing_rejects_unrepresentable_names() -> Result<()> {
+        use std::os::unix::ffi::OsStringExt;
+        let root = tempfile::tempdir()?;
+        std::fs::File::create(root.path().join(std::ffi::OsString::from_vec(vec![255])))?;
+        let runtime = Runtime::new(loom_store::Store::memory()?)?;
+        let machine = runtime.create_machine(root.path())?;
+        let error = runtime
+            .list_machine_directory(&json!({"machine":machine.id,"path":"/"}))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("UTF8"));
+        Ok(())
+    }
     #[tokio::test]
     async fn snapshots_are_content_keyed_and_observations_are_scoped() -> Result<()> {
         let root = tempfile::tempdir()?;

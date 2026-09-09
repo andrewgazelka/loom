@@ -17,6 +17,8 @@ export interface Reply {
 }
 export interface Definition {
   sig?: unknown;
+  allowed_effects?: string[] | null;
+  observed_effects?: string[];
   hash: string;
   lang: string;
   name_hint?: string;
@@ -58,6 +60,25 @@ export class Client {
     public endpoint: string,
     public token: string,
   ) {}
+  async bytes(hash: string, limit = 262144): Promise<Uint8Array> {
+    const response = await fetch(`${this.endpoint.replace(/\/$/, "")}/v1/cas/${encodeURIComponent(hash)}`, {headers:{Accept:"application/octet-stream", ...(this.token ? {Authorization:`Bearer ${this.token}`} : {})}});
+    if (!response.ok) throw new Error(`Could not read content: HTTP ${response.status}`);
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error("Content body unavailable");
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    try { for (;;) {
+      const next = await reader.read();
+      if(next.done) break;
+      size += next.value.length;
+      if(size > limit) { await reader.cancel(); throw new Error(`Content exceeds the ${limit / 1024} KiB diff preview limit`); }
+      chunks.push(next.value);
+    }} finally { reader.releaseLock(); }
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for(const chunk of chunks) { bytes.set(chunk,offset); offset += chunk.length; }
+    return bytes;
+  }
   async text(hash: string): Promise<string> {
     const response = await fetch(
       `${this.endpoint.replace(/\/$/, "")}/v1/cas/${encodeURIComponent(hash)}`,

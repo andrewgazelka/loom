@@ -27,6 +27,9 @@
   import { eventRow } from "./journal";
   import type { LogEvent } from "./api";
   let query = "";
+  export let initialActor = "";
+  let openedInitial = "";
+  $: if(initialActor && initialActor !== openedInitial && actors.some(actor => actor.id === initialActor)) { openedInitial = initialActor; void open(actors.find(actor => actor.id === initialActor)!); }
   export let client: Client;
   export let actors: Actor[] = [];
   export let definitions: Definition[] = [];

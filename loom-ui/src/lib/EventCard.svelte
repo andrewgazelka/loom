@@ -13,6 +13,7 @@
   } from "lucide-svelte";
   import { format, record, short } from "./api";
   import { definitionHash, type JournalRow } from "./journal";
+  import SignatureView from "./SignatureView.svelte";
   import ReferenceLink from "./ReferenceLink.svelte";
   import CodeBlock from "./CodeBlock.svelte";
   import type { CodeLanguage } from "./highlight";
@@ -70,11 +71,11 @@
   <div class="event-body">
     {#if definition}<details
         class="code-disclosure"
-        open={failed || !!row.entry}
+        open={failed}
         on:toggle={openSource}
       >
         <summary
-          ><ChevronRight size={13} /><span class="signature">{title}</span><span
+          ><ChevronRight size={13} /><div class="signature"><span>{title}</span><SignatureView value={row.kind === "defined" ? record(row.value).sig : record(record(row.entry?.reply?.result).def).sig} name={title} /></div><span
             class="language-marker"
             >{row.language === "rust" ? "Rust" : "TS"}</span
           ></summary
@@ -241,7 +242,7 @@
   details[open] > summary :global(svg:first-child) {
     transform: rotate(90deg);
   }
-  .code-disclosure :global(.code-block) {
+  .code-disclosure > :global(.code-block) {
     border-top: 1px solid var(--line);
   }
   .language-marker {

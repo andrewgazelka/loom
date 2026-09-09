@@ -27,6 +27,22 @@ impl Lang {
 #[serde(deny_unknown_fields)]
 pub struct TypeSig {
     pub exports: Vec<ExportSig>,
+    #[serde(default)]
+    pub effects: EffectSet,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "codegen", derive(TS))]
+pub struct EffectSet {
+    pub labels: Vec<String>,
+    pub unknown: bool,
+}
+impl Default for EffectSet {
+    fn default() -> Self {
+        Self {
+            labels: Vec::new(),
+            unknown: true,
+        }
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "codegen", derive(TS))]
@@ -35,6 +51,8 @@ pub struct ExportSig {
     pub name: String,
     pub params: Vec<ParamSig>,
     pub returns: ValueShape,
+    #[serde(default)]
+    pub effects: EffectSet,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "codegen", derive(TS))]
@@ -71,6 +89,10 @@ pub struct Def {
     pub lang: Lang,
     pub component_hash: Option<String>,
     pub sig: TypeSig,
+    #[serde(default)]
+    pub allowed_effects: Option<Vec<String>>,
+    #[serde(default)]
+    pub observed_effects: Vec<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "codegen", derive(TS))]
@@ -93,6 +115,8 @@ pub struct DefineRequest {
     pub source: String,
     #[serde(default)]
     pub deps: BTreeMap<String, String>,
+    #[serde(default)]
+    pub allowed_effects: Option<Vec<String>>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "codegen", derive(TS))]
@@ -257,6 +281,14 @@ pub fn definition_identity(
     lang: Lang,
     source: &str,
     deps: &BTreeMap<String, String>,
+    allowed_effects: Option<&[String]>,
 ) -> Result<Vec<u8>, serde_json::Error> {
-    serde_json::to_vec(&serde_json::json!({"version":1,"lang":lang,"source":source,"deps":deps}))
+    let mut identity = serde_json::json!({"version":1,"lang":lang,"source":source,"deps":deps});
+    if let Some(labels) = allowed_effects {
+        let mut labels = labels.to_vec();
+        labels.sort();
+        labels.dedup();
+        identity["allowed_effects"] = serde_json::to_value(labels)?;
+    }
+    serde_json::to_vec(&identity)
 }

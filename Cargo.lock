@@ -1509,6 +1509,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "loom-example-effects"
+version = "0.1.0"
+dependencies = [
+ "loom-guest-rs",
+]
+
+[[package]]
 name = "loom-example-largest"
 version = "0.1.0"
 dependencies = [
@@ -1603,8 +1610,10 @@ name = "loom-process"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "loom-proto",
  "loom-store",
  "nix",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",

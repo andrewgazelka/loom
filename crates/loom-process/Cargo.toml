@@ -5,11 +5,13 @@ edition.workspace = true
 [dependencies]
 anyhow = "1"
 loom-store = { path = "../loom-store" }
+loom-proto = { path = "../loom-proto" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4"] }
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.30", features = ["signal", "process"] }
+rustix = { version = "1", features = ["fs"] }
 [dev-dependencies]
 tempfile = "3"

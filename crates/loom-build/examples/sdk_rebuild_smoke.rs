@@ -36,6 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         name: "legacy_render".into(),
         source: std::fs::read_to_string(root.join("examples/bundles/itoa.json"))?,
         deps: BTreeMap::new(),
+        allowed_effects: None,
     };
     let initial = checker.check(&request).await?;
     assert!(initial.diagnostics.is_empty(), "{:?}", initial.diagnostics);

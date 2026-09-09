@@ -4,7 +4,7 @@ use loom_proto::{Actor, Value};
 use loom_store::Store;
 use serde_json::json;
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -45,6 +45,32 @@ impl Drop for FiberTask {
         self.task.abort();
     }
 }
+#[derive(Clone, Default)]
+struct EffectContext {
+    def_hash: Option<String>,
+    actor_id: Option<String>,
+    allowed: Option<BTreeSet<String>>,
+}
+impl EffectContext {
+    fn delegated(&self, def_hash: &str, allowed: Option<&[String]>) -> Self {
+        let requested = allowed.map(|labels| labels.iter().cloned().collect::<BTreeSet<_>>());
+        let allowed = match (&self.allowed, requested) {
+            (Some(parent), Some(child)) => Some(parent.intersection(&child).cloned().collect()),
+            (Some(parent), None) => Some(parent.clone()),
+            (None, child) => child,
+        };
+        Self {
+            def_hash: Some(def_hash.into()),
+            actor_id: self.actor_id.clone(),
+            allowed,
+        }
+    }
+    fn permits(&self, op: &str) -> bool {
+        self.allowed
+            .as_ref()
+            .is_none_or(|allowed| allowed.contains(op))
+    }
+}
 struct ContextData {
     runtime: Runtime,
     scope: String,
@@ -52,6 +78,7 @@ struct ContextData {
     occurrence: i64,
     limits: StoreLimits,
     pure: bool,
+    effects: EffectContext,
 }
 impl Drop for ContextData {
     fn drop(&mut self) {
@@ -73,7 +100,7 @@ impl loom::host::abilities::Host for ContextData {
         self.occurrence += 1;
         let result = self
             .runtime
-            .perform(desc, &self.scope, occurrence)
+            .perform_contextual(desc, &self.scope, occurrence, self.effects.clone())
             .await
             .map_err(|e| format!("{e:#}"))?;
         encode(&result).map_err(|e| e.to_string())
@@ -154,12 +181,23 @@ impl Runtime {
         Ok(runtime)
     }
     async fn instance(&self, hash: &str, scope: &str, pure: bool) -> Result<Instance> {
+        self.instance_delegated(hash, scope, pure, &EffectContext::default())
+            .await
+    }
+    async fn instance_delegated(
+        &self,
+        hash: &str,
+        scope: &str,
+        pure: bool,
+        parent: &EffectContext,
+    ) -> Result<Instance> {
         let resolve_start = Instant::now();
         let def = self
             .inner
             .store
             .definition(hash)?
             .context("definition not found")?;
+        let effects = parent.delegated(hash, def.allowed_effects.as_deref());
         let component_hash = match def.component_hash {
             Some(hash) => hash,
             None => {
@@ -248,6 +286,7 @@ impl Runtime {
                     .instances(16)
                     .build(),
                 pure,
+                effects,
             },
         );
         store.limiter(|s| &mut s.limits);
@@ -268,12 +307,33 @@ impl Runtime {
         self.call_scoped_timed(hash, args, &format!("call:{}", uuid::Uuid::new_v4()))
             .await
     }
-    async fn call_scoped(&self, hash: &str, args: Value, scope: &str) -> Result<Value> {
-        Ok(self.call_scoped_timed(hash, args, scope).await?.value)
+    async fn call_scoped(
+        &self,
+        hash: &str,
+        args: Value,
+        scope: &str,
+        effects: EffectContext,
+    ) -> Result<Value> {
+        Ok(self
+            .call_scoped_delegated(hash, args, scope, effects)
+            .await?
+            .value)
     }
     async fn call_scoped_timed(&self, hash: &str, args: Value, scope: &str) -> Result<TimedCall> {
+        self.call_scoped_delegated(hash, args, scope, EffectContext::default())
+            .await
+    }
+    async fn call_scoped_delegated(
+        &self,
+        hash: &str,
+        args: Value,
+        scope: &str,
+        effects: EffectContext,
+    ) -> Result<TimedCall> {
         let call_start = Instant::now();
-        let mut instance = self.instance(hash, scope, false).await?;
+        let mut instance = self
+            .instance_delegated(hash, scope, false, &effects)
+            .await?;
         let run_start = Instant::now();
         let result = instance
             .bindings
@@ -412,6 +472,7 @@ impl Runtime {
                 false,
             )
             .await?;
+        instance.store.data_mut().effects.actor_id = Some(actor.clone());
         let bytes = instance
             .bindings
             .call_run(
@@ -521,13 +582,32 @@ impl Runtime {
         scope: &'a str,
         occurrence: i64,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send + 'a>> {
+        self.perform_contextual(desc, scope, occurrence, EffectContext::default())
+    }
+    fn perform_contextual<'a>(
+        &'a self,
+        desc: Value,
+        scope: &'a str,
+        occurrence: i64,
+        effects: EffectContext,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send + 'a>> {
         Box::pin(async move {
             let op = desc
                 .get("op")
                 .and_then(Value::as_str)
                 .context("descriptor op required")?;
-            let args = desc.get("args").cloned().unwrap_or(Value::Null);
             let hash = self.inner.store.put_value("desc", &desc)?;
+            if !effects.permits(op) {
+                self.inner.store.append("system", &json!({"type":"effect_denied","desc_hash":hash,"def_hash":effects.def_hash,"actor_id":effects.actor_id,"op":op,"scope":scope,"occurrence":occurrence}), 0)?;
+                bail!(
+                    "effect {op} is not allowed for definition {}",
+                    effects.def_hash.as_deref().unwrap_or("<host>")
+                );
+            }
+            let args = desc.get("args").cloned().unwrap_or(Value::Null);
+            self.inner.store.append("system", &json!({"type":"effect_invoked","def_hash":effects.def_hash,"actor_id":effects.actor_id,"op":op,"desc_hash":hash,"scope":scope,"occurrence":occurrence}), 0)?;
+            let mut cached = false;
+            let outcome: Result<Value> = async {
             match op {
                 "all" | "race" => {
                     let descs = args
@@ -538,7 +618,14 @@ impl Runtime {
                     let futures = descs
                         .iter()
                         .enumerate()
-                        .map(|(index, desc)| self.perform(desc.clone(), &child_scope, index as i64))
+                        .map(|(index, desc)| {
+                            self.perform_contextual(
+                                desc.clone(),
+                                &child_scope,
+                                index as i64,
+                                effects.clone(),
+                            )
+                        })
                         .collect::<Vec<_>>();
                     if op == "all" {
                         return Ok(Value::Array(futures::future::try_join_all(futures).await?));
@@ -554,6 +641,7 @@ impl Runtime {
                             required_str(&args, "def")?,
                             args.get("args").cloned().unwrap_or(Value::Null),
                             &format!("{scope}/call:{occurrence}"),
+                            effects.clone(),
                         )
                         .await;
                 }
@@ -563,8 +651,11 @@ impl Runtime {
                     let runtime = self.clone();
                     let id = uuid::Uuid::new_v4().to_string();
                     let child_scope = format!("{scope}/fork:{occurrence}");
+                    let child_effects = effects.clone();
                     let task = tokio::spawn(async move {
-                        runtime.call_scoped(&hash, args, &child_scope).await
+                        runtime
+                            .call_scoped(&hash, args, &child_scope, child_effects)
+                            .await
                     });
                     self.inner.fibers.lock().unwrap().insert(
                         id.clone(),
@@ -614,6 +705,7 @@ impl Runtime {
                         .clone();
                     let _guard = lock.lock().await;
                     if let Some(result) = self.inner.store.effect_get(&hash, scope, occurrence)? {
+                        cached = true;
                         return Ok(result);
                     }
                     let actor_id = blake3::hash(key.as_bytes()).to_hex().to_string();
@@ -663,6 +755,7 @@ impl Runtime {
                     .store
                     .effect_get(&hash, cache_scope, cache_occurrence)?
             {
+                cached = true;
                 return Ok(result);
             }
             let result = match op {
@@ -716,7 +809,7 @@ impl Runtime {
                             );
                         }
                     }
-                    self.execute_command(command).await?
+                    self.execute_command(command, capture_paths(&args)?).await?
                 }
                 "fs.snapshot" => self.snapshot_tree(&args).await?,
                 "fs.read" => self.read_machine_file(&args).await?,
@@ -724,28 +817,40 @@ impl Runtime {
                     let metadata = tokio::fs::metadata(self.machine_path(&args)?).await?;
                     json!({"size":metadata.len(),"is_dir":metadata.is_dir(),"is_file":metadata.is_file()})
                 }
-                "fs.list" => {
-                    let mut entries = tokio::fs::read_dir(self.machine_path(&args)?).await?;
-                    let mut values = Vec::new();
-                    while let Some(entry) = entries.next_entry().await? {
-                        if values.len() >= 100_000 {
-                            bail!("directory entry limit exceeded");
-                        }
-                        let metadata = entry.metadata().await?;
-                        values.push(json!({"name":entry.file_name().to_string_lossy(),"size":metadata.len(),"is_dir":metadata.is_dir()}));
-                    }
-                    values.sort_by_key(|v| v["name"].as_str().unwrap_or("").to_owned());
-                    json!(values)
-                }
+                "fs.list" => self.list_machine_directory(&args).await?,
                 _ => bail!("unsupported ability: {op}"),
             };
             self.inner
                 .store
                 .effect_put(&hash, cache_scope, cache_occurrence, &result)?;
             Ok(result)
+            }.await;
+            let result_hash = outcome
+                .as_ref()
+                .ok()
+                .map(|result| self.inner.store.put_value("result", result))
+                .transpose()?;
+            self.inner.store.append("system", &json!({"type":"effect_completed","def_hash":effects.def_hash,"actor_id":effects.actor_id,"op":op,"desc_hash":hash,"scope":scope,"occurrence":occurrence,"cached":cached,"result_hash":result_hash,"error":outcome.as_ref().err().map(|error|format!("{error:#}"))}), 0)?;
+            outcome
         })
     }
 }
+fn capture_paths(args: &Value) -> Result<Vec<std::path::PathBuf>> {
+    match args.get("capture_paths") {
+        None => Ok(Vec::new()),
+        Some(value) => value
+            .as_array()
+            .context("capture_paths must be an array")?
+            .iter()
+            .map(|path| {
+                path.as_str()
+                    .map(std::path::PathBuf::from)
+                    .context("capture path must be a string")
+            })
+            .collect(),
+    }
+}
+
 fn required_str<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
     value
         .get(key)
@@ -781,7 +886,11 @@ impl Runtime {
     pub fn processes(&self) -> &loom_process::Supervisor {
         &self.inner.processes
     }
-    async fn execute_command(&self, command: tokio::process::Command) -> Result<Value> {
+    async fn execute_command(
+        &self,
+        command: tokio::process::Command,
+        capture_paths: Vec<std::path::PathBuf>,
+    ) -> Result<Value> {
         let native = command.as_std();
         let cwd = native
             .get_current_dir()
@@ -794,6 +903,7 @@ impl Runtime {
         );
         let spec = loom_process::ProcessSpec {
             machine: "local".into(),
+            capture_paths,
             program: native
                 .get_program()
                 .to_str()
@@ -824,7 +934,9 @@ impl Runtime {
         if completed.phase != loom_process::Phase::Completed {
             bail!("process did not complete: {:?}", completed.phase);
         }
-        Ok(json!({"code":completed.code,"stdout":completed.stdout,"stderr":completed.stderr}))
+        Ok(
+            json!({"code":completed.code,"stdout":completed.stdout,"stderr":completed.stderr,"filesystem_changes":completed.filesystem_changes,"filesystem_capture":completed.filesystem_capture}),
+        )
     }
 }
 
@@ -903,6 +1015,78 @@ mod tests {
         );
         tokio::time::sleep(Duration::from_millis(1100)).await;
         assert!(!orphan.exists(), "descendant survived canceled effect");
+        Ok(())
+    }
+    #[tokio::test]
+    async fn exec_capture_preserves_actual_before_after_cas_bytes() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        std::fs::write(root.path().join("note"), b"before\n")?;
+        let runtime = Runtime::new(Store::memory()?)?;
+        let mut command = tokio::process::Command::new("sh");
+        command
+            .current_dir(root.path())
+            .args(["-c", "printf 'after\n' > note"]);
+        let result = runtime
+            .execute_command(command, vec!["note".into()])
+            .await?;
+        let changes = result["filesystem_changes"].as_array().context("changes")?;
+        assert_eq!(changes.len(), 1, "{result}");
+        assert_eq!(
+            runtime
+                .inner
+                .store
+                .get(changes[0]["before"].as_str().context("before CID")?)?,
+            Some(b"before\n".to_vec())
+        );
+        assert_eq!(
+            runtime
+                .inner
+                .store
+                .get(changes[0]["after"].as_str().context("after CID")?)?,
+            Some(b"after\n".to_vec())
+        );
+        Ok(())
+    }
+    #[tokio::test]
+    async fn policy_denies_dynamic_and_cached_requests_and_nested_combinators() -> Result<()> {
+        let runtime = Runtime::new(Store::memory()?)?;
+        let desc = json!({"op":"cas.put","args":{"secret":42}});
+        runtime.perform(desc.clone(), "warm", 0).await?;
+        let denied = EffectContext::default().delegated("restricted", Some(&[]));
+        let error = runtime
+            .perform_contextual(desc.clone(), "denied", 0, denied.clone())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("not allowed"));
+        let parent =
+            EffectContext::default().delegated("parent", Some(&["all".into(), "call".into()]));
+        let child = parent.delegated("child", Some(&["all".into(), "cas.put".into()]));
+        assert!(!child.permits("cas.put"));
+        assert!(child.permits("all"));
+        assert!(
+            !parent
+                .delegated("unrestricted-child", None)
+                .permits("cas.put")
+        );
+        let nested = json!({"op":"all","args":{"descs":[desc]}});
+        assert!(
+            runtime
+                .perform_contextual(nested, "nested", 0, child)
+                .await
+                .is_err()
+        );
+        let events = runtime.inner.store.events(Some("system"), 0, 1000)?;
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event["type"] == "effect_denied")
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.event["type"] == "effect_invoked"
+                    && event.event["def_hash"] == "restricted")
+        );
         Ok(())
     }
     #[test]

@@ -9,7 +9,7 @@ pub fn register(store: &Store, lang: Lang, path: impl AsRef<Path>, label: &str) 
     let component_hash = store.put("component", &std::fs::read(path)?)?;
     let source = format!("{label}: {component_hash}");
     let deps = BTreeMap::new();
-    let hash = blake3::hash(&definition_identity(lang, &source, &deps)?)
+    let hash = blake3::hash(&definition_identity(lang, &source, &deps, None)?)
         .to_hex()
         .to_string();
     store.define(
@@ -18,6 +18,8 @@ pub fn register(store: &Store, lang: Lang, path: impl AsRef<Path>, label: &str) 
             lang,
             component_hash: Some(component_hash),
             sig: Default::default(),
+            allowed_effects: None,
+            observed_effects: Vec::new(),
         },
         None,
         &source,

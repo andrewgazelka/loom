@@ -148,6 +148,8 @@ impl Service {
         }
         if checked.lang == Lang::Ts {
             let def = Def {
+                allowed_effects: request.allowed_effects.clone(),
+                observed_effects: Vec::new(),
                 hash: checked.hash.clone(),
                 lang: checked.lang,
                 component_hash: self
@@ -181,6 +183,8 @@ impl Service {
         let component_hash = self.store.put("component", &built.component)?;
         let logs_ref = self.store.put("blob", built.logs.as_bytes())?;
         let def = Def {
+            allowed_effects: request.allowed_effects.clone(),
+            observed_effects: Vec::new(),
             hash: checked.hash,
             lang: checked.lang,
             component_hash: Some(component_hash.clone()),
@@ -206,6 +210,7 @@ impl Service {
             .prepare_rust_source(&checked, &dependencies)
             .await?;
         let prepared = DefineRequest {
+            allowed_effects: request.allowed_effects.clone(),
             lang: Lang::Rust,
             name: request.name.clone(),
             source,
@@ -277,6 +282,11 @@ impl Service {
                 }
             }
             let request = DefineRequest {
+                allowed_effects: self
+                    .store
+                    .definition(&hash)?
+                    .context("dependent definition missing")?
+                    .allowed_effects,
                 lang: candidate.lang,
                 name: candidate.name.clone(),
                 source: candidate.source,
@@ -290,6 +300,8 @@ impl Service {
                 continue;
             }
             let def = Def {
+                allowed_effects: request.allowed_effects.clone(),
+                observed_effects: Vec::new(),
                 hash: checked.hash,
                 lang: checked.lang,
                 component_hash: None,
@@ -341,6 +353,7 @@ impl Service {
         );
         let response = self
             .define_authorized(DefineRequest {
+                allowed_effects: None,
                 lang: Lang::Ts,
                 name: format!("session/{session}/eval"),
                 source,
@@ -356,7 +369,7 @@ impl Service {
         let actor = match self.store.session(&session)? {
             Some(actor) => actor,
             None => {
-                let definition=self.define(DefineRequest{lang:Lang::Ts,name:"loom/session".into(),source:"export function run(state: unknown, msg: unknown): unknown[] { return [msg]; } export function fold(state: unknown, event: unknown): unknown { return event; }".into(),deps:BTreeMap::new()}).await;
+                let definition=self.define(DefineRequest{allowed_effects:None,lang:Lang::Ts,name:"loom/session".into(),source:"export function run(state: unknown, msg: unknown): unknown[] { return [msg]; } export function fold(state: unknown, event: unknown): unknown { return event; }".into(),deps:BTreeMap::new()}).await;
                 if !definition.ok {
                     return Ok(definition);
                 }
@@ -931,6 +944,45 @@ mod tests {
         )
     }
     #[tokio::test]
+    async fn explicit_effect_policy_persists_and_changes_identity() {
+        let service = Service::new(
+            Store::memory().unwrap(),
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
+            vec![Lang::Ts],
+        )
+        .unwrap();
+        let request = DefineRequest {
+            lang: Lang::Ts,
+            name: "policy".into(),
+            source: "export function main(): number { return 42; }".into(),
+            deps: BTreeMap::new(),
+            allowed_effects: Some(Vec::new()),
+        };
+        let restricted = service.define(request.clone()).await;
+        assert!(restricted.ok, "{restricted:?}");
+        let hash = restricted.result["def"]["hash"].as_str().unwrap();
+        assert_eq!(
+            service
+                .store
+                .definition(hash)
+                .unwrap()
+                .unwrap()
+                .allowed_effects,
+            Some(Vec::new())
+        );
+        let unrestricted = service
+            .define(DefineRequest {
+                allowed_effects: None,
+                ..request
+            })
+            .await;
+        assert!(unrestricted.ok, "{unrestricted:?}");
+        assert_ne!(
+            restricted.result["def"]["hash"],
+            unrestricted.result["def"]["hash"]
+        );
+    }
+    #[tokio::test]
     async fn ts_define_is_lazy_and_eval_rejections_remain_failures() {
         let service = Service::new(
             Store::memory().unwrap(),
@@ -948,6 +1000,7 @@ mod tests {
         assert!(!rejected.ok);
         assert!(!rejected.diagnostics.is_empty());
         let request = DefineRequest {
+            allowed_effects: None,
             lang: Lang::Ts,
             name: "lazy".into(),
             source: "export function main(): number { return 42; }".into(),
@@ -973,6 +1026,7 @@ mod tests {
         .unwrap();
         let first = service
             .define(DefineRequest {
+                allowed_effects: None,
                 lang: Lang::Ts,
                 name: "add".into(),
                 source: "export function main(x:number):number {return x+1;}".into(),
@@ -983,7 +1037,7 @@ mod tests {
         let hash = first.result["def"]["hash"].as_str().unwrap().to_owned();
         let mut deps = BTreeMap::new();
         deps.insert("add".into(), hash);
-        let mut dependent=DefineRequest{lang:Lang::Ts,name:"caller".into(),source:"import {call} from 'loom'; import {add} from 'loom:defs'; export function main():unknown {return call(add,[41]);}".into(),deps};
+        let mut dependent=DefineRequest{allowed_effects:None,lang:Lang::Ts,name:"caller".into(),source:"import {call} from 'loom'; import {add} from 'loom:defs'; export function main():unknown {return call(add,[41]);}".into(),deps};
         let before = service.define(dependent.clone()).await;
         assert!(before.ok, "{before:?}");
         dependent.name = "bad-caller".into();
@@ -992,6 +1046,7 @@ mod tests {
         assert!(!rejected.ok, "{rejected:?}");
         let second = service
             .define(DefineRequest {
+                allowed_effects: None,
                 lang: Lang::Ts,
                 name: "add".into(),
                 source: "export function main(x:number):number {return x+2;}".into(),
@@ -1020,6 +1075,7 @@ mod tests {
             let started = std::time::Instant::now();
             let response = service
                 .define(DefineRequest {
+                    allowed_effects: None,
                     lang: Lang::Ts,
                     name: "latency".into(),
                     source: format!("export function main(x:number):number {{return x+{index};}}"),
@@ -1066,6 +1122,7 @@ mod tests {
         .unwrap();
         let response = service
             .define(DefineRequest {
+                allowed_effects: None,
                 lang: Lang::Rust,
                 name: "missing".into(),
                 source: format!("#{}", "a".repeat(64)),
@@ -1082,6 +1139,7 @@ mod tests {
         let source = "#[loom::def] pub fn main() { std::fs::read(\"secret\").unwrap(); }";
         let checked = service
             .define(DefineRequest {
+                allowed_effects: None,
                 lang: Lang::Rust,
                 name: "macro".into(),
                 source: source.into(),

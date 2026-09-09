@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { signatures } from "./signature";
+  import EffectBadges from "./EffectBadges.svelte";
+  import SignatureView from "./SignatureView.svelte";
   import RowPreview from "./RowPreview.svelte";
   import {
     AlignLeft,
@@ -116,15 +117,16 @@
         ><Play size={12} /> Call</button
       >
     </div>
+    <SignatureView value={selected.sig} name={definitionName(selected)} /><EffectBadges inferred={record(selected.sig).effects} allowed={selected.allowed_effects} observed={selected.observed_effects} />
     <button
       class="cid text-button identity"
       on:click={() => inspect(selected!.hash)}>{selected.hash} ↗</button
-    >{#if source}<div class="source-card">
+    >{#if source}<details class="source-card"><summary class="source-summary">Source</summary>
         <CodeBlock
           code={source}
           language={selected.lang === "rust" ? "rust" : "typescript"}
         />
-      </div>{:else if loading}<p class="empty">Reading definition…</p>{/if}
+      </details>{:else if loading}<p class="empty">Reading definition…</p>{/if}
     <details class="plain-details">
       <summary>Signature & identity</summary>
       <div class="detail-body"><ValueView value={selected} {inspect} /></div>
@@ -173,14 +175,14 @@
     <p class="graph-help">
       Two-finger scroll to pan · Pinch to zoom · Arrow keys to pan · 0 to reset
     </p>{:else}<div class="definition-list">
-      {#each definitions.filter(def => JSON.stringify(def).toLowerCase().includes(query.toLowerCase())) as def (def.hash)}<button
+      {#each definitions.filter(def => JSON.stringify(def).toLowerCase().includes(query.toLowerCase())) as def (def.hash)}<div class="definition-item"><button
           class="definition-row"
           on:click={() => open(def)}
           ><AlignLeft size={15} />
           <div>
-            <span class="definition-name">{definitionName(def)}</span>{#each signatures(def.sig) as signature}<span class="definition-signature">{signature}</span>{/each}<code
+            <span class="definition-name">{definitionName(def)}</span><SignatureView value={def.sig} name={definitionName(def)} /><EffectBadges inferred={record(def.sig).effects} allowed={def.allowed_effects} observed={def.observed_effects} /><code
               >{short(def.hash, 25)}</code
-            ><RowPreview code language={def.lang === "rust" ? "rust" : "ts"} load={() => preview(def)} />
+            >
           </div>
           <span class="badge">{def.lang === "rust" ? "Rust" : "TS"}</span><span
             class="quiet"
@@ -190,12 +192,14 @@
                 ? "Built"
                 : "On first use"}</span
           ><ChevronRight size={12} /></button
-        >{:else}<p class="empty">
+        ><details class="source-peek"><summary>Source</summary><RowPreview code language={def.lang === "rust" ? "rust" : "ts"} load={() => preview(def)} /></details></div>{:else}<p class="empty">
           No definitions yet. Save one from the session prompt.
         </p>{/each}
     </div>{/if}{/if}
 
 <style>
+  .source-peek { margin:0 10px 12px 39px; color:var(--muted); font-size:10px; }
+  .source-peek summary { cursor:pointer; }
   .definition-detail {
     margin-top: 28px;
   }
@@ -216,6 +220,7 @@
     text-align: left !important;
     word-break: break-all;
   }
+  .source-summary { padding:12px 16px; font-size:11px; cursor:pointer; }
   .source-card {
     margin: 20px 0;
     border: 1px solid var(--line);
@@ -261,7 +266,6 @@
     flex: 1;
     min-width: 0;
   }
-  .definition-signature { display:block; margin-top:6px; font:12px/1.7 var(--mono); color:var(--ink); overflow-wrap:anywhere; }
   .definition-name {
     display: block;
     font: 11px var(--mono);
@@ -286,7 +290,6 @@
     .definition-row {
       gap: 8px;
     }
-    .definition-signature { display:block; margin-top:6px; font:12px/1.7 var(--mono); color:var(--ink); overflow-wrap:anywhere; }
   .definition-name {
       font-size: 10px;
     }

@@ -27,11 +27,13 @@
   import Composer from "$lib/Composer.svelte";
   import ActorBrowser from "$lib/ActorBrowser.svelte";
   import DefinitionBrowser from "$lib/DefinitionBrowser.svelte";
+  import EffectsBrowser from "$lib/EffectsBrowser.svelte";
   import CasBrowser from "$lib/CasBrowser.svelte";
   import "@fontsource/jetbrains-mono/400.css";
   import "$lib/app.css";
-  type View = "Session" | "Definitions" | "Actors" | "CAS";
-  const views: View[] = ["Session", "Definitions", "Actors", "CAS"];
+  type View = "Session" | "Definitions" | "Actors" | "CAS" | "Effects";
+  const views: View[] = ["Session", "Definitions", "Actors", "CAS", "Effects"];
+  let selectedActor = "";
   let view: View = "Session",
     endpoint = "",
     token = "",
@@ -402,7 +404,8 @@
         {events}
         {inspect}
         {call}
-      />{:else if view === "Actors"}<ActorBrowser
+      />{:else if view === "Effects"}<EffectsBrowser {client} {events} {inspect} actor={(id) => { selectedActor = id; view = "Actors"; }} />{:else if view === "Actors"}<ActorBrowser
+        initialActor={selectedActor}
         {client}
         {actors}
         {definitions}

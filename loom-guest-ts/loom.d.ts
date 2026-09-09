@@ -1,5 +1,6 @@
 declare module "loom" {
   export type Value = import("./protocol.generated").JsonValue;
+  export type EffectSet = import("./protocol.generated").EffectSet;
   export interface Ref<T = Value> { readonly $ref: string; readonly __type?: T }
   export type Desc<T = Value> = import("./protocol.generated").Desc & { readonly __result?: T };
   const defBrand: unique symbol;

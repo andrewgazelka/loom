@@ -1,4 +1,5 @@
 //! Language checking before definitions become executable identities.
+mod rust_effects;
 use loom_proto::{DefineRequest, Diagnostic, ExportSig, Lang, ParamSig, TypeSig, ValueShape};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf, process::Stdio};
@@ -114,7 +115,7 @@ impl Checker {
                     diagnostics: result.diagnostics,
                 }
             }
-            Lang::Rust => check_rust(request),
+            Lang::Rust => check_rust(request, signatures),
         };
         for hash in checked.deps.values() {
             if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -126,8 +127,12 @@ impl Checker {
             }
         }
         // Structured serialization frames the source and dependency edges unambiguously.
-        let identity =
-            loom_proto::definition_identity(checked.lang, &checked.source, &checked.deps)?;
+        let identity = loom_proto::definition_identity(
+            checked.lang,
+            &checked.source,
+            &checked.deps,
+            request.allowed_effects.as_deref(),
+        )?;
         checked.hash = blake3::hash(&identity).to_hex().to_string();
         Ok(checked)
     }
@@ -223,9 +228,9 @@ impl SourceBundle {
         Ok(())
     }
 }
-fn check_rust(request: &DefineRequest) -> CheckedDef {
+fn check_rust(request: &DefineRequest, signatures: &BTreeMap<String, TypeSig>) -> CheckedDef {
     if !request.source.trim_start().starts_with('{') {
-        return check_rust_file(request);
+        return check_rust_file(request, signatures);
     }
     let mut checked = CheckedDef {
         hash: String::new(),
@@ -298,8 +303,9 @@ fn check_rust(request: &DefineRequest) -> CheckedDef {
                 name: request.name.clone(),
                 source: source.clone(),
                 deps: checked.deps.clone(),
+                allowed_effects: request.allowed_effects.clone(),
             };
-            let file = check_rust_file(&file_request);
+            let file = check_rust_file(&file_request, signatures);
             *source = file.source;
             if name == "src/lib.rs" {
                 checked.sig = file.sig;
@@ -312,6 +318,35 @@ fn check_rust(request: &DefineRequest) -> CheckedDef {
                 }));
         }
     }
+    fn opaque_dependencies(value: &toml::Value, known: &BTreeMap<String, TypeSig>) -> bool {
+        let Some(table) = value.as_table() else {
+            return false;
+        };
+        table.iter().any(|(name, value)| {
+            if ["dependencies", "build-dependencies", "dev-dependencies"].contains(&name.as_str()) {
+                value.as_table().is_some_and(|dependencies| {
+                    dependencies.iter().any(|(name, _)| {
+                        !["serde", "serde_json", "loom"].contains(&name.as_str())
+                            && !known.contains_key(name)
+                    })
+                })
+            } else {
+                opaque_dependencies(value, known)
+            }
+        })
+    }
+    if opaque_dependencies(&manifest, signatures)
+        || manifest
+            .get("package")
+            .and_then(|package| package.get("build"))
+            .is_some()
+        || bundle.files.contains_key("build.rs")
+    {
+        checked.sig.effects.unknown = true;
+        for export in &mut checked.sig.exports {
+            export.effects.unknown = true;
+        }
+    }
     match serde_json::to_string(&bundle) {
         Ok(source) => checked.source = source,
         Err(error) => {
@@ -322,10 +357,11 @@ fn check_rust(request: &DefineRequest) -> CheckedDef {
     }
     checked
 }
-fn check_rust_file(request: &DefineRequest) -> CheckedDef {
+fn check_rust_file(request: &DefineRequest, signatures: &BTreeMap<String, TypeSig>) -> CheckedDef {
     let source = request.source.replace("\r\n", "\n");
     let mut diagnostics = Vec::new();
     let mut exports = Vec::new();
+    let mut aggregate_effects = loom_proto::EffectSet::default();
     let source = match syn::parse_file(&source) {
         Ok(file) => {
             struct EntryVisitor {
@@ -349,6 +385,7 @@ fn check_rust_file(request: &DefineRequest) -> CheckedDef {
             if entries.count > 1 {
                 diagnostics.push(diagnostic(Lang::Rust,"LOOM_ENTRYPOINT","A definition crate must have one #[loom::def] or #[loom::actor] entrypoint; place reusable functions in separate hashed definitions."));
             }
+            let effects = rust_effects::infer(&file, signatures);
             for item in &file.items {
                 if let syn::Item::Fn(function) = item
                     && function.attrs.iter().any(|attribute| {
@@ -386,9 +423,14 @@ fn check_rust_file(request: &DefineRequest) -> CheckedDef {
                         name: function.sig.ident.to_string(),
                         params,
                         returns,
+                        effects: effects
+                            .get(&function.sig.ident.to_string())
+                            .cloned()
+                            .unwrap_or_default(),
                     });
                 }
             }
+            aggregate_effects = rust_effects::aggregate(&file, signatures, &effects, &exports);
             fn ambient_macro(tokens: proc_macro2::TokenStream) -> bool {
                 tokens.into_iter().any(|token| match token {
                     proc_macro2::TokenTree::Ident(name) => [
@@ -531,7 +573,10 @@ fn check_rust_file(request: &DefineRequest) -> CheckedDef {
         name: request.name.clone(),
         source,
         deps: request.deps.clone(),
-        sig: TypeSig { exports },
+        sig: TypeSig {
+            exports,
+            effects: aggregate_effects,
+        },
         diagnostics,
     }
 }
@@ -593,10 +638,13 @@ mod tests {
             name: "test".into(),
             source: "pub fn f()->u32 { 2 }".into(),
             deps: BTreeMap::new(),
+            allowed_effects: None,
         };
         let first = checker.check(&request).await.unwrap();
         request.source = "pub fn f() -> u32 {\n 2\n}\n".into();
         assert_eq!(first.hash, checker.check(&request).await.unwrap().hash);
+        request.allowed_effects = Some(vec![]);
+        assert_ne!(first.hash, checker.check(&request).await.unwrap().hash);
         request.source = "pub fn f() { std::fs::read(\"secret\").unwrap(); }".into();
         assert!(
             !checker
@@ -606,6 +654,17 @@ mod tests {
                 .diagnostics
                 .is_empty()
         );
+    }
+    #[tokio::test]
+    async fn external_crate_initialization_is_not_claimed_pure() {
+        let request=DefineRequest {
+            lang:Lang::Rust,name:"external".into(),deps:BTreeMap::new(),allowed_effects:None,
+            source:serde_json::json!({"files":{"Cargo.toml":"[package]\nname='external'\nversion='0.1.0'\n[dependencies]\nthird_party='1'\n","src/lib.rs":"#[loom::def] pub fn main()->i64 {42}"}}).to_string(),
+        };
+        let checked = Checker::new(PathBuf::new()).check(&request).await.unwrap();
+        assert!(checked.diagnostics.is_empty());
+        assert!(checked.sig.effects.unknown);
+        assert!(checked.sig.exports[0].effects.unknown);
     }
     #[tokio::test]
     async fn rejects_compiler_file_reads_and_macro_aliases() {
@@ -623,6 +682,7 @@ mod tests {
                 name: "test".into(),
                 source: source.into(),
                 deps: BTreeMap::new(),
+                allowed_effects: None,
             };
             assert!(
                 checker

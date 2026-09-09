@@ -107,7 +107,7 @@ pub fn def(attr: TokenStream, item: TokenStream) -> TokenStream {
     quote! {
         #function
         pub fn #signature() -> ::loom::Value {
-            ::loom::serde_json::json!({"exports":[{"name":#export_name,"params":[#(#parameter_signatures),*],"returns":#return_shape}]})
+            ::loom::serde_json::json!({"effects":{"labels":[],"unknown":true},"exports":[{"name":#export_name,"params":[#(#parameter_signatures),*],"returns":#return_shape,"effects":{"labels":[],"unknown":true}}]})
         }
         #invocation
         pub struct #component;

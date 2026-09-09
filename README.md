@@ -40,3 +40,6 @@ nix run .
 Open **http://localhost:8787** for the Svelte app; the launcher prints the token file location. Nix supplies both guest toolchains. The same runtime is available through the terminal REPL, HTTP, and MCP.
 
 [Setup, API, and architecture →](docs/guide.md)
+
+Connect Codex with `bun scripts/configure-codex-mcp.ts --token-file /path/to/loom/token`.
+See the [MCP setup and verification guide](docs/guide.md#codex-over-mcp).

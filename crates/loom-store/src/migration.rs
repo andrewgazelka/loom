@@ -32,6 +32,14 @@ struct StoredSignature {
 
 pub(super) fn run(connection: &mut Connection) -> Result<()> {
     let tx = connection.transaction()?;
+    let policy_exists: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('defs') WHERE name='allowed_effects')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !policy_exists {
+        tx.execute_batch("ALTER TABLE defs ADD COLUMN allowed_effects TEXT;")?;
+    }
     let key_columns: i64 = tx.query_row(
         "SELECT count(*) FROM pragma_table_info('inbox') WHERE pk>0",
         [],
@@ -57,6 +65,7 @@ pub(super) fn run(connection: &mut Connection) -> Result<()> {
         let legacy: LegacySignature = serde_json::from_str(&definition.sig)
             .with_context(|| format!("unrecognized persisted signature {}", definition.hash))?;
         let typed = TypeSig {
+            effects: Default::default(),
             exports: legacy
                 .exports
                 .into_iter()
@@ -71,6 +80,7 @@ pub(super) fn run(connection: &mut Connection) -> Result<()> {
                         })
                         .collect(),
                     returns: shape(&export.returns),
+                    effects: Default::default(),
                 })
                 .collect(),
         };
@@ -94,13 +104,19 @@ pub(super) fn run(connection: &mut Connection) -> Result<()> {
         let recorded:Vec<u8>=tx.query_row("SELECT bytes FROM events WHERE actor='system' AND json_extract(bytes,'$.type')='defined' AND json_extract(bytes,'$.def.hash')=? ORDER BY seq DESC LIMIT 1",[&hash],|r|r.get(0))?;
         let event: Value = serde_json::from_slice(&recorded)?;
         let deps = serde_json::from_value(event["deps"].clone())?;
-        let identity = loom_proto::definition_identity(def.lang, &source, &deps)?;
+        let identity = loom_proto::definition_identity(
+            def.lang,
+            &source,
+            &deps,
+            def.allowed_effects.as_deref(),
+        )?;
         anyhow::ensure!(
             blake3::hash(&identity).to_hex().as_str() == hash,
             "persisted definition {hash} does not match canonical source identity"
         );
         super::put(&tx, "def", &identity)?;
     }
+    tx.execute("INSERT OR IGNORE INTO def_effects SELECT json_extract(bytes,'$.def_hash'),json_extract(bytes,'$.op') FROM events WHERE actor='system' AND json_extract(bytes,'$.type')='effect_invoked' AND json_type(bytes,'$.def_hash')='text'",[])?;
     tx.commit()?;
     Ok(())
 }

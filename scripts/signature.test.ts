@@ -9,3 +9,7 @@ test("optional fields remain visible and absent signature does not invent argume
   expect(signatures(undefined)).toEqual([]);
   expect(shapeLabel({type:"future"})).toBe("unknown");
 });
+test("named definitions omit redundant main but retain other exports", () => {
+  const sig = {exports:[{name:"main",params:[{name:"path",shape:{type:"string"}}],returns:{type:"value"}},{name:"helper",params:[],returns:{type:"null"}}]};
+  expect(signatures(sig,"read-file")).toEqual(["(path: string) → Value","helper() → null"]);
+});

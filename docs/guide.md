@@ -108,3 +108,31 @@ podman compose -f deploy/compose.yaml up --build
 The image includes the compiler sidecars and static UI. Data and build cache live under `/data`. The compose file binds the service to host loopback. Use the backup command for a consistent SQLite snapshot while the server is running. A plain copy of an active SQLite file may omit WAL data.
 
 `scripts/container-smoke.sh` builds the image and checks both guest languages over HTTP and MCP, a vendored Rust crate, build sandbox isolation, and clean SIGTERM shutdown. The Compose configuration unmasks the outer container's `/proc` paths so nested build namespaces can mount private procfs; builds retain their isolated network, filesystem, and cleared environment. `scripts/remote-check.sh acceptance` runs the milestone suite on the configured Linux development node within an 8-core, 24-GB systemd user unit.
+
+### Codex over MCP
+
+Configure the four Loom tools in Codex, preserving other server settings:
+
+```sh
+bun scripts/configure-codex-mcp.ts --token-file /path/to/loom/token
+```
+
+The launcher prints the token path: macOS defaults to `~/Library/Application Support/loom/token`; Linux defaults to `${XDG_DATA_HOME:-~/.local/share}/loom/token`. The setup helper reports only the configured endpoint and approved tool count, never the bearer header.
+
+The token file must have owner-only permissions. The configuration stores its bearer header in an owner-only file and approves the four Loom tools; these tools can define and execute guest code. Use `--url` and `--config` to select another endpoint or configuration file.
+
+To verify a fresh Codex session against an **isolated test daemon**, set its URL and token file explicitly:
+
+```sh
+LOOM_URL=http://127.0.0.1:18891 LOOM_TOKEN_FILE=/path/to/test-state/token bun scripts/codex-mcp-run.ts
+```
+
+The runner creates a separate 10,000-file fixture, starts Codex with only Loom configured and a read-only shell sandbox, and retains its real JSONL trace. The six-gate verifier checks model-written TS and Rust definitions, independent results, filesystem changes, and five-scan warm medians below 1,500 ms. It ignores unrelated user configuration for this isolated run. Do not point it at the live application database.
+
+## Effects and file changes
+
+Definition signatures distinguish inferred effects, the host-enforced `allowed_effects` policy, and effects observed during execution. Inference is conservative: dynamic calls, getters, iterators, and unexpanded Rust code can leave the set unknown. Omitting `allowed_effects` permits all host operations; `[]` permits none. Explicit policies are part of definition identity. Calls and forks inherit the intersection of caller and callee permissions, including on cache hits.
+
+The Effects view shows individual invocations and their outcomes. To capture file content changes from a process, pass `capture_paths: ["note.txt"]` to `exec` or `process.start`. Paths are resolved within the process root; the capture records actual before/after bytes in CAS and displays created, modified, and deleted files as diffs. Capture is limited to 64 explicitly selected regular files, at most 1 MiB each. Symlinks, unsupported files, and unavailable reads are reported explicitly.
+
+These snapshots observe selected files across the process interval. They do not enumerate every write, track metadata-only changes, or distinguish concurrent writers. Historical effects without snapshots remain browsable, with no invented diff.

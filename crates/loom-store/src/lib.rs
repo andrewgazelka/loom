@@ -1,5 +1,6 @@
 mod cas_browser;
 mod dag_migration;
+mod effect_index;
 mod migration;
 use anyhow::{Context, Result, anyhow, ensure};
 use loom_proto::{Actor, Def, Event, Snapshot, Value};
@@ -60,6 +61,7 @@ impl Store {
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         connection.execute_batch(include_str!("schema.sql"))?;
         migration::run(&mut connection)?;
+        effect_index::rebuild(&mut connection)?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
         })
@@ -194,16 +196,27 @@ impl Store {
     ) -> Result<i64> {
         let mut connection = self.lock()?;
         let tx = connection.transaction()?;
-        let identity = loom_proto::definition_identity(def.lang, source, deps)?;
+        let identity = loom_proto::definition_identity(
+            def.lang,
+            source,
+            deps,
+            def.allowed_effects.as_deref(),
+        )?;
         ensure!(
             blake3::hash(&identity).to_hex().as_str() == def.hash,
             "definition hash does not match canonical identity"
         );
         put(&tx, "def", &identity)?;
+        let mut def = def.clone();
+        if let Some(labels) = def.allowed_effects.as_mut() {
+            labels.sort();
+            labels.dedup();
+        }
+        def.observed_effects.clear();
         let source_hash = put(&tx, "source_bundle", source.as_bytes())?;
         let event = serde_json::json!({"type":"defined","def":def,"name":name,"source_hash":source_hash,"deps":deps});
         let seq = append(&tx, "system", &event, 0)?;
-        tx.execute("INSERT INTO defs(hash,lang,name_hint,type_sig,component_hash,source_hash) VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT(hash) DO UPDATE SET component_hash=coalesce(excluded.component_hash,defs.component_hash)",params![def.hash,def.lang.as_str(),name,serde_json::to_string(&def.sig)?,def.component_hash,source_hash])?;
+        tx.execute("INSERT INTO defs(hash,lang,name_hint,type_sig,component_hash,source_hash,allowed_effects) VALUES (?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(hash) DO UPDATE SET component_hash=coalesce(excluded.component_hash,defs.component_hash)",params![def.hash,def.lang.as_str(),name,serde_json::to_string(&def.sig)?,def.component_hash,source_hash,def.allowed_effects.as_ref().map(serde_json::to_string).transpose()?])?;
         for hash in deps.values() {
             tx.execute(
                 "INSERT OR IGNORE INTO def_deps VALUES (?,?)",
@@ -262,7 +275,7 @@ impl Store {
             result
         };
         let signature_replacements = migration::replacements(&recorded)?;
-        tx.execute_batch("DELETE FROM message_keys; DELETE FROM inbox; DELETE FROM sessions; DELETE FROM snapshots; DELETE FROM names; DELETE FROM def_deps; DELETE FROM defs; DELETE FROM actors; DELETE FROM effect_results;")?;
+        tx.execute_batch("DELETE FROM def_effects; DELETE FROM message_keys; DELETE FROM inbox; DELETE FROM sessions; DELETE FROM snapshots; DELETE FROM names; DELETE FROM def_deps; DELETE FROM defs; DELETE FROM actors; DELETE FROM effect_results;")?;
         for record in recorded {
             let e = &record.event;
             if record.actor != "system" {
@@ -273,6 +286,9 @@ impl Store {
                 continue;
             }
             match e.get("type").and_then(Value::as_str) {
+                Some("effect_invoked") => {
+                    record_observed_effect(&tx, e)?;
+                }
                 Some("dag_cbor_migrated") => {
                     tx.execute_batch("UPDATE defs SET component_hash=NULL; UPDATE actors SET component_hash=NULL;")?;
                 }
@@ -318,7 +334,7 @@ impl Store {
                         definition["sig"] = sig.clone();
                     }
                     let def: Def = serde_json::from_value(definition)?;
-                    tx.execute("INSERT INTO defs VALUES (?,?,?,?,?,?) ON CONFLICT(hash) DO UPDATE SET component_hash=coalesce(excluded.component_hash,defs.component_hash)",params![def.hash,def.lang.as_str(),e["name"].as_str(),serde_json::to_string(&def.sig)?,def.component_hash,e["source_hash"].as_str().context("missing source hash")?])?;
+                    tx.execute("INSERT INTO defs(hash,lang,name_hint,type_sig,component_hash,source_hash,allowed_effects) VALUES (?,?,?,?,?,?,?) ON CONFLICT(hash) DO UPDATE SET component_hash=coalesce(excluded.component_hash,defs.component_hash)",params![def.hash,def.lang.as_str(),e["name"].as_str(),serde_json::to_string(&def.sig)?,def.component_hash,e["source_hash"].as_str().context("missing source hash")?,def.allowed_effects.as_ref().map(serde_json::to_string).transpose()?])?;
                     let deps: BTreeMap<String, String> = serde_json::from_value(e["deps"].clone())?;
                     for hash in deps.values() {
                         tx.execute(
@@ -843,7 +859,10 @@ impl Store {
         occurrence: i64,
     ) -> Result<Option<Value>> {
         let c = self.lock()?;
-        let bytes:Option<Vec<u8>>=c.query_row("SELECT bytes FROM cas WHERE hash=(SELECT result_hash FROM (SELECT coalesce((SELECT result_hash FROM effect_results WHERE desc_hash=?1 AND scope=?2 AND occurrence=?3), (SELECT json_extract(bytes, '$.result_hash') FROM effects WHERE json_extract(bytes, '$.desc_hash')=?1 AND json_extract(bytes, '$.scope')=?2 AND json_extract(bytes, '$.occurrence')=?3 ORDER BY seq DESC LIMIT 1)) AS result_hash) WHERE result_hash IS NOT NULL)",params![desc_hash,scope,occurrence],|r|r.get(0)).optional()?;
+        let bytes: Option<Vec<u8>> = c.query_row(
+            "SELECT c.bytes FROM effect_results e JOIN cas c ON c.hash=e.result_hash WHERE e.desc_hash=? AND e.scope=? AND e.occurrence=?",
+            params![desc_hash, scope, occurrence], |row| row.get(0),
+        ).optional()?;
         bytes.map(|b| decode(&b)).transpose()
     }
     pub fn effect_put(
@@ -856,7 +875,10 @@ impl Store {
         let mut c = self.lock()?;
         let tx = c.transaction()?;
         let hash = put_value(&tx, "result", result)?;
-        let existing:Option<String>=tx.query_row("SELECT result_hash FROM (SELECT coalesce((SELECT result_hash FROM effect_results WHERE desc_hash=?1 AND scope=?2 AND occurrence=?3), (SELECT json_extract(bytes, '$.result_hash') FROM effects WHERE json_extract(bytes, '$.desc_hash')=?1 AND json_extract(bytes, '$.scope')=?2 AND json_extract(bytes, '$.occurrence')=?3 ORDER BY seq DESC LIMIT 1)) AS result_hash) WHERE result_hash IS NOT NULL",params![desc_hash,scope,occurrence],|r|r.get(0)).optional()?;
+        let existing: Option<String> = tx.query_row(
+            "SELECT result_hash FROM effect_results WHERE desc_hash=? AND scope=? AND occurrence=?",
+            params![desc_hash, scope, occurrence], |row| row.get(0),
+        ).optional()?;
         ensure!(
             existing.as_ref().is_none_or(|h| h == &hash),
             "effect cache result conflict"
@@ -904,13 +926,40 @@ fn append(c: &Connection, actor: &str, event: &Value, handler_seq: i64) -> Resul
         "INSERT INTO log(actor,event_hash,handler_seq,ts) VALUES (?,?,?,unixepoch())",
         params![actor, hash, handler_seq],
     )?;
-    Ok(c.last_insert_rowid())
+    let seq = c.last_insert_rowid();
+    if actor == "system" && event["type"] == "effect_invoked" {
+        record_observed_effect(c, event)?;
+    }
+    Ok(seq)
+}
+fn record_observed_effect(c: &Connection, event: &Value) -> Result<()> {
+    // Trusted host operations are logged without a guest definition owner.
+    if event["def_hash"].is_null() {
+        return Ok(());
+    }
+    let hash = event["def_hash"]
+        .as_str()
+        .context("effect invocation missing definition hash")?;
+    let op = event["op"]
+        .as_str()
+        .context("effect invocation missing operation")?;
+    c.execute(
+        "INSERT OR IGNORE INTO def_effects VALUES (?,?)",
+        params![hash, op],
+    )?;
+    Ok(())
 }
 fn definition(c: &Connection, hash: &str) -> Result<Option<Def>> {
-    let value:Option<String>=c.query_row("SELECT json_object('hash',hash,'lang',lang,'component_hash',component_hash,'sig',json(type_sig)) FROM defs WHERE hash=?",[hash],|r|r.get(0)).optional()?;
-    value
-        .map(|v| serde_json::from_str(&v).map_err(Into::into))
-        .transpose()
+    let value:Option<String>=c.query_row("SELECT json_object('hash',hash,'lang',lang,'component_hash',component_hash,'sig',json(type_sig),'allowed_effects',json(allowed_effects)) FROM defs WHERE hash=?",[hash],|r|r.get(0)).optional()?;
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let mut def: Def = serde_json::from_str(&value)?;
+    let mut q = c.prepare("SELECT op FROM def_effects WHERE def_hash=? ORDER BY op")?;
+    def.observed_effects = q
+        .query_map([hash], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(Some(def))
 }
 
 #[cfg(test)]
@@ -919,7 +968,7 @@ mod tests {
     use loom_proto::Lang;
     use serde_json::json;
     fn identity(lang: Lang, source: &str, deps: &BTreeMap<String, String>) -> String {
-        blake3::hash(&loom_proto::definition_identity(lang, source, deps).unwrap())
+        blake3::hash(&loom_proto::definition_identity(lang, source, deps, None).unwrap())
             .to_hex()
             .to_string()
     }
@@ -948,6 +997,8 @@ mod tests {
                 lang: Lang::Rust,
                 component_hash: None,
                 sig: Default::default(),
+                allowed_effects: None,
+                observed_effects: Vec::new(),
             };
             store.define(&def, Some("counter"), "source", &BTreeMap::new())?;
             assert_eq!(
@@ -955,7 +1006,8 @@ mod tests {
                 Some(loom_proto::definition_identity(
                     def.lang,
                     "source",
-                    &BTreeMap::new()
+                    &BTreeMap::new(),
+                    None
                 )?)
             );
             let mut invalid = def.clone();
@@ -1108,7 +1160,7 @@ mod tests {
         let seq = store.append("system", &event, 0)?;
         store.with_connection(|c| {
             c.execute(
-                "INSERT INTO defs VALUES (?,'ts','legacy',?,NULL,?)",
+                "INSERT INTO defs(hash,lang,name_hint,type_sig,component_hash,source_hash) VALUES (?,'ts','legacy',?,NULL,?)",
                 params![hash, serde_json::to_string(&legacy)?, source],
             )?;
             c.execute(
@@ -1133,7 +1185,8 @@ mod tests {
             Some(loom_proto::definition_identity(
                 Lang::Ts,
                 "source",
-                &BTreeMap::new()
+                &BTreeMap::new(),
+                None
             )?)
         );
         let seq = store.latest_seq()?;
@@ -1163,6 +1216,8 @@ mod tests {
                 lang: Lang::Ts,
                 component_hash: None,
                 sig: Default::default(),
+                allowed_effects: None,
+                observed_effects: Vec::new(),
             },
             Some("d"),
             "source",
@@ -1190,7 +1245,7 @@ mod tests {
         assert_eq!(store.compact_log(store.latest_seq()?, 1000)?.events, 0);
         assert_eq!(store.get(&event_hash)?, Some(event_bytes));
         drop(store);
-        let store = Store::open(path)?;
+        let store = Store::open(&path)?;
         assert_eq!(serde_json::to_value(store.events(None, 0, 1000)?)?, before);
         store.rebuild_views()?;
         assert_eq!(
@@ -1205,6 +1260,8 @@ mod tests {
             c.execute("DELETE FROM effect_results", [])?;
             Ok(())
         })?;
+        drop(store);
+        let store = Store::open(path)?;
         assert_eq!(store.effect_get("desc", "global", 0)?, Some(json!(123)));
         assert!(store.effect_put("desc", "global", 0, &json!(124)).is_err());
         store.complete_message("a", message.handler_seq, &[json!("done")])?;
@@ -1228,6 +1285,8 @@ mod tests {
                     lang: Lang::Ts,
                     component_hash: None,
                     sig: Default::default(),
+                    allowed_effects: None,
+                    observed_effects: Vec::new(),
                 },
                 Some("name"),
                 source,

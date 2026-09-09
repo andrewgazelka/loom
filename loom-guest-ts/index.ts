@@ -3,6 +3,7 @@ import {encode, decode} from "./codec";
 import { perform as hostPerform } from "loom:host/abilities";
 import type { JsonValue, Desc as WireDesc } from "./protocol.generated";
 export type Value = JsonValue;
+export type { EffectSet } from "./protocol.generated";
 export type Ref<T = Value> = { readonly $ref: string; readonly __type?: T };
 export type Desc<T = Value> = WireDesc & { readonly __result?: T };
 declare const defBrand: unique symbol;

@@ -1,5 +1,5 @@
 import ts from 'typescript';
-import type {TypeSig,ValueShape} from '../loom-guest-ts/protocol.generated';
+import type {EffectSet,TypeSig,ValueShape} from '../loom-guest-ts/protocol.generated';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -160,13 +160,152 @@ export class Checker {
       }
       return {type:'value'};
     };
+    // Resolve provenance through symbols: spelling alone cannot distinguish aliases or shadows.
+    type Effects = EffectSet;
+    type Target = {kind:'loom'|'dependency';name:string}|{kind:'local';node:ts.FunctionLikeDeclaration};
+    const unwrap = (expression:ts.Expression):ts.Expression => {
+      while(ts.isParenthesizedExpression(expression)||ts.isAsExpression(expression)||ts.isTypeAssertionExpression(expression)||ts.isNonNullExpression(expression))expression=expression.expression;
+      return expression;
+    };
+    const reassigned=new Set<ts.Symbol>();
+    let propertyMutation=false;
+    const mutations=(node:ts.Node) => {
+      const target=ts.isBinaryExpression(node)&&node.operatorToken.kind>=ts.SyntaxKind.FirstAssignment&&node.operatorToken.kind<=ts.SyntaxKind.LastAssignment?node.left:(ts.isPrefixUnaryExpression(node)||ts.isPostfixUnaryExpression(node))&&(node.operator===ts.SyntaxKind.PlusPlusToken||node.operator===ts.SyntaxKind.MinusMinusToken)?node.operand:undefined;
+      if(target){if(ts.isIdentifier(target)){const symbol=checker.getSymbolAtLocation(target);if(symbol)reassigned.add(symbol);}else propertyMutation=true;}
+      ts.forEachChild(node,mutations);
+    };
+    mutations(file);
+    const resolveTarget = (expression:ts.Expression, seen=new Set<ts.Symbol>()):Target|undefined => {
+      expression=unwrap(expression);
+      if(ts.isArrowFunction(expression)||ts.isFunctionExpression(expression))return {kind:'local',node:expression};
+      if(ts.isPropertyAccessExpression(expression)||ts.isElementAccessExpression(expression)) {
+        const base=resolveTarget(expression.expression,seen);
+        const name=ts.isPropertyAccessExpression(expression)?expression.name.text:expression.argumentExpression&&ts.isStringLiteral(expression.argumentExpression)?expression.argumentExpression.text:undefined;
+        if(base&&base.kind!=='local'&&name)return {...base,name:base.name?`${base.name}.${name}`:name};
+      }
+      const symbol=checker.getSymbolAtLocation(expression);
+      if(!symbol||seen.has(symbol)||reassigned.has(symbol))return undefined;
+      seen.add(symbol);
+      for(const declaration of symbol.declarations??[]) {
+        if(ts.isImportSpecifier(declaration)||ts.isNamespaceImport(declaration)) {
+          const clause=ts.isImportSpecifier(declaration)?declaration.parent.parent:declaration.parent;
+          const imported=clause.parent;
+          if(ts.isImportDeclaration(imported)&&ts.isStringLiteral(imported.moduleSpecifier)) {
+            const kind=imported.moduleSpecifier.text==='loom'?'loom':imported.moduleSpecifier.text==='loom:defs'?'dependency':undefined;
+            if(kind)return {kind,name:ts.isImportSpecifier(declaration)?(declaration.propertyName??declaration.name).text:''};
+          }
+        }
+        if(ts.isFunctionDeclaration(declaration)&&declaration.body)return {kind:'local',node:declaration};
+        if(ts.isVariableDeclaration(declaration)&&declaration.initializer&&(declaration.parent.flags&ts.NodeFlags.Const))return resolveTarget(declaration.initializer,seen);
+        if(ts.isExportSpecifier(declaration)) {
+          const local=checker.getExportSpecifierLocalTargetSymbol(declaration);
+          const value=local?.valueDeclaration;
+          if(value&&ts.isFunctionDeclaration(value))return {kind:'local',node:value};
+          if(value&&ts.isVariableDeclaration(value)&&value.initializer)return resolveTarget(value.initializer,seen);
+        }
+      }
+      return undefined;
+    };
+    const summaries=new Map<ts.FunctionLikeDeclaration|ts.SourceFile,{labels:Set<string>;unknown:boolean;calls:Set<ts.FunctionLikeDeclaration>}>();
+    const knownAbilities=new Set(['exec','llm','now','random','sleep','fs.list','fs.stat','fs.read','fs.snapshot','cas.put','cas.get','send','join']);
+    const summarize=(node:ts.FunctionLikeDeclaration|ts.SourceFile) => {
+      const existing=summaries.get(node);if(existing)return existing;
+      const summary={labels:new Set<string>(),unknown:false,calls:new Set<ts.FunctionLikeDeclaration>()};summaries.set(node,summary);
+      const dependency=(expression:ts.Expression|undefined) => {
+        const target=expression&&resolveTarget(expression);
+        const sig=target?.kind==='dependency'?signatures[target.name]:undefined;
+        const exported=sig?.exports.find(item=>item.name==='default')??sig?.exports[0];
+        const effects=sig?.effects??exported?.effects;
+        if(!effects){summary.unknown=true;return;}
+        effects.labels.forEach(label=>summary.labels.add(label));summary.unknown ||= effects.unknown;
+      };
+      const dereference=(expression:ts.Expression,seen=new Set<ts.Symbol>()):ts.Expression => {
+        expression=unwrap(expression);
+        if(ts.isIdentifier(expression)) {
+          const symbol=checker.getSymbolAtLocation(expression);
+          if(symbol&&!seen.has(symbol))for(const declaration of symbol.declarations??[])if(ts.isVariableDeclaration(declaration)&&declaration.initializer&&(declaration.parent.flags&ts.NodeFlags.Const)){seen.add(symbol);return dereference(declaration.initializer,seen);}
+        }
+        return expression;
+      };
+      const descriptors=(expression:ts.Expression|undefined) => {
+        if(!expression){summary.unknown=true;return;}
+        expression=dereference(expression);
+        if(ts.isArrayLiteralExpression(expression))expression.elements.forEach(item=>descriptor(item));else summary.unknown=true;
+      };
+      const descriptor=(expression:ts.Expression|undefined) => {
+        if(!expression){summary.unknown=true;return;}
+        expression=dereference(expression);
+        if(ts.isCallExpression(expression)) {
+          const target=resolveTarget(expression.expression);
+          if(target?.kind==='loom'&&target.name.endsWith('.desc')&&knownAbilities.has(target.name.slice(0,-5))){summary.labels.add(target.name.slice(0,-5));return;}
+        }
+        if(ts.isObjectLiteralExpression(expression)) {
+          const properties=new Map<string,ts.Expression>();
+          for(const property of expression.properties) {
+            if(ts.isPropertyAssignment(property)&&(ts.isIdentifier(property.name)||ts.isStringLiteral(property.name)))properties.set(property.name.text,property.initializer);
+            else {summary.unknown=true;return;}
+          }
+          const op=properties.get('op');
+          if(op&&ts.isStringLiteral(dereference(op))) {
+            const name=(dereference(op) as ts.StringLiteral).text;
+            if(name==='all'||name==='race') {
+              summary.labels.add(name);
+              const args=properties.get('args');const value=args&&dereference(args);
+              if(value&&ts.isObjectLiteralExpression(value)){const descs=value.properties.find(p=>ts.isPropertyAssignment(p)&&p.name.getText(file)==='descs');descriptors(descs&&ts.isPropertyAssignment(descs)?descs.initializer:undefined);}else summary.unknown=true;
+            } else {summary.labels.add(name);if(['call','fork','spawn'].includes(name))summary.unknown=true;}
+            return;
+          }
+        }
+        summary.unknown=true;
+      };
+      const walk=(child:ts.Node) => {
+        if(child!==node&&ts.isFunctionLike(child))return;
+        // Destructuring and spread perform implicit reads/iteration. Getter and
+        // iterator dispatch can run guest code without an explicit call node.
+        if(ts.isObjectBindingPattern(child)||ts.isArrayBindingPattern(child)||ts.isSpreadAssignment(child)||ts.isSpreadElement(child)||ts.isForOfStatement(child))summary.unknown=true;
+        if(ts.isBinaryExpression(child)&&child.operatorToken.kind===ts.SyntaxKind.EqualsToken&&(ts.isObjectLiteralExpression(child.left)||ts.isArrayLiteralExpression(child.left)))summary.unknown=true;
+        if(ts.isPropertyAccessExpression(child)||ts.isElementAccessExpression(child)) {
+          const symbol=checker.getSymbolAtLocation(ts.isPropertyAccessExpression(child)?child.name:child);
+          for(const declaration of symbol?.declarations??[])if(ts.isGetAccessorDeclaration(declaration)&&declaration.body){summary.calls.add(declaration);summarize(declaration);}
+        }
+        if(ts.isCallExpression(child)||ts.isNewExpression(child)) {
+          const target=resolveTarget(child.expression);
+          if(target?.kind==='local'){summary.calls.add(target.node);summarize(target.node);}
+          else if(target?.kind==='loom') {
+            if(knownAbilities.has(target.name))summary.labels.add(target.name);
+            else if(target.name==='perform')descriptor(child.arguments?.[0]);
+            else if(target.name==='all'||target.name==='race'){summary.labels.add(target.name);descriptors(child.arguments?.[0]);}
+            else if(['call','fork','spawn'].includes(target.name)){summary.labels.add(target.name);dependency(child.arguments?.[0]);}
+            else if(!(target.name.endsWith('.desc')&&knownAbilities.has(target.name.slice(0,-5))))summary.unknown=true;
+          } else summary.unknown=true;
+        }
+        ts.forEachChild(child,walk);
+      };
+      walk(node);return summary;
+    };
+    const exportEffects=(symbol:ts.Symbol):Effects => {
+      const declaration=symbol.valueDeclaration??symbol.declarations?.[0];
+      let target:Target|undefined;
+      if(declaration&&ts.isFunctionDeclaration(declaration))target={kind:'local',node:declaration};
+      else if(declaration&&ts.isVariableDeclaration(declaration)&&declaration.initializer)target=resolveTarget(declaration.initializer);
+      else if(declaration&&ts.isExportSpecifier(declaration))target=resolveTarget(declaration.propertyName??declaration.name);
+      else if(declaration&&ts.isExportAssignment(declaration))target=resolveTarget(declaration.expression);
+      if(target?.kind!=='local')return {labels:[],unknown:true};
+      const summary=summarize(target.node);
+      const moduleEffects=summarize(file);
+      let changed=true;
+      while(changed){changed=false;for(const value of summaries.values())for(const call of value.calls){const other=summaries.get(call)!;for(const label of other.labels)if(!value.labels.has(label)){value.labels.add(label);changed=true;}if(other.unknown&&!value.unknown){value.unknown=true;changed=true;}}}
+      return {labels:[...new Set([...summary.labels,...moduleEffects.labels])].sort(),unknown:summary.unknown||moduleEffects.unknown||propertyMutation};
+    };
     const exported = checker.getSymbolAtLocation(file);
     const functions = exported ? checker.getExportsOfModule(exported).flatMap(symbol => {
       const type = checker.getTypeOfSymbolAtLocation(symbol, file);
-      return type.getCallSignatures().map(signature => ({name:symbol.name,params:signature.parameters.map(p=>({name:p.name,shape:shape(checker.getTypeOfSymbolAtLocation(p,file))})),returns:shape(signature.getReturnType())}));
+      return type.getCallSignatures().map(signature => ({name:symbol.name,params:signature.parameters.map(p=>({name:p.name,shape:shape(checker.getTypeOfSymbolAtLocation(p,file))})),returns:shape(signature.getReturnType()),effects:exportEffects(symbol)}));
     }) : [];
     if (functions.length === 0 && diagnostics.length === 0) reject(file, 'Export a default function, a named function, or actor run/fold functions.');
-    return {canonical,sig:{exports:functions},diagnostics};
+    const moduleEffects=summarize(file);
+    const effects:Effects={labels:[...new Set([...moduleEffects.labels,...functions.flatMap(item=>item.effects.labels)])].sort(),unknown:functions.length===0||moduleEffects.unknown||functions.some(item=>item.effects.unknown)};
+    return {canonical,sig:{exports:functions,effects},diagnostics};
   }
 }
 if (import.meta.main) {

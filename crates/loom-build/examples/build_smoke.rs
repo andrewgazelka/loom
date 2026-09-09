@@ -20,6 +20,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         name: "smoke".into(),
         source: std::fs::read_to_string(source_path)?,
         deps: BTreeMap::new(),
+        allowed_effects: None,
     };
     let checker = Checker::new(root.clone());
     let builder = Builder::new(root);

@@ -16,7 +16,7 @@ export function shapeLabel(value: unknown, depth = 0): string {
     default: return "unknown";
   }
 }
-export function signatures(value: unknown): string[] {
+export function signatures(value: unknown, enclosingName = ""): string[] {
   const exports = record(value).exports;
   if (!Array.isArray(exports)) return [];
   return exports.map(item => {
@@ -25,6 +25,7 @@ export function signatures(value: unknown): string[] {
       const data = record(param);
       return `${typeof data.name === "string" && data.name ? `${data.name}: ` : ""}${shapeLabel(data.shape)}`;
     }).join(", ") : "…";
-    return `${typeof entry.name === "string" ? entry.name : ""}(${params}) → ${shapeLabel(entry.returns)}`;
+    const name = typeof entry.name === "string" && !(enclosingName && (entry.name === "main" || entry.name === enclosingName)) ? entry.name : "";
+    return `${name}(${params}) → ${shapeLabel(entry.returns)}`;
   });
 }

@@ -21,6 +21,8 @@ pub struct LoomMcp {
 #[derive(Deserialize, JsonSchema)]
 pub struct DefineArgs {
     #[serde(default)]
+    allowed_effects: Option<Vec<String>>,
+    #[serde(default)]
     lang: Option<String>,
     name: String,
     source: String,
@@ -79,6 +81,7 @@ impl LoomMcp {
             &self.service.inline(
                 self.service_for(&context)
                     .define(DefineRequest {
+                        allowed_effects: args.allowed_effects,
                         lang,
                         name: args.name,
                         source: args.source,
@@ -118,7 +121,7 @@ impl LoomMcp {
         .unwrap()
     }
     #[tool(
-        description = "Run a loom command. Read CAS with cas.list {limit,after,kind,q} or cas.inspect {hash}; other commands include defs, actors, events, state, spawn, send, fork, upgrade, call, resolve, deps."
+        description = "Run a command with its JSON args object: machine.create {root:string} returns actor with id; call {hash:string,args:Value[]} invokes a definition; resolve {hash:string} accepts name/hash/CID; defs {} and actors {} list definitions/actors; state {actor:string}, spawn {hash:string,initial:Value}, send {actor:string,msg:Value}, events {actor?:string,after?:number,limit?:number}, deps {hash:string}; cas.list {limit?,after?,kind?,q?}, cas.inspect {hash:string}. For machine filesystem work define guest code using fs.list, then call it with machine id. Read loom_intro_ts or loom_intro_rust for ability signatures."
     )]
     async fn loom_command(
         &self,
@@ -194,10 +197,10 @@ impl ServerHandler for LoomMcp {
     ) -> Result<GetPromptResult, rmcp::ErrorData> {
         let text = match request.name.as_str() {
             "loom_intro_ts" => {
-                "Write synchronous pure TypeScript. Import abilities from 'loom' and named definition identities from 'loom:defs'; supply deps as an alias-to-hash map to define or eval. Abilities: perform(desc), all(descs), fork(def,args), join(fibers), sleep(ms), now(), random(), exec(args), fs. No fetch, Date, Math.random, timers, eval or Function. Define returns strict diagnostics; correct source and retry. Functions export main; actors export run(state,msg) returning events and fold(state,event) returning state. New components must compile before execution; build.ms reports elapsed time."
+                "Write synchronous pure TypeScript. Import abilities from 'loom' and named definition identities from 'loom:defs'; supply deps as an alias-to-hash map to define or eval. Abilities: perform(desc), all(descs), fork(def,args), join(fibers), sleep(ms), now(), random(), exec(args), fs. fs.list({machine,path}) returns sorted entries {name,size,is_dir,is_file,is_symlink}; machine is an actor ID and path is relative to its root. Recursively list entries with is_dir=true and select regular files using is_file=true; symlinks have both false. Skip symlinks when traversing and implement recursion in the guest. No fetch, Date, Math.random, timers, eval or Function. Define returns strict diagnostics; correct source and retry. Functions export main; actors export run(state,msg) returning events and fold(state,event) returning state. New components must compile before execution; build.ms reports elapsed time."
             }
             "loom_intro_rust" => {
-                "Write pure Rust using loom_guest_rs. Export free functions with #[loom::def] or implement Actor and #[loom::actor]. Abilities are synchronous host imports: perform(desc), all(descs), fork(def,args), join(fibers), abilities::exec, abilities::fs. No std::fs/net/time/env/process; use loom abilities. Cargo diagnostics include file,line,col,code and hint. New dependencies require a cold build; warm builds reuse cache. build.ms reports actual elapsed time. State, event, message, and call values use serde JSON-compatible shapes."
+                "Write pure Rust using loom_guest_rs. Export free functions with #[loom::def] or implement Actor and #[loom::actor]. Abilities are synchronous host imports: perform(desc), all(descs), fork(def,args), join(fibers), abilities::exec, abilities::fs. abilities::fs::list(machine,path) returns sorted entries {name,size,is_dir,is_file,is_symlink}; machine is an actor ID and path is relative to its root. Recursively list entries with is_dir=true and select regular files using is_file=true; symlinks have both false. Skip symlinks when traversing and implement recursion in the guest. No std::fs/net/time/env/process; use loom abilities. Cargo diagnostics include file,line,col,code and hint. New dependencies require a cold build; warm builds reuse cache. build.ms reports actual elapsed time. State, event, message, and call values use serde JSON-compatible shapes."
             }
             _ => return Err(rmcp::ErrorData::invalid_params("unknown prompt", None)),
         };

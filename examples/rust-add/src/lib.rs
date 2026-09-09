@@ -13,6 +13,10 @@ mod tests {
             "number"
         );
         assert_eq!(super::ADD_DEF.hash, "$self");
+        assert_eq!(
+            super::add_signature()["exports"][0]["effects"],
+            loom::serde_json::json!({"labels":[],"unknown":true})
+        );
         let signature: loom::TypeSig =
             loom::serde_json::from_value(super::add_signature()).unwrap();
         assert_eq!(signature.exports[0].params.len(), 2);

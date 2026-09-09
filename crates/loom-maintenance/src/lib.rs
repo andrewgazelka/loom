@@ -61,8 +61,8 @@ pub struct Collection {
     pub removed_index_entries: usize,
 }
 
-/// Remove at most `limit` disposable lookup rows, retaining both result bytes and
-/// effect-recorded events. Store::effect_get reads the log on an index miss.
+/// Remove at most `limit` orphan lookup rows. Recorded keys remain indexed for
+/// replay; deleting their index rows does not reclaim any result or event bytes.
 pub fn collect_effect_index(store: &Store, limit: usize) -> Result<Collection> {
     ensure!(
         (1..=1000).contains(&limit),
@@ -70,10 +70,21 @@ pub fn collect_effect_index(store: &Store, limit: usize) -> Result<Collection> {
     );
     store.with_connection(|connection| {
         let removed_index_entries = connection.execute(
-            "DELETE FROM effect_results WHERE rowid IN (SELECT rowid FROM effect_results ORDER BY rowid LIMIT ?)",
+            "WITH recorded AS MATERIALIZED (
+                SELECT json_extract(bytes,'$.desc_hash') AS desc_hash,
+                       json_extract(bytes,'$.scope') AS scope,
+                       json_extract(bytes,'$.occurrence') AS occurrence FROM effects
+             ) DELETE FROM effect_results WHERE rowid IN (
+                SELECT e.rowid FROM effect_results e WHERE NOT EXISTS (
+                    SELECT 1 FROM recorded r WHERE r.desc_hash=e.desc_hash
+                    AND r.scope=e.scope AND r.occurrence=e.occurrence
+                ) ORDER BY e.rowid LIMIT ?
+             )",
             [limit as i64],
         )?;
-        Ok(Collection { removed_index_entries })
+        Ok(Collection {
+            removed_index_entries,
+        })
     })
 }
 
@@ -119,10 +130,15 @@ mod tests {
         let store = Store::memory()?;
         store.effect_put("a", "global", 0, &json!(11))?;
         store.effect_put("b", "global", 1, &json!(22))?;
+        store.with_connection(|connection| {
+            connection.execute("INSERT INTO effect_results SELECT 'orphan-a',scope,occurrence,result_hash FROM effect_results WHERE desc_hash='a'", [])?;
+            connection.execute("INSERT INTO effect_results SELECT 'orphan-b',scope,occurrence,result_hash FROM effect_results WHERE desc_hash='b'", [])?;
+            Ok(())
+        })?;
         let before = stats(&store)?;
         assert_eq!(collect_effect_index(&store, 1)?.removed_index_entries, 1);
         let after = stats(&store)?;
-        assert_eq!(after.effect_index_entries, 1);
+        assert_eq!(after.effect_index_entries, 3);
         assert_eq!(before.cas_objects, after.cas_objects);
         assert_eq!(before.events, after.events);
         assert_eq!(store.effect_get("a", "global", 0)?, Some(json!(11)));

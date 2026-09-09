@@ -1,6 +1,8 @@
 //! Durable process lifecycle. Callers supply a trusted, sandboxed command after
 //! machine authorization; cwd containment alone is not a filesystem sandbox.
+mod capture;
 use anyhow::{Context, Result, ensure};
+pub use capture::{FileChange, FilesystemCapture, UnavailablePath};
 use loom_store::Store;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -24,6 +26,9 @@ pub struct ProcessSpec {
     pub root: PathBuf,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Explicit machine-root-relative regular files to observe before and after.
+    #[serde(default)]
+    pub capture_paths: Vec<PathBuf>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -43,6 +48,10 @@ pub struct ProcessState {
     pub stdout: String,
     pub stderr: String,
     pub error: Option<String>,
+    #[serde(default)]
+    pub filesystem_changes: Vec<FileChange>,
+    #[serde(default)]
+    pub filesystem_capture: FilesystemCapture,
 }
 struct Running {
     state: watch::Receiver<ProcessState>,
@@ -74,6 +83,8 @@ impl Supervisor {
             if state.phase == Phase::Running {
                 state.phase = Phase::Interrupted;
                 state.error = Some("daemon restarted; start a new process to resume".into());
+                state.filesystem_capture.unavailable_reason =
+                    Some("Process was interrupted; after-state capture is unavailable".into());
                 record(&store, &state)?;
             }
         }
@@ -102,6 +113,14 @@ impl Supervisor {
         let root = spec.root.canonicalize().context("machine root")?;
         let cwd = spec.cwd.canonicalize().context("process cwd")?;
         ensure!(cwd.starts_with(&root), "process cwd escapes machine root");
+        let capture_store = self.inner.store.clone();
+        let capture_machine = spec.machine.clone();
+        let capture_paths = spec.capture_paths.clone();
+        let capture = tokio::task::spawn_blocking(move || {
+            capture::Capture::begin(&capture_store, capture_machine, &root, &capture_paths)
+        })
+        .await
+        .context("filesystem capture worker")?;
         let mut command = Command::new(&spec.program);
         command
             .args(&spec.args)
@@ -126,6 +145,8 @@ impl Supervisor {
             stdout: String::new(),
             stderr: String::new(),
             error: None,
+            filesystem_changes: Vec::new(),
+            filesystem_capture: capture.report.clone(),
         };
         record(&self.inner.store, &initial)?;
         let (state_tx, state_rx) = watch::channel(initial.clone());
@@ -189,6 +210,17 @@ impl Supervisor {
                 }
             }
             drop(readers);
+            let capture_store = store.clone();
+            match tokio::task::spawn_blocking(move || capture.finish(&capture_store)).await {
+                Ok(captured) => {
+                    state.filesystem_changes = captured.changes;
+                    state.filesystem_capture = captured.report;
+                }
+                Err(error) => {
+                    state.filesystem_capture.unavailable_reason =
+                        Some(format!("Filesystem capture worker failed: {error}"));
+                }
+            }
             if let Err(error) = record(&store, &state) {
                 state.phase = Phase::Failed;
                 state.error = Some(format!("persist process outcome: {error}"));
@@ -410,6 +442,7 @@ mod tests {
             cwd: root.into(),
             root: root.into(),
             env,
+            capture_paths: Vec::new(),
         }
     }
     #[tokio::test]
@@ -490,6 +523,108 @@ mod tests {
         let mut outside = spec(temp.path(), "true");
         outside.cwd = "/".into();
         assert!(supervisor.start(outside).await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn capture_records_actual_file_changes_and_survives_restart() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        std::fs::write(temp.path().join("modified"), b"before")?;
+        std::fs::write(temp.path().join("deleted"), b"deleted bytes")?;
+        std::fs::write(temp.path().join("unchanged"), b"same")?;
+        let store = Store::open(temp.path().join("loom.sqlite"))?;
+        let supervisor = Supervisor::new(store.clone())?;
+        let mut input = spec(
+            temp.path(),
+            "printf after > modified; printf created > created; \"$LOOM_TEST_RM\" deleted",
+        );
+        input.env.insert("LOOM_TEST_RM".into(), executable("rm"));
+        input.capture_paths = ["modified", "created", "deleted", "unchanged"]
+            .into_iter()
+            .map(PathBuf::from)
+            .collect();
+        let process = supervisor.start(input).await?;
+        let completed = supervisor.wait(&process.id).await?;
+        assert_eq!(completed.code, Some(0));
+        assert_eq!(completed.filesystem_changes.len(), 3);
+        assert!(completed.filesystem_capture.unavailable_reason.is_none());
+        let modified = completed
+            .filesystem_changes
+            .iter()
+            .find(|change| change.path == "modified")
+            .context("modified file")?;
+        assert_eq!(
+            store.get(modified.before.as_deref().context("before CID")?)?,
+            Some(b"before".to_vec())
+        );
+        assert_eq!(
+            store.get(modified.after.as_deref().context("after CID")?)?,
+            Some(b"after".to_vec())
+        );
+        let created = completed
+            .filesystem_changes
+            .iter()
+            .find(|change| change.path == "created")
+            .context("created file")?;
+        assert!(created.before.is_none());
+        assert_eq!(
+            store.get(created.after.as_deref().context("created CID")?)?,
+            Some(b"created".to_vec())
+        );
+        let deleted = completed
+            .filesystem_changes
+            .iter()
+            .find(|change| change.path == "deleted")
+            .context("deleted file")?;
+        assert!(deleted.after.is_none());
+        assert_eq!(
+            store.get(deleted.before.as_deref().context("deleted CID")?)?,
+            Some(b"deleted bytes".to_vec())
+        );
+        drop(supervisor);
+        let reopened = Supervisor::new(Store::open(temp.path().join("loom.sqlite"))?)?;
+        assert_eq!(
+            serde_json::to_value(reopened.status(&process.id)?.filesystem_changes)?,
+            serde_json::to_value(completed.filesystem_changes)?
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn capture_unavailable_paths_do_not_fail_process_or_follow_symlinks() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let outside = tempfile::tempdir()?;
+        std::fs::write(outside.path().join("secret"), b"outside secret")?;
+        std::os::unix::fs::symlink(outside.path().join("secret"), temp.path().join("link"))?;
+        std::os::unix::fs::symlink(outside.path(), temp.path().join("parent-link"))?;
+        std::fs::create_dir(temp.path().join("directory"))?;
+        std::fs::write(temp.path().join("large"), vec![0; 1024 * 1024 + 1])?;
+        let store = Store::memory()?;
+        let supervisor = Supervisor::new(store.clone())?;
+        let mut input = spec(temp.path(), "printf success");
+        input.capture_paths = [
+            "link",
+            "parent-link/secret",
+            "directory",
+            "large",
+            "../escape",
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+        let process = supervisor.start(input).await?;
+        let completed = supervisor.wait(&process.id).await?;
+        assert_eq!(completed.code, Some(0));
+        assert_eq!(completed.stdout, "success");
+        assert!(completed.filesystem_changes.is_empty());
+        assert_eq!(completed.filesystem_capture.unavailable_paths.len(), 5);
+        let no_capture = supervisor
+            .start(spec(temp.path(), "printf uncaptured > other"))
+            .await?;
+        let no_capture = supervisor.wait(&no_capture.id).await?;
+        assert!(no_capture.filesystem_changes.is_empty());
+        assert!(no_capture.filesystem_capture.unavailable_reason.is_some());
         Ok(())
     }
 }
