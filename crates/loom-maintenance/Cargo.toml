@@ -1,0 +1,17 @@
+[package]
+name = "loom-maintenance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = "1"
+loom-store = { path = "../loom-store" }
+loom-build = { path = "../loom-build" }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt", "time"] }

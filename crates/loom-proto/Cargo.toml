@@ -1,0 +1,17 @@
+[package]
+name = "loom-proto"
+version = "0.1.0"
+edition = "2024"
+[features]
+default = []
+codegen = ["dep:ts-rs"]
+
+[[example]]
+name = "generate_ts"
+required-features = ["codegen"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ciborium = "0.2"
+ts-rs = { version = "11", features = ["serde-json-impl"], optional = true }

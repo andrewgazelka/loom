@@ -1,0 +1,20 @@
+services:
+  loom:
+    build:
+      context: ..
+    ports:
+      - "127.0.0.1:8787:8787"
+    environment:
+      LOOM_TOKEN: ${LOOM_TOKEN:?Set LOOM_TOKEN before starting Loom}
+    volumes:
+      - loom-data:/data
+    restart: unless-stopped
+    mem_limit: 8g
+    cpus: 4
+    healthcheck:
+      test: ["CMD", "bun", "-e", "fetch('http://127.0.0.1:8787/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+volumes:
+  loom-data:

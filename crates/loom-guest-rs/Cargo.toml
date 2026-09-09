@@ -1,0 +1,11 @@
+[package]
+name = "loom-guest-rs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+loom-proto = { path = "../loom-proto" }
+wit-bindgen = "0.46"
+loom-guest-macros = { path = "../loom-guest-macros" }

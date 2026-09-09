@@ -1,0 +1,10 @@
+/target/
+**/node_modules/
+**/.svelte-kit/
+**/build/
+.loom/
+.loom-build/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.DS_Store

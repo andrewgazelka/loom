@@ -1,0 +1,145 @@
+//! One-time conversion of the v0 string signatures. Immutable historical events
+//! retain their original bytes; migration events carry their typed replacement.
+use anyhow::{Context, Result};
+use loom_proto::{ExportSig, ParamSig, TypeSig, Value, ValueShape};
+use rusqlite::{Connection, params};
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacySignature {
+    #[serde(default)]
+    exports: Vec<LegacyExport>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyExport {
+    name: String,
+    params: Vec<LegacyParam>,
+    returns: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyParam {
+    name: String,
+    #[serde(rename = "type")]
+    shape: String,
+}
+struct StoredSignature {
+    hash: String,
+    sig: String,
+}
+
+pub(super) fn run(connection: &mut Connection) -> Result<()> {
+    let tx = connection.transaction()?;
+    let key_columns: i64 = tx.query_row(
+        "SELECT count(*) FROM pragma_table_info('inbox') WHERE pk>0",
+        [],
+        |r| r.get(0),
+    )?;
+    if key_columns == 1 {
+        tx.execute_batch("CREATE TABLE inbox_queue(actor TEXT NOT NULL REFERENCES actors(id),handler_seq INTEGER NOT NULL REFERENCES log(seq),msg TEXT NOT NULL,PRIMARY KEY(actor,handler_seq)); INSERT INTO inbox_queue SELECT actor,handler_seq,msg FROM inbox; DROP TABLE inbox; ALTER TABLE inbox_queue RENAME TO inbox;")?;
+    }
+    let definitions: Vec<StoredSignature> = {
+        let mut q = tx.prepare("SELECT hash,type_sig FROM defs")?;
+        q.query_map([], |r| {
+            Ok(StoredSignature {
+                hash: r.get(0)?,
+                sig: r.get(1)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?
+    };
+    for definition in definitions {
+        if serde_json::from_str::<TypeSig>(&definition.sig).is_ok() {
+            continue;
+        }
+        let legacy: LegacySignature = serde_json::from_str(&definition.sig)
+            .with_context(|| format!("unrecognized persisted signature {}", definition.hash))?;
+        let typed = TypeSig {
+            exports: legacy
+                .exports
+                .into_iter()
+                .map(|export| ExportSig {
+                    name: export.name,
+                    params: export
+                        .params
+                        .into_iter()
+                        .map(|param| ParamSig {
+                            name: param.name,
+                            shape: shape(&param.shape),
+                        })
+                        .collect(),
+                    returns: shape(&export.returns),
+                })
+                .collect(),
+        };
+        let event = serde_json::json!({"type":"definition_signature_migrated","version":1,"hash":definition.hash,"sig":typed});
+        super::append(&tx, "system", &event, 0)?;
+        tx.execute(
+            "UPDATE defs SET type_sig=? WHERE hash=?",
+            params![serde_json::to_string(&typed)?, definition.hash],
+        )?;
+    }
+    let hashes: Vec<String> = {
+        let mut q = tx.prepare(
+            "SELECT hash FROM defs WHERE NOT EXISTS(SELECT 1 FROM cas WHERE cas.hash=defs.hash)",
+        )?;
+        q.query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?
+    };
+    for hash in hashes {
+        let def = super::definition(&tx, &hash)?.context("definition disappeared")?;
+        let source:String=tx.query_row("SELECT CAST(c.bytes AS TEXT) FROM defs d JOIN cas c ON c.hash=d.source_hash WHERE d.hash=?",[&hash],|r|r.get(0))?;
+        let recorded:Vec<u8>=tx.query_row("SELECT bytes FROM events WHERE actor='system' AND json_extract(bytes,'$.type')='defined' AND json_extract(bytes,'$.def.hash')=? ORDER BY seq DESC LIMIT 1",[&hash],|r|r.get(0))?;
+        let event: Value = serde_json::from_slice(&recorded)?;
+        let deps = serde_json::from_value(event["deps"].clone())?;
+        let identity = loom_proto::definition_identity(def.lang, &source, &deps)?;
+        anyhow::ensure!(
+            blake3::hash(&identity).to_hex().as_str() == hash,
+            "persisted definition {hash} does not match canonical source identity"
+        );
+        super::put(&tx, "def", &identity)?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+fn shape(value: &str) -> ValueShape {
+    let value = value.trim();
+    if let Some(items) = value.strip_suffix("[]") {
+        return ValueShape::Array {
+            items: Box::new(shape(items)),
+        };
+    }
+    if let Some(target) = value.strip_prefix("Ref<").and_then(|v| v.strip_suffix('>')) {
+        return ValueShape::Ref {
+            target: Box::new(shape(target)),
+        };
+    }
+    match value {
+        "null" | "void" | "undefined" | "()" => ValueShape::Null,
+        "boolean" | "bool" => ValueShape::Boolean,
+        "number" | "u8" | "u16" | "u32" | "u64" | "i8" | "i16" | "i32" | "i64" | "f32" | "f64" => {
+            ValueShape::Number
+        }
+        "string" | "String" | "&str" => ValueShape::String,
+        // The old checker serialized language-specific types with no structural
+        // schema. Their only sound common boundary is the unrestricted Value.
+        _ => ValueShape::Value,
+    }
+}
+pub(super) fn replacements(
+    events: &[loom_proto::Event],
+) -> Result<std::collections::BTreeMap<String, Value>> {
+    let mut replacements = std::collections::BTreeMap::new();
+    for event in events {
+        if event.actor == "system" && event.event["type"] == "definition_signature_migrated" {
+            let hash = event.event["hash"]
+                .as_str()
+                .context("signature migration missing hash")?;
+            let sig: TypeSig = serde_json::from_value(event.event["sig"].clone())?;
+            replacements.insert(hash.into(), serde_json::to_value(sig)?);
+        }
+    }
+    Ok(replacements)
+}

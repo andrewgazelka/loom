@@ -1,0 +1,11 @@
+[package]
+name = "loom-example-recursive"
+version = "0.1.0"
+edition = "2024"
+[lib]
+crate-type = ["cdylib", "rlib"]
+[dependencies]
+loom = { package = "loom-guest-rs", path = "../../crates/loom-guest-rs" }
+
+[features]
+loom-dependency = []

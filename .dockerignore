@@ -1,0 +1,7 @@
+.git
+**/target
+**/node_modules
+**/.svelte-kit
+**/build
+.loom-build
+*.sqlite*

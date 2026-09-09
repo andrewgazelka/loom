@@ -1,0 +1,192 @@
+use proc_macro::TokenStream;
+use quote::{format_ident, quote};
+use syn::{FnArg, ItemFn, ItemStruct, Pat, parse_macro_input};
+
+/// Export one free function as the component's callable definition.
+#[proc_macro_attribute]
+pub fn def(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let mut definition_hash = syn::LitStr::new("$self", proc_macro2::Span::call_site());
+    if !attr.is_empty() {
+        let argument = parse_macro_input!(attr as syn::MetaNameValue);
+        if !argument.path.is_ident("hash") {
+            return syn::Error::new_spanned(argument, "expected hash = \"definition hash\"")
+                .to_compile_error()
+                .into();
+        }
+        match argument.value {
+            syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(hash),
+                ..
+            }) => definition_hash = hash,
+            other => {
+                return syn::Error::new_spanned(other, "hash must be a string literal")
+                    .to_compile_error()
+                    .into();
+            }
+        }
+    }
+    let function = parse_macro_input!(item as ItemFn);
+    if function.sig.asyncness.is_some() || !function.sig.generics.params.is_empty() {
+        return syn::Error::new_spanned(
+            &function.sig,
+            "loom definitions must be synchronous and non-generic",
+        )
+        .to_compile_error()
+        .into();
+    }
+    let name = &function.sig.ident;
+    let component = format_ident!("__LoomDefinition");
+    let mut decode = Vec::new();
+    let mut arguments = Vec::new();
+    let mut argument_types = Vec::new();
+    let mut parameter_signatures = Vec::new();
+    for (index, input) in function.sig.inputs.iter().enumerate() {
+        let FnArg::Typed(argument) = input else {
+            return syn::Error::new_spanned(input, "free function required")
+                .to_compile_error()
+                .into();
+        };
+        let Pat::Ident(pattern) = argument.pat.as_ref() else {
+            return syn::Error::new_spanned(argument, "use named arguments")
+                .to_compile_error()
+                .into();
+        };
+        let variable = &pattern.ident;
+        let ty = &argument.ty;
+        decode.push(quote! { let #variable: #ty = ::loom::serde_json::from_value(values.get(#index).cloned().ok_or_else(|| format!("missing argument {}", #index))?).map_err(|error| error.to_string())?; });
+        arguments.push(variable);
+        argument_types.push(ty);
+        let parameter_name = variable.to_string();
+        let shape = type_shape(ty);
+        parameter_signatures
+            .push(quote! { ::loom::serde_json::json!({"name": #parameter_name, "shape": #shape}) });
+    }
+    let count = arguments.len();
+    let def_constant = format_ident!("{}_DEF", name.to_string().to_uppercase());
+    let output = &function.sig.output;
+    let signature = format_ident!("{}_signature", name);
+    let export_name = name.to_string();
+    let return_shape = match output {
+        syn::ReturnType::Default => quote!(::loom::serde_json::json!({"type":"null"})),
+        syn::ReturnType::Type(_, ty) => type_shape(ty),
+    };
+    let invocation = if count == 1 {
+        quote! { pub const #def_constant: ::loom::Def<fn(#(#argument_types),*) #output> = ::loom::Def::new(#definition_hash); }
+    } else {
+        let pascal_name: String = name
+            .to_string()
+            .split('_')
+            .map(|part| {
+                let mut chars = part.chars();
+                chars
+                    .next()
+                    .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+                    .unwrap_or_default()
+            })
+            .collect();
+        let args_name = format_ident!("{}Args", pascal_name);
+        let invocation_name = format_ident!("{}Invocation", pascal_name);
+        let return_type = match output {
+            syn::ReturnType::Default => quote!(()),
+            syn::ReturnType::Type(_, ty) => quote!(#ty),
+        };
+        quote! {
+            pub struct #args_name { #(pub #arguments: #argument_types),* }
+            pub struct #invocation_name;
+            impl ::loom::Invocation for #invocation_name {
+                type Args = #args_name;
+                type Output = #return_type;
+                fn arguments(args: #args_name) -> Result<Vec<::loom::Value>, ::loom::EffectError> {
+                    let #args_name { #(#arguments),* } = args;
+                    Ok(vec![#(::loom::serde_json::to_value(#arguments).map_err(|error| error.to_string())?),*])
+                }
+            }
+            pub const #def_constant: ::loom::Def<#invocation_name> = ::loom::Def::new(#definition_hash);
+        }
+    };
+    quote! {
+        #function
+        pub fn #signature() -> ::loom::Value {
+            ::loom::serde_json::json!({"exports":[{"name":#export_name,"params":[#(#parameter_signatures),*],"returns":#return_shape}]})
+        }
+        #invocation
+        pub struct #component;
+        #[cfg(not(feature = "loom-dependency"))]
+        impl ::loom::bindings::Guest for #component {
+            fn run(_state: Vec<u8>, _msg: Vec<u8>) -> Result<Vec<u8>, String> { Err("free definition has no actor handler".into()) }
+            fn fold(_state: Vec<u8>, _event: Vec<u8>) -> Vec<u8> { panic!("free definition has no fold") }
+            fn call(_def: Vec<u8>, args: Vec<u8>) -> Result<Vec<u8>, String> {
+                let value: ::loom::Value = ::loom::decode(&args)?;
+                let values = match value { ::loom::Value::Array(values) => values, value if #count == 1 => vec![value], ::loom::Value::Null if #count == 0 => vec![], _ => return Err("arguments must be an array".into()) };
+                if values.len() != #count { return Err(format!("expected {} arguments, got {}", #count, values.len())); }
+                #(#decode)*
+                ::loom::encode(&#name(#(#arguments),*))
+            }
+        }
+        #[cfg(not(feature = "loom-dependency"))]
+        ::loom::bindings::export!(#component);
+    }.into()
+}
+
+/// Export an Actor implementation. Place this attribute on its named struct.
+#[proc_macro_attribute]
+pub fn actor(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let structure = parse_macro_input!(item as ItemStruct);
+    let name = &structure.ident;
+    quote! {
+        #structure
+        #[cfg(not(feature = "loom-dependency"))]
+        impl ::loom::bindings::Guest for #name {
+            fn run(state: Vec<u8>, msg: Vec<u8>) -> Result<Vec<u8>, String> {
+                let state = if ::loom::decode::<::loom::Value>(&state)?.is_null() { <Self as ::loom::Actor>::init() } else { ::loom::decode(&state)? };
+                let msg = ::loom::decode(&msg)?;
+                ::loom::encode(&<Self as ::loom::Actor>::handle(&state, msg))
+            }
+            fn fold(state: Vec<u8>, event: Vec<u8>) -> Vec<u8> {
+                let state = if ::loom::decode::<::loom::Value>(&state).expect("invalid state CBOR").is_null() { <Self as ::loom::Actor>::init() } else { ::loom::decode(&state).expect("invalid actor state") };
+                let event = ::loom::decode(&event).expect("invalid actor event");
+                ::loom::encode(&<Self as ::loom::Actor>::fold(state, &event)).expect("invalid folded state")
+            }
+            fn call(_def: Vec<u8>, _args: Vec<u8>) -> Result<Vec<u8>, String> { Err("actor definition has no free function".into()) }
+        }
+        #[cfg(not(feature = "loom-dependency"))]
+        ::loom::bindings::export!(#name);
+    }.into()
+}
+
+fn type_shape(ty: &syn::Type) -> proc_macro2::TokenStream {
+    let primitive = match ty {
+        syn::Type::Path(path) => {
+            let Some(segment) = path.path.segments.last() else {
+                return quote!(::loom::serde_json::json!({"type":"value"}));
+            };
+            match segment.ident.to_string().as_str() {
+                "bool" => "boolean",
+                "String" | "str" => "string",
+                "u8" | "u16" | "u32" | "u64" | "usize" | "i8" | "i16" | "i32" | "i64" | "isize"
+                | "f32" | "f64" => "number",
+                "Vec" => {
+                    if let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments
+                        && let Some(syn::GenericArgument::Type(item)) = arguments.args.first()
+                    {
+                        let shape = type_shape(item);
+                        return quote!(::loom::serde_json::json!({"type":"array","items":#shape}));
+                    }
+                    "value"
+                }
+                _ => "value",
+            }
+        }
+        syn::Type::Reference(reference) => return type_shape(&reference.elem),
+        syn::Type::Array(array) => {
+            let shape = type_shape(&array.elem);
+            return quote!(::loom::serde_json::json!({"type":"array","items":#shape}));
+        }
+        syn::Type::Slice(slice) => {
+            let shape = type_shape(&slice.elem);
+            return quote!(::loom::serde_json::json!({"type":"array","items":#shape}));
+        }
+        _ => "value",
+    };
+    quote!(::loom::serde_json::json!({"type":#primitive}))
+}
