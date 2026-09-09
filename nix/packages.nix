@@ -39,6 +39,7 @@ let
     runtimePath = lib.makeBinPath runtime;
     inherit sources;
     daemon = lib.getExe host;
+    rustc = lib.getExe' toolchain "rustc";
     certificates = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
   };
   package = pkgs.stdenvNoCC.mkDerivation {
