@@ -9,6 +9,11 @@ use std::{
 };
 use tokio::{fs, process::Command, sync::Mutex};
 
+// Build workspaces own mutable files; immutable SDK permissions must not leak in.
+async fn seed_build_lock(source: &Path, destination: &Path) -> Result<(), std::io::Error> {
+    fs::write(destination, fs::read(source).await?).await
+}
+
 pub struct Builder {
     root: PathBuf,
     cache: PathBuf,
@@ -156,7 +161,8 @@ impl Builder {
             // Seed from its checked-in lock; metadata updates path package entries
             // without running any dependency build scripts.
             if !crate_dir.join("Cargo.lock").exists() {
-                fs::copy(self.root.join("Cargo.lock"), crate_dir.join("Cargo.lock")).await?;
+                seed_build_lock(&self.root.join("Cargo.lock"), &crate_dir.join("Cargo.lock"))
+                    .await?;
             }
             let mut command = Command::new("cargo");
             command
@@ -847,6 +853,39 @@ impl Builder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn immutable_sdk_lock_becomes_mutable_build_input() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory =
+            std::env::temp_dir().join(format!("loom-readonly-lock-{}", std::process::id()));
+        fs::create_dir_all(&directory).await.unwrap();
+        let source = directory.join("sdk.lock");
+        let destination = directory.join("build.lock");
+        fs::write(&source, b"version = 4\n").await.unwrap();
+        fs::set_permissions(&source, std::fs::Permissions::from_mode(0o444))
+            .await
+            .unwrap();
+        seed_build_lock(&source, &destination).await.unwrap();
+        assert_ne!(
+            fs::metadata(&destination)
+                .await
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o200,
+            0
+        );
+        fs::write(&destination, b"updated build lock")
+            .await
+            .unwrap();
+        assert_eq!(fs::read(&source).await.unwrap(), b"version = 4\n");
+        assert_eq!(
+            fs::metadata(&source).await.unwrap().permissions().mode() & 0o222,
+            0
+        );
+        fs::remove_dir_all(directory).await.unwrap();
+    }
     #[test]
     fn cargo_artifact_uses_the_root_manifest_and_reported_filename() {
         let root =
