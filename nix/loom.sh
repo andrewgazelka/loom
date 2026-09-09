@@ -19,7 +19,18 @@ export LOOM_BUILD_DIR=${LOOM_BUILD_DIR:-"$state/builds"}
 export CARGO_HOME=${CARGO_HOME:-"$state/cargo"}
 export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-4}
 mkdir -p "$LOOM_BUILD_DIR" "$CARGO_HOME"
-if [[ -z ${LOOM_TOKEN:-} ]]; then
+has_db=false
+has_bind=false
+has_auth=false
+for argument in "$@"; do
+  case "$argument" in
+    --db|--db=*) has_db=true ;;
+    --bind|--bind=*) has_bind=true ;;
+    --token|--token=*|--tokens-file|--tokens-file=*) has_auth=true ;;
+  esac
+done
+if $has_auth; then unset LOOM_TOKEN; fi
+if ! $has_auth && [[ -z ${LOOM_TOKEN:-} ]]; then
   if [[ ! -s "$state/token" ]]; then
     token=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
     (set -o noclobber; printf '%s\n' "$token" > "$state/token") 2>/dev/null || true
@@ -28,5 +39,11 @@ if [[ -z ${LOOM_TOKEN:-} ]]; then
   export LOOM_TOKEN
 fi
 bind=${LOOM_BIND:-127.0.0.1:8787}
-printf 'Loom: http://%s\nToken file: %s/token\n' "$bind" "$state" >&2
-exec '@daemon@' --db "$state/loom.sqlite" --bind "$bind" "$@"
+defaults=()
+if ! $has_db; then defaults+=(--db "$state/loom.sqlite"); fi
+if ! $has_bind; then
+  defaults+=(--bind "$bind")
+  printf 'Loom: http://%s\n' "$bind" >&2
+fi
+if [[ -s "$state/token" ]]; then printf 'Token file: %s/token\n' "$state" >&2; fi
+exec '@daemon@' "${defaults[@]}" "$@"
