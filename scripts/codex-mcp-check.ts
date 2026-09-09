@@ -1,5 +1,5 @@
 /** Independent verifier: the caller owns isolated loomd and the actual fresh Codex invocation. */
-import {mkdir, readdir, readFile, stat, writeFile, symlink, rename, readlink, lstat} from 'node:fs/promises';
+import {mkdir, readdir, readFile, stat, writeFile, symlink, rename, readlink, lstat, mkdtemp, rm} from 'node:fs/promises';
 import {join, resolve} from 'node:path';
 import {LoomMcpClient, object} from './mcp-client';
 const args=process.argv.slice(2);
@@ -41,6 +41,7 @@ if(option('--create-fixture')) {await createFixture(resolve(requireValue(option(
 let passed=0;
 let firstFailure: string | undefined;
 let client:LoomMcpClient|undefined;
+let mutationRoot:string|undefined;
 async function gate(name:string,run:()=>Promise<void>){try {await run();passed++;console.log(`PASS ${name}`);} catch(error) { firstFailure ??= `${name}: ${String(error)}`; throw error; }}
 function assert(condition:unknown,message:string):asserts condition {if(!condition)throw new Error(message);}
 function decodedLoomResult(call:Record<string,unknown>):Record<string,unknown>|undefined {
@@ -92,21 +93,23 @@ try {
     assert(calls.some(call=>call.server==='loom'&&call.tool==='loom_command'&&successfulLoomResult(call)&&object(call.arguments).command==='call'&&object(object(call.arguments).args).hash===definition.hash),`trace lacks actual${lang}execution`);
     await invoke(lang);
   });
-  const mutationDirectory=join(root,'nested/middle/deep',`new-${crypto.randomUUID()}`,'deeper');
-  const mutationFile=join(mutationDirectory,'winner.dat');
+  let mutationFile:string;
   await gate('both languages observe a new deeper directory and winner',async()=>{
-    await mkdir(mutationDirectory,{recursive:true});
+    mutationRoot=await mkdtemp(join(root,'nested/middle/deep','.loom-check-'));
+    const mutationDirectory=join(mutationRoot,'deeper');
+    await mkdir(mutationDirectory);
+    mutationFile=join(mutationDirectory,'winner.dat');
     await writeFile(mutationFile,new Uint8Array(16387));expected=await scan(root);await invoke('ts');await invoke('rust');
   });
   const failures: string[] = [];
   for(const lang of ['ts','rust'])try { await gate(`${lang} five fresh warm scans median below1500ms`,async()=>{
     const samples:number[]=[];
     for(let iteration=0;iteration<5;iteration++){
-      await writeFile(mutationFile,new Uint8Array(16388+iteration));expected=await scan(root);
+      await writeFile(mutationFile!,new Uint8Array(16388+iteration));expected=await scan(root);
       const start=performance.now();await invoke(lang);samples.push(performance.now()-start);
     }
     const median=[...samples].sort((a,b)=>a-b)[2]!;console.log(JSON.stringify({lang,samples_ms:samples,median_ms:median}));assert(median<1500,`${lang} median${median}ms exceeds1500ms`);
   }); } catch(error) { failures.push(String(error)); console.error(error); }
   if(failures.length)throw new Error(failures.join('; '));
 }catch(error){firstFailure ??= String(error);console.error(error);process.exitCode=1;}
-finally {try {await client?.close();} catch(error) {console.error(error);process.exitCode=1;} console.log(`${passed}/6 fresh Codex recursive MCP checks pass${firstFailure ? `; first failing step: ${firstFailure}` : ''}`);}
+finally {try {if(mutationRoot)await rm(mutationRoot,{recursive:true});} catch(error) {firstFailure ??= `fixture cleanup: ${String(error)}`;console.error(error);process.exitCode=1;} try {await client?.close();} catch(error) {console.error(error);process.exitCode=1;} console.log(`${passed}/6 fresh Codex recursive MCP checks pass${firstFailure ? `; first failing step: ${firstFailure}` : ''}`);}
