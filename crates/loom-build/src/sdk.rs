@@ -231,6 +231,7 @@ fn seed_sdk(original: &Lock, current: &Lock) -> Result<Vec<u8>, BuildError> {
 }
 
 pub(crate) struct Rebuild<'a> {
+    pub store: &'a loom_store::Store,
     pub root: &'a Path,
     pub cache: &'a Path,
     pub directory: &'a Path,
@@ -321,6 +322,7 @@ pub(crate) async fn reconcile(job: Rebuild<'_>) -> Result<(), BuildError> {
             )
             .await?;
         }
+        materialize_pinned_crates(job.store, &job.definition.source, &crate_dir)?;
         fs::copy(
             job.directory.join("Cargo.toml"),
             crate_dir.join("Cargo.toml"),
@@ -350,6 +352,19 @@ pub(crate) async fn reconcile(job: Rebuild<'_>) -> Result<(), BuildError> {
         fs::write(config.join("config.toml"), VENDOR_CONFIG).await?;
     }
     fs::remove_dir_all(overlay).await?;
+    Ok(())
+}
+fn materialize_pinned_crates(store: &loom_store::Store, source: &str, directory: &Path) -> Result<(), BuildError> {
+    if !source.trim_start().starts_with('{') { return Ok(()); }
+    let bundle: SourceBundle = serde_json::from_str(source).map_err(|error| BuildError::Rejected(error.to_string()))?;
+    let manifest = bundle.files.get("Cargo.toml").and_then(loom_check::SourceFile::as_text).ok_or_else(|| BuildError::Rejected("definition manifest missing".into()))?;
+    let crates = loom_check::crate_dependencies(manifest).map_err(BuildError::Rejected)?;
+    let mut seen = BTreeSet::new();
+    for dependency in crates.values() {
+        if seen.insert(&dependency.hash) {
+            crate::registry::CrateRegistry::new(store.clone()).materialize(&dependency.hash, &directory.join("loom-crates").join(&dependency.hash)).map_err(|error| BuildError::Rejected(error.to_string()))?;
+        }
+    }
     Ok(())
 }
 fn vendor_identity(directory: &Path) -> Result<PackageKey, BuildError> {
@@ -427,6 +442,22 @@ mod tests {
     use super::*;
     fn lock(source: &str) -> Lock {
         Lock::parse(source.as_bytes()).unwrap()
+    }
+    #[test]
+    fn overlay_materializes_pinned_crates_from_cas() {
+        let store = loom_store::Store::memory().unwrap();
+        let bytes = b"[package]\nname='pinned'\nversion='1.0.0'\n";
+        let blob = store.put("blob", bytes).unwrap();
+        let tree = loom_proto::Tree { entries: vec![loom_proto::TreeEntry { name: "Cargo.toml".into(), reference: store.reference(&blob, loom_proto::RAW_CODEC).unwrap(), directory: false, executable: false }] };
+        let hash = store.put_value("tree", &tree).unwrap();
+        let mut files = BTreeMap::new();
+        files.insert("Cargo.toml".into(), loom_check::SourceFile::Text(format!("[loom.crates]\npinned={{hash='{hash}'}}\nalias={{hash='{hash}'}}\n")));
+        let source = serde_json::to_string(&SourceBundle { files }).unwrap();
+        let directory = std::env::temp_dir().join(format!("loom-sdk-overlay-{}", std::process::id()));
+        if directory.exists() { std::fs::remove_dir_all(&directory).unwrap(); }
+        materialize_pinned_crates(&store, &source, &directory).unwrap();
+        assert_eq!(std::fs::read(directory.join("loom-crates").join(&hash).join("Cargo.toml")).unwrap(), bytes);
+        std::fs::remove_dir_all(directory).unwrap();
     }
     #[test]
     fn filling_missing_checksum_preserves_existing_pins() {

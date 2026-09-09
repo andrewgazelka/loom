@@ -43,7 +43,10 @@ try {
   assert(baseline.path==='nested/middle/deep/alpha.dat'&&baseline.size===8193,'Tie/symlink fixture control failed');
   passed++;
   const machine=object(await command('machine.create',{root:fixture}));
+  const existing=process.env.LOOM_BENCH_HASHES?object(JSON.parse(process.env.LOOM_BENCH_HASHES)):{};
   for(const name of ['all','fork']) {
+    let hash=existing[name];
+    if(hash===undefined) {
     const source=await readFile(new URL(`largest-${name}.rs`,import.meta.url),'utf8');
     const start=performance.now();
     const reply=await client.callTool('loom_define',{lang:'rust',name:`benchmark-largest-${name}`,source});
@@ -51,9 +54,14 @@ try {
     const result=object(reply.result),def=object(result.def);
     assert(typeof def.hash==='string','Missing definition hash');
     console.log(JSON.stringify({stage:'define',name,wall_ms:performance.now()-start,build:result.build}));
-    variants.push({name,hash:def.hash,samples:[],recordingCommits:[]});
+    hash=def.hash;
+    } else {
+      console.log(JSON.stringify({stage:'reuse-compiled-definition',name,hash}));
+    }
+    assert(typeof hash==='string'&&/^[0-9a-f]{64}$/.test(hash),'Invalid definition hash');
+    variants.push({name,hash,samples:[],recordingCommits:[]});
     const callStart=performance.now();
-    same(await command('call',{hash:def.hash,args:[machine.id,'.']}),baseline);
+    same(await command('call',{hash,args:[machine.id,'.']}),baseline);
     console.log(JSON.stringify({stage:'first-call',name,ms:performance.now()-callStart}));
     passed++;
   }

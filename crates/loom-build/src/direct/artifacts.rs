@@ -65,6 +65,7 @@ pub(super) fn capture(
     target: &Path,
     compiler: &str,
     cargo_output: &str,
+    source_roots: &[PathBuf],
 ) -> Result<Vec<Unit>, BuildError> {
     let reports = cargo_output
         .lines()
@@ -81,7 +82,7 @@ pub(super) fn capture(
         {
             continue;
         }
-        let mut recipe = Recipe::parse(&std::fs::read(path)?, Path::new(""))?;
+        let mut recipe = Recipe::parse(&std::fs::read(&path)?, Path::new(""))?;
         if recipe
             .environment
             .get("CARGO_PRIMARY_PACKAGE")
@@ -98,7 +99,7 @@ pub(super) fn capture(
         let name = argument(&recipe, "--crate-name")?.to_owned();
         let directory = PathBuf::from(argument(&recipe, "--out-dir")?);
         let manifest = std::fs::canonicalize(recipe.source.join("Cargo.toml"))?;
-        let outputs = reports
+        let reported = reports
             .iter()
             .filter(|message| {
                 message["target"]["name"]
@@ -116,8 +117,37 @@ pub(super) fn capture(
             .collect::<Vec<_>>();
         // Build scripts may invoke rustc to probe language support. Only Cargo
         // artifact records introduce compilation graph nodes.
-        if outputs.is_empty() {
+        if reported.is_empty() {
             continue;
+        }
+        let canonical_source = std::fs::canonicalize(&recipe.source)?;
+        if !source_roots
+            .iter()
+            .any(|root| canonical_source.starts_with(root))
+        {
+            return Err(rejected(format!(
+                "compiler source escaped admitted roots: {}",
+                recipe.source.display()
+            )));
+        }
+        let compiler_messages = std::fs::read_to_string(path.with_extension("stderr"))?;
+        let outputs = compiler_messages
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter_map(|message| message["artifact"].as_str().map(PathBuf::from))
+            .filter(|path| path.extension().is_none_or(|extension| extension != "d"))
+            .collect::<Vec<_>>();
+        if outputs.is_empty() {
+            return Err(rejected(format!(
+                "Cargo unit {name} has no rustc artifact notification"
+            )));
+        }
+        for output in &outputs {
+            if !std::fs::canonicalize(output)?.starts_with(target)
+                || !std::fs::symlink_metadata(output)?.file_type().is_file()
+            {
+                return Err(rejected("rustc artifact escaped the build target"));
+            }
         }
         pending.push(Pending {
             recipe,
@@ -293,7 +323,7 @@ fn source_tree(store: &Store, path: &Path) -> Result<String, BuildError> {
     store.put_value("tree", &Tree { entries }).map_err(rejected)
 }
 
-fn executable(path: &Path) -> Result<bool, BuildError> {
+pub(super) fn executable(path: &Path) -> Result<bool, BuildError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -313,14 +343,18 @@ pub(super) fn restore(output: &Output, bytes: &[u8]) -> Result<(), BuildError> {
     if let Some(parent) = output.path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&output.path, bytes)?;
+    let temporary = output
+        .path
+        .with_extension(format!("restore-{}", std::process::id()));
+    std::fs::write(&temporary, bytes)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(
-            &output.path,
+            &temporary,
             std::fs::Permissions::from_mode(if output.executable { 0o755 } else { 0o644 }),
         )?;
     }
+    std::fs::rename(temporary, &output.path)?;
     Ok(())
 }

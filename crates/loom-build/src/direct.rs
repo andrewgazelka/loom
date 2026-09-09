@@ -24,7 +24,7 @@ struct Recipe {
     compiler: String,
     environment: BTreeMap<String, String>,
     arguments: Vec<String>,
-    artifacts: BTreeMap<PathBuf, String>,
+    artifacts: BTreeMap<PathBuf, ArtifactFile>,
     #[serde(default)]
     units: Vec<artifacts::Unit>,
     #[serde(default)]
@@ -35,6 +35,12 @@ struct Recipe {
 struct Layout {
     root: PathBuf,
     cache: PathBuf,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct ArtifactFile {
+    hash: String,
+    executable: bool,
 }
 
 fn rejected(error: impl std::fmt::Display) -> BuildError {
@@ -57,6 +63,9 @@ impl Recipe {
             let (name, value) = field
                 .split_once('=')
                 .ok_or_else(|| rejected("invalid captured rustc environment"))?;
+            if ["CARGO_MAKEFLAGS", "MAKEFLAGS", "MFLAGS"].contains(&name) {
+                continue;
+            }
             environment.insert(name.into(), value.into());
         }
         let compiler = values
@@ -125,6 +134,7 @@ impl Recipe {
             "-C".into(),
             format!("incremental={}", incremental.display()),
         ]);
+        self.arguments.push("-Funsafe-code".into());
         self.source = directory.into();
         Ok(())
     }
@@ -159,8 +169,8 @@ impl Recipe {
         collect(target, &mut files)?;
         for path in files {
             let name = path.file_name().unwrap().to_string_lossy();
-            if name.starts_with(&root_name)
-                || name.starts_with(&format!("lib{root_name}"))
+            if name == format!("{root_name}.wasm")
+                || name == format!("{root_name}.d")
                 || name == "root-rustc.recipe"
                 || name == "direct.sh"
                 || name.ends_with(".pending")
@@ -170,17 +180,21 @@ impl Recipe {
             let hash = store
                 .put("rust-artifact", &std::fs::read(&path)?)
                 .map_err(rejected)?;
-            self.artifacts.insert(path, hash);
+            let executable = artifacts::executable(&path)?;
+            self.artifacts
+                .insert(path, ArtifactFile { hash, executable });
         }
         Ok(())
     }
 
     fn restore_artifacts(&self, store: &Store) -> Result<bool, BuildError> {
         let mut complete = true;
-        for (path, hash) in &self.artifacts {
+        for (path, artifact) in &self.artifacts {
+            let hash = &artifact.hash;
             if let Ok(bytes) = std::fs::read(path) {
                 if blake3::hash(&bytes).to_hex().as_str() == hash
                     && store.codec(hash).map_err(rejected)?.is_some()
+                    && artifacts::executable(path)? == artifact.executable
                 {
                     continue;
                 }
@@ -192,12 +206,14 @@ impl Recipe {
             if blake3::hash(&bytes).to_hex().as_str() != hash {
                 return Err(rejected("corrupt Rust artifact in CAS"));
             }
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            let temporary = path.with_extension(format!("restore-{}", std::process::id()));
-            std::fs::write(&temporary, bytes)?;
-            std::fs::rename(temporary, path)?;
+            artifacts::restore(
+                &artifacts::Output {
+                    path: path.clone(),
+                    hash: hash.clone(),
+                    executable: artifact.executable,
+                },
+                &bytes,
+            )?;
         }
         Ok(complete)
     }
@@ -213,6 +229,7 @@ pub(crate) struct Request<'a> {
 }
 
 pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
+    let started = std::time::Instant::now();
     let Request {
         root,
         cache,
@@ -281,21 +298,28 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
             .and_then(|package| package.get("build"))
             .is_some();
     if !root_build_script && let Some(mut recipe) = read_graph(store, &key)? {
+        let setup_ms = started.elapsed().as_millis();
+        let restore_started = std::time::Instant::now();
         recipe.rebase_graph(root, cache, directory)?;
         let restored = recipe.restore_artifacts(store)?;
-        let repairs = repair_units(
-            &recipe.units,
-            RepairContext {
-                store,
-                root,
-                cache,
-                directory,
-                target: &target,
-                isolated,
-            },
-        )
-        .await?;
+        let repairs = if restored {
+            0
+        } else {
+            repair_units(
+                &recipe.units,
+                RepairContext {
+                    store,
+                    root,
+                    cache,
+                    directory,
+                    target: &target,
+                    isolated,
+                },
+            )
+            .await?
+        };
         if restored || recipe.restore_artifacts(store)? {
+            let restore_ms = restore_started.elapsed().as_millis();
             let lineage = target
                 .join("incremental")
                 .join(blake3::hash(definition.name.as_bytes()).to_hex().as_str());
@@ -320,10 +344,14 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
                     .current_dir(directory);
                 command
             };
+            let compiler_started = std::time::Instant::now();
             let output = run(command).await?;
+            let compiler_ms = compiler_started.elapsed().as_millis();
             let stderr = String::from_utf8_lossy(&output.stderr);
             let diagnostics = rustc_diagnostics(&stderr);
-            let logs = format!("direct rustc; dependency graph {key}\n{stderr}");
+            let stages = serde_json::json!({"build_stages":{"compiler_setup_ms":setup_ms,
+                "artifact_restore_ms":restore_ms,"root_rustc_ms":compiler_ms}});
+            let logs = format!("direct rustc; dependency graph {key}\n{stages}\n{stderr}");
             if !output.status.success() {
                 if diagnostics.is_empty() {
                     return Err(rejected(logs));
@@ -390,7 +418,24 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
             &fs::read(target.join("root-rustc.recipe")).await?,
             directory,
         )?;
-        recipe.units = artifacts::capture(store, &target, &compiler_identity, &stdout)?;
+        let mut source_roots = vec![
+            cache.to_owned(),
+            root.join("crates/loom-guest-rs"),
+            root.join("crates/loom-guest-macros"),
+            root.join("crates/loom-proto"),
+        ];
+        if !isolated {
+            let cargo_home = std::env::var_os("CARGO_HOME")
+                .map(PathBuf::from)
+                .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")))
+                .ok_or_else(|| rejected("Cargo home is unavailable"))?;
+            source_roots.push(cargo_home.join("registry/src"));
+        }
+        for source_root in &mut source_roots {
+            *source_root = std::fs::canonicalize(&*source_root)?;
+        }
+        recipe.units =
+            artifacts::capture(store, &target, &compiler_identity, &stdout, &source_roots)?;
         recipe.capture_artifacts(store, &target)?;
         recipe.layout = Some(Layout {
             root: root.into(),
@@ -658,5 +703,60 @@ mod tests {
         );
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].code, "E0308");
+    }
+    #[test]
+    fn corrupt_materialization_is_replaced_from_cas() {
+        let store = Store::memory().unwrap();
+        let directory = std::env::temp_dir().join(format!(
+            "loom-artifact-integrity-01a0866a-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("dependency.rlib");
+        let hash = store.put("rust-artifact", b"verified artifact").unwrap();
+        std::fs::write(&path, b"corrupted artifact").unwrap();
+        let mut recipe = Recipe::parse(b"LOOM_RUSTC_ARGUMENTS\0rustc\0", &directory).unwrap();
+        recipe.artifacts.insert(
+            path.clone(),
+            ArtifactFile {
+                hash,
+                executable: false,
+            },
+        );
+        assert!(recipe.restore_artifacts(&store).unwrap());
+        assert_eq!(std::fs::read(path).unwrap(), b"verified artifact");
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restored_build_script_retains_execute_permission() {
+        use std::os::unix::fs::PermissionsExt;
+        let store = Store::memory().unwrap();
+        let directory = std::env::temp_dir().join(format!(
+            "loom-artifact-executable-01a0866a-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("build-script-build");
+        let hash = store
+            .put("rust-artifact", b"compiled build script")
+            .unwrap();
+        std::fs::write(&path, b"compiled build script").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let mut recipe = Recipe::parse(b"LOOM_RUSTC_ARGUMENTS\0rustc\0", &directory).unwrap();
+        recipe.artifacts.insert(
+            path.clone(),
+            ArtifactFile {
+                hash,
+                executable: true,
+            },
+        );
+        assert!(recipe.restore_artifacts(&store).unwrap());
+        assert_ne!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o111,
+            0
+        );
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

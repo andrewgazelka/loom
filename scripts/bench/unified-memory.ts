@@ -14,7 +14,10 @@ function record(name:string,pass:boolean,detail:string) {
   console.log(JSON.stringify({gate:name,pass,detail}));
 }
 async function invoke(script:string,args:string[],extra:Record<string,string>={}):Promise<Invocation> {
-  const child=Bun.spawn(['bun',script,...args],{env:{...process.env,...extra},stdout:'pipe',stderr:'pipe'});
+  return invokeCommand(['bun',script,...args],extra);
+}
+async function invokeCommand(command:string[],extra:Record<string,string>={}):Promise<Invocation> {
+  const child=Bun.spawn(command,{env:{...process.env,...extra},stdout:'pipe',stderr:'pipe'});
   const result:Invocation={exit:-1,stdout:'',stderr:''};
   await Promise.all([
     new Response(child.stdout).text().then(value=>{result.stdout=value;}),
@@ -57,7 +60,14 @@ try {
   // The build lane supplies an executable witness, not a receipt from an older run.
   const buildScript='scripts/bench/warm-crates.ts';
   if(await Bun.file(buildScript).exists()) {
-    const result=await invoke(buildScript,[]);
+    let result:Invocation;
+    if(process.env.LOOM_BUILD_BENCH_COMMAND) {
+      const command:unknown=JSON.parse(process.env.LOOM_BUILD_BENCH_COMMAND);
+      if(!Array.isArray(command)||command.length===0||!command.every(value=>typeof value==='string'&&value.length>0))throw new Error('LOOM_BUILD_BENCH_COMMAND must be a nonempty JSON array of command arguments');
+      result=await invokeCommand(command);
+    } else {
+      result=await invoke(buildScript,[]);
+    }
     process.stdout.write(result.stdout);process.stderr.write(result.stderr);
     for(const name of names.slice(4)) {
       let witness:Gate|undefined;

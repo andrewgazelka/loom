@@ -332,6 +332,7 @@ impl Builder {
                 )
                 .await?;
                 sdk::reconcile(sdk::Rebuild {
+                    store: &self.store,
                     root: &self.root,
                     cache: &self.cache,
                     directory: &directory,
@@ -339,7 +340,8 @@ impl Builder {
                     isolated,
                 })
                 .await?;
-                let built = direct::build(direct::Request {
+                let materialization_ms = started.elapsed().as_millis();
+                let mut built = direct::build(direct::Request {
                     root: &self.root,
                     cache: &self.cache,
                     directory: &directory,
@@ -351,6 +353,7 @@ impl Builder {
                     return Ok(BuildOutput { component: Vec::new(), ms: started.elapsed().as_millis() as u64,
                         logs: built.logs, diagnostics: built.diagnostics, rustc_invocations: built.rustc_invocations });
                 }
+                let encoding_started = Instant::now();
                 let component = {
                     wit_component::ComponentEncoder::default()
                         .module(&built.bytes).map_err(|error| BuildError::Rejected(error.to_string()))?
@@ -359,6 +362,9 @@ impl Builder {
                         .map_err(|error| BuildError::Rejected(error.to_string()))?
                         .validate(true).encode().map_err(|error| BuildError::Rejected(error.to_string()))?
                 };
+                built.logs.push_str(&format!("\n{}\n", serde_json::json!({"build_stages":{
+                    "input_materialization_ms":materialization_ms,
+                    "component_encode_ms":encoding_started.elapsed().as_millis()}})));
                 validate_component(&component)?;
                 fs::write(&component_path, &component).await?;
                 fs::write(directory.join("component.inputs"), inputs).await?;
@@ -566,9 +572,7 @@ async fn materialize_rust(
         let relative = format!("loom-crates/{}", dependency.hash);
         let destination = directory.join(&relative);
         if materialized_crates.insert(dependency.hash.clone()) {
-            if destination.exists() { fs::remove_dir_all(&destination).await?; }
-            registry::CrateRegistry::new(store.clone()).materialize(&dependency.hash, &destination)
-                .map_err(|error| BuildError::Rejected(error.to_string()))?;
+            preparation::materialize_tree(store, cache, &destination, &dependency.hash)?;
         }
         let source = std::fs::read_to_string(destination.join("Cargo.toml"))?;
         let crate_manifest: toml::Value = source.parse().map_err(|error: toml::de::Error| BuildError::Rejected(error.to_string()))?;
@@ -742,7 +746,7 @@ async fn materialize_rust(
     fs::create_dir_all(directory).await?;
     if let Some(tree) = files.get(preparation::VENDOR_TREE) {
         let hash = tree.as_text().ok_or_else(|| BuildError::Rejected("vendor tree must be a hash".into()))?;
-        preparation::materialize_vendor(store, cache, directory, hash)?;
+        preparation::materialize_tree(store, cache, &directory.join("vendor"), hash)?;
     }
     for (name, source) in files {
         let path = directory.join(name);

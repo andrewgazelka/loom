@@ -619,6 +619,7 @@ impl Runtime {
                 self.inner.store.enqueue_recording(&json!({"type":"effect_invoked","def_hash":effects.def_hash,"actor_id":effects.actor_id,"op":op,"desc_hash":hash,"scope":scope,"occurrence":occurrence}))?;
             }
             let mut cached = false;
+            let mut recorded_result_hash = None;
             let outcome: Result<Value> = async {
             match op {
                 "all" | "race" => {
@@ -730,9 +731,9 @@ impl Runtime {
                         )
                         .await?;
                     let result = serde_json::to_value(actor)?;
-                    self.inner
+                    recorded_result_hash = Some(self.inner
                         .store
-                        .enqueue_effect(&hash, scope, occurrence, &result)?;
+                        .enqueue_effect(&hash, scope, occurrence, &result)?);
                     return Ok(result);
                 }
                 _ => {}
@@ -833,19 +834,20 @@ impl Runtime {
                 "fs.list" => self.list_machine_directory(&args).await?,
                 _ => bail!("unsupported ability: {op}"),
             };
-            self.inner
+            recorded_result_hash = Some(self.inner
                 .store
-                .enqueue_effect(&hash, cache_scope, cache_occurrence, &result)?;
+                .enqueue_effect(&hash, cache_scope, cache_occurrence, &result)?);
             Ok(result)
             }.await;
             if scheduler {
                 return outcome;
             }
-            let result_hash = outcome
-                .as_ref()
-                .ok()
-                .map(|result| self.inner.store.enqueue_value("result", result))
-                .transpose()?;
+            let result_hash = match recorded_result_hash {
+                Some(hash) => Some(hash),
+                None => outcome.as_ref().ok()
+                    .map(|result| self.inner.store.enqueue_value("result", result))
+                    .transpose()?,
+            };
             self.inner.store.enqueue_recording(&json!({"type":"effect_completed","def_hash":effects.def_hash,"actor_id":effects.actor_id,"op":op,"desc_hash":hash,"scope":scope,"occurrence":occurrence,"cached":cached,"result_hash":result_hash,"error":outcome.as_ref().err().map(|error|format!("{error:#}"))}))?;
             outcome
         })

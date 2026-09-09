@@ -904,7 +904,7 @@ impl Store {
         scope: &str,
         occurrence: i64,
         result: &Value,
-    ) -> Result<()> {
+    ) -> Result<String> {
         self.recording.effect(
             &self.connection,
             recording::EffectKey {

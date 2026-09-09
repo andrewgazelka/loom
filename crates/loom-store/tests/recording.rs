@@ -174,3 +174,31 @@ fn blocked_checkpoint_is_not_reported_as_durable() -> Result<()> {
     assert!(store.flush().is_err());
     Ok(())
 }
+
+#[test]
+fn queued_effect_hash_matches_cas_and_encoding_failure_leaves_no_pending_result() -> Result<()> {
+    let store = Store::memory()?;
+    let result = json!({"entries":["one","two"],"count":2});
+    let hash = store.enqueue_effect("desc", "scope", 0, &result)?;
+    assert_eq!(store.enqueue_effect("desc", "scope", 0, &result)?, hash);
+    assert_eq!(store.effect_get("desc", "scope", 0)?, Some(result.clone()));
+    store.flush()?;
+    assert_eq!(store.enqueue_effect("desc", "scope", 0, &result)?, hash);
+    assert_eq!(store.put_value("result", &result)?, hash);
+    assert_eq!(store.get_value::<serde_json::Value>(&hash)?, Some(result));
+    let invalid = json!({"large":u64::MAX});
+    let queued_error = store
+        .enqueue_effect("invalid", "scope", 0, &invalid)
+        .unwrap_err()
+        .to_string();
+    let synchronous_error = store
+        .effect_put("invalid", "scope", 0, &invalid)
+        .unwrap_err()
+        .to_string();
+    assert_eq!(queued_error, synchronous_error);
+    assert!(store.effect_get("invalid", "scope", 0)?.is_none());
+    store.enqueue_effect("invalid", "scope", 0, &json!(1))?;
+    store.flush()?;
+    assert_eq!(store.effect_get("invalid", "scope", 0)?, Some(json!(1)));
+    Ok(())
+}

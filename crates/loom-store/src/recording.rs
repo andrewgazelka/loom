@@ -1,4 +1,4 @@
-use super::{append, encode, put_value};
+use super::{append, encode};
 use anyhow::{Result, anyhow, ensure};
 use loom_proto::Value;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -31,7 +31,8 @@ enum Record {
     },
     Effect {
         key: EffectKey,
-        result: Value,
+        bytes: Vec<u8>,
+        hash: String,
     },
 }
 enum Message {
@@ -134,7 +135,10 @@ impl Writer {
         connection: &Mutex<Connection>,
         key: EffectKey,
         result: &Value,
-    ) -> Result<()> {
+    ) -> Result<String> {
+        self.check()?;
+        let bytes = encode(result)?;
+        let hash = blake3::hash(&bytes).to_hex().to_string();
         let _submission = self
             .shared
             .submission
@@ -148,7 +152,7 @@ impl Writer {
             .map_err(|_| anyhow!("pending effects lock poisoned"))?;
         if let Some(existing) = pending.get(&key) {
             ensure!(existing == result, "effect cache result conflict");
-            return Ok(());
+            return Ok(hash);
         }
         {
             let connection = connection
@@ -156,11 +160,8 @@ impl Writer {
                 .map_err(|_| anyhow!("store lock poisoned"))?;
             let existing: Option<String> = connection.query_row("SELECT result_hash FROM effect_results WHERE desc_hash=? AND scope=? AND occurrence=?", params![key.desc_hash, key.scope, key.occurrence], |row| row.get(0)).optional()?;
             if let Some(existing) = existing {
-                ensure!(
-                    existing == blake3::hash(&encode(result)?).to_hex().as_str(),
-                    "effect cache result conflict"
-                );
-                return Ok(());
+                ensure!(existing == hash, "effect cache result conflict");
+                return Ok(hash);
             }
         }
         pending.insert(key.clone(), result.clone());
@@ -168,8 +169,10 @@ impl Writer {
         drop(pending);
         self.send(Record::Effect {
             key,
-            result: result.clone(),
-        })
+            bytes,
+            hash: hash.clone(),
+        })?;
+        Ok(hash)
     }
     pub fn barrier(&self, durable: bool) -> Result<()> {
         self.check()?;
@@ -231,11 +234,13 @@ fn commit(
                     transaction
                         .execute("INSERT OR IGNORE INTO cas_codecs VALUES (?,113)", [hash])?;
                 }
-                Record::Effect { key, result } => {
-                    let hash = put_value(&transaction, "result", result)?;
+                Record::Effect { key, bytes, hash } => {
+                    transaction.execute("INSERT OR IGNORE INTO cas(hash,kind,bytes,created_at,codec) VALUES (?,'result',?,unixepoch(),113)", params![hash,bytes])?;
+                    transaction
+                        .execute("INSERT OR IGNORE INTO cas_codecs VALUES (?,113)", [hash])?;
                     let existing: Option<String> = transaction.query_row("SELECT result_hash FROM effect_results WHERE desc_hash=? AND scope=? AND occurrence=?", params![key.desc_hash, key.scope, key.occurrence], |row| row.get(0)).optional()?;
                     ensure!(
-                        existing.as_ref().is_none_or(|existing| existing == &hash),
+                        existing.as_ref().is_none_or(|existing| existing == hash),
                         "effect cache result conflict"
                     );
                     if existing.is_none() {

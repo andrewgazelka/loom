@@ -46,16 +46,16 @@ pub(crate) fn save(
     }).map_err(rejected)
 }
 
-pub(crate) fn materialize_vendor(
+pub(crate) fn materialize_tree(
     store: &Store,
     cache: &Path,
-    directory: &Path,
+    destination: &Path,
     hash: &str,
 ) -> Result<(), BuildError> {
     if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(rejected("invalid vendor tree hash"));
+        return Err(rejected("invalid source tree hash"));
     }
-    let trees = cache.join("vendor-trees");
+    let trees = cache.join("source-trees");
     std::fs::create_dir_all(&trees)?;
     let tree = trees.join(hash);
     if !tree.exists() {
@@ -68,17 +68,19 @@ pub(crate) fn materialize_vendor(
             .map_err(rejected)?;
         std::fs::rename(temporary, &tree)?;
     }
-    let vendor = directory.join("vendor");
-    if let Ok(metadata) = std::fs::symlink_metadata(&vendor) {
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if let Ok(metadata) = std::fs::symlink_metadata(destination) {
         if metadata.file_type().is_symlink() {
-            std::fs::remove_file(&vendor)?;
+            std::fs::remove_file(destination)?;
         } else {
-            std::fs::remove_dir_all(&vendor)?;
+            std::fs::remove_dir_all(destination)?;
         }
     }
     #[cfg(unix)]
     {
-        std::os::unix::fs::symlink(std::fs::canonicalize(tree)?, vendor)?;
+        std::os::unix::fs::symlink(std::fs::canonicalize(tree)?, destination)?;
         Ok(())
     }
     #[cfg(not(unix))]

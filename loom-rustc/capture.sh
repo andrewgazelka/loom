@@ -9,8 +9,10 @@ if [ "$(uname -s)" = Darwin ]; then
 fi
 compile=no
 for argument in "$@"; do
-  if [ "$argument" = --error-format=json ]; then compile=yes; break; fi
+  case "$argument" in --print|--print=*|-) exec "$@" ;; esac
+  if [ "$argument" = --error-format=json ]; then compile=yes; fi
 done
+if [ -z "${CARGO_MANIFEST_DIR:-}" ]; then exec "$@"; fi
 if [ "$compile" = no ]; then exec "$@"; fi
 # Every user definition, including definition dependencies, gets a correctness
 # lint. The isolated Wasm runtime remains the execution boundary.
@@ -27,7 +29,13 @@ temporary="$capture.units/unit-$$.pending"
   printf '%s\000' LOOM_RUSTC_ARGUMENTS "$@"
 } > "$temporary"
 printf '%s\n' loom-rustc-invocation >&2
-"$@"
+if "$@" 2> "$capture.units/unit-$$.stderr"; then
+  status=0
+else
+  status=$?
+fi
+cat "$capture.units/unit-$$.stderr" >&2
+if [ "$status" -ne 0 ]; then exit "$status"; fi
 mv "$temporary" "$capture.units/unit-$$.recipe"
 if [ "${CARGO_PRIMARY_PACKAGE:-}" = 1 ]; then
   cp "$capture.units/unit-$$.recipe" "$capture"
