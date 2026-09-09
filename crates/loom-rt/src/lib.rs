@@ -1,11 +1,12 @@
 mod machine;
+mod trace;
 use anyhow::{Context, Result, bail};
 use loom_proto::{Actor, Value};
 use loom_store::Store;
 use serde_json::json;
 use std::{
     collections::{BTreeSet, HashMap},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak, atomic::{AtomicU64, Ordering}},
     time::{Duration, Instant},
 };
 use tokio::sync::Mutex as AsyncMutex;
@@ -33,12 +34,13 @@ struct Inner {
     components: Mutex<HashMap<String, HandlerPre<ContextData>>>,
     component_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     actor_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
-    effect_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
+    effect_locks: Mutex<HashMap<String, Weak<AsyncMutex<()>>>>,
     fibers: Mutex<HashMap<String, FiberTask>>,
+    effect_wire_bytes: AtomicU64,
 }
 struct FiberTask {
     scope: String,
-    task: tokio::task::JoinHandle<Result<Value>>,
+    task: tokio::task::JoinHandle<Result<EffectOutput>>,
 }
 impl Drop for FiberTask {
     fn drop(&mut self) {
@@ -50,6 +52,7 @@ struct EffectContext {
     def_hash: Option<String>,
     actor_id: Option<String>,
     allowed: Option<BTreeSet<String>>,
+    trace: Option<Arc<trace::ExecutionTrace>>,
 }
 impl EffectContext {
     fn delegated(&self, def_hash: &str, allowed: Option<&[String]>) -> Self {
@@ -63,6 +66,7 @@ impl EffectContext {
             def_hash: Some(def_hash.into()),
             actor_id: self.actor_id.clone(),
             allowed,
+            trace: self.trace.clone(),
         }
     }
     fn permits(&self, op: &str) -> bool {
@@ -94,7 +98,7 @@ impl loom::host::abilities::Host for ContextData {
         if self.pure {
             return Err("fold cannot perform effects".into());
         }
-        let mut desc = decode(&desc).map_err(|e| e.to_string())?;
+        let mut desc = loom_proto::decode_host::<Value>(&desc)?;
         resolve_self(&mut desc, &self.def_hash);
         let occurrence = self.occurrence;
         self.occurrence += 1;
@@ -103,8 +107,17 @@ impl loom::host::abilities::Host for ContextData {
             .perform_contextual(desc, &self.scope, occurrence, self.effects.clone())
             .await
             .map_err(|e| format!("{e:#}"))?;
-        encode(&result).map_err(|e| e.to_string())
+        self.runtime.inner.effect_wire_bytes.fetch_add(result.bytes.len() as u64, Ordering::Relaxed);
+        Ok(result.bytes)
     }
+}
+#[derive(Debug, Clone)]
+struct EffectOutput {
+    bytes: Vec<u8>,
+}
+impl EffectOutput {
+    fn value(value: &Value) -> Result<Self> { Ok(Self { bytes: encode(value)? }) }
+    fn decode(&self) -> Result<Value> { loom_proto::decode_host(&self.bytes).map_err(anyhow::Error::msg) }
 }
 fn encode(value: &Value) -> Result<Vec<u8>> {
     loom_proto::encode(value).map_err(anyhow::Error::msg)
@@ -133,12 +146,40 @@ pub struct TimedCall {
 fn elapsed_ms(start: Instant) -> f64 {
     start.elapsed().as_secs_f64() * 1000.0
 }
+struct EncodedCall {
+    output: EffectOutput,
+    timing: RuntimeTiming,
+}
 struct Instance {
     timing: RuntimeTiming,
     bindings: Handler,
     store: wasmtime::Store<ContextData>,
 }
 impl Runtime {
+    fn effect_lock(&self, key: String) -> Arc<AsyncMutex<()>> {
+        let mut locks = self.inner.effect_locks.lock().unwrap();
+        locks.retain(|_, lock| lock.strong_count() != 0);
+        if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) { return lock; }
+        let lock = Arc::new(AsyncMutex::new(()));
+        locks.insert(key, Arc::downgrade(&lock));
+        lock
+    }
+    async fn cancel_fibers(&self, scope: &str) {
+        loop {
+            let tasks = {
+                let mut fibers = self.inner.fibers.lock().unwrap();
+                let prefix = format!("{scope}/");
+                let ids: Vec<_> = fibers.iter().filter(|(_, fiber)| fiber.scope == scope || fiber.scope.starts_with(&prefix)).map(|(id, _)| id.clone()).collect();
+                ids.into_iter().filter_map(|id| fibers.remove(&id)).collect::<Vec<_>>()
+            };
+            if tasks.is_empty() { break; }
+            for task in &tasks { task.task.abort(); }
+            for mut task in tasks { let _ = (&mut task.task).await; }
+        }
+    }
+    pub fn effect_wire_bytes(&self) -> u64 {
+        self.inner.effect_wire_bytes.load(Ordering::Relaxed)
+    }
     pub fn new(store: Store) -> Result<Self> {
         Self::create(store, None)
     }
@@ -168,6 +209,7 @@ impl Runtime {
                 actor_locks: Mutex::new(HashMap::new()),
                 effect_locks: Mutex::new(HashMap::new()),
                 fibers: Mutex::new(HashMap::new()),
+                effect_wire_bytes: AtomicU64::new(0),
             }),
         };
         let weak = Arc::downgrade(&runtime.inner);
@@ -313,15 +355,24 @@ impl Runtime {
         args: Value,
         scope: &str,
         effects: EffectContext,
-    ) -> Result<Value> {
+    ) -> Result<EffectOutput> {
         Ok(self
             .call_scoped_delegated(hash, args, scope, effects)
             .await?
-            .value)
+            .output)
     }
     async fn call_scoped_timed(&self, hash: &str, args: Value, scope: &str) -> Result<TimedCall> {
-        self.call_scoped_delegated(hash, args, scope, EffectContext::default())
-            .await
+        let execution = trace::ExecutionTrace::fresh(scope);
+        let session = trace::TraceSession::new(self.inner.store.clone(), execution.clone());
+        let effects = EffectContext { trace: Some(execution), ..EffectContext::default() };
+        let result = self.call_scoped_delegated(hash, args, scope, effects).await;
+        let outcome = match &result {
+            Ok(call) => Ok(call.output.clone()),
+            Err(error) => Err(anyhow::anyhow!("{error:#}")),
+        };
+        session.finish(&outcome)?;
+        let call = result?;
+        Ok(TimedCall { value: call.output.decode()?, timing: call.timing })
     }
     async fn call_scoped_delegated(
         &self,
@@ -329,7 +380,7 @@ impl Runtime {
         args: Value,
         scope: &str,
         effects: EffectContext,
-    ) -> Result<TimedCall> {
+    ) -> Result<EncodedCall> {
         let call_start = Instant::now();
         let mut instance = self
             .instance_delegated(hash, scope, false, &effects)
@@ -338,13 +389,14 @@ impl Runtime {
         let result = instance
             .bindings
             .call_call(&mut instance.store, &encode(&json!(hash))?, &encode(&args)?)
-            .await?
-            .map_err(anyhow::Error::msg)?;
-        let value = decode(&result)?;
+            .await;
+        self.cancel_fibers(scope).await;
+        let result = result?.map_err(anyhow::Error::msg)?;
+        let output = EffectOutput { bytes: result };
         instance.timing.run_ms = elapsed_ms(run_start);
         instance.timing.total_ms = elapsed_ms(call_start);
-        Ok(TimedCall {
-            value,
+        Ok(EncodedCall {
+            output,
             timing: instance.timing,
         })
     }
@@ -465,13 +517,14 @@ impl Runtime {
         let metadata = self.inner.store.actor(actor)?.context("actor not found")?;
         let state = self.state(actor).await?;
         let handler_seq = message.handler_seq;
-        let mut instance = self
-            .instance(
-                &metadata.behavior_hash,
-                &format!("{actor}:{handler_seq}"),
-                false,
-            )
-            .await?;
+        let scope = format!("{actor}:{handler_seq}");
+        let execution = match self.inner.store.load_call_trace(&scope)? {
+            Some(bundle) => trace::ExecutionTrace::loaded(bundle)?,
+            None => trace::ExecutionTrace::fresh(&scope),
+        };
+        let session = trace::TraceSession::new(self.inner.store.clone(), execution.clone()).recoverable();
+        let effects = EffectContext { trace: Some(execution), actor_id: Some(actor.clone()), ..EffectContext::default() };
+        let mut instance = self.instance_delegated(&metadata.behavior_hash, &scope, false, &effects).await?;
         instance.store.data_mut().effects.actor_id = Some(actor.clone());
         let bytes = instance
             .bindings
@@ -486,6 +539,7 @@ impl Runtime {
             .as_array()
             .context("run must return array of events")?
             .clone();
+        session.finish(&Ok(EffectOutput { bytes }))?;
         self.inner
             .store
             .complete_message(actor, handler_seq, &events)?;
@@ -582,7 +636,17 @@ impl Runtime {
         scope: &'a str,
         occurrence: i64,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send + 'a>> {
-        self.perform_contextual(desc, scope, occurrence, EffectContext::default())
+        Box::pin(async move {
+            let execution = match self.inner.store.load_call_trace(scope)? {
+                Some(bundle) => trace::ExecutionTrace::loaded(bundle)?,
+                None => trace::ExecutionTrace::fresh(scope),
+            };
+            let session = trace::TraceSession::new(self.inner.store.clone(), execution.clone());
+            let effects = EffectContext { trace: Some(execution), ..EffectContext::default() };
+            let outcome = self.perform_contextual(desc, scope, occurrence, effects).await;
+            session.finish(&outcome)?;
+            outcome?.decode()
+        })
     }
     fn perform_contextual<'a>(
         &'a self,
@@ -590,37 +654,32 @@ impl Runtime {
         scope: &'a str,
         occurrence: i64,
         effects: EffectContext,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send + 'a>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<EffectOutput>> + Send + 'a>> {
         Box::pin(async move {
             let op = desc
                 .get("op")
                 .and_then(Value::as_str)
                 .context("descriptor op required")?;
             let scheduler = matches!(op, "fork" | "join" | "all" | "race" | "call");
-            let hash = if scheduler {
-                String::new()
-            } else {
-                self.inner.store.enqueue_value("desc", &desc)?
-            };
-            if !effects.permits(op) {
-                let hash = if scheduler {
-                    self.inner.store.enqueue_value("desc", &desc)?
-                } else {
-                    hash.clone()
-                };
-                self.inner.store.enqueue_recording(&json!({"type":"effect_denied","desc_hash":hash,"def_hash":effects.def_hash,"actor_id":effects.actor_id,"op":op,"scope":scope,"occurrence":occurrence}))?;
-                bail!(
-                    "effect {op} is not allowed for definition {}",
-                    effects.def_hash.as_deref().unwrap_or("<host>")
-                );
-            }
+            let execution = effects.trace.clone().unwrap_or_else(|| trace::ExecutionTrace::fresh(scope));
+            let mut effects = effects;
+            effects.trace = Some(execution.clone());
+            let tracked = !scheduler || op == "race" || !effects.permits(op);
+            let guard = if tracked {
+                match execution.begin(scope, occurrence, &desc, op == "race")? {
+                    trace::StartedEffect::Replayed(output) => {
+                        anyhow::ensure!(effects.permits(op), "effect {op} is not allowed");
+                        return Ok(output);
+                    },
+                    trace::StartedEffect::Recorded(guard) => Some(guard),
+                }
+            } else { None };
+            let hash = if tracked { blake3::hash(&encode(&desc)?).to_hex().to_string() } else { String::new() };
             let args = desc.get("args").cloned().unwrap_or(Value::Null);
-            if !scheduler {
-                self.inner.store.enqueue_recording(&json!({"type":"effect_invoked","def_hash":effects.def_hash,"actor_id":effects.actor_id,"op":op,"desc_hash":hash,"scope":scope,"occurrence":occurrence}))?;
+            let outcome: Result<EffectOutput> = async {
+            if !effects.permits(op) {
+                bail!("effect {op} is not allowed for definition {}", effects.def_hash.as_deref().unwrap_or("<host>"));
             }
-            let mut cached = false;
-            let mut recorded_result_hash = None;
-            let outcome: Result<Value> = async {
             match op {
                 "all" | "race" => {
                     let mut args = args;
@@ -642,7 +701,8 @@ impl Runtime {
                         })
                         .collect::<Vec<_>>();
                     if op == "all" {
-                        return Ok(Value::Array(futures::future::try_join_all(futures).await?));
+                        let results = futures::future::try_join_all(futures).await?;
+                        return Ok(EffectOutput { bytes: loom_proto::encode_host_array(results.iter().map(|result| result.bytes.as_slice())).map_err(anyhow::Error::msg)? });
                     }
                     if futures.is_empty() {
                         bail!("race requires at least one descriptor");
@@ -663,8 +723,8 @@ impl Runtime {
                     let hash = required_str(&args, "def")?.to_owned();
                     let args = args.get("args").cloned().unwrap_or(Value::Null);
                     let runtime = self.clone();
-                    let id = uuid::Uuid::new_v4().to_string();
                     let child_scope = format!("{scope}/fork:{occurrence}");
+                    let id = child_scope.clone();
                     let child_effects = effects.clone();
                     let task = tokio::spawn(async move {
                         runtime
@@ -678,7 +738,7 @@ impl Runtime {
                             task,
                         },
                     );
-                    return Ok(json!(id));
+                    return EffectOutput::value(&json!(id));
                 }
                 "join" => {
                     let mut out = Vec::new();
@@ -696,7 +756,7 @@ impl Runtime {
                             .context("unknown or already joined fiber")?;
                         out.push((&mut task.task).await??);
                     }
-                    return Ok(json!(out));
+                    return Ok(EffectOutput { bytes: loom_proto::encode_host_array(out.iter().map(|result: &EffectOutput| result.bytes.as_slice())).map_err(anyhow::Error::msg)? });
                 }
                 "send" => {
                     let key = format!("{scope}:{occurrence}:{hash}");
@@ -705,23 +765,10 @@ impl Runtime {
                         &args.get("msg").cloned().unwrap_or(Value::Null),
                         &key,
                     )?;
-                    return self.schedule_message(message);
+                    return self.schedule_message(message).and_then(|result| EffectOutput::value(&result));
                 }
                 "spawn" => {
                     let key = format!("spawn:{scope}:{occurrence}:{hash}");
-                    let lock = self
-                        .inner
-                        .effect_locks
-                        .lock()
-                        .unwrap()
-                        .entry(key.clone())
-                        .or_default()
-                        .clone();
-                    let _guard = lock.lock().await;
-                    if let Some(result) = self.inner.store.effect_get(&hash, scope, occurrence)? {
-                        cached = true;
-                        return Ok(result);
-                    }
                     let actor_id = blake3::hash(key.as_bytes()).to_hex().to_string();
                     let actor = self
                         .spawn_identified(
@@ -731,10 +778,7 @@ impl Runtime {
                         )
                         .await?;
                     let result = serde_json::to_value(actor)?;
-                    recorded_result_hash = Some(self.inner
-                        .store
-                        .enqueue_effect(&hash, scope, occurrence, &result)?);
-                    return Ok(result);
+                    return EffectOutput::value(&result);
                 }
                 _ => {}
             }
@@ -744,33 +788,13 @@ impl Runtime {
                 "exec" if args.get("key").and_then(Value::as_str).is_some() => "keyed",
                 _ => "observational",
             };
-            let cache_scope = if class == "hermetic" || class == "keyed" {
-                "global"
-            } else {
-                scope
-            };
-            let cache_occurrence = if class == "hermetic" || class == "keyed" {
-                0
-            } else {
-                occurrence
-            };
-            let key = format!("{hash}:{cache_scope}:{cache_occurrence}");
-            let lock = self
-                .inner
-                .effect_locks
-                .lock()
-                .unwrap()
-                .entry(key)
-                .or_default()
-                .clone();
-            let _guard = lock.lock().await;
-            if let Some(result) =
-                self.inner
-                    .store
-                    .effect_get(&hash, cache_scope, cache_occurrence)?
-            {
-                cached = true;
-                return Ok(result);
+            let memoized = class == "hermetic" || class == "keyed";
+            let lock = memoized.then(|| self.effect_lock(hash.clone()));
+            let _guard = match &lock { Some(lock) => Some(lock.lock().await), None => None };
+            if memoized {
+                if let Some(result) = self.inner.store.effect_get(&hash, "global", 0)? {
+                    return EffectOutput::value(&result);
+                }
             }
             let result = match op {
                 "llm" => serde_json::to_value(
@@ -831,24 +855,19 @@ impl Runtime {
                     let metadata = tokio::fs::metadata(self.machine_path(&args)?).await?;
                     json!({"size":metadata.len(),"is_dir":metadata.is_dir(),"is_file":metadata.is_file()})
                 }
-                "fs.list" => self.list_machine_directory(&args).await?,
+                "fs.list" => return self.list_machine_directory(&args).await,
                 _ => bail!("unsupported ability: {op}"),
             };
-            recorded_result_hash = Some(self.inner
-                .store
-                .enqueue_effect(&hash, cache_scope, cache_occurrence, &result)?);
-            Ok(result)
-            }.await;
-            if scheduler {
-                return outcome;
+            if memoized {
+                self.inner.store.enqueue_effect(&hash, "global", 0, &result)?;
             }
-            let result_hash = match recorded_result_hash {
-                Some(hash) => Some(hash),
-                None => outcome.as_ref().ok()
-                    .map(|result| self.inner.store.enqueue_value("result", result))
-                    .transpose()?,
-            };
-            self.inner.store.enqueue_recording(&json!({"type":"effect_completed","def_hash":effects.def_hash,"actor_id":effects.actor_id,"op":op,"desc_hash":hash,"scope":scope,"occurrence":occurrence,"cached":cached,"result_hash":result_hash,"error":outcome.as_ref().err().map(|error|format!("{error:#}"))}))?;
+            EffectOutput::value(&result)
+            }.await;
+            if let Some(guard) = guard { guard.finish(&outcome); }
+            if effects.actor_id.is_some() && tracked {
+                let snapshot = execution.snapshot(None, false)?;
+                self.inner.store.persist_call_trace(&snapshot)?;
+            }
             outcome
         })
     }
@@ -972,13 +991,11 @@ mod tests {
         assert_eq!(result.as_array().map(Vec::len), Some(2));
         store.flush()?;
         let events = store.events(None, 0, 100)?;
-        let invoked: Vec<_> = events.iter()
-            .filter(|event| event.event["type"] == "effect_invoked")
-            .collect();
-        assert_eq!(invoked.len(), 2);
-        assert!(invoked.iter().all(|event| event.event["op"] == "sleep"));
-        assert!(events.iter().all(|event| event.event["op"] != "all"));
-        assert!(invoked.iter().all(|event| event.event["scope"] == "scheduler-control/all:0"));
+        assert_eq!(events.iter().filter(|event| event.event["type"] == "call_completed").count(), 1);
+        assert!(events.iter().all(|event| event.event["type"] != "effect_invoked" && event.event["type"] != "effect_completed"));
+        let bundle = store.load_call_trace("scheduler-control")?.context("trace")?;
+        assert_eq!(bundle.trace.entries.len(), 2);
+        assert!(bundle.trace.entries.iter().all(|entry| entry.key.scope == "scheduler-control/all:0"));
         Ok(())
     }
     #[tokio::test]
@@ -993,7 +1010,7 @@ mod tests {
             first,
             runtime.perform(descriptor.clone(), "handler-1", 0).await?
         );
-        assert_ne!(first, runtime.perform(descriptor, "handler-1", 1).await?);
+        assert_ne!(first, runtime.perform(descriptor, "handler-2", 0).await?);
         Ok(())
     }
     #[tokio::test]
@@ -1116,18 +1133,6 @@ mod tests {
                 .perform_contextual(nested, "nested", 0, child)
                 .await
                 .is_err()
-        );
-        let events = runtime.inner.store.events(Some("system"), 0, 1000)?;
-        assert!(
-            events
-                .iter()
-                .any(|event| event.event["type"] == "effect_denied")
-        );
-        assert!(
-            !events
-                .iter()
-                .any(|event| event.event["type"] == "effect_invoked"
-                    && event.event["def_hash"] == "restricted")
         );
         Ok(())
     }

@@ -10,12 +10,12 @@ pub mod bindings {
 }
 
 pub type EffectError = String;
-pub use loom_proto::{Desc, TypeSig, Value, decode, encode};
+pub use loom_proto::{Desc, DirEntry, EntryKind, TypeSig, Value, decode, decode_host, encode};
 
 pub fn perform<T: DeserializeOwned>(desc: Desc<T>) -> Result<T, EffectError> {
     let bytes = encode(&desc)?;
     let result = bindings::loom::host::abilities::perform(&bytes)?;
-    decode(&result)
+    decode_host(&result)
 }
 
 pub struct Def<F> {
@@ -107,7 +107,15 @@ pub mod abilities {
         perform(Desc::new("random", Value::Null))
     }
     pub fn sleep(ms: u64) -> Result<Value, EffectError> {
-        perform(Desc::new("sleep", serde_json::json!({"ms": ms})))
+        perform(sleep::desc(ms))
+    }
+    pub mod sleep {
+        use super::*;
+
+        /// Describe a delay for composition with `loom::all` or `loom::perform`.
+        pub fn desc(ms: u64) -> Desc<Value> {
+            Desc::new("sleep", serde_json::json!({"ms": ms}))
+        }
     }
     pub fn exec(args: Value) -> Result<Value, EffectError> {
         perform(Desc::new("exec", args))
@@ -123,17 +131,26 @@ pub mod abilities {
     }
     pub mod fs {
         use super::*;
-        pub fn list(machine: Value, path: &str) -> Result<Value, EffectError> {
-            perform(Desc::new(
-                "fs.list",
-                serde_json::json!({"machine":machine,"path":path}),
-            ))
+        pub fn list(machine: &str, path: &str) -> Result<Vec<DirEntry>, EffectError> {
+            perform(list::desc(machine, path))
         }
-        pub fn stat(machine: Value, path: &str) -> Result<Value, EffectError> {
-            perform(Desc::new(
-                "fs.stat",
-                serde_json::json!({"machine":machine,"path":path}),
-            ))
+        pub mod list {
+            use super::*;
+            pub fn desc(machine: &str, path: &str) -> Desc<Vec<DirEntry>> {
+                Desc::new("fs.list", serde_json::json!({"machine":machine,"path":path}))
+            }
+        }
+        pub fn stat(machine: &str, path: &str) -> Result<DirEntry, EffectError> {
+            perform(Desc::new("fs.stat", serde_json::json!({"machine":machine,"path":path})))
+        }
+        pub fn walk(machine: &str, path: &str, max_depth: u32, max_entries: u32) -> Result<Vec<DirEntry>, EffectError> {
+            perform(walk::desc(machine, path, max_depth, max_entries))
+        }
+        pub mod walk {
+            use super::*;
+            pub fn desc(machine: &str, path: &str, max_depth: u32, max_entries: u32) -> Desc<Vec<DirEntry>> {
+                Desc::new("fs.walk", serde_json::json!({"machine":machine,"path":path,"max_depth":max_depth,"max_entries":max_entries}))
+            }
         }
         pub fn read(machine: Value, path: &str) -> Result<Value, EffectError> {
             perform(Desc::new(
@@ -162,6 +179,17 @@ mod tests {
         assert_eq!(decode::<Value>(&bytes).unwrap(), value);
         bytes.push(0);
         assert!(decode::<Value>(&bytes).is_err());
+    }
+    #[test]
+    fn sleep_descriptor_preserves_the_direct_effect_protocol() {
+        use abilities::sleep;
+
+        // One import exposes both the direct function and descriptor namespace.
+        let _immediate: fn(u64) -> Result<Value, EffectError> = sleep;
+        let descriptors: [Desc<Value>; 2] = [sleep::desc(100), sleep::desc(200)];
+        assert_eq!(descriptors[0].op, "sleep");
+        assert_eq!(descriptors[0].args, serde_json::json!({"ms": 100}));
+        assert_eq!(descriptors[1].args, serde_json::json!({"ms": 200}));
     }
     #[test]
     fn unary_array_remains_one_argument() {

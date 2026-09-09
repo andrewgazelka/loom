@@ -16,6 +16,11 @@ struct Unit {
     name: String,
     key: String,
     outputs: Vec<Output>,
+    recipe: Recipe,
+}
+#[derive(Deserialize)]
+struct Recipe {
+    arguments: Vec<String>,
 }
 #[derive(Deserialize)]
 struct Output {
@@ -26,11 +31,14 @@ struct Output {
 fn main() -> anyhow::Result<()> {
     let mut arguments = std::env::args().skip(1);
     let database = arguments.next().ok_or_else(|| {
-        anyhow::anyhow!("usage: evict_artifact ISOLATED_DB CRATE_NAME BUILD_LOG_HASH")
+        anyhow::anyhow!("usage: evict_artifact ISOLATED_DB CRATE_NAME TARGET BUILD_LOG_HASH")
     })?;
     let name = arguments
         .next()
         .ok_or_else(|| anyhow::anyhow!("missing crate name"))?;
+    let target = arguments
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("missing compiler target"))?;
     let log_hash = arguments
         .next()
         .ok_or_else(|| anyhow::anyhow!("missing build log hash"))?;
@@ -63,11 +71,18 @@ fn main() -> anyhow::Result<()> {
     let graph: Graph = store
         .get_value(&manifest)?
         .ok_or_else(|| anyhow::anyhow!("build graph missing"))?;
-    let mut matching = graph.units.into_iter().filter(|unit| unit.name == name);
+    let mut matching = graph.units.into_iter().filter(|unit| {
+        unit.name == name
+            && unit
+                .recipe
+                .arguments
+                .windows(2)
+                .any(|arguments| arguments[0] == "--target" && arguments[1] == target)
+    });
     if let Some(artifact) = matching.next() {
         anyhow::ensure!(
             matching.next().is_none(),
-            "crate name is ambiguous within target graph"
+            "crate name and compiler target are ambiguous within dependency graph"
         );
         anyhow::ensure!(!artifact.outputs.is_empty(), "crate has no artifacts");
         for output in &artifact.outputs {
@@ -103,9 +118,9 @@ fn main() -> anyhow::Result<()> {
         anyhow::ensure!(removed > 0, "crate has no artifacts");
         println!(
             "{}",
-            serde_json::json!({"name":name,"key":artifact.key,"dependency_graph":key,"build_log_hash":log_hash,"removed_outputs":removed})
+            serde_json::json!({"name":name,"target":target,"key":artifact.key,"dependency_graph":key,"build_log_hash":log_hash,"removed_outputs":removed})
         );
         return Ok(());
     }
-    anyhow::bail!("compiled crate {name} not found")
+    anyhow::bail!("compiled crate {name} for {target} not found in graph {key}")
 }

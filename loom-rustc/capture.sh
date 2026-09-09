@@ -40,7 +40,36 @@ case "${CARGO_PRIMARY_PACKAGE:-}:${CARGO_PKG_NAME:-}" in
     fi
     ;;
 esac
-set -- "$@" "--remap-path-prefix=${CARGO_MANIFEST_DIR:?missing package source}=/loom/source"
+# rustc randomizes archive object-member names when incremental is enabled.
+# Dependency artifacts must reproduce byte-for-byte; only the root keeps its
+# incremental workspace for edits to that definition.
+if [ "${CARGO_PRIMARY_PACKAGE:-}" != 1 ] || [ -n "${LOOM_ROOT_INCREMENTAL:-}" ]; then
+  remaining=$#
+  while [ "$remaining" -gt 0 ]; do
+    argument=$1
+    shift
+    remaining=$((remaining - 1))
+    case "$argument" in
+      -C)
+        option=$1
+        shift
+        remaining=$((remaining - 1))
+        case "$option" in incremental=*) ;; *) set -- "$@" -C "$option" ;; esac
+        ;;
+      -Cincremental=*) ;;
+      *) set -- "$@" "$argument" ;;
+    esac
+  done
+fi
+if [ "${CARGO_PRIMARY_PACKAGE:-}" = 1 ] && [ -n "${LOOM_ROOT_INCREMENTAL:-}" ]; then
+  set -- "$@" -C "incremental=$LOOM_ROOT_INCREMENTAL"
+fi
+# Relative input paths also carry the compiler working directory in metadata.
+# Remap both owner paths so relocating the definition preserves artifact bytes.
+compiler_cwd=$(pwd -P)
+set -- "$@" "--remap-path-prefix=$compiler_cwd=/loom/build" "--remap-path-prefix=${CARGO_MANIFEST_DIR:?missing package source}=/loom/source"
+# CARGO_MANIFEST_DIR identifies package source, not the compiler's cwd.
+export LOOM_RUSTC_CWD="$compiler_cwd"
 capture=${LOOM_RUSTC_CAPTURE:?missing capture destination}
 mkdir -p "$capture.units"
 temporary="$capture.units/unit-$$.pending"

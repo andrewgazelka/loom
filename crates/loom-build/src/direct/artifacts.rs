@@ -272,6 +272,10 @@ pub(super) fn inputs(
             value = value.replace(path, &format!("$DEP/{key}"));
         }
         value = value.replace(recipe.source.to_string_lossy().as_ref(), "$SOURCE");
+        value = value.replace(
+            recipe.working_directory().to_string_lossy().as_ref(),
+            "$WORKDIR",
+        );
         if let Some(sysroot) = Path::new(&recipe.compiler).parent().and_then(Path::parent) {
             value = value.replace(sysroot.to_string_lossy().as_ref(), "$SYSROOT");
         }
@@ -409,4 +413,23 @@ pub(super) fn restore(output: &Output, bytes: &[u8]) -> Result<(), BuildError> {
     }
     std::fs::rename(temporary, &output.path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_directories_named_target_are_content_inputs() {
+        let directory =
+            std::env::temp_dir().join(format!("loom-source-tree-{}", std::process::id()));
+        std::fs::create_dir_all(directory.join("src/target")).unwrap();
+        let source = directory.join("src/target/value.rs");
+        std::fs::write(&source, b"pub const VALUE: u8 = 1;").unwrap();
+        let before = tree_hash(None, &directory).unwrap();
+        std::fs::write(&source, b"pub const VALUE: u8 = 2;").unwrap();
+        let after = tree_hash(None, &directory).unwrap();
+        assert_ne!(before, after);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 }

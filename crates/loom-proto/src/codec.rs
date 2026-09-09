@@ -1,3 +1,4 @@
+pub(crate) mod host;
 use crate::Value;
 use ipld_core::{
     cid::{Cid, multihash::Multihash},
@@ -9,7 +10,7 @@ use std::collections::BTreeMap;
 pub const DAG_CBOR_CODEC: u64 = 0x71;
 pub const RAW_CODEC: u64 = 0x55;
 const BLAKE3_256: u64 = 0x1e;
-const MAX_SAFE_INTEGER: i128 = 9_007_199_254_740_991;
+pub(crate) const MAX_SAFE_INTEGER: i128 = 9_007_199_254_740_991;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentAddress {

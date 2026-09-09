@@ -2,13 +2,21 @@
 import {resolve} from 'node:path';
 
 interface Gate {name:string;pass:boolean;detail:string}
-interface VariantMeasurement {name:string;median_ms:number;samples_ms:number[];queued_recording_commits?:(number|null)[]}
-interface ScanSummary {stage:string;variants:VariantMeasurement[]}
 interface Invocation {exit:number;stdout:string;stderr:string}
 const gates:Gate[]=[];
 const fixture=process.argv[2];
 const native=process.argv[3];
-const names=['legacy correctness','all <=55ms','fork <=70ms','queued recording commits <=3','warm five-crate delta <=600ms','one rustc invocation','missing dependency rebuild control'];
+const scanNames=[
+  'native correctness','all correctness','fork correctness','changing winners',
+  ...['all','fork'].flatMap(name=>[
+    `${name}: median <15ms`,
+    `${name}: identical-scan database growth <32768 bytes`,
+    `${name}: wire bytes <200000`,
+    `${name}: median reply storage wait <1ms`,
+  ]),
+];
+const compilerNames=['warm five-crate delta <=600ms','one rustc invocation','missing dependency rebuild control'];
+const names=[...scanNames,...compilerNames];
 function record(name:string,pass:boolean,detail:string) {
   gates.push({name,pass,detail});
   console.log(JSON.stringify({gate:name,pass,detail}));
@@ -26,37 +34,43 @@ async function invokeCommand(command:string[],extra:Record<string,string>={}):Pr
   ]);
   return result;
 }
-function summary(stdout:string):ScanSummary|undefined {
+function scanWitness(stdout:string):Gate[]|undefined {
+  const summaries:unknown[]=[];
   for(const line of stdout.split('\n')) {
-    try {const value=JSON.parse(line);if(value.stage==='warm-summary')return value;} catch {}
+    try {const value=JSON.parse(line);if(value?.stage==='goal-summary')summaries.push(value);} catch {}
   }
+  if(summaries.length!==1)return;
+  const value=summaries[0] as Record<string,unknown>;
+  if(!Array.isArray(value.gates)||value.gates.length!==scanNames.length||value.total!==scanNames.length)return;
+  const seen=new Set<string>();
+  const validated:Gate[]=[];
+  for(const candidate of value.gates) {
+    if(!candidate||typeof candidate!=='object')return;
+    const item=candidate as Record<string,unknown>;
+    if(typeof item.name!=='string'||!scanNames.includes(item.name)||seen.has(item.name)||typeof item.pass!=='boolean'||typeof item.detail!=='string')return;
+    seen.add(item.name);validated.push({name:item.name,pass:item.pass,detail:item.detail});
+  }
+  if(value.passed!==validated.filter(gate=>gate.pass).length)return;
+  if(value.first_failure!==(validated.find(gate=>!gate.pass)?.name??null))return;
+  return validated;
 }
-async function scan(variants:string[],correctness:string,targets:Record<string,number>) {
-  const result=await invoke('scripts/bench/largest.ts',[resolve(fixture!),resolve(native!)],{LOOM_BENCH_VARIANTS:variants.join(',')});
+async function scan() {
+  const result=await invoke('scripts/bench/largest.ts',[resolve(fixture!),resolve(native!)]);
   process.stdout.write(result.stdout);
   process.stderr.write(result.stderr);
-  const measurement=summary(result.stdout);
-  const total=variants.length+2;
-  const correct=result.exit===0&&result.stdout.includes(`${total}/${total} scan benchmark checks pass`)&&!!measurement;
-  record(correctness,correct,correct?'native tie/symlink control and seven changing winners match':`scan exit ${result.exit}; ${result.stderr.slice(-1200)}`);
-  if(variants.includes('all')) {
-    const samples=measurement?.variants.flatMap(value=>value.queued_recording_commits??[]);
-    const valid=!!samples&&samples.length===variants.length*7&&samples.every(value=>typeof value==='number'&&Number.isSafeInteger(value)&&value>=0);
-    record('queued recording commits <=3',correct&&valid&&samples!.every(value=>value!<=3),valid?`${JSON.stringify(samples)} queued recording commits per warm scan`:'missing or invalid recording_commits stats counter');
-  }
-  for(const variant of variants) {
-    const measured=measurement?.variants.find(value=>value.name===variant);
-    const limit=targets[variant]!;
-    const gate=variant==='all'?'all <=55ms':'fork <=70ms';
-    const valid=!!measured&&Number.isFinite(measured.median_ms)&&measured.samples_ms.length===7&&measured.samples_ms.every(value=>Number.isFinite(value)&&value>=0);
-    record(gate,correct&&valid&&measured!.median_ms<=limit,valid?`${measured!.median_ms.toFixed(3)}ms median / ${limit}ms target`:'no validated warm samples');
+  const witness=scanWitness(result.stdout);
+  const consistent=witness!==undefined&&result.exit===(witness.every(gate=>gate.pass)?0:1);
+  for(const name of scanNames) {
+    const gate=witness?.find(gate=>gate.name===name);
+    record(name,consistent&&gate?.pass===true,consistent?gate!.detail:`missing, invalid, or inconsistent scan goal summary; exit ${result.exit}`);
   }
 }
+
 try {
   if(!fixture||!native||!process.env.LOOM_URL||!process.env.LOOM_TOKEN_FILE) {
     throw new Error('Usage: LOOM_URL=isolated-url LOOM_TOKEN_FILE=file bun scripts/bench/unified-memory.ts FIXTURE NATIVE_BINARY');
   }
-  await scan(['all','fork'],'legacy correctness',{all:55,fork:70});
+  await scan();
   // The build lane supplies an executable witness, not a receipt from an older run.
   const buildScript='scripts/bench/warm-crates.ts';
   if(await Bun.file(buildScript).exists()) {
@@ -69,7 +83,7 @@ try {
       result=await invoke(buildScript,[]);
     }
     process.stdout.write(result.stdout);process.stderr.write(result.stderr);
-    for(const name of names.slice(4)) {
+    for(const name of compilerNames) {
       let witness:Gate|undefined;
       for(const line of result.stdout.split('\n')) {
         try {const item=JSON.parse(line);if(item.gate===name&&typeof item.pass==='boolean'&&typeof item.detail==='string')witness={name,pass:item.pass,detail:item.detail};}catch{}

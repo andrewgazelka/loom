@@ -260,3 +260,148 @@ fn mixed_sync_and_queued_results_during_commits_never_poison_the_writer() -> Res
     }
     Ok(())
 }
+
+#[test]
+fn weakened_durability_configuration_fails_closed() -> Result<()> {
+    for pragma in ["PRAGMA synchronous=OFF", "PRAGMA journal_mode=DELETE"] {
+        let directory = tempfile::tempdir()?;
+        let store = Store::open(directory.path().join("config.sqlite"))?;
+        let error = store
+            .with_connection(|connection| {
+                connection.execute_batch(pragma)?;
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("durable store requires"));
+        assert!(store.flush().is_err());
+        assert!(store.enqueue_effect("desc", "scope", 0, &json!(1)).is_err());
+    }
+    let ephemeral = Store::memory()?;
+    ephemeral.with_connection(|connection| {
+        let mode: String = connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+        assert_eq!(mode, "memory");
+        Ok(())
+    })?;
+    ephemeral.enqueue_effect("desc", "scope", 0, &json!(1))?;
+    ephemeral.flush()?;
+    Ok(())
+}
+
+#[test]
+fn failed_commit_is_sticky_and_rolls_back_results() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("commit.sqlite");
+    let store = Store::open(&path)?;
+    store.with_connection(|connection| {
+        connection.execute_batch("CREATE TABLE commit_parent(id INTEGER PRIMARY KEY); CREATE TABLE commit_child(parent_id INTEGER REFERENCES commit_parent(id) DEFERRABLE INITIALLY DEFERRED); CREATE TRIGGER fail_commit AFTER INSERT ON effect_results BEGIN INSERT INTO commit_child VALUES (1); END;")?;
+        Ok(())
+    })?;
+    store.enqueue_effect("desc", "scope", 0, &json!(1))?;
+    assert!(
+        store
+            .flush()
+            .unwrap_err()
+            .to_string()
+            .contains("FOREIGN KEY constraint failed")
+    );
+    assert!(store.flush().is_err());
+    assert_eq!(store.recording_commit_count(), 0);
+    let reader = rusqlite::Connection::open(path)?;
+    let count: i64 =
+        reader.query_row("SELECT count(*) FROM effect_results", [], |row| row.get(0))?;
+    assert_eq!(count, 0);
+    let count: i64 =
+        reader.query_row("SELECT count(*) FROM cas WHERE kind='result'", [], |row| {
+            row.get(0)
+        })?;
+    assert_eq!(count, 0);
+    Ok(())
+}
+
+#[test]
+fn flushed_wal_crash_child() -> Result<()> {
+    let Some(path) = std::env::var_os("LOOM_RECORDING_CRASH_TEST_PATH") else {
+        return Ok(());
+    };
+    let store = Store::open(path)?;
+    let desc = store.enqueue_value("desc", &json!({"op":"crash-control"}))?;
+    store.enqueue_effect(&desc, "crash-scope", 0, &json!({"answer":42}))?;
+    store.flush()?;
+    println!("LOOM_WAL_READY {desc}");
+    std::io::Write::flush(&mut std::io::stdout())?;
+    loop {
+        std::thread::park();
+    }
+}
+
+#[test]
+fn acknowledged_result_survives_killed_process() -> Result<()> {
+    use std::io::BufRead;
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("crash.sqlite");
+    let mut child = std::process::Command::new(std::env::current_exe()?)
+        .args(["--exact", "flushed_wal_crash_child", "--nocapture"])
+        .env("LOOM_RECORDING_CRASH_TEST_PATH", &path)
+        .stdout(std::process::Stdio::piped())
+        .spawn()?;
+    let stdout = child.stdout.take().unwrap();
+    let mut output = std::io::BufReader::new(stdout);
+    let desc = loop {
+        let mut line = String::new();
+        anyhow::ensure!(
+            output.read_line(&mut line)? != 0,
+            "crash child exited before acknowledgement"
+        );
+        if let Some(start) = line.find("LOOM_WAL_READY ") {
+            break line[start + "LOOM_WAL_READY ".len()..].trim().to_owned();
+        }
+    };
+    child.kill()?;
+    let status = child.wait()?;
+    assert!(!status.success());
+    assert!(std::fs::metadata(path.with_extension("sqlite-wal"))?.len() > 0);
+    // Recover using the primary file and WAL only, with no inherited shared index.
+    let recovered = directory.path().join("recovered.sqlite");
+    std::fs::copy(&path, &recovered)?;
+    std::fs::copy(
+        path.with_extension("sqlite-wal"),
+        recovered.with_extension("sqlite-wal"),
+    )?;
+    let store = Store::open(recovered)?;
+    assert_eq!(
+        store.effect_get(&desc, "crash-scope", 0)?,
+        Some(json!({"answer":42}))
+    );
+    assert_eq!(
+        store.get_value::<serde_json::Value>(&desc)?,
+        Some(json!({"op":"crash-control"}))
+    );
+    assert_eq!(store.events(None, 0, 100)?.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn recording_timings_distinguish_transactions_from_empty_flushes() -> Result<()> {
+    let store = Store::memory()?;
+    let before = store.recording_timings();
+    store.enqueue_effect("timing", "scope", 0, &json!(1))?;
+    store.flush()?;
+    let recorded = store.recording_timings();
+    assert_eq!(
+        recorded.committed_transactions - before.committed_transactions,
+        1
+    );
+    assert!(recorded.transaction_nanos > before.transaction_nanos);
+    assert_eq!(recorded.checkpoint_attempts - before.checkpoint_attempts, 1);
+    assert!(recorded.checkpoint_nanos > before.checkpoint_nanos);
+    store.flush()?;
+    let empty = store.recording_timings();
+    assert_eq!(
+        empty.committed_transactions,
+        recorded.committed_transactions
+    );
+    assert_eq!(empty.transaction_nanos, recorded.transaction_nanos);
+    assert_eq!(empty.checkpoint_attempts, recorded.checkpoint_attempts + 1);
+    assert!(empty.checkpoint_nanos > recorded.checkpoint_nanos);
+    Ok(())
+}

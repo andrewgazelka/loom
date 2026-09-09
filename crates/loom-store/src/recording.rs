@@ -13,6 +13,49 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Cumulative completed recording stages; sample after flush for a reply boundary.
+/// Transaction time includes BEGIN, record insertion, encoding, and COMMIT,
+/// including any SQLite automatic checkpoint inside COMMIT. It excludes waiting
+/// to acquire the connection. Explicit checkpoint time includes failed attempts.
+#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
+pub struct RecordingTimings {
+    pub committed_transactions: u64,
+    pub transaction_nanos: u64,
+    pub checkpoint_attempts: u64,
+    pub checkpoint_nanos: u64,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum Durability {
+    Wal,
+    Ephemeral,
+}
+impl Durability {
+    pub fn verify(self, connection: &Connection) -> Result<()> {
+        let journal: String = connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+        match self {
+            Self::Wal => {
+                ensure!(
+                    journal == "wal",
+                    "durable store requires WAL journal mode, got {journal}"
+                );
+                let synchronous: i64 =
+                    connection.query_row("PRAGMA synchronous", [], |row| row.get(0))?;
+                ensure!(
+                    synchronous == 1,
+                    "durable store requires NORMAL synchronous mode, got {synchronous}"
+                );
+            }
+            // In-memory stores have no persistent durability claim.
+            Self::Ephemeral => ensure!(
+                journal == "memory",
+                "ephemeral store requires memory journal mode"
+            ),
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct EffectKey {
     pub desc_hash: String,
@@ -55,26 +98,43 @@ struct Shared {
     submission: Mutex<()>,
     error: Mutex<Option<String>>,
     commits: AtomicU64,
+    transaction_nanos: AtomicU64,
+    checkpoint_attempts: AtomicU64,
+    checkpoint_nanos: AtomicU64,
     effects_generation: AtomicU64,
 }
 pub(crate) struct Writer {
     sender: Option<mpsc::SyncSender<Message>>,
     shared: Arc<Shared>,
     thread: Option<thread::JoinHandle<()>>,
+    durability: Durability,
 }
 impl Writer {
-    pub fn new(connection: Arc<Mutex<Connection>>) -> Result<Self> {
+    pub fn new(connection: Arc<Mutex<Connection>>, durability: Durability) -> Result<Self> {
         let (sender, receiver) = mpsc::sync_channel(8192);
         let shared = Arc::new(Shared::default());
         let worker_shared = shared.clone();
         let thread = thread::Builder::new()
             .name("loom-recording".into())
-            .spawn(move || run(connection, receiver, worker_shared))?;
+            .spawn(move || run(connection, receiver, worker_shared, durability))?;
         Ok(Self {
             sender: Some(sender),
             shared,
             thread: Some(thread),
+            durability,
         })
+    }
+    pub fn verify_connection(&self, connection: &Connection) -> Result<()> {
+        if let Err(error) = self.durability.verify(connection) {
+            *self
+                .shared
+                .error
+                .lock()
+                .map_err(|_| anyhow!("recording error lock poisoned"))? =
+                Some(format!("{error:#}"));
+            return Err(error);
+        }
+        Ok(())
     }
     pub fn check(&self) -> Result<()> {
         ensure!(
@@ -218,6 +278,14 @@ impl Writer {
             .effects_generation
             .fetch_add(1, Ordering::Release);
     }
+    pub fn timings(&self) -> RecordingTimings {
+        RecordingTimings {
+            committed_transactions: self.shared.commits.load(Ordering::Relaxed),
+            transaction_nanos: self.shared.transaction_nanos.load(Ordering::Relaxed),
+            checkpoint_attempts: self.shared.checkpoint_attempts.load(Ordering::Relaxed),
+            checkpoint_nanos: self.shared.checkpoint_nanos.load(Ordering::Relaxed),
+        }
+    }
     pub fn commits(&self) -> u64 {
         self.shared.commits.load(Ordering::Relaxed)
     }
@@ -237,23 +305,25 @@ impl Drop for Writer {
         }
     }
 }
-fn checkpoint(connection: &Connection) -> Result<()> {
-    // SQLite synchronizes the WAL before a FULL checkpoint even in NORMAL mode.
-    // A busy checkpoint is not a successful durability barrier.
-    let busy: i64 = connection.query_row("PRAGMA wal_checkpoint(FULL)", [], |row| row.get(0))?;
-    ensure!(busy == 0, "recording durability checkpoint is busy");
-    Ok(())
+fn elapsed_nanos(started: Instant) -> u64 {
+    // Saturation bounds the public counter representation for durations over 584 years.
+    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
 fn commit(
     connection: &Mutex<Connection>,
     records: &mut Vec<Record>,
     shared: &Shared,
     durable: bool,
+    durability: Durability,
 ) -> Result<()> {
     let mut connection = connection
         .lock()
         .map_err(|_| anyhow!("store lock poisoned"))?;
+    if durable || !records.is_empty() {
+        durability.verify(&connection)?;
+    }
     if !records.is_empty() {
+        let transaction_started = Instant::now();
         let transaction = connection.transaction()?;
         for record in records.iter() {
             match record {
@@ -290,11 +360,25 @@ fn commit(
             }
         }
         transaction.commit()?;
+        shared
+            .transaction_nanos
+            .fetch_add(elapsed_nanos(transaction_started), Ordering::Relaxed);
         shared.commits.fetch_add(1, Ordering::Relaxed);
         shared.effects_generation.fetch_add(1, Ordering::Release);
     }
     if durable {
-        checkpoint(&connection)?;
+        // NORMAL mode synchronizes the WAL and database during checkpointing.
+        // A busy checkpoint cannot acknowledge the requested durability barrier.
+        let checkpoint_started = Instant::now();
+        let checkpoint = connection.query_row("PRAGMA wal_checkpoint(FULL)", [], |row| {
+            row.get::<_, i64>(0)
+        });
+        shared
+            .checkpoint_nanos
+            .fetch_add(elapsed_nanos(checkpoint_started), Ordering::Relaxed);
+        shared.checkpoint_attempts.fetch_add(1, Ordering::Relaxed);
+        let busy = checkpoint?;
+        ensure!(busy == 0, "recording durability checkpoint is busy");
     }
     // Release SQLite before taking pending: producers inspect committed results
     // while holding pending, and must never wait on the opposite lock order.
@@ -310,7 +394,12 @@ fn commit(
     }
     Ok(())
 }
-fn run(connection: Arc<Mutex<Connection>>, receiver: mpsc::Receiver<Message>, shared: Arc<Shared>) {
+fn run(
+    connection: Arc<Mutex<Connection>>,
+    receiver: mpsc::Receiver<Message>,
+    shared: Arc<Shared>,
+    durability: Durability,
+) {
     let mut records = Vec::new();
     let mut deadline = Instant::now() + Duration::from_millis(100);
     loop {
@@ -351,7 +440,7 @@ fn run(connection: Arc<Mutex<Connection>>, receiver: mpsc::Receiver<Message>, sh
         let result = if let Some(error) = existing_error {
             Err(error)
         } else {
-            commit(&connection, &mut records, &shared, durable)
+            commit(&connection, &mut records, &shared, durable, durability)
                 .map_err(|error| format!("{error:#}"))
         };
         if let Err(error) = &result {

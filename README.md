@@ -15,7 +15,19 @@ export function main(): string {
 }
 ```
 
-Two effects run concurrently. The function returns a string—no `async`, no `Promise`, no coloring spreading through callers. Rust guests use ordinary `fn`s too.
+The same example in Rust:
+
+```rust
+use loom::abilities::sleep;
+
+#[loom::def]
+pub fn main() -> String {
+    loom::all([sleep::desc(100), sleep::desc(200)]).expect("sleep failed");
+    "both finished".into()
+}
+```
+
+Two effects run concurrently. Both examples use ordinary synchronous functions; the host handles suspension and resumption.
 
 - **One REPL, two languages.** Define interactively, call across languages, `fork` work by hash, and `join` the results.
 - **Actors with history.** State is folded from events. Fork a session, replay an actor, or upgrade its behavior.

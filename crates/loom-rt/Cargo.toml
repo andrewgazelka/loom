@@ -17,3 +17,5 @@ wasmtime = { version = "48.0.0", default-features = false, features = ["anyhow",
 
 serde = { version = "1", features = ["derive"] }
 tempfile = "3"
+
+libc = "0.2"

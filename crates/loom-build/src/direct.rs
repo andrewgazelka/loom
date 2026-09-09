@@ -86,6 +86,14 @@ impl Recipe {
         })
     }
 
+    fn working_directory(&self) -> &Path {
+        self.environment
+            .get("LOOM_RUSTC_CWD")
+            .or_else(|| self.environment.get("PWD"))
+            .map(Path::new)
+            .unwrap_or(&self.source)
+    }
+
     fn output(&self) -> Result<PathBuf, BuildError> {
         let value = |flag: &str| {
             self.arguments
@@ -145,7 +153,13 @@ impl Recipe {
                 self.arguments.push(argument);
             }
         }
-        self.arguments.push("-Funsafe-code".into());
+        if !self
+            .arguments
+            .iter()
+            .any(|argument| argument == "-Funsafe-code")
+        {
+            self.arguments.push("-Funsafe-code".into());
+        }
         self.source = directory.into();
         Ok(())
     }
@@ -314,6 +328,13 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
     let graph = cache.join("rust-artifacts").join(&key);
     fs::create_dir_all(&graph).await?;
     let target = graph.join("target");
+    let lineage = blake3::hash(definition.name.as_bytes())
+        .to_hex()
+        .to_string();
+    let workspace = graph.join("root-sources").join(&lineage);
+    materialize_root_workspace(directory, &workspace)?;
+    let directory = workspace.as_path();
+    let root_incremental = target.join("incremental").join(&lineage);
     let isolated = directory.join("vendor").is_dir();
     let manifest: toml::Value =
         toml::from_str(&fs::read_to_string(directory.join("Cargo.toml")).await?)
@@ -352,11 +373,8 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
         };
         if restored || recipe.restore_artifacts(store)? {
             let restore_ms = restore_started.elapsed().as_millis();
-            let lineage = target
-                .join("incremental")
-                .join(blake3::hash(definition.name.as_bytes()).to_hex().as_str());
-            fs::create_dir_all(&lineage).await?;
-            recipe.relocate(directory, &target.join("root-output"), &lineage)?;
+            fs::create_dir_all(&root_incremental).await?;
+            recipe.relocate(directory, &target.join("root-output"), &root_incremental)?;
             let command = if isolated {
                 fs::write(target.join("direct.sh"), recipe.shell()).await?;
                 let mut command = Command::new(root.join("loom-rustc/sandbox.sh"));
@@ -434,7 +452,8 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
         .env("LOOM_RUST_TARGET", target_name)
         .env("LOOM_CAS_SOURCES", cache.join("source-trees"))
         .env("LOOM_COMPILER_CACHE_OWNER", helper_owner)
-        .env("LOOM_COMPILER_CACHE_MIRROR", &mirror);
+        .env("LOOM_COMPILER_CACHE_MIRROR", &mirror)
+        .env("LOOM_ROOT_INCREMENTAL", &root_incremental);
     let output = run(command).await?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let graph_identity = serde_json::json!({"dependency_graph":key});
@@ -641,7 +660,7 @@ impl Recipe {
         let mut script = String::from("#!/bin/sh\nset -eu\n");
         script.push_str(&format!(
             "cd {}\n",
-            quote(self.source.to_string_lossy().as_ref())
+            quote(self.working_directory().to_string_lossy().as_ref())
         ));
         for (name, value) in &self.environment {
             script.push_str(&format!("export {}={}\n", name, quote(value)));
@@ -738,7 +757,7 @@ async fn repair_units(
             command
                 .args(&unit.recipe.arguments)
                 .envs(&unit.recipe.environment)
-                .current_dir(&unit.recipe.source);
+                .current_dir(unit.recipe.working_directory());
             command
         };
         let output = run(command).await?;
@@ -879,6 +898,161 @@ mod tests {
             after, original,
             "unreviewed host code replaced a shared artifact"
         );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn root_edits_reuse_incremental_state_and_execute_new_code() {
+        fn run(recipe: &Recipe) -> std::process::Output {
+            std::process::Command::new(&recipe.compiler)
+                .args(&recipe.arguments)
+                .envs(&recipe.environment)
+                .current_dir(recipe.working_directory())
+                .output()
+                .unwrap()
+        }
+        let directory =
+            std::env::temp_dir().join(format!("loom-root-incremental-{}", std::process::id()));
+        let old = directory.join("old");
+        let new = directory.join("new");
+        for source in [&old, &new] {
+            std::fs::create_dir_all(source).unwrap();
+            std::fs::write(
+                source.join("Cargo.toml"),
+                "[package]\nname='incremental-control'\nversion='0.1.0'\n",
+            )
+            .unwrap();
+        }
+        let unchanged = (0..128)
+            .map(|index| {
+                format!(
+                    "pub fn f{index}(x:u64)->u64{{x.wrapping_mul({})}}\n",
+                    index + 2
+                )
+            })
+            .collect::<String>();
+        std::fs::write(
+            old.join("lib.rs"),
+            format!("pub fn changed()->u64{{1}}\n{unchanged}"),
+        )
+        .unwrap();
+        std::fs::write(
+            new.join("lib.rs"),
+            format!("pub fn changed()->u64{{2}}\n{unchanged}"),
+        )
+        .unwrap();
+        let workspace = directory.join("workspace");
+        materialize_root_workspace(&old, &workspace).unwrap();
+        let output = directory.join("cold-output");
+        std::fs::create_dir_all(&output).unwrap();
+        let incremental = directory.join("incremental");
+        let compiler = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".into());
+        let capture = format!(
+            "LOOM_RUSTC_CWD={}\0RUSTC_BOOTSTRAP=1\0LOOM_RUSTC_ARGUMENTS\0{compiler}\0",
+            workspace.display()
+        );
+        let mut recipe = Recipe::parse(capture.as_bytes(), &workspace).unwrap();
+        recipe.arguments = vec![
+            "--edition=2024".into(),
+            "--crate-name".into(),
+            "loom_definition".into(),
+            "--crate-type".into(),
+            "rlib".into(),
+            "lib.rs".into(),
+            "--out-dir".into(),
+            output.to_string_lossy().into_owned(),
+            "-Copt-level=2".into(),
+            "-Ccodegen-units=16".into(),
+            "-C".into(),
+            format!("incremental={}", incremental.display()),
+            "-Funsafe-code".into(),
+            format!("--remap-path-prefix={}=/loom/build", workspace.display()),
+            format!("--remap-path-prefix={}=/loom/source", workspace.display()),
+            "-Zincremental-info".into(),
+        ];
+        let first = run(&recipe);
+        assert!(
+            first.status.success(),
+            "{}",
+            String::from_utf8_lossy(&first.stderr)
+        );
+        materialize_root_workspace(&new, &workspace).unwrap();
+        let warm = directory.join("warm-output");
+        recipe.relocate(&workspace, &warm, &incremental).unwrap();
+        let second = run(&recipe);
+        let diagnostics = String::from_utf8_lossy(&second.stderr);
+        assert!(second.status.success(), "{diagnostics}");
+        assert!(
+            !diagnostics.contains("completely ignoring cache"),
+            "{diagnostics}"
+        );
+        assert!(
+            diagnostics
+                .lines()
+                .any(|line| line.contains("files hard-linked")
+                    && line
+                        .split_whitespace()
+                        .nth(3)
+                        .and_then(|count| count.parse::<usize>().ok())
+                        .is_some_and(|count| count > 0)),
+            "{diagnostics}"
+        );
+        let main = directory.join("main.rs");
+        std::fs::write(
+            &main,
+            "fn main(){assert_eq!(loom_definition::changed(),2);}",
+        )
+        .unwrap();
+        let executable = directory.join("witness");
+        let linked = std::process::Command::new(&compiler)
+            .arg("--edition=2024")
+            .arg(&main)
+            .arg("--extern")
+            .arg(format!(
+                "loom_definition={}",
+                warm.join("libloom_definition.rlib").display()
+            ))
+            .arg("-o")
+            .arg(&executable)
+            .output()
+            .unwrap();
+        assert!(
+            linked.status.success(),
+            "{}",
+            String::from_utf8_lossy(&linked.stderr)
+        );
+        assert!(
+            std::process::Command::new(executable)
+                .status()
+                .unwrap()
+                .success()
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn dependency_replay_preserves_compiler_working_directory() {
+        let directory =
+            std::env::temp_dir().join(format!("loom-compiler-cwd-{}", std::process::id()));
+        let package = directory.join("deps/a package");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(package.join("input"), b"correct compiler cwd").unwrap();
+        let capture = format!(
+            "LOOM_RUSTC_CWD={}\0LOOM_RUSTC_ARGUMENTS\0cat\0deps/a package/input\0",
+            directory.display()
+        );
+        let recipe = Recipe::parse(capture.as_bytes(), &package).unwrap();
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(recipe.shell())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"correct compiler cwd");
         std::fs::remove_dir_all(directory).unwrap();
     }
 
@@ -1044,4 +1218,48 @@ async fn graph_shareable(
         }
     }
     Ok(true)
+}
+
+fn materialize_root_workspace(source: &Path, workspace: &Path) -> Result<(), BuildError> {
+    fn copy(source: &Path, destination: &Path, root: bool) -> Result<(), BuildError> {
+        std::fs::create_dir_all(destination)?;
+        for entry in std::fs::read_dir(source)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            if root && (name == "component.wasm" || name == "component.inputs") {
+                continue;
+            }
+            let output = destination.join(&name);
+            let kind = entry.file_type()?;
+            if kind.is_symlink() {
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(std::fs::canonicalize(entry.path())?, output)?;
+                #[cfg(not(unix))]
+                return Err(rejected("root workspace requires Unix source links"));
+            } else if kind.is_dir() {
+                copy(&entry.path(), &output, false)?;
+            } else if kind.is_file() {
+                std::fs::copy(entry.path(), output)?;
+            } else {
+                return Err(rejected("unsupported root source file type"));
+            }
+        }
+        Ok(())
+    }
+    let temporary = workspace.with_extension(format!("pending-{}", std::process::id()));
+    if temporary.exists() {
+        std::fs::remove_dir_all(&temporary)?;
+    }
+    copy(source, &temporary, true)?;
+    let manifest = temporary.join("Cargo.toml");
+    let content = std::fs::read_to_string(&manifest)?.replace(
+        source.to_string_lossy().as_ref(),
+        workspace.to_string_lossy().as_ref(),
+    );
+    std::fs::write(manifest, content)?;
+    if workspace.exists() {
+        std::fs::remove_dir_all(workspace)?;
+    }
+    std::fs::rename(temporary, workspace)?;
+    Ok(())
 }

@@ -5,6 +5,7 @@ mod migration;
 mod recording;
 use anyhow::{Context, Result, anyhow, ensure};
 use loom_proto::{Actor, Def, Event, Snapshot, Value};
+pub use recording::RecordingTimings;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::{
     collections::BTreeMap,
@@ -27,12 +28,15 @@ pub struct Store {
 }
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        Self::initialize(Connection::open(path)?)
+        Self::initialize(Connection::open(path)?, recording::Durability::Wal)
     }
     pub fn memory() -> Result<Self> {
-        Self::initialize(Connection::open_in_memory()?)
+        Self::initialize(
+            Connection::open_in_memory()?,
+            recording::Durability::Ephemeral,
+        )
     }
-    fn initialize(mut connection: Connection) -> Result<Self> {
+    fn initialize(mut connection: Connection, durability: recording::Durability) -> Result<Self> {
         connection.create_scalar_function(
             "loom_archive",
             1,
@@ -64,9 +68,10 @@ impl Store {
         connection.execute_batch(include_str!("schema.sql"))?;
         migration::run(&mut connection)?;
         effect_index::rebuild(&mut connection)?;
-        connection.execute_batch("PRAGMA synchronous=NORMAL; PRAGMA cache_size=-65536;")?;
+        connection.execute_batch("PRAGMA synchronous=NORMAL;")?;
+        durability.verify(&connection)?;
         let connection = Arc::new(Mutex::new(connection));
-        let recording = Arc::new(recording::Writer::new(connection.clone())?);
+        let recording = Arc::new(recording::Writer::new(connection.clone(), durability)?);
         Ok(Self {
             recording,
             connection,
@@ -78,6 +83,10 @@ impl Store {
             .lock()
             .map_err(|_| anyhow!("store lock poisoned"))
     }
+    /// Trusted native extension point. Callbacks must preserve the durability
+    /// configuration throughout their operation, including temporary changes.
+    /// Effective settings are checked afterward, even when the callback fails;
+    /// a weaken/write/restore sequence cannot be inferred from final settings.
     pub fn with_connection<T>(
         &self,
         operation: impl FnOnce(&mut Connection) -> Result<T>,
@@ -88,6 +97,7 @@ impl Store {
         let result = operation(&mut connection);
         // The callback may alter effect projections, including before an error.
         self.recording.effects_changed();
+        self.recording.verify_connection(&connection)?;
         result
     }
     pub fn put(&self, kind: &str, bytes: &[u8]) -> Result<String> {
@@ -892,9 +902,12 @@ impl Store {
             None => Ok(None),
         }
     }
-    /// Drain queued recording and synchronize its WAL before an external reply.
+    /// Drain recording and synchronize the WAL and database before an external reply.
     pub fn flush(&self) -> Result<()> {
         self.recording.barrier(true)
+    }
+    pub fn recording_timings(&self) -> RecordingTimings {
+        self.recording.timings()
     }
     pub fn recording_commit_count(&self) -> u64 {
         self.recording.commits()

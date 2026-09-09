@@ -1,20 +1,14 @@
 // Each subtree advances independently; join merges only its winning entry.
 #[loom::def]
 pub fn main(machine: String, path: String) -> loom::Value {
-    let entries: loom::Value = loom::perform(loom::Desc::new(
-        "fs.list",
-        serde_json::json!({"machine": machine, "path": path}),
-    ))
-    .expect("directory listing failed");
+    let entries = loom::abilities::fs::list(&machine, &path)
+        .expect("directory listing failed");
     let mut best = serde_json::json!({"path":"", "size":-1});
     let mut fibers = Vec::new();
     let mut directories = Vec::new();
-    for entry in entries.as_array().expect("directory entries") {
-        if entry["is_symlink"].as_bool().expect("symlink flag") {
-            continue;
-        }
-        let name = entry["name"].as_str().expect("entry name");
-        if entry["is_dir"].as_bool().expect("directory flag") {
+    for entry in entries {
+        let name = &entry.name;
+        if entry.kind == loom::EntryKind::Directory {
             fibers.push(
                 loom::fork(
                     MAIN_DEF,
@@ -26,8 +20,8 @@ pub fn main(machine: String, path: String) -> loom::Value {
                 .expect("fork failed"),
             );
             directories.push(name.to_owned());
-        } else if entry["is_file"].as_bool().expect("file flag") {
-            merge(&mut best, name, entry["size"].as_i64().expect("file size"));
+        } else if entry.kind == loom::EntryKind::File {
+            merge(&mut best, name, i64::try_from(entry.size).expect("file size exceeds i64"));
         }
     }
     for (index, child) in loom::join(fibers)

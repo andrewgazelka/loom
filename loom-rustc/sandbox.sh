@@ -97,7 +97,8 @@ else
   if [[ $mode == build && -n ${LOOM_COMPILER_CACHE_OWNER:-} ]]; then
     args+=(--ro-bind "$LOOM_COMPILER_CACHE_OWNER" "$LOOM_COMPILER_CACHE_OWNER"
       --setenv LOOM_COMPILER_CACHE_OWNER "$LOOM_COMPILER_CACHE_OWNER"
-      --setenv LOOM_COMPILER_CACHE_MIRROR "$LOOM_COMPILER_CACHE_MIRROR")
+      --setenv LOOM_COMPILER_CACHE_MIRROR "$LOOM_COMPILER_CACHE_MIRROR"
+      --setenv LOOM_ROOT_INCREMENTAL "$LOOM_ROOT_INCREMENTAL")
   fi
   run=(/bin/sh /opt/build.sh "$crate_dir" "$target_dir")
   if [[ $mode == rustc ]]; then

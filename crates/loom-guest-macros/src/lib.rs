@@ -116,7 +116,7 @@ pub fn def(attr: TokenStream, item: TokenStream) -> TokenStream {
             fn run(_state: Vec<u8>, _msg: Vec<u8>) -> Result<Vec<u8>, String> { Err("free definition has no actor handler".into()) }
             fn fold(_state: Vec<u8>, _event: Vec<u8>) -> Vec<u8> { panic!("free definition has no fold") }
             fn call(_def: Vec<u8>, args: Vec<u8>) -> Result<Vec<u8>, String> {
-                let value: ::loom::Value = ::loom::decode(&args)?;
+                let value: ::loom::Value = ::loom::decode_host(&args)?;
                 let values = match value { ::loom::Value::Array(values) => values, value if #count == 1 => vec![value], ::loom::Value::Null if #count == 0 => vec![], _ => return Err("arguments must be an array".into()) };
                 if values.len() != #count { return Err(format!("expected {} arguments, got {}", #count, values.len())); }
                 #(#decode)*
@@ -138,13 +138,13 @@ pub fn actor(_attr: TokenStream, item: TokenStream) -> TokenStream {
         #[cfg(not(feature = "loom-dependency"))]
         impl ::loom::bindings::Guest for #name {
             fn run(state: Vec<u8>, msg: Vec<u8>) -> Result<Vec<u8>, String> {
-                let state = if ::loom::decode::<::loom::Value>(&state)?.is_null() { <Self as ::loom::Actor>::init() } else { ::loom::decode(&state)? };
-                let msg = ::loom::decode(&msg)?;
+                let state = if ::loom::decode_host::<::loom::Value>(&state)?.is_null() { <Self as ::loom::Actor>::init() } else { ::loom::decode_host(&state)? };
+                let msg = ::loom::decode_host(&msg)?;
                 ::loom::encode(&<Self as ::loom::Actor>::handle(&state, msg))
             }
             fn fold(state: Vec<u8>, event: Vec<u8>) -> Vec<u8> {
-                let state = if ::loom::decode::<::loom::Value>(&state).expect("invalid state CBOR").is_null() { <Self as ::loom::Actor>::init() } else { ::loom::decode(&state).expect("invalid actor state") };
-                let event = ::loom::decode(&event).expect("invalid actor event");
+                let state = if ::loom::decode_host::<::loom::Value>(&state).expect("invalid state CBOR").is_null() { <Self as ::loom::Actor>::init() } else { ::loom::decode_host(&state).expect("invalid actor state") };
+                let event = ::loom::decode_host(&event).expect("invalid actor event");
                 ::loom::encode(&<Self as ::loom::Actor>::fold(state, &event)).expect("invalid folded state")
             }
             fn call(_def: Vec<u8>, _args: Vec<u8>) -> Result<Vec<u8>, String> { Err("actor definition has no free function".into()) }

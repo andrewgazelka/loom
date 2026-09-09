@@ -17,7 +17,7 @@ use loom_proto::{CommandRequest, Def, DefineRequest, EvalRequest, Lang, Response
 use loom_store::Store;
 use serde::Deserialize;
 use serde_json::json;
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, path::PathBuf, sync::{Arc, atomic::{AtomicU64, Ordering}}, time::{Duration, Instant}};
 
 #[derive(Clone)]
 pub struct Service {
@@ -29,6 +29,7 @@ pub struct Service {
     languages: Vec<Lang>,
     backup_directory: PathBuf,
     definitions_gate: Arc<tokio::sync::Mutex<()>>,
+    last_reply_storage_nanos: Arc<AtomicU64>,
 }
 impl Service {
     pub fn new(store: Store, root: PathBuf, languages: Vec<Lang>) -> Result<Self> {
@@ -49,6 +50,7 @@ impl Service {
             languages,
             backup_directory,
             definitions_gate: Arc::new(tokio::sync::Mutex::new(())),
+            last_reply_storage_nanos: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -66,7 +68,13 @@ impl Service {
             loom_proto::encode(&value).map_err(anyhow::Error::msg)?;
             Ok(value)
         });
-        let seq = match self.store.flush().and_then(|()| self.store.latest_seq()) {
+        let storage_start = Instant::now();
+        let sequence = self.store.flush().and_then(|()| self.store.latest_seq());
+        self.last_reply_storage_nanos.store(
+            u64::try_from(storage_start.elapsed().as_nanos()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        let seq = match sequence {
             Ok(seq) => seq,
             Err(error) => {
                 return Response {
@@ -522,6 +530,8 @@ impl Service {
             "stats" => {
                 let mut stats = serde_json::to_value(loom_maintenance::stats(&self.store)?)?;
                 stats["recording_commits"] = json!(self.store.recording_commit_count());
+                stats["last_reply_storage_nanos"] = json!(self.last_reply_storage_nanos.load(Ordering::Relaxed));
+                stats["effect_wire_bytes"] = json!(self.runtime.effect_wire_bytes());
                 Ok(stats)
             }
             "gc" => Ok(serde_json::to_value(
@@ -663,16 +673,27 @@ impl Service {
         if let Ok(bytes) = serde_json::to_vec(&response.result)
             && bytes.len() > 8192
         {
-            match self
+            let storage_start = Instant::now();
+            let reference = self
                 .store
                 .put_value("result", &response.result)
-                .and_then(|hash| self.store.reference(&hash, loom_proto::DAG_CBOR_CODEC))
-            {
+                .and_then(|hash| self.store.reference(&hash, loom_proto::DAG_CBOR_CODEC));
+            self.last_reply_storage_nanos.fetch_add(
+                u64::try_from(storage_start.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                Ordering::Relaxed,
+            );
+            match reference {
                 Ok(reference) => response.result = reference,
                 Err(error) => return self.response(Err(error)),
             }
         }
-        if let Err(error) = self.store.flush() {
+        let storage_start = Instant::now();
+        let flushed = self.store.flush();
+        self.last_reply_storage_nanos.fetch_add(
+            u64::try_from(storage_start.elapsed().as_nanos()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        if let Err(error) = flushed {
             return self.response(Err(error));
         }
         response

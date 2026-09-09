@@ -4,7 +4,7 @@ pub fn main(machine: String, path: String) -> loom::Value {
     let mut best_path = String::new();
     let mut best_size: i64 = -1;
     while !frontier.is_empty() {
-        let descs: Vec<loom::Desc<loom::Value>> = frontier
+        let descs: Vec<loom::Desc<Vec<loom::DirEntry>>> = frontier
             .iter()
             .map(|rel| {
                 let full = if rel.is_empty() {
@@ -12,30 +12,23 @@ pub fn main(machine: String, path: String) -> loom::Value {
                 } else {
                     format!("{}/{}", path, rel)
                 };
-                loom::Desc::<loom::Value>::new(
-                    "fs.list",
-                    serde_json::json!({"machine":machine,"path":full}),
-                )
+                loom::abilities::fs::list::desc(&machine, &full)
             })
             .collect();
         let batches = loom::all(descs).expect("directory listing failed");
         let mut next: Vec<String> = Vec::new();
         for (index, batch) in batches.into_iter().enumerate() {
-            let entries = batch.as_array().expect("fs.list must return an array");
-            for entry in entries {
-                if entry["is_symlink"].as_bool().expect("is_symlink") {
-                    continue;
-                }
-                let name = entry["name"].as_str().expect("name");
+            for entry in batch {
+                let name = &entry.name;
                 let rel = if frontier[index].is_empty() {
                     name.to_string()
                 } else {
                     format!("{}/{}", frontier[index], name)
                 };
-                if entry["is_dir"].as_bool().expect("is_dir") {
+                if entry.kind == loom::EntryKind::Directory {
                     next.push(rel);
-                } else if entry["is_file"].as_bool().expect("is_file") {
-                    let size = entry["size"].as_i64().expect("size");
+                } else if entry.kind == loom::EntryKind::File {
+                    let size = i64::try_from(entry.size).expect("file size exceeds i64");
                     if size > best_size || (size == best_size && rel < best_path) {
                         best_size = size;
                         best_path = rel;

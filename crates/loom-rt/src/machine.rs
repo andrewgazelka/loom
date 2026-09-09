@@ -1,18 +1,9 @@
 use crate::{Runtime, required_str};
 use anyhow::{Context, Result, bail, ensure};
-use loom_proto::{Actor, Lang, Value, Tree, TreeEntry};
-use serde::Serialize;
+use loom_proto::{Actor, Lang, Value, Tree, TreeEntry, DirEntry, EntryKind};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
-#[derive(Serialize)]
-struct DirectoryEntry {
-    name: String,
-    size: u64,
-    is_dir: bool,
-    is_file: bool,
-    is_symlink: bool,
-}
 
 impl Runtime {
     pub fn create_machine(&self, root: &Path) -> Result<Actor> {
@@ -125,31 +116,29 @@ impl Runtime {
         ensure!(path.starts_with(&root), "path escapes machine root");
         Ok(path)
     }
-    pub(crate) async fn list_machine_directory(&self, args: &Value) -> Result<Value> {
+    pub(crate) async fn list_machine_directory(&self, args: &Value) -> Result<crate::EffectOutput> {
         let path = self.machine_path(args)?;
-        let entries = tokio::task::spawn_blocking(move || -> Result<Vec<DirectoryEntry>> {
+        let entries = tokio::task::spawn_blocking(move || -> Result<Vec<DirEntry>> {
             let mut entries = Vec::new();
             for entry in std::fs::read_dir(&path)? {
                 ensure!(entries.len() < 100_000, "directory entry limit exceeded");
                 let entry = entry?;
                 // DirEntry::metadata does not follow symlinks.
                 let metadata = entry.metadata()?;
-                entries.push(DirectoryEntry {
+                entries.push(DirEntry {
                     name: entry
                         .file_name()
                         .into_string()
                         .map_err(|_| anyhow::anyhow!("directory entry name is not UTF8"))?,
-                    size: metadata.len(),
-                    is_dir: metadata.is_dir(),
-                    is_file: metadata.is_file(),
-                    is_symlink: metadata.file_type().is_symlink(),
+                    size: if metadata.is_file() { metadata.len() } else { 0 },
+                    kind: if metadata.is_dir() { EntryKind::Directory } else if metadata.is_file() { EntryKind::File } else if metadata.file_type().is_symlink() { EntryKind::Symlink } else { EntryKind::Other },
                 });
             }
             entries.sort_unstable_by(|left, right| left.name.cmp(&right.name));
             Ok(entries)
         })
         .await??;
-        Ok(serde_json::to_value(entries)?)
+        Ok(crate::EffectOutput { bytes: loom_proto::encode_host(&entries).map_err(anyhow::Error::msg)? })
     }
     pub(crate) async fn read_machine_file(&self, args: &Value) -> Result<Value> {
         use tokio::io::AsyncReadExt;

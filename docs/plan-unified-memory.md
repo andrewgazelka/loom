@@ -5,50 +5,30 @@ Status: implementation in progress, 2026-09-09. The consolidated command is
 It prints the passing gate count and first failure. Performance targets below
 remain acceptance criteria until that command verifies them.
 
-The desired end-state scan latency is about 7 ms while retaining separate Wasm memories and DAG-CBOR. That target is unverified. The 55/70 ms recording targets below are intermediate milestones; passing them would not establish the desired end-state performance. The canceled shared-memory proposal provides no performance evidence for the retained design.
+## Scan contract change, 2026-09-09
 
-Baseline (7 warm runs, ~10,000 files, over MCP): native sequential 26 ms,
-Loom `all` 162 ms, Loom recursive fork/join 314 ms.
+The earlier 7 ms figure was an estimate for Linux, not a measurement on this Mac. The current Mac acceptance target is below 15 ms for both `all` and recursive fork/join. The user's separate report measured a 5.4 ms native batched walk; that result is a filesystem-only reference, not a Loom measurement. Keep separate Wasm memories and DAG-CBOR.
 
-## Phase 0: recording off the hot path (prerequisite for everything)
+The goal command is:
 
-Where the time goes today (per effect, on the calling thread, one SQLite
-connection behind one mutex, `synchronous` unset = FULL): `put_value` of the
-descriptor (`loom-rt/src/lib.rs:599`), `append("effect_invoked")` (`:608`),
-`effect_put` (`:722`). Three fsynced commits. Measured on this Mac: 774 such
-commits = 105 ms; the same rows in one transaction = 22 ms. fork and join are
-recorded the same way (`:648`, `:669`), so the recursive style pays nine
-commits per directory.
+```sh
+LOOM_URL=<isolated-daemon> LOOM_TOKEN_FILE=<token-file> bun scripts/bench/largest.ts <fixture> <native-binary>
+```
 
-Changes:
-1. `fork`, `join`, `all`, `race` are scheduler operations. They do not touch
-   the store. Only leaf effects (`fs.*`, `exec`, `llm`, `cas.*`, `now`,
-   `random`, `sleep`, `send`) are recorded, under their existing scope path.
-2. `loom-store`: one writer thread, one channel. `append`, `put_value`,
-   `effect_put` push a record and return. The writer commits everything it
-   drains in one transaction. `PRAGMA synchronous=NORMAL`. An in-memory map
-   of pending effect results sits in front of `effect_get`.
-3. Flush barrier: before any bytes leave the process (MCP reply, HTTP reply,
-   WebSocket event), wait for the writer to pass the last record this request
-   produced. Nothing external ever observes an unrecorded effect.
-4. `all` stops cloning child descriptors (`:623`) and stops storing its own
-   aggregate descriptor and result.
+It checks correctness against a native scan, including ties, symlinks, and seven changing winners. Each Loom variant must have a warm median below 15 ms, average retained database growth below 32 KiB per identical scan, fewer than 200,000 result bytes crossing the guest boundary per scan, and median reply storage wait below 1 ms. It reports load average and fails missing metrics. Database growth includes SQLite indexes and uses both allocated and used page deltas; it does not confuse checkpoint traffic with retained database growth. The consolidated command adds the three compiler gates for 15 checks total.
 
-Control, run BEFORE writing code: set `PRAGMA synchronous=OFF` on the store
-connection, re-run the scan. Expected: `all` drops to ~60 to 80 ms with no
-other change. If it does not move, this diagnosis is wrong; next suspect is
-the store mutex (time `self.lock()` waits).
+The first run of the extended scan command passed 4/12 checks. On the existing history database, `all` was 184.2 ms and fork/join 149.1 ms at a load average of 23.3. Identical scans added about 690 KB. Wire and storage-wait metrics were absent and failed explicitly. This loaded run is a baseline, not a controlled attribution of individual costs.
 
-Pre-code control on this checkout, using matched debug daemons and guests:
-FULL `all` 384.5 ms and fork/join 485.4 ms; OFF `all` 328.3 ms and fork/join
-350.0 ms. Both passed 4/4 correctness checks. Sync accounts for part of the
-cost; these debug measurements do not establish the release latency target.
+Implementation order and contracts:
 
-Goal command: the consolidated benchmark. Targets: `all` <= 55 ms,
-fork/join <= 70 ms. Queued recording transactions per scan must be <= 3,
-measured by the `stats.recording_commits` counter. Inserted rows are not a
-transaction counter. The response barrier must checkpoint the WAL and reject
-a busy or failed checkpoint before returning success.
+1. A completed call stores one trace object and one `call_completed` event. The trace identifies each effect by descriptor, deterministic job scope and occurrence, and references its result. Repeated descriptors and concurrent completion order must not change replay. Result blobs deduplicate. Fresh calls keep their trace in memory and do not query SQLite for newly generated scopes. Global memoization is limited to effects with a valid hermetic or explicit cache key. Pending actors retain recovery checkpoints; failure, cancellation and race outcomes must remain replayable. Historical effects stay readable through a verified migration and trace-backed projections.
+2. Every store user gets the same process-crash durability contract. Use SQLite WAL with `synchronous=NORMAL`; replies wait for commit, not a disk synchronization receipt. Background checkpointing must own disk synchronization without introducing a request-path sync through WAL restart or automatic checkpointing. A queue acceptance is insufficient for an acknowledged reply. Power-loss durability is not promised. The final implementation must test native sync behavior, recovery after process termination, and bounded WAL growth.
+3. Filesystem results use typed `DirEntry` values with named fields and array-shaped DAG-CBOR encoding. The host encodes typed results directly; guests decode host-produced values without canonical re-encoding. Foreign descriptors and CAS bytes still undergo strict validation where their original bytes determine an identity. Keep CID, depth, size and numeric constraints. Measure the codec on the actual scan listing shape; target below 1 ms each way.
+4. Pin each machine root directory handle. Resolve filesystem operations relative to that handle, reject parent traversal, and refuse symlinks throughout resolution. macOS batches metadata through `getattrlistbulk`; Linux uses descriptor-relative directory enumeration and `statx`. Add a bounded parallel `fs.walk` effect while retaining `fs.list` for guest-driven traversal. A rename/symlink race must fail to escape the root. Store root identity so a restart cannot silently grant access to a replacement directory.
+
+Measure recording and codec changes with the original filesystem calls first, then measure the pinned, batched filesystem implementation. The final implementation has one path; intermediate source snapshots exist only to attribute the improvement.
+
+The earlier FULL-sync and 64 MiB SQLite page-cache experiments were reverted. The native reference program still defaults to one worker; its optional parallel mode is diagnostic and cannot substitute for improving Loom. Shared guest memory remains canceled.
 
 ## Phase 1: crates by hash (Unison style)
 
@@ -88,21 +68,13 @@ lock committed with the definition), build missing artifacts bottom-up, then
 CAS-materialized rlibs. `std` for the target is rustup's prebuilt rlib (or
 one CAS artifact when `-Zbuild-std` is required).
 
-Consequences: a warm build is one rustc invocation for the definition plus
-link and adapt (~0.3 s); no double `cargo` startup (`loom-rustc/build.sh:15-16`);
-artifacts move between hosts through the CAS like any other blob; the
-`rust-target` warm dir is retired.
+A cold graph uses Cargo to resolve and capture the compiler contract. Cache lookup happens before a dependency compiler runs. Subsequent root edits invoke rustc directly and adapt the component in process. Artifacts produced by untrusted host build scripts or procedural macros remain graph-private; only independently verified host-code closures can publish shared artifacts.
 
 ### 1d. Incremental for successive versions
-`-C incremental=<cache>/lineage/<definition name>` seeded from the parent
-definition's incremental dir. rustc only requires the same crate name
-(`loom-definition`, already constant), compiler and flags. A one-line body
-change then recompiles one codegen unit. Profile: `opt-level=2, lto=false,
-codegen-units=16, incremental=true, debug=false`.
 
-Goal command: `loom define` of a 1-line change to a definition with 5 crates,
-warm: wall time <= 600 ms, and `rustc` invocations per define = 1. Control:
-delete the CAS artifact for one dep and confirm exactly that dep rebuilds.
+The definition root uses one stable workspace per graph and definition name, protected by the builder gate. Its compiler flags and remapped paths stay stable, so rustc can reuse the root incremental cache. Dependency compilation disables incremental output to keep portable artifacts byte-deterministic.
+
+Verified on native Linux: 21/21 builder tests and 6/6 production checks. A warm five-crate body edit took 469 ms with exactly one rustc invocation. Evicting the selected dependency artifact required two invocations. A new graph using cached dependencies and a fresh build directory using the same CAS each required one invocation. The incremental control checked real cache reuse and executed changed code. Serde derives and the exact typed Rust README example also passed.
 
 ## Memory isolation decision
 
@@ -118,6 +90,6 @@ The long-term goal is a formally verified guest language whose guarantees surviv
 
 ## Remaining integration
 
-Run the consolidated benchmark against a copied, freshly built release daemon. Its scope is the recording and crate-cache targets above, plus explicit unsafe-code rejection controls. Unit and integration tests must also cover persistence, explicit upgrades, writer failure, and compiler artifact invalidation.
+Run the consolidated benchmark against a copied, freshly built release daemon. Its scope is the scan and crate-cache targets above. Run explicit unsafe-code rejection controls alongside it. Unit and integration tests must also cover persistence, explicit upgrades, writer failure, and compiler artifact invalidation.
 
 After those gates pass, disable the TypeScript-to-Wasm path as separately requested. Keep persisted records readable. Linux I/O improvements must preserve isolated instance memory and the DAG-CBOR effect protocol; the canceled shared-memory performance targets are no longer acceptance criteria.

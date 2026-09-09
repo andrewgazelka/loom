@@ -210,6 +210,11 @@ impl<T> Desc<T> {
 }
 
 mod codec;
+mod fs;
+mod trace;
+pub use trace::{CallTrace, TraceBlob, TraceBlobKind, TraceBundle, TraceEntry, TraceKey, TraceMemo, TraceOutcome};
+pub use fs::{DirEntry, EntryKind};
+pub use codec::host::{HostValue, decode_host, encode_host, encode_host_array};
 pub use codec::{
     ContentAddress, DAG_CBOR_CODEC, RAW_CODEC, cid_for_hash, decode, encode, parse_reference,
     reference,
