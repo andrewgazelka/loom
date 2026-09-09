@@ -6,13 +6,17 @@ let
       (lib.fileset.unions [ ../Cargo.toml ../Cargo.lock ../crates ../examples ../loom-wit ../loom-rustc ../loom-checker ../loom-guest-ts ../loom-ui ])
       (lib.fileset.unions (map lib.fileset.maybeMissing [ ../loom-checker/node_modules ../loom-guest-ts/node_modules ../loom-ui/node_modules ../loom-ui/.svelte-kit ../loom-ui/build ]));
   };
+  rustSource = lib.fileset.toSource {
+    root = ../.;
+    fileset = lib.fileset.unions [ ../Cargo.toml ../Cargo.lock ../crates ../examples ../loom-wit ../loom-rustc/vendor-config.toml ];
+  };
   toolchain = import ./toolchain.nix { inherit pkgs lib; };
   javascript = import ./javascript.nix { inherit pkgs lib src; };
   rustPlatform = pkgs.makeRustPlatform { cargo = toolchain; rustc = toolchain; };
   host = rustPlatform.buildRustPackage {
     pname = "loom-host";
     version = "0.1.0";
-    inherit src;
+    src = rustSource;
     cargoLock.lockFile = ../Cargo.lock;
     cargoBuildFlags = [ "-p" "loomd" "-p" "loom-cli" ];
     doCheck = false;

@@ -40,6 +40,7 @@ in
       done
       runHook postInstall
     '';
+    passthru.badTargetPlatforms = [];
     passthru.targetPlatforms = [ "aarch64-darwin" "x86_64-linux" ];
     passthru.updateScript = [
       (lib.getExe pkgs.python3)
