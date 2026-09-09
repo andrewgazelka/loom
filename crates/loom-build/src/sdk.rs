@@ -172,8 +172,11 @@ fn validate_pins(
     let user = original.reachable(&roots, true);
     let sdk = original.reachable(&sdk_roots(original), false);
     for old in &original.packages {
-        if let Some(new) = updated.packages.iter().find(|new| new.key == old.key)
-            && old.raw.get("checksum") != new.raw.get("checksum")
+        // Cargo may fill a checksum omitted by an older lockfile. That adds a
+        // content pin; removing or changing an existing pin remains forbidden.
+        if let Some(checksum) = old.raw.get("checksum")
+            && let Some(new) = updated.packages.iter().find(|new| new.key == old.key)
+            && Some(checksum) != new.raw.get("checksum")
         {
             return Err(BuildError::Rejected(format!(
                 "SDK rebuild changed checksum for {} {}",
@@ -384,6 +387,13 @@ fn merge_vendor(source: &Path, destination: &Path) -> Result<(), BuildError> {
         }
         Ok(())
     }
+    // CAS materializations are shared by definitions. An SDK upgrade gets a
+    // private overlay before adding files; it cannot mutate the addressed tree.
+    if std::fs::symlink_metadata(destination)?.file_type().is_symlink() {
+        let original = std::fs::canonicalize(destination)?;
+        std::fs::remove_file(destination)?;
+        copy_tree(&original, destination)?;
+    }
     let mut existing = BTreeMap::<PackageKey, PathBuf>::new();
     for entry in std::fs::read_dir(destination)? {
         let entry = entry?;
@@ -417,6 +427,17 @@ mod tests {
     use super::*;
     fn lock(source: &str) -> Lock {
         Lock::parse(source.as_bytes()).unwrap()
+    }
+    #[test]
+    fn filling_missing_checksum_preserves_existing_pins() {
+        let source = "version=4\n[[package]]\nname='anyhow'\nversion='1.0.100'\nsource='registry+https://github.com/rust-lang/crates.io-index'\n";
+        let original = lock(source);
+        let pinned = lock(&format!("{source}checksum='a23eb6b1614318a8071c9b2521f36b424b2c83db5eb3a0fead4a6c0809af6e61'\n"));
+        let changed = lock(&format!("{source}checksum='{}'\n", "b".repeat(64)));
+        let manifest = toml::from_str("[dependencies]\nanyhow='=1.0.100'\n").unwrap();
+        assert!(validate_pins(&original, &pinned, &manifest).is_ok());
+        assert!(validate_pins(&pinned, &original, &manifest).is_err());
+        assert!(validate_pins(&pinned, &changed, &manifest).is_err());
     }
     #[test]
     fn registry_package_sharing_sdk_name_is_not_sdk_owned() {

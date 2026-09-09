@@ -11,7 +11,7 @@ if (!process.argv[2] || !native || !process.env.LOOM_URL || !process.env.LOOM_TO
 const client = new LoomMcpClient({endpoint:process.env.LOOM_URL, token:(await readFile(process.env.LOOM_TOKEN_FILE,'utf8')).trim()});
 interface Winner {path:string;size:number}
 interface Measurement extends Winner {ms:number;wall_ms:number;files:number;directories:number}
-interface Variant {name:string;hash:string;samples:number[]}
+interface Variant {name:string;hash:string;samples:number[];recordingCommits:(number|null)[]}
 function assert(value:unknown, message:string):asserts value {if(!value)throw new Error(message);}
 async function nativeScan():Promise<Measurement> {
   const start=performance.now();
@@ -51,7 +51,7 @@ try {
     const result=object(reply.result),def=object(result.def);
     assert(typeof def.hash==='string','Missing definition hash');
     console.log(JSON.stringify({stage:'define',name,wall_ms:performance.now()-start,build:result.build}));
-    variants.push({name,hash:def.hash,samples:[]});
+    variants.push({name,hash:def.hash,samples:[],recordingCommits:[]});
     const callStart=performance.now();
     same(await command('call',{hash:def.hash,args:[machine.id,'.']}),baseline);
     console.log(JSON.stringify({stage:'first-call',name,ms:performance.now()-callStart}));
@@ -71,16 +71,19 @@ try {
         nativeSamples.push(result.ms);nativeWall.push(result.wall_ms);
       } else {
         const variant=variants.find(value=>value.name===name)!;
+        const before=object(await command('stats',{})).recording_commits;
         const start=performance.now();
         same(await command('call',{hash:variant.hash,args:[machine.id,'.']}),expected);
         variant.samples.push(performance.now()-start);
+        const after=object(await command('stats',{})).recording_commits;
+        variant.recordingCommits.push(typeof before==='number'&&typeof after==='number'&&Number.isSafeInteger(before)&&Number.isSafeInteger(after)&&after>=before ? after-before : null);
       }
     }
   }
   passed++;
   function median(samples:number[]) {return [...samples].sort((a,b)=>a-b)[Math.floor(samples.length/2)]!;}
   const nativeMedian=median(nativeSamples);
-  console.log(JSON.stringify({stage:'warm-summary',native:{samples_ms:nativeSamples,median_ms:nativeMedian,wall_samples_ms:nativeWall,wall_median_ms:median(nativeWall)},variants:variants.map(variant=>({name:variant.name,samples_ms:variant.samples,median_ms:median(variant.samples),ratio_to_native:median(variant.samples)/nativeMedian}))}));
+  console.log(JSON.stringify({stage:'warm-summary',native:{samples_ms:nativeSamples,median_ms:nativeMedian,wall_samples_ms:nativeWall,wall_median_ms:median(nativeWall)},variants:variants.map(variant=>({name:variant.name,samples_ms:variant.samples,queued_recording_commits:variant.recordingCommits,median_ms:median(variant.samples),ratio_to_native:median(variant.samples)/nativeMedian}))}));
 } finally {
   if(created)await rm(mutation,{recursive:true});
   await client.close();

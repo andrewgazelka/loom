@@ -34,7 +34,7 @@ impl Service {
     pub fn new(store: Store, root: PathBuf, languages: Vec<Lang>) -> Result<Self> {
         let backup_directory = root.join("backups");
         let checker = Arc::new(loom_check::Checker::new(root.clone()));
-        let builder = Arc::new(loom_build::Builder::new(root));
+        let builder = Arc::new(loom_build::Builder::new(root, store.clone()));
         let resolver = Arc::new(BuildResolver {
             store: store.clone(),
             builder: builder.clone(),
@@ -66,7 +66,7 @@ impl Service {
             loom_proto::encode(&value).map_err(anyhow::Error::msg)?;
             Ok(value)
         });
-        let seq = match self.store.latest_seq() {
+        let seq = match self.store.flush().and_then(|()| self.store.latest_seq()) {
             Ok(seq) => seq,
             Err(error) => {
                 return Response {
@@ -136,7 +136,6 @@ impl Service {
                 .context("dependency not found")?
                 .hash;
         }
-        let previous = self.store.resolve(&request.name)?;
         let checked = self.check_definition(&request).await?;
         if !checked.diagnostics.is_empty() {
             return Ok(Response {
@@ -160,8 +159,7 @@ impl Service {
             };
             self.store
                 .define(&def, Some(&request.name), &checked.source, &checked.deps)?;
-            let updates = self.rehash_dependents(previous.as_ref(), &def).await?;
-            return Ok(self.response(Ok(json!({"def":def,"build":{"status":if def.component_hash.is_some(){"cached"}else{"pending"}},"rehashed":updates.rehashed,"stale_actors":updates.stale_actors}))));
+            return Ok(self.response(Ok(json!({"def":def,"build":{"status":if def.component_hash.is_some(){"cached"}else{"pending"},"rustc_invocations":0}}))));
         }
         let dependencies = dependency_closure(&self.store, &checked.deps)?;
         let built = self
@@ -172,7 +170,7 @@ impl Service {
             return Ok(Response {
                 ok: false,
                 seq: self.store.latest_seq()?,
-                result: json!({"build":{"ms":built.ms,"logs":built.logs}}),
+                result: json!({"build":{"ms":built.ms,"logs":built.logs,"rustc_invocations":built.rustc_invocations}}),
                 diagnostics: built.diagnostics,
             });
         }
@@ -192,9 +190,8 @@ impl Service {
         };
         self.store
             .define(&def, Some(&request.name), &checked.source, &checked.deps)?;
-        self.store.append("system",&json!({"type":"component_built","component_hash":component_hash,"logs_ref":logs_ref,"ms":built.ms,"size":built.component.len()}),0)?;
-        let updates = self.rehash_dependents(previous.as_ref(), &def).await?;
-        Ok(self.response(Ok(json!({"def":def,"build":{"ms":built.ms,"component_hash":component_hash,"size":built.component.len(),"logs_ref":logs_ref},"rehashed":updates.rehashed,"stale_actors":updates.stale_actors}))))
+        self.store.append("system",&json!({"type":"component_built","component_hash":component_hash,"logs_ref":logs_ref,"ms":built.ms,"size":built.component.len(),"rustc_invocations":built.rustc_invocations}),0)?;
+        Ok(self.response(Ok(json!({"def":def,"build":{"ms":built.ms,"component_hash":component_hash,"size":built.component.len(),"logs_ref":logs_ref,"rustc_invocations":built.rustc_invocations}}))))
     }
     async fn check_definition(&self, request: &DefineRequest) -> Result<loom_check::CheckedDef> {
         let checked = self
@@ -281,6 +278,22 @@ impl Service {
                     *dependency = replacement.clone();
                 }
             }
+            if candidate.lang == Lang::Rust && candidate.source.trim_start().starts_with('{') {
+                let mut bundle: loom_check::SourceBundle = serde_json::from_str(&candidate.source)?;
+                if let Some(manifest) = bundle.files.get_mut("Cargo.toml").and_then(loom_check::SourceFile::text_mut) {
+                    let mut document: toml::Value = manifest.parse()?;
+                    if let Some(deps) = document.get_mut("loom").and_then(|loom| loom.get_mut("deps")).and_then(toml::Value::as_table_mut) {
+                        for dependency in deps.iter_mut().map(|entry| entry.1) {
+                            if let Some(replacement) = dependency.as_str().and_then(|hash| replacements.get(hash.trim_start_matches('#'))) {
+                                *dependency = toml::Value::String(replacement.clone());
+                            }
+                        }
+                    }
+                    *manifest = toml::to_string(&document)?;
+                }
+                bundle.files.retain(|name, _| !name.starts_with("vendor/") && !name.starts_with(".cargo/"));
+                candidate.source = serde_json::to_string(&bundle)?;
+            }
             let request = DefineRequest {
                 allowed_effects: self
                     .store
@@ -292,23 +305,9 @@ impl Service {
                 source: candidate.source,
                 deps: candidate.deps,
             };
-            let checked = self.check_definition(&request).await?;
-            if !checked.diagnostics.is_empty() {
-                updates.rehashed.push(
-                    json!({"name":request.name,"previous":hash,"diagnostics":checked.diagnostics}),
-                );
-                continue;
-            }
-            let def = Def {
-                allowed_effects: request.allowed_effects.clone(),
-                observed_effects: Vec::new(),
-                hash: checked.hash,
-                lang: checked.lang,
-                component_hash: None,
-                sig: checked.sig,
-            };
-            self.store
-                .define(&def, Some(&request.name), &checked.source, &checked.deps)?;
+            let response = self.define_inner(request.clone()).await?;
+            ensure!(response.ok, "upgrade of {} failed: {}", request.name, serde_json::to_string(&response)?);
+            let def: Def = serde_json::from_value(response.result["def"].clone())?;
             replacements.insert(hash.clone(), def.hash.clone());
             updates
                 .rehashed
@@ -407,6 +406,54 @@ impl Service {
     async fn command_inner(&self, request: CommandRequest) -> Result<Value> {
         let args = &request.args;
         match request.command.as_str() {
+            "crate.add" => Ok(serde_json::to_value(loom_build::registry::CrateRegistry::new(self.store.clone()).add(field(args, "name")?, field(args, "version")?).await?)?),
+            "upgrade" => {
+                let _guard = self.definitions_gate.lock().await;
+                let old = field(args, "old")?;
+                let new = field(args, "new")?;
+                if let Some(previous) = self.store.definition(old)? {
+                    let current = self.store.definition(new)?.context("replacement definition missing")?;
+                    let updates = self.rehash_dependents(Some(&previous), &current).await?;
+                    return Ok(serde_json::json!({"rehashed":updates.rehashed,"stale_actors":updates.stale_actors}));
+                }
+                let _: loom_proto::Tree = self.store.get_value(old)?.context("old crate tree missing")?;
+                let _: loom_proto::Tree = self.store.get_value(new)?.context("replacement crate tree missing")?;
+                let mut changed = Vec::new();
+                struct CrateReplacement { previous: Def, current: Def }
+                let mut replacements = Vec::new();
+                for def in self.store.definitions()? {
+                    if def.lang != Lang::Rust { continue; }
+                    let Some(name) = self.store.definition_name(&def.hash)? else { continue };
+                    if self.store.resolve(&name)?.is_none_or(|current| current.hash != def.hash) { continue; }
+                    let source = self.store.source(&def.hash)?.context("definition source missing")?;
+                    let Ok(mut bundle) = serde_json::from_str::<loom_check::SourceBundle>(&source) else { continue };
+                    let Some(manifest) = bundle.files.get_mut("Cargo.toml").and_then(loom_check::SourceFile::text_mut) else { continue };
+                    let mut document: toml::Value = manifest.parse()?;
+                    let Some(crates) = document.get_mut("loom").and_then(|loom| loom.get_mut("crates")).and_then(toml::Value::as_table_mut) else { continue };
+                    let mut replaced = false;
+                    for entry in crates.iter_mut().map(|entry| entry.1) {
+                        if entry.get("hash").and_then(toml::Value::as_str) == Some(old) { entry["hash"] = toml::Value::String(new.into()); replaced = true; }
+                    }
+                    if !replaced { continue; }
+                    *manifest = toml::to_string(&document)?;
+                    bundle.files.retain(|name, _| !name.starts_with("vendor/") && !name.starts_with(".cargo/"));
+                    let response = self.define_inner(DefineRequest { lang: def.lang, name, source: serde_json::to_string(&bundle)?, deps: self.store.definition_deps(&def.hash)?, allowed_effects: def.allowed_effects.clone() }).await?;
+                    ensure!(response.ok, "crate upgrade failed: {}", serde_json::to_string(&response)?);
+                    let current: Def = serde_json::from_value(response.result["def"].clone())?;
+                    changed.push(serde_json::json!({"old":def.hash,"result":response.result}));
+                    replacements.push(CrateReplacement { previous: def, current });
+                }
+                let mut rehashed = Vec::new();
+                for replacement in replacements {
+                    let current = if let Some(name) = self.store.definition_name(&replacement.current.hash)? {
+                        self.store.resolve(&name)?.context("upgraded definition name missing")?
+                    } else { replacement.current };
+                    let updates = self.rehash_dependents(Some(&replacement.previous), &current).await?;
+                    rehashed.extend(updates.rehashed);
+                }
+                Ok(serde_json::json!({"upgraded":changed,"rehashed":rehashed}))
+            }
+
             "cas.list" => {
                 let query = if request.args.is_null() {
                     loom_proto::CasListRequest::default()
@@ -472,7 +519,11 @@ impl Service {
                 self.runtime
                     .create_machine(std::path::Path::new(field(args, "root")?))?,
             )?),
-            "stats" => Ok(serde_json::to_value(loom_maintenance::stats(&self.store)?)?),
+            "stats" => {
+                let mut stats = serde_json::to_value(loom_maintenance::stats(&self.store)?)?;
+                stats["recording_commits"] = json!(self.store.recording_commit_count());
+                Ok(stats)
+            }
             "gc" => Ok(serde_json::to_value(
                 loom_maintenance::collect_effect_index(
                     &self.store,
@@ -549,7 +600,7 @@ impl Service {
                     Ok(serde_json::to_value(fork)?)
                 }
             }
-            "upgrade" => {
+            "actor.upgrade" => {
                 self.runtime
                     .upgrade(&self.command_actor(&request)?, field(args, "hash")?)
                     .await
@@ -620,6 +671,9 @@ impl Service {
                 Ok(reference) => response.result = reference,
                 Err(error) => return self.response(Err(error)),
             }
+        }
+        if let Err(error) = self.store.flush() {
+            return self.response(Err(error));
         }
         response
     }
@@ -773,6 +827,7 @@ async fn cas(
     headers: HeaderMap,
 ) -> HttpResponse {
     let result = (|| -> Result<Option<CasBlock>> {
+        s.service.store.flush()?;
         let Some(codec) = s.service.store.codec(&hash)? else {
             return Ok(None);
         };
@@ -923,12 +978,27 @@ async fn stream_events(s: ApiState, mut socket: WebSocket) {
     }
     let mut interval = tokio::time::interval(Duration::from_millis(100));
     loop {
-        tokio::select! {_ = interval.tick()=>{let Ok(events)=s.service.store.events(subscription.actor.as_deref(),subscription.after,1000) else{return};for event in events{subscription.after=event.seq;let Ok(text)=serde_json::to_string(&event)else{return};if socket.send(Message::Text(text.into())).await.is_err(){return}}},message=socket.recv()=>match message{Some(Ok(Message::Ping(bytes)))=>{if socket.send(Message::Pong(bytes)).await.is_err(){return}},Some(Ok(Message::Close(_)))|None|Some(Err(_))=>return,_=>{}}}
+        tokio::select! {_ = interval.tick()=>{let Ok(events)=s.service.store.events(subscription.actor.as_deref(),subscription.after,1000) else{return};if s.service.store.flush().is_err(){return};for event in events{subscription.after=event.seq;let Ok(text)=serde_json::to_string(&event)else{return};if socket.send(Message::Text(text.into())).await.is_err(){return}}},message=socket.recv()=>match message{Some(Ok(Message::Ping(bytes)))=>{if socket.send(Message::Pong(bytes)).await.is_err(){return}},Some(Ok(Message::Close(_)))|None|Some(Err(_))=>return,_=>{}}}
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn response_refuses_success_when_recording_cannot_commit() -> Result<()> {
+        let store = Store::memory()?;
+        let service = Service::new(store.clone(), PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."), vec![Lang::Rust])?;
+        store.with_connection(|connection| {
+            connection.execute_batch("CREATE TRIGGER refuse_recording BEFORE INSERT ON log BEGIN SELECT RAISE(ABORT, 'recording control'); END;")?;
+            Ok(())
+        })?;
+        store.enqueue_recording(&json!({"type":"effect_invoked","op":"sleep"}))?;
+        let response = service.response(Ok(json!(42)));
+        assert!(!response.ok);
+        assert_eq!(response.result["code"], "store_unavailable");
+        assert!(response.result["error"].as_str().unwrap().contains("recording control"));
+        Ok(())
+    }
     use tower::ServiceExt;
     fn app() -> Router {
         router(
@@ -1017,7 +1087,7 @@ mod tests {
         assert_eq!(accepted.result["def"]["hash"], same.result["def"]["hash"]);
     }
     #[tokio::test]
-    async fn redefinition_rehashes_typed_dependents_and_rejects_wrong_arguments() {
+    async fn explicit_upgrade_rehashes_dependents_and_redefinition_preserves_pins() {
         let service = Service::new(
             Store::memory().unwrap(),
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
@@ -1054,7 +1124,10 @@ mod tests {
             })
             .await;
         assert!(second.ok, "{second:?}");
-        assert_eq!(second.result["rehashed"].as_array().unwrap().len(), 1);
+        assert_eq!(service.store.resolve("caller").unwrap().unwrap().hash, before.result["def"]["hash"].as_str().unwrap());
+        let upgraded = service.command(CommandRequest { session: None, command: "upgrade".into(), args: json!({"old":first.result["def"]["hash"],"new":second.result["def"]["hash"]}) }).await;
+        assert!(upgraded.ok, "{upgraded:?}");
+        assert_eq!(upgraded.result["rehashed"].as_array().unwrap().len(), 1);
         let current = service.store.resolve("caller").unwrap().unwrap();
         assert_ne!(current.hash, before.result["def"]["hash"].as_str().unwrap());
         assert_eq!(
@@ -1515,7 +1588,7 @@ impl loom_rt::ComponentResolver for BuildResolver {
             def.component_hash = Some(component_hash.clone());
             self.store
                 .define(&def, None, &checked.source, &checked.deps)?;
-            self.store.append("system",&json!({"type":"component_built","component_hash":component_hash,"logs_ref":logs_ref,"ms":built.ms,"size":built.component.len()}),0)?;
+            self.store.append("system",&json!({"type":"component_built","component_hash":component_hash,"logs_ref":logs_ref,"ms":built.ms,"size":built.component.len(),"rustc_invocations":built.rustc_invocations}),0)?;
             Ok(())
         })
     }

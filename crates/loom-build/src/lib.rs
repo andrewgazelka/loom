@@ -1,5 +1,8 @@
 //! Component builders. No successful response exists without component bytes.
+pub mod registry;
 mod sdk;
+mod direct;
+mod preparation;
 use loom_check::{CheckedDef, SourceBundle, SourceFile};
 use loom_proto::{Diagnostic, Lang};
 use std::{
@@ -15,6 +18,7 @@ async fn seed_build_lock(source: &Path, destination: &Path) -> Result<(), std::i
 }
 
 pub struct Builder {
+    store: loom_store::Store,
     root: PathBuf,
     cache: PathBuf,
     gate: Mutex<()>,
@@ -25,6 +29,8 @@ pub struct BuildOutput {
     pub ms: u64,
     pub logs: String,
     pub diagnostics: Vec<Diagnostic>,
+    /// Compiler processes performing a compilation, excluding version probes.
+    pub rustc_invocations: usize,
 }
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
@@ -34,11 +40,12 @@ pub enum BuildError {
     Rejected(String),
 }
 impl Builder {
-    pub fn new(root: PathBuf) -> Self {
+    pub fn new(root: PathBuf, store: loom_store::Store) -> Self {
         let cache = std::env::var_os("LOOM_BUILD_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| root.join(".loom-build"));
         Self {
+            store,
             root,
             cache,
             gate: Mutex::new(()),
@@ -108,12 +115,26 @@ impl Builder {
                 })
             })
         }
-        let isolated = untrusted(&manifest)
+        let isolated = manifest.get("loom").and_then(|loom| loom.get("crates")).is_some() || untrusted(&manifest)
             || bundle.files.contains_key("build.rs")
             || manifest
                 .get("package")
                 .is_some_and(|package| package.get("build").is_some())
             || dependencies.values().any(is_vendored);
+        let preparation_inputs = serde_json::json!({
+            "manifest": manifest,
+            "lock": bundle.files.get("Cargo.lock"),
+            "definitions": definition.deps,
+            "sdk": build_fingerprint(&self.root, Lang::Rust)?,
+            "isolated": isolated,
+        });
+        let preparation_key = blake3::hash(&serde_json::to_vec(&preparation_inputs)
+            .map_err(|error| BuildError::Rejected(error.to_string()))?).to_hex().to_string();
+        if let Some(overlay) = preparation::load(&self.store, &preparation_key)? {
+            bundle.files.extend(overlay);
+            bundle.validate().map_err(BuildError::Rejected)?;
+            return serde_json::to_string(&bundle).map_err(|error| BuildError::Rejected(error.to_string()));
+        }
         let staging = self.cache.join("intake").join(&definition.hash);
         if staging.exists() {
             fs::remove_dir_all(&staging).await?;
@@ -127,6 +148,7 @@ impl Builder {
                 return Err(BuildError::Rejected("invalid dependency hash".into()));
             }
             materialize_rust(
+                &self.store,
                 &self.root,
                 &staging,
                 &staging.join("sources").join(&dependency.hash),
@@ -138,6 +160,7 @@ impl Builder {
             .await?;
         }
         materialize_rust(
+                &self.store,
             &self.root,
             &staging,
             &crate_dir,
@@ -189,54 +212,11 @@ impl Builder {
             SourceFile::from_bytes(fs::read(crate_dir.join("Cargo.lock")).await?),
         );
         if isolated {
-            fn collect(
-                directory: &Path,
-                root: &Path,
-                files: &mut BTreeMap<String, SourceFile>,
-                total: &mut u64,
-            ) -> Result<(), BuildError> {
-                for entry in std::fs::read_dir(directory)? {
-                    let entry = entry?;
-                    let path = entry.path();
-                    let kind = entry.file_type()?;
-                    if kind.is_symlink() {
-                        return Err(BuildError::Rejected(
-                            "vendor tree contains a symlink".into(),
-                        ));
-                    }
-                    if kind.is_dir() {
-                        collect(&path, root, files, total)?;
-                    } else if kind.is_file() {
-                        *total = total
-                            .checked_add(entry.metadata()?.len())
-                            .ok_or_else(|| BuildError::Rejected("vendor size overflow".into()))?;
-                        if *total > 256 * 1024 * 1024 || files.len() >= 65536 {
-                            return Err(BuildError::Rejected(
-                                "vendored source bundle exceeds limits".into(),
-                            ));
-                        }
-                        let name = path
-                            .strip_prefix(root)
-                            .map_err(|error| BuildError::Rejected(error.to_string()))?
-                            .to_string_lossy()
-                            .replace('\\', "/");
-                        files.insert(name, SourceFile::from_bytes(std::fs::read(path)?));
-                    }
-                }
-                Ok(())
-            }
-            let mut total = 0;
-            collect(
-                &crate_dir.join("vendor"),
-                &crate_dir,
-                &mut bundle.files,
-                &mut total,
-            )?;
-            bundle.files.insert(
-                ".cargo/config.toml".into(),
-                SourceFile::Text(VENDOR_CONFIG.into()),
-            );
+            let hash = registry::snapshot_directory(&self.store, &crate_dir.join("vendor"))
+                .map_err(|error| BuildError::Rejected(error.to_string()))?;
+            bundle.files.insert(preparation::VENDOR_TREE.into(), SourceFile::Text(hash));
         }
+        preparation::save(&self.store, &preparation_key, &bundle.files)?;
         bundle.validate().map_err(BuildError::Rejected)?;
         let result = serde_json::to_string(&bundle)
             .map_err(|error| BuildError::Rejected(error.to_string()))?;
@@ -280,6 +260,7 @@ impl Builder {
                 ms: started.elapsed().as_millis() as u64,
                 logs: "component cache hit".into(),
                 diagnostics: Vec::new(),
+                rustc_invocations: 0,
             });
         }
         let mut command = match definition.lang {
@@ -327,6 +308,7 @@ impl Builder {
                         return Err(BuildError::Rejected("invalid dependency hash".into()));
                     }
                     materialize_rust(
+                        &self.store,
                         &self.root,
                         &self.cache,
                         &self.cache.join("sources").join(&dependency.hash),
@@ -339,6 +321,7 @@ impl Builder {
                 }
                 let isolated = is_vendored(definition);
                 materialize_rust(
+                    &self.store,
                     &self.root,
                     &self.cache,
                     &directory,
@@ -356,25 +339,32 @@ impl Builder {
                     isolated,
                 })
                 .await?;
-                // cargo-component consumes a core wasip1 module and adapts it to a component.
-                let mut command = if directory.join("vendor").is_dir() {
-                    let mut command = Command::new(self.root.join("loom-rustc/sandbox.sh"));
-                    command
-                        .arg("build")
-                        .arg(&self.cache)
-                        .arg(&directory)
-                        .arg(directory.join("target"))
-                        .arg(&self.root);
-                    command
-                } else {
-                    let mut command = Command::new(self.root.join("loom-rustc/build.sh"));
-                    command.arg(&directory).arg(self.cache.join("rust-target"));
-                    command
-                };
-                if directory.join("Cargo.lock").is_file() {
-                    command.env("LOOM_LOCKED", "1");
+                let built = direct::build(direct::Request {
+                    root: &self.root,
+                    cache: &self.cache,
+                    directory: &directory,
+                    definition,
+                    sdk_fingerprint: &inputs,
+                    store: &self.store,
+                }).await?;
+                if !built.diagnostics.is_empty() {
+                    return Ok(BuildOutput { component: Vec::new(), ms: started.elapsed().as_millis() as u64,
+                        logs: built.logs, diagnostics: built.diagnostics, rustc_invocations: built.rustc_invocations });
                 }
-                command
+                let component = {
+                    wit_component::ComponentEncoder::default()
+                        .module(&built.bytes).map_err(|error| BuildError::Rejected(error.to_string()))?
+                        .adapter(wasi_preview1_component_adapter_provider::WASI_SNAPSHOT_PREVIEW1_ADAPTER_NAME,
+                            wasi_preview1_component_adapter_provider::WASI_SNAPSHOT_PREVIEW1_REACTOR_ADAPTER)
+                        .map_err(|error| BuildError::Rejected(error.to_string()))?
+                        .validate(true).encode().map_err(|error| BuildError::Rejected(error.to_string()))?
+                };
+                validate_component(&component)?;
+                fs::write(&component_path, &component).await?;
+                fs::write(directory.join("component.inputs"), inputs).await?;
+                fs::write(directory.join("build.log"), &built.logs).await?;
+                return Ok(BuildOutput { component, ms: started.elapsed().as_millis() as u64,
+                    logs: built.logs, diagnostics: built.diagnostics, rustc_invocations: built.rustc_invocations });
             }
         };
         let output = tokio::time::timeout(
@@ -399,18 +389,10 @@ impl Builder {
                     ms: started.elapsed().as_millis() as u64,
                     logs,
                     diagnostics,
+                    rustc_invocations: 0,
                 });
             }
             return Err(BuildError::Rejected(logs));
-        }
-        if definition.lang == Lang::Rust {
-            let target = if directory.join("vendor").is_dir() {
-                directory.join("target")
-            } else {
-                self.cache.join("rust-target")
-            };
-            let artifact = cargo_artifact(&stdout, &directory.join("Cargo.toml"), &target)?;
-            fs::copy(artifact, &component_path).await?;
         }
         let component = fs::read(&component_path).await?;
         validate_component(&component)?;
@@ -420,6 +402,7 @@ impl Builder {
             ms: started.elapsed().as_millis() as u64,
             logs,
             diagnostics,
+            rustc_invocations: 0,
         })
     }
 }
@@ -436,7 +419,7 @@ fn trusted_dependency(name: &str, value: &toml::Value) -> bool {
 
 fn is_vendored(definition: &CheckedDef) -> bool {
     serde_json::from_str::<SourceBundle>(&definition.source)
-        .is_ok_and(|bundle| bundle.files.keys().any(|name| name.starts_with("vendor/")))
+        .is_ok_and(|bundle| bundle.files.keys().any(|name| name.starts_with("vendor/") || name == preparation::VENDOR_TREE))
 }
 
 const VENDOR_CONFIG: &str = include_str!("../../../loom-rustc/vendor-config.toml");
@@ -486,6 +469,9 @@ fn build_fingerprint(root: &Path, lang: Lang) -> Result<String, BuildError> {
     files.sort();
     let mut hash = blake3::Hasher::new();
     hash.update(b"loom-component-build-v2-dag-cbor");
+    hash.update(include_bytes!("direct.rs"));
+    hash.update(include_bytes!("direct/artifacts.rs"));
+    hash.update(include_bytes!("preparation.rs"));
     for path in files {
         let relative = path
             .strip_prefix(root)
@@ -501,6 +487,7 @@ fn build_fingerprint(root: &Path, lang: Lang) -> Result<String, BuildError> {
 }
 
 async fn materialize_rust(
+    store: &loom_store::Store,
     root: &Path,
     cache: &Path,
     directory: &Path,
@@ -520,6 +507,9 @@ async fn materialize_rust(
             SourceFile::Text(definition.source.clone()),
         )])
     };
+    if files.keys().any(|name| name.starts_with("loom-crates/")) {
+        return Err(BuildError::Rejected("loom-crates source paths are host-owned".into()));
+    }
     let mut manifest = if let Some(source) = files.remove("Cargo.toml") {
         source
             .as_text()
@@ -568,6 +558,31 @@ async fn materialize_rust(
         Ok(())
     }
     validate_manifest(&toml::Value::Table(table.clone()), isolated)?;
+    let crates = loom_check::crate_dependencies(&toml::to_string(&toml::Value::Table(table.clone())).map_err(|error| BuildError::Rejected(error.to_string()))?)
+        .map_err(BuildError::Rejected)?;
+    let crate_aliases: std::collections::BTreeSet<_> = crates.keys().cloned().collect();
+    let mut materialized_crates = std::collections::BTreeSet::new();
+    for (alias, dependency) in crates {
+        let relative = format!("loom-crates/{}", dependency.hash);
+        let destination = directory.join(&relative);
+        if materialized_crates.insert(dependency.hash.clone()) {
+            if destination.exists() { fs::remove_dir_all(&destination).await?; }
+            registry::CrateRegistry::new(store.clone()).materialize(&dependency.hash, &destination)
+                .map_err(|error| BuildError::Rejected(error.to_string()))?;
+        }
+        let source = std::fs::read_to_string(destination.join("Cargo.toml"))?;
+        let crate_manifest: toml::Value = source.parse().map_err(|error: toml::de::Error| BuildError::Rejected(error.to_string()))?;
+        let package = crate_manifest.get("package").and_then(|package| package.get("name")).and_then(toml::Value::as_str).ok_or_else(|| BuildError::Rejected("crate package name missing".into()))?;
+        let mut specification = toml::map::Map::new();
+        specification.insert("path".into(), toml::Value::String(relative));
+        specification.insert("package".into(), toml::Value::String(package.into()));
+        specification.insert("features".into(), toml::Value::Array(dependency.features.into_iter().map(toml::Value::String).collect()));
+        specification.insert("default-features".into(), toml::Value::Boolean(dependency.default_features));
+        let dependencies = table.entry("dependencies").or_insert_with(|| toml::Value::Table(Default::default())).as_table_mut().ok_or_else(|| BuildError::Rejected("dependencies must be a table".into()))?;
+        if dependencies.insert(alias.clone(), toml::Value::Table(specification)).is_some() {
+            return Err(BuildError::Rejected(format!("crate alias {alias} declared twice")));
+        }
+    }
     table.remove("loom");
     table.insert("workspace".into(), toml::Value::Table(Default::default()));
     let package = table
@@ -626,6 +641,7 @@ async fn materialize_rust(
         .as_table_mut()
         .ok_or_else(|| BuildError::Rejected("[dependencies] must be a table".into()))?;
     for (name, value) in manifest_deps.iter() {
+        if crate_aliases.contains(name) { continue; }
         if value.get("path").is_some()
             || value.get("git").is_some()
             || value.get("registry").is_some()
@@ -645,6 +661,7 @@ async fn materialize_rust(
         "package".into(),
         toml::Value::String("loom-guest-rs".into()),
     );
+
     guest_dependency.insert(
         "path".into(),
         toml::Value::String(
@@ -684,7 +701,7 @@ async fn materialize_rust(
         );
         manifest_deps.insert(name.clone(), toml::Value::Table(entry));
     }
-    if files.keys().any(|name| name.starts_with("vendor/")) {
+    if files.keys().any(|name| name.starts_with("vendor/") || name == preparation::VENDOR_TREE) {
         files.insert(
             ".cargo/config.toml".into(),
             SourceFile::Text(VENDOR_CONFIG.into()),
@@ -723,6 +740,10 @@ async fn materialize_rust(
         }
     }
     fs::create_dir_all(directory).await?;
+    if let Some(tree) = files.get(preparation::VENDOR_TREE) {
+        let hash = tree.as_text().ok_or_else(|| BuildError::Rejected("vendor tree must be a hash".into()))?;
+        preparation::materialize_vendor(store, cache, directory, hash)?;
+    }
     for (name, source) in files {
         let path = directory.join(name);
         if let Some(parent) = path.parent() {
@@ -853,6 +874,34 @@ impl Builder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn crate_pins_materialize_but_caller_paths_and_overlays_are_rejected() {
+        let store = loom_store::Store::memory().unwrap();
+        let manifest_hash = store.put("blob", b"[package]\nname='tiny'\nversion='1.0.0'\n").unwrap();
+        let tree = loom_proto::Tree { entries: vec![loom_proto::TreeEntry { name: "Cargo.toml".into(), reference: store.reference(&manifest_hash, loom_proto::RAW_CODEC).unwrap(), directory: false, executable: false }] };
+        let hash = store.put_value("tree", &tree).unwrap();
+        let manifest = format!("[package]\nname='loom-definition'\nversion='0.1.0'\nedition='2024'\n[loom.crates]\ntiny={{hash='{hash}'}}\n");
+        let mut files = BTreeMap::new();
+        files.insert("Cargo.toml".into(), SourceFile::Text(manifest));
+        files.insert("src/lib.rs".into(), SourceFile::Text("pub fn main() -> i64 { 42 }".into()));
+        let mut bundle = SourceBundle { files };
+        let mut definition = CheckedDef { hash: "a".repeat(64), lang: Lang::Rust, name: "test".into(), source: serde_json::to_string(&bundle).unwrap(), deps: BTreeMap::new(), sig: Default::default(), diagnostics: vec![] };
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let directory = std::env::temp_dir().join(format!("loom-crate-paths-{}", std::process::id()));
+        if directory.exists() { fs::remove_dir_all(&directory).await.unwrap(); }
+        materialize_rust(&store, &root, &directory, &directory, &definition, &BTreeMap::new(), false, true).await.unwrap();
+        let emitted: toml::Value = fs::read_to_string(directory.join("Cargo.toml")).await.unwrap().parse().unwrap();
+        assert_eq!(emitted["dependencies"]["tiny"]["path"].as_str(), Some(format!("loom-crates/{hash}").as_str()));
+        assert_eq!(fs::read(directory.join(format!("loom-crates/{hash}/Cargo.toml"))).await.unwrap(), store.get(&manifest_hash).unwrap().unwrap());
+        bundle.files.insert(format!("loom-crates/{hash}/Cargo.toml"), SourceFile::Text("tampered".into()));
+        definition.source = serde_json::to_string(&bundle).unwrap();
+        assert!(materialize_rust(&store, &root, &directory, &directory, &definition, &BTreeMap::new(), false, true).await.unwrap_err().to_string().contains("host-owned"));
+        bundle.files.remove(&format!("loom-crates/{hash}/Cargo.toml"));
+        bundle.files.insert("Cargo.toml".into(), SourceFile::Text(format!("[package]\nname='loom-definition'\nversion='0.1.0'\n[dependencies]\ntiny={{path='loom-crates/{hash}'}}\n")));
+        definition.source = serde_json::to_string(&bundle).unwrap();
+        assert!(materialize_rust(&store, &root, &directory, &directory, &definition, &BTreeMap::new(), false, true).await.unwrap_err().to_string().contains("not path/git"));
+        fs::remove_dir_all(directory).await.unwrap();
+    }
     #[cfg(unix)]
     #[tokio::test]
     async fn immutable_sdk_lock_becomes_mutable_build_input() {

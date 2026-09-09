@@ -108,3 +108,43 @@ fn trusted_host_effects_remain_logged_without_a_definition_projection() -> Resul
     assert_eq!(count, 0);
     Ok(())
 }
+
+#[test]
+fn executable_metadata_excludes_recorded_observations() -> Result<()> {
+    let store = Store::memory()?;
+    let deps = BTreeMap::new();
+    let policy = vec!["fs.read".to_owned()];
+    let hash = blake3::hash(&definition_identity(
+        Lang::Rust,
+        "source",
+        &deps,
+        Some(&policy),
+    )?)
+    .to_hex()
+    .to_string();
+    store.define(
+        &Def {
+            hash: hash.clone(),
+            lang: Lang::Rust,
+            component_hash: Some("artifact".into()),
+            sig: Default::default(),
+            allowed_effects: Some(policy.clone()),
+            observed_effects: Vec::new(),
+        },
+        None,
+        "source",
+        &deps,
+    )?;
+    store.enqueue_recording(&json!({"type":"effect_invoked","def_hash":hash,"op":"fs.read"}))?;
+    let executable = store.executable_definition(&hash)?.unwrap();
+    assert_eq!(executable.hash, hash);
+    assert_eq!(executable.component_hash.as_deref(), Some("artifact"));
+    assert_eq!(executable.allowed_effects, Some(policy));
+    assert!(executable.observed_effects.is_empty());
+    assert_eq!(
+        store.definition(&hash)?.unwrap().observed_effects,
+        vec!["fs.read"]
+    );
+    assert!(store.executable_definition("missing")?.is_none());
+    Ok(())
+}

@@ -57,3 +57,30 @@ The runner reports build time, first-call time, every warm sample, medians,
 ratios, and `4/4 scan benchmark checks pass`. Repeating the runner reuses builds
 and filesystem caches. It removes its temporary winner directory on exit;
 the fixture and isolated database remain available for inspection.
+
+## Unified-memory integration gate
+
+With that same dedicated daemon, fixture and native executable, run:
+
+```sh
+LOOM_URL=http://127.0.0.1:18894 LOOM_TOKEN_FILE="$bench_dir/state/token" \
+  bun scripts/bench/unified-memory.ts "$bench_dir/tree" "$bench_dir/native"
+```
+
+The command reports `N/7 unified-memory gates pass` and the first failed step.
+The historical command name remains stable; the shared-memory tier is canceled.
+The gate executes isolated `all`/`fork` definitions, checks every changing winner,
+and enforces 55/70 ms median limits and at most three queued recording transactions
+per warm scan. The stats counter is sampled outside scan timing; absent counters
+fail admission rather than defaulting to zero. Missing build-control execution
+witnesses count as failures. It never starts a daemon or substitutes saved results.
+
+The five-crate delta gate uses `heck`, `strsim`, `adler2`, `version_check`, and
+`cfg-if`, exercising each dependency in the resulting definition. The compiler's
+unsafe-code policy applies to these crates; the benchmark does not exempt them.
+For its missing-dependency control, build the `loom-build` example
+`evict_artifact`, set `LOOM_ARTIFACT_EVICTOR` to that executable and
+`LOOM_BENCH_DB` to the dedicated daemon's database. The control removes `heck`'s
+CAS outputs and materializations, then verifies a fresh definition result and
+exactly two compilation processes (dependency plus definition). These variables
+must refer to the isolated benchmark state; missing settings fail that gate.

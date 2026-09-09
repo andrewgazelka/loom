@@ -1,7 +1,7 @@
 use crate::{Runtime, required_str};
 use anyhow::{Context, Result, bail, ensure};
-use loom_proto::{Actor, Lang, Value};
-use serde::{Deserialize, Serialize};
+use loom_proto::{Actor, Lang, Value, Tree, TreeEntry};
+use serde::Serialize;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
@@ -12,18 +12,6 @@ struct DirectoryEntry {
     is_dir: bool,
     is_file: bool,
     is_symlink: bool,
-}
-
-#[derive(Serialize, Deserialize)]
-struct Tree {
-    entries: Vec<TreeEntry>,
-}
-#[derive(Serialize, Deserialize)]
-struct TreeEntry {
-    name: String,
-    reference: Value,
-    directory: bool,
-    executable: bool,
 }
 
 impl Runtime {

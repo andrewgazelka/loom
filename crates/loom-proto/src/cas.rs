@@ -81,3 +81,14 @@ pub struct CasInspection {
     pub hex: String,
     pub truncated: bool,
 }
+
+/// Canonical directory schema shared by machine snapshots and registry sources.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Tree { pub entries: Vec<TreeEntry> }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TreeEntry {
+    pub name: String,
+    pub reference: Value,
+    pub directory: bool,
+    pub executable: bool,
+}

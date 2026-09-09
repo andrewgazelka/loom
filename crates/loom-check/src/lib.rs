@@ -1,4 +1,6 @@
 //! Language checking before definitions become executable identities.
+mod crates;
+pub use crates::{CrateDependency, crate_dependencies};
 mod rust_effects;
 use loom_proto::{DefineRequest, Diagnostic, ExportSig, Lang, ParamSig, TypeSig, ValueShape};
 use serde::{Deserialize, Serialize};
@@ -289,6 +291,9 @@ fn check_rust(request: &DefineRequest, signatures: &BTreeMap<String, TypeSig>) -
             }
         }
     }
+    if let Err(error) = crate_dependencies(bundle.files["Cargo.toml"].as_text().unwrap()) {
+        checked.diagnostics.push(diagnostic(Lang::Rust, "LOOM_CRATE", &error));
+    }
     for (name, contents) in &mut bundle.files {
         if name.starts_with("vendor/") {
             continue;
@@ -335,7 +340,8 @@ fn check_rust(request: &DefineRequest, signatures: &BTreeMap<String, TypeSig>) -
             }
         })
     }
-    if opaque_dependencies(&manifest, signatures)
+    if manifest.get("loom").and_then(|loom| loom.get("crates")).and_then(toml::Value::as_table).is_some_and(|crates| !crates.is_empty())
+        || opaque_dependencies(&manifest, signatures)
         || manifest
             .get("package")
             .and_then(|package| package.get("build"))
@@ -385,6 +391,8 @@ fn check_rust_file(request: &DefineRequest, signatures: &BTreeMap<String, TypeSi
             if entries.count > 1 {
                 diagnostics.push(diagnostic(Lang::Rust,"LOOM_ENTRYPOINT","A definition crate must have one #[loom::def] or #[loom::actor] entrypoint; place reusable functions in separate hashed definitions."));
             }
+            diagnostics.extend(rust_effects::unsafe_source_diagnostics(&file));
+            diagnostics.extend(rust_effects::unsupported_mode_diagnostics(&file));
             let effects = rust_effects::infer(&file, signatures);
             for item in &file.items {
                 if let syn::Item::Fn(function) = item

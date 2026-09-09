@@ -12,3 +12,13 @@ syn = { version = "2", features = ["full"] }
 prettyplease = "0.2"
 toml = "0.8"
 blake3 = "1"
+wit-component = "0.254"
+wasi-preview1-component-adapter-provider = "48.0.1"
+loom-store = { path = "../loom-store" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+sha2 = "0.10"
+tar = "0.4"
+flate2 = "1"
+

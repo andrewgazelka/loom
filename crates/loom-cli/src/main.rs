@@ -2,6 +2,8 @@ use clap::Parser;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 #[derive(Parser)]
 struct Args {
+    #[command(subcommand)]
+    operation: Option<Operation>,
     #[arg(long, default_value = "http://127.0.0.1:8787")]
     url: String,
     #[arg(long, env = "LOOM_TOKEN")]
@@ -23,10 +25,30 @@ struct Args {
     )]
     deps: String,
 }
+#[derive(clap::Subcommand)]
+enum Operation {
+    Crate { #[command(subcommand)] command: CrateCommand },
+    Upgrade { old: String, new: String },
+}
+#[derive(clap::Subcommand)]
+enum CrateCommand { Add { coordinate: String } }
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let client = reqwest::Client::new();
+    if let Some(operation) = args.operation {
+        let body = match operation {
+            Operation::Crate { command: CrateCommand::Add { coordinate } } => {
+                let mut parts = coordinate.split('@');
+                let name = parts.next().filter(|name| !name.is_empty()).ok_or_else(|| anyhow::anyhow!("expected name@version"))?;
+                let version = parts.next().filter(|version| !version.is_empty()).ok_or_else(|| anyhow::anyhow!("expected name@version"))?;
+                anyhow::ensure!(parts.next().is_none(), "expected name@version");
+                serde_json::json!({"command":"crate.add","args":{"name":name,"version":version}})
+            }
+            Operation::Upgrade { old, new } => serde_json::json!({"command":"upgrade","args":{"old":old,"new":new}}),
+        };
+        return print_response(&client, &args.url, &args.token, "command", body).await;
+    }
     let deps: std::collections::BTreeMap<String, String> = serde_json::from_str(&args.deps)?;
     if let Some(define) = args.define {
         return print_response(

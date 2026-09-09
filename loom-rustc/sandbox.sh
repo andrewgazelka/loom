@@ -2,8 +2,8 @@
 # Linux-only build boundary. Source roots must contain only materialized CAS input.
 # Toolchains are public, immutable inputs; no caller home/config/credentials enter.
 set -euo pipefail
-if [[ $# != 5 || ( $1 != vendor && $1 != build ) ]]; then
-  echo 'usage: sandbox.sh vendor|build SOURCE_ROOT CRATE_DIR TARGET_DIR REPO_ROOT' >&2
+if [[ $# != 5 || ( $1 != vendor && $1 != build && $1 != rustc ) ]]; then
+  echo 'usage: sandbox.sh vendor|build|rustc SOURCE_ROOT CRATE_DIR TARGET_DIR REPO_ROOT' >&2
   exit 64
 fi
 mode=$1
@@ -26,20 +26,29 @@ for public in /nix/store /usr /bin /lib /lib64 /run/current-system/sw; do
   [[ ! -e $public ]] || args+=(--ro-bind "$public" "$public")
 done
 cc_dir=$(dirname "$(command -v cc)")
-# Rustup installs are exposed as toolchains only, never as an entire caller home.
-rustup_root=${RUSTUP_HOME:-${HOME}/.rustup}
-if [[ -d $rustup_root/toolchains ]]; then
-  args+=(--ro-bind "$rustup_root/toolchains" /opt/rustup/toolchains)
-  active=$(rustup show active-toolchain | cut -d ' ' -f 1)
-  [[ -d $rustup_root/toolchains/$active/bin ]] || { echo 'active toolchain absent' >&2; exit 69; }
-  args+=(--setenv PATH "/opt/rustup/toolchains/$active/bin:/opt/loom-bin:$cc_dir:/run/current-system/sw/bin:/usr/local/bin:/usr/bin:/bin")
-else
-  # An administrator-installed standalone Rust distribution needs its sysroot.
-  rust_bin=$(realpath "$(command -v rustc)")
-  rust_root=$(dirname "$(dirname "$rust_bin")")
-  args+=(--ro-bind "$rust_root" /opt/loom-rust --setenv RUSTC /opt/loom-rust/bin/rustc)
-  args+=(--setenv PATH "/opt/loom-rust/bin:$(dirname "$(command -v cargo)"):/opt/loom-bin:$cc_dir:/run/current-system/sw/bin:/usr/local/bin:/usr/bin:/bin")
+# Select the compiler actually used by the host, including a Nix toolchain when
+# a separate rustup installation also exists. Expose only its immutable sysroot.
+rust_root=$(rustc --print sysroot)
+[[ -x $rust_root/bin/rustc ]] || { echo 'selected Rust sysroot is incomplete' >&2; exit 69; }
+cargo_executable=$(command -v cargo)
+# Rustup's proxy needs the caller home; use its selected real Cargo instead.
+if [[ $(basename "$(realpath "$cargo_executable")") == rustup ]]; then
+  cargo_executable="$rust_root/bin/cargo"
 fi
+[[ -x $cargo_executable ]] || { echo 'selected Cargo executable is missing' >&2; exit 69; }
+args+=(--ro-bind "$cargo_executable" "$cargo_executable")
+cargo_dir=$(dirname "$cargo_executable")
+args+=(--ro-bind "$rust_root" "$rust_root" --setenv RUSTC "$rust_root/bin/rustc")
+sandbox_path="$rust_root/bin:$cargo_dir:/opt/loom-bin:$cc_dir:/run/current-system/sw/bin:/usr/local/bin:/usr/bin:/bin"
+# Packaged helper tools live in separate Nix outputs. Retain public immutable
+# directories, while dropping caller-local executable/configuration directories.
+IFS=: read -r -a host_path <<< "$PATH"
+for directory in "${host_path[@]}"; do
+  case "$directory" in
+    /nix/store/*/bin) sandbox_path="$sandbox_path:$directory" ;;
+  esac
+done
+args+=(--setenv PATH "$sandbox_path")
 args+=(--dir /opt/loom-bin)
 # Debian's cc symlink crosses /etc/alternatives, which is deliberately absent.
 # Link to its canonical public path so GCC still finds its installed plugins.
@@ -57,7 +66,8 @@ for guest in loom-guest-rs loom-guest-macros loom-proto; do
   args+=(--ro-bind "$repo_root/crates/$guest" "$repo_root/crates/$guest")
 done
 args+=(--ro-bind "$repo_root/loom-wit" "$repo_root/loom-wit"
-  --ro-bind "$repo_root/loom-rustc/build.sh" /opt/build.sh --chdir "$crate_dir")
+  --ro-bind "$repo_root/loom-rustc/build.sh" /opt/build.sh
+  --ro-bind "$repo_root/loom-rustc/capture.sh" /opt/capture.sh --chdir "$crate_dir")
 if [[ $mode == vendor ]]; then
   # Cargo vendor resolves/downloads packages but never executes their build scripts.
   # This is the sole network-capable phase; it has no application secrets.
@@ -71,7 +81,8 @@ if [[ $mode == vendor ]]; then
   [[ -f $ca_bundle ]] || { echo 'trusted CA bundle unavailable' >&2; exit 69; }
   args+=(--ro-bind "$(realpath "$ca_bundle")" /opt/ca-bundle.crt
     --setenv CARGO_HTTP_CAINFO /opt/ca-bundle.crt --setenv SSL_CERT_FILE /opt/ca-bundle.crt)
-  run=(/bin/sh -eu -c 'if [ -f Cargo.lock ]; then cargo vendor --locked vendor; else cargo vendor vendor; fi > .cargo/config.toml')
+  run=(/bin/sh -eu -c 'cargo metadata --format-version=1 > /dev/null; cargo vendor --locked vendor > .cargo/config.toml')
+
 else
   [[ -f $crate_dir/Cargo.lock && -f $crate_dir/.cargo/config.toml && -d $crate_dir/vendor ]] || {
     echo 'offline build requires locked, vendored sources' >&2; exit 65;
@@ -80,8 +91,12 @@ else
   [[ ! -e $crate_dir/.cargo/config && $(cat "$crate_dir/.cargo/config.toml") == "$expected_config" ]] || {
     echo 'offline Cargo configuration differs from the fixed vendor contract' >&2; exit 65;
   }
-  args+=(--setenv CARGO_NET_OFFLINE true --setenv LOOM_LOCKED 1)
+  args+=(--setenv CARGO_NET_OFFLINE true --setenv LOOM_LOCKED 1
+    --setenv LOOM_RUST_TARGET "${LOOM_RUST_TARGET:-wasm32-wasip1}")
   run=(/bin/sh /opt/build.sh "$crate_dir" "$target_dir")
+  if [[ $mode == rustc ]]; then
+    run=(/bin/sh "$target_dir/direct.sh")
+  fi
 fi
 # Per-process limits supplement the worker cgroup (MemoryMax/CPUQuota/TasksMax).
 # timeout ends the namespace; bwrap kills sandbox descendants on parent exit.

@@ -40,7 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let initial = checker.check(&request).await?;
     assert!(initial.diagnostics.is_empty(), "{:?}", initial.diagnostics);
-    request.source = Builder::new(legacy)
+    request.source = Builder::new(legacy, loom_store::Store::memory()?)
         .prepare_rust_source(&initial, &BTreeMap::new())
         .await?;
     let checked = checker.check(&request).await?;
@@ -50,7 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let old_lock = lock_text(&original_source);
     assert!(old_lock.contains("name = \"ciborium\""));
     assert!(!old_lock.contains("name = \"serde_ipld_dagcbor\""));
-    let built = Builder::new(root).build(&checked).await?;
+    let built = Builder::new(root, loom_store::Store::memory()?).build(&checked).await?;
     assert!(built.diagnostics.is_empty(), "{:?}", built.diagnostics);
     assert_eq!(checked.hash, original_hash);
     assert_eq!(checked.source, original_source);

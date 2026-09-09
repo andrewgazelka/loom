@@ -79,7 +79,7 @@
             : action === "upgrade"
               ? { actor: selected?.id, hash: behavior }
               : { actor: selected?.id };
-      actionResult = resultOf(await runCommand(action, args));
+      actionResult = resultOf(await runCommand(action === "upgrade" ? "actor.upgrade" : action, args));
       action = "";
       if (selected) await open(selected);
     } catch (e) {

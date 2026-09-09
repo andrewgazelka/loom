@@ -46,7 +46,7 @@
     mkdir -p $out/loom-ui
     ln -s ${javascript.ui} $out/loom-ui/build
   '';
-  runtime = [toolchain pkgs.bun pkgs.cargo-component pkgs.binaryen pkgs.stdenv.cc pkgs.pkg-config pkgs.coreutils pkgs.findutils pkgs.gnused pkgs.gnugrep pkgs.gnutar pkgs.gzip pkgs.cacert] ++ lib.optional pkgs.stdenv.hostPlatform.isLinux pkgs.bubblewrap;
+  runtime = [toolchain pkgs.bun pkgs.cargo-component pkgs.binaryen pkgs.stdenv.cc pkgs.stdenv.cc.bintools pkgs.pkg-config pkgs.coreutils pkgs.findutils pkgs.gnused pkgs.gnugrep pkgs.gnutar pkgs.gzip pkgs.cacert] ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [pkgs.bubblewrap pkgs.util-linux];
   launcher = pkgs.replaceVars ./loom.sh {
     bash = lib.getExe pkgs.bash;
     runtimePath = lib.makeBinPath runtime;

@@ -5,6 +5,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 impl Store {
     pub fn cas_list(&self, request: &CasListRequest) -> Result<CasPage> {
+        self.recording.barrier(false)?;
         ensure!(
             (1..=1000).contains(&request.limit),
             "CAS list limit must be 1..=1000"

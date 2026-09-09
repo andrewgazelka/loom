@@ -23,7 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         allowed_effects: None,
     };
     let checker = Checker::new(root.clone());
-    let builder = Builder::new(root);
+    let builder = Builder::new(root, loom_store::Store::memory()?);
     let initial = checker.check(&request).await?;
     if !initial.diagnostics.is_empty() {
         return Err(serde_json::to_string(&initial.diagnostics)?.into());

@@ -487,3 +487,113 @@ mod tests {
         assert!(effects.unknown);
     }
 }
+
+/// Friendly correctness diagnostics, complemented by compiler `forbid(unsafe_code)`.
+/// These checks are not a security boundary: external macro expansions can be exempt.
+pub(crate) fn unsafe_source_diagnostics(file: &syn::File) -> Vec<loom_proto::Diagnostic> {
+    struct UnsafeSource { messages: BTreeSet<String> }
+    impl UnsafeSource {
+        fn reject(&mut self, kind: &str) {
+            self.messages.insert(format!("{kind} is forbidden in definition source; definition sources must use safe Rust"));
+        }
+    }
+    impl<'ast> Visit<'ast> for UnsafeSource {
+        fn visit_macro(&mut self, node: &'ast syn::Macro) {
+            fn contains_unsafe(tokens: proc_macro2::TokenStream) -> bool {
+                tokens.into_iter().any(|token| match token {
+                    proc_macro2::TokenTree::Ident(name) => name == "unsafe",
+                    proc_macro2::TokenTree::Group(group) => contains_unsafe(group.stream()),
+                    _ => false,
+                })
+            }
+            if contains_unsafe(node.tokens.clone()) { self.reject("unsafe tokens in macro input or definition"); }
+            visit::visit_macro(self, node);
+        }
+        fn visit_expr_unsafe(&mut self, expression: &'ast syn::ExprUnsafe) {
+            self.reject("unsafe block");
+            visit::visit_expr_unsafe(self, expression);
+        }
+        fn visit_signature(&mut self, signature: &'ast syn::Signature) {
+            if signature.unsafety.is_some() { self.reject("unsafe function"); }
+            visit::visit_signature(self, signature);
+        }
+        fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
+            if item.unsafety.is_some() { self.reject("unsafe impl"); }
+            visit::visit_item_impl(self, item);
+        }
+        fn visit_item_trait(&mut self, item: &'ast syn::ItemTrait) {
+            if item.unsafety.is_some() { self.reject("unsafe trait"); }
+            visit::visit_item_trait(self, item);
+        }
+        fn visit_item_foreign_mod(&mut self, item: &'ast syn::ItemForeignMod) {
+            if item.unsafety.is_some() { self.reject("unsafe extern block"); }
+            visit::visit_item_foreign_mod(self, item);
+        }
+        fn visit_attribute(&mut self, attribute: &'ast syn::Attribute) {
+            if attribute.path().is_ident("unsafe") {
+                self.reject("unsafe attribute");
+            }
+            visit::visit_attribute(self, attribute);
+        }
+    }
+    let mut checker = UnsafeSource { messages: BTreeSet::new() };
+    checker.visit_file(file);
+    checker.messages.into_iter().map(|message| super::diagnostic(loom_proto::Lang::Rust, "LOOM_UNSAFE", &message)).collect()
+}
+
+#[cfg(test)]
+mod unsafe_tests {
+    use super::*;
+    #[test]
+    fn rejects_unsafe_constructs_even_inside_safe_helpers() {
+        for source in [
+            "fn main() { unsafe { operation(); } }",
+            "unsafe fn operation() {}",
+            "unsafe trait Marker {}",
+            "unsafe impl Send for User {}",
+            "unsafe extern \"C\" { fn foreign(); }",
+            "#[unsafe(no_mangle)] fn exported() {}",
+            "struct User; impl User { unsafe fn operation() {} }",
+            "#![allow(unsafe_code)] fn main() { unsafe { operation(); } }",
+            "macro_rules! hidden { () => { unsafe { operation(); } } }",
+            "fn main() { generate!({unsafe fn hidden() {}}); }",
+        ] {
+            let file = syn::parse_file(source).unwrap();
+            assert!(!unsafe_source_diagnostics(&file).is_empty(), "accepted {source}");
+        }
+        let safe = syn::parse_file("#[loom::def] fn main() { let values = vec![1, 2]; let _ = values[0]; }").unwrap();
+        assert!(unsafe_source_diagnostics(&safe).is_empty());
+    }
+}
+
+
+pub(crate) fn unsupported_mode_diagnostics(file: &syn::File) -> Vec<loom_proto::Diagnostic> {
+    struct Attributes { threaded: bool }
+    impl<'ast> Visit<'ast> for Attributes {
+        fn visit_attribute(&mut self, attribute: &'ast syn::Attribute) {
+            if attribute.path().segments.last().is_some_and(|part| part.ident == "def") {
+                let _ = attribute.parse_nested_meta(|meta| {
+                    self.threaded |= meta.path.is_ident("threads");
+                    Ok(())
+                });
+            }
+        }
+    }
+    let mut attributes = Attributes { threaded: false };
+    attributes.visit_file(file);
+    if attributes.threaded {
+        vec![super::diagnostic(loom_proto::Lang::Rust, "LOOM_THREADS_UNSUPPORTED", "#[loom::def(threads)] is unsupported; definitions use isolated Wasm instances and CBOR messages")]
+    } else { Vec::new() }
+}
+
+#[cfg(test)]
+mod unsupported_mode_tests {
+    use super::*;
+    #[test]
+    fn threaded_abi_is_rejected_and_isolated_definition_is_allowed() {
+        let threaded = syn::parse_file("#[loom::def(threads)] fn main() {} ").unwrap();
+        assert_eq!(unsupported_mode_diagnostics(&threaded)[0].code, "LOOM_THREADS_UNSUPPORTED");
+        let isolated = syn::parse_file("#[loom::def] fn main() {} ").unwrap();
+        assert!(unsupported_mode_diagnostics(&isolated).is_empty());
+    }
+}

@@ -2,6 +2,8 @@
 
 Loom runs TypeScript and Rust WebAssembly components behind one Rust actor host. Definitions, component bytes, event payloads, and effect results are content-addressed with BLAKE3. SQLite WAL holds the append-only event history and rebuildable indexes.
 
+**Memory isolation is a security requirement. Rust safety checks are not a formally proven boundary against adversarial code.** Compiler and library soundness bugs can expose undefined behavior through safe Rust; denying `unsafe` does not close that class of bug. Loom keeps separate Wasm memories and exchanges DAG-CBOR values instead of sharing guest pointers. Wasm validation, the engine, and checked host interfaces remain trusted, and the complete system has no end-to-end formal proof. See the [memory isolation decision](plan-unified-memory.md#memory-isolation-decision) for the concrete Rust soundness issue and supporting sources.
+
 ## Run locally
 
 On Apple Silicon macOS or x86-64 Linux, Nix supplies the daemon, Svelte app, checker, and both guest toolchains:
@@ -52,7 +54,7 @@ The returned definition hash identifies the callable. Invoke `POST /v1/command` 
 pub fn add(a: i64, b: i64) -> i64 { a + b }
 ```
 
-Actors export `run` and `fold` in TS or implement `loom::Actor` under `#[loom::actor]` in Rust. `examples/` contains executable fixtures. Actor commands include `spawn`, `send`, `state`, `fork`, and `upgrade`. Cross-language calls use the same DAG-CBOR values and host effect dispatcher.
+Actors export `run` and `fold` in TS or implement `loom::Actor` under `#[loom::actor]` in Rust. `examples/` contains executable fixtures. Actor commands include `spawn`, `send`, `state`, `fork`, and `actor.upgrade`. Cross-language calls use the same DAG-CBOR values and host effect dispatcher.
 
 Client responses contain `ok`, `seq`, `result`, and `diagnostics`. Results above 8 KB become CAS references. Use the `resolve` command to retrieve a reference. WebSocket clients connect to `/v1/stream` and send `{ "token": "...", "after": 0 }` as their first message; the server streams durable events after that cursor.
 
@@ -136,3 +138,12 @@ Definition signatures distinguish inferred effects, the host-enforced `allowed_e
 The Effects view shows individual invocations and their outcomes. To capture file content changes from a process, pass `capture_paths: ["note.txt"]` to `exec` or `process.start`. Paths are resolved within the process root; the capture records actual before/after bytes in CAS and displays created, modified, and deleted files as diffs. Capture is limited to 64 explicitly selected regular files, at most 1 MiB each. Symlinks, unsupported files, and unavailable reads are reported explicitly.
 
 These snapshots observe selected files across the process interval. They do not enumerate every write, track metadata-only changes, or distinguish concurrent writers. Historical effects without snapshots remain browsable, with no invented diff.
+
+Crate intake uses `loom --token "$LOOM_TOKEN" crate add serde@1.0.210` or the MCP `crate_add` tool with `{name, version}`. The registry checksum is verified before the source tree enters the CAS. Pin the returned hash in a Rust bundle's manifest:
+
+```toml
+[loom.crates]
+serde = { hash = "<returned 64-digit hash>", features = ["derive"] }
+```
+
+Updating a definition name leaves existing dependency hashes intact. Run `loom --token "$LOOM_TOKEN" upgrade <old-hash> <new-hash>` or MCP `loom_upgrade` to rewrite named dependents explicitly. Both definition hashes and crate source hashes use this command; its result lists the changed identities. Actor behavior changes remain a separate `actor.upgrade` command with `{actor, hash}`.

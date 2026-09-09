@@ -195,7 +195,7 @@ impl Runtime {
         let def = self
             .inner
             .store
-            .definition(hash)?
+            .executable_definition(hash)?
             .context("definition not found")?;
         let effects = parent.delegated(hash, def.allowed_effects.as_deref());
         let component_hash = match def.component_hash {
@@ -209,7 +209,7 @@ impl Runtime {
                     .await?;
                 self.inner
                     .store
-                    .definition(hash)?
+                    .executable_definition(hash)?
                     .and_then(|d| d.component_hash)
                     .context("builder did not publish component")?
             }
@@ -596,31 +596,44 @@ impl Runtime {
                 .get("op")
                 .and_then(Value::as_str)
                 .context("descriptor op required")?;
-            let hash = self.inner.store.put_value("desc", &desc)?;
+            let scheduler = matches!(op, "fork" | "join" | "all" | "race" | "call");
+            let hash = if scheduler {
+                String::new()
+            } else {
+                self.inner.store.enqueue_value("desc", &desc)?
+            };
             if !effects.permits(op) {
-                self.inner.store.append("system", &json!({"type":"effect_denied","desc_hash":hash,"def_hash":effects.def_hash,"actor_id":effects.actor_id,"op":op,"scope":scope,"occurrence":occurrence}), 0)?;
+                let hash = if scheduler {
+                    self.inner.store.enqueue_value("desc", &desc)?
+                } else {
+                    hash.clone()
+                };
+                self.inner.store.enqueue_recording(&json!({"type":"effect_denied","desc_hash":hash,"def_hash":effects.def_hash,"actor_id":effects.actor_id,"op":op,"scope":scope,"occurrence":occurrence}))?;
                 bail!(
                     "effect {op} is not allowed for definition {}",
                     effects.def_hash.as_deref().unwrap_or("<host>")
                 );
             }
             let args = desc.get("args").cloned().unwrap_or(Value::Null);
-            self.inner.store.append("system", &json!({"type":"effect_invoked","def_hash":effects.def_hash,"actor_id":effects.actor_id,"op":op,"desc_hash":hash,"scope":scope,"occurrence":occurrence}), 0)?;
+            if !scheduler {
+                self.inner.store.enqueue_recording(&json!({"type":"effect_invoked","def_hash":effects.def_hash,"actor_id":effects.actor_id,"op":op,"desc_hash":hash,"scope":scope,"occurrence":occurrence}))?;
+            }
             let mut cached = false;
             let outcome: Result<Value> = async {
             match op {
                 "all" | "race" => {
-                    let descs = args
-                        .get("descs")
-                        .and_then(Value::as_array)
-                        .context("descs required")?;
+                    let mut args = args;
+                    let descs = match args.get_mut("descs").map(Value::take) {
+                        Some(Value::Array(descs)) => descs,
+                        _ => bail!("descs required"),
+                    };
                     let child_scope = format!("{scope}/{op}:{occurrence}");
                     let futures = descs
-                        .iter()
+                        .into_iter()
                         .enumerate()
                         .map(|(index, desc)| {
                             self.perform_contextual(
-                                desc.clone(),
+                                desc,
                                 &child_scope,
                                 index as i64,
                                 effects.clone(),
@@ -719,7 +732,7 @@ impl Runtime {
                     let result = serde_json::to_value(actor)?;
                     self.inner
                         .store
-                        .effect_put(&hash, scope, occurrence, &result)?;
+                        .enqueue_effect(&hash, scope, occurrence, &result)?;
                     return Ok(result);
                 }
                 _ => {}
@@ -822,15 +835,18 @@ impl Runtime {
             };
             self.inner
                 .store
-                .effect_put(&hash, cache_scope, cache_occurrence, &result)?;
+                .enqueue_effect(&hash, cache_scope, cache_occurrence, &result)?;
             Ok(result)
             }.await;
+            if scheduler {
+                return outcome;
+            }
             let result_hash = outcome
                 .as_ref()
                 .ok()
-                .map(|result| self.inner.store.put_value("result", result))
+                .map(|result| self.inner.store.enqueue_value("result", result))
                 .transpose()?;
-            self.inner.store.append("system", &json!({"type":"effect_completed","def_hash":effects.def_hash,"actor_id":effects.actor_id,"op":op,"desc_hash":hash,"scope":scope,"occurrence":occurrence,"cached":cached,"result_hash":result_hash,"error":outcome.as_ref().err().map(|error|format!("{error:#}"))}), 0)?;
+            self.inner.store.enqueue_recording(&json!({"type":"effect_completed","def_hash":effects.def_hash,"actor_id":effects.actor_id,"op":op,"desc_hash":hash,"scope":scope,"occurrence":occurrence,"cached":cached,"result_hash":result_hash,"error":outcome.as_ref().err().map(|error|format!("{error:#}"))}))?;
             outcome
         })
     }
@@ -944,6 +960,26 @@ impl Runtime {
 mod tests {
     use super::*;
     #[tokio::test]
+    async fn scheduling_records_only_leaf_effects() -> Result<()> {
+        let store = Store::memory()?;
+        let runtime = Runtime::new(store.clone())?;
+        let result = runtime.perform(json!({"op":"all","args":{"descs":[
+            {"op":"sleep","args":{"ms":0}},
+            {"op":"sleep","args":{"ms":1}}
+        ]}}), "scheduler-control", 0).await?;
+        assert_eq!(result.as_array().map(Vec::len), Some(2));
+        store.flush()?;
+        let events = store.events(None, 0, 100)?;
+        let invoked: Vec<_> = events.iter()
+            .filter(|event| event.event["type"] == "effect_invoked")
+            .collect();
+        assert_eq!(invoked.len(), 2);
+        assert!(invoked.iter().all(|event| event.event["op"] == "sleep"));
+        assert!(events.iter().all(|event| event.event["op"] != "all"));
+        assert!(invoked.iter().all(|event| event.event["scope"] == "scheduler-control/all:0"));
+        Ok(())
+    }
+    #[tokio::test]
     async fn observational_effect_replays_across_runtime_restart() -> Result<()> {
         let store = Store::memory()?;
         let runtime = Runtime::new(store.clone())?;
@@ -1007,8 +1043,12 @@ mod tests {
         let ready = root.path().join("ready");
         let orphan = root.path().join("orphan");
         let runtime = Runtime::new(Store::memory()?)?;
-        let desc = json!({"op":"race","args":{"descs":[{"op":"exec","args":{"program":"sh","args":["-c","printf ready > \"$1\"; (sleep 1; printf orphan > \"$2\") & wait","loom",ready,orphan]}},{"op":"sleep","args":{"ms":200}}]}});
-        assert_eq!(runtime.perform(desc, "cancel", 0).await?, Value::Null);
+        let desc = json!({"op":"race","args":{"descs":[
+            {"op":"exec","args":{"program":"sh","args":["-c","(sleep 1; printf orphan > \"$2\") & printf ready > \"$1\"; wait","loom",ready,orphan]}},
+            {"op":"exec","args":{"program":"sh","args":["-c","while [ ! -f \"$1\" ]; do sleep .01; done","loom",ready]}}
+        ]}});
+        let result = tokio::time::timeout(Duration::from_secs(5), runtime.perform(desc, "cancel", 0)).await??;
+        assert_eq!(result["code"], 0);
         assert!(
             ready.exists(),
             "process never started; cancellation control invalid"
@@ -1087,6 +1127,14 @@ mod tests {
                 .any(|event| event.event["type"] == "effect_invoked"
                     && event.event["def_hash"] == "restricted")
         );
+        Ok(())
+    }
+    #[test]
+    fn shared_memory_is_rejected_by_the_execution_engine() -> Result<()> {
+        let runtime = Runtime::new(Store::memory()?)?;
+        Component::new(&runtime.inner.engine, "(component (core module (memory 1)))")?;
+        assert!(Component::new(&runtime.inner.engine,
+            "(component (core module (memory 1 1 shared)))").is_err());
         Ok(())
     }
     #[test]

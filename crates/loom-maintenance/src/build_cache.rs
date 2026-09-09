@@ -144,7 +144,7 @@ mod tests {
     #[tokio::test]
     async fn maintenance_waits_for_builder_gate() -> Result<()> {
         let root = tempfile::tempdir()?;
-        let builder = Builder::new(root.path().to_owned());
+        let builder = Builder::new(root.path().to_owned(), loom_store::Store::memory()?);
         let policy = CachePolicy {
             max_bytes: u64::MAX,
             max_age: Duration::MAX,

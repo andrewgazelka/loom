@@ -2,6 +2,7 @@ mod cas_browser;
 mod dag_migration;
 mod effect_index;
 mod migration;
+mod recording;
 use anyhow::{Context, Result, anyhow, ensure};
 use loom_proto::{Actor, Def, Event, Snapshot, Value};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -21,6 +22,7 @@ pub struct Compaction {
 
 #[derive(Clone)]
 pub struct Store {
+    recording: Arc<recording::Writer>,
     connection: Arc<Mutex<Connection>>,
 }
 impl Store {
@@ -62,11 +64,16 @@ impl Store {
         connection.execute_batch(include_str!("schema.sql"))?;
         migration::run(&mut connection)?;
         effect_index::rebuild(&mut connection)?;
+        connection.execute_batch("PRAGMA synchronous=NORMAL;")?;
+        let connection = Arc::new(Mutex::new(connection));
+        let recording = Arc::new(recording::Writer::new(connection.clone())?);
         Ok(Self {
-            connection: Arc::new(Mutex::new(connection)),
+            recording,
+            connection,
         })
     }
     fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
+        self.recording.check()?;
         self.connection
             .lock()
             .map_err(|_| anyhow!("store lock poisoned"))
@@ -75,12 +82,15 @@ impl Store {
         &self,
         operation: impl FnOnce(&mut Connection) -> Result<T>,
     ) -> Result<T> {
+        self.recording.barrier(false)?;
         operation(&mut *self.lock()?)
     }
     pub fn put(&self, kind: &str, bytes: &[u8]) -> Result<String> {
+        self.recording.barrier(false)?;
         put(&*self.lock()?, kind, bytes)
     }
     pub fn get(&self, hash: &str) -> Result<Option<Vec<u8>>> {
+        self.recording.barrier(false)?;
         let address = if hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()) {
             None
         } else {
@@ -129,6 +139,7 @@ impl Store {
         anyhow::bail!("archive index refers to missing event {hash}")
     }
     pub fn put_value<T: serde::Serialize>(&self, kind: &str, value: &T) -> Result<String> {
+        self.recording.barrier(false)?;
         put_value(&*self.lock()?, kind, value)
     }
     pub fn get_value<T: serde::de::DeserializeOwned>(&self, hash: &str) -> Result<Option<T>> {
@@ -147,6 +158,7 @@ impl Store {
         self.get(hash)?.map(|b| decode(&b)).transpose()
     }
     pub fn codec(&self, hash: &str) -> Result<Option<u64>> {
+        self.recording.barrier(false)?;
         let address = if hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()) {
             None
         } else {
@@ -183,6 +195,7 @@ impl Store {
         Ok(reference)
     }
     pub fn latest_seq(&self) -> Result<i64> {
+        self.recording.barrier(false)?;
         Ok(self
             .lock()?
             .query_row("SELECT coalesce(max(seq),0) FROM log", [], |r| r.get(0))?)
@@ -194,6 +207,7 @@ impl Store {
         source: &str,
         deps: &BTreeMap<String, String>,
     ) -> Result<i64> {
+        self.recording.barrier(false)?;
         let mut connection = self.lock()?;
         let tx = connection.transaction()?;
         let identity = loom_proto::definition_identity(
@@ -232,7 +246,13 @@ impl Store {
         tx.commit()?;
         Ok(seq)
     }
+    /// Execution metadata is published synchronously. Reading it does not drain
+    /// effect recordings; observed_effects is intentionally excluded.
+    pub fn executable_definition(&self, hash: &str) -> Result<Option<Def>> {
+        executable_definition(&*self.lock()?, hash)
+    }
     pub fn definition(&self, hash: &str) -> Result<Option<Def>> {
+        self.recording.barrier(false)?;
         definition(&*self.lock()?, hash)
     }
     pub fn resolve(&self, name: &str) -> Result<Option<Def>> {
@@ -256,6 +276,7 @@ impl Store {
     }
     /// Reconstruct durable projections from the append-only log. Snapshots are disposable.
     pub fn rebuild_views(&self) -> Result<()> {
+        self.recording.barrier(false)?;
         let mut c = self.lock()?;
         let tx = c.transaction()?;
         let recorded: Vec<Event> = {
@@ -416,6 +437,7 @@ impl Store {
         msg: &Value,
         key: Option<&str>,
     ) -> Result<PendingMessage> {
+        self.recording.barrier(false)?;
         let mut c = self.lock()?;
         let tx = c.transaction()?;
         if let Some(key) = key {
@@ -491,6 +513,7 @@ impl Store {
         )?)
     }
     pub fn complete_message(&self, actor: &str, handler_seq: i64, events: &[Value]) -> Result<i64> {
+        self.recording.barrier(false)?;
         let mut c = self.lock()?;
         let tx = c.transaction()?;
         let message = pending(&tx, actor)?.context("no pending message")?;
@@ -523,6 +546,7 @@ impl Store {
         Ok(completed)
     }
     pub fn compact_log(&self, through_seq: i64, limit: usize) -> Result<Compaction> {
+        self.recording.barrier(false)?;
         ensure!(
             limit > 0 && limit <= 100_000,
             "compaction limit must be 1..=100000"
@@ -591,6 +615,7 @@ impl Store {
         })
     }
     pub fn definitions(&self) -> Result<Vec<Def>> {
+        self.recording.barrier(false)?;
         let c = self.lock()?;
         let mut q = c.prepare("SELECT hash FROM defs ORDER BY hash")?;
         let hashes: Vec<String> = q
@@ -608,6 +633,7 @@ impl Store {
             .optional()?)
     }
     pub fn create_session(&self, id: &str, actor: &str, owner: &str) -> Result<()> {
+        self.recording.barrier(false)?;
         let mut c = self.lock()?;
         let tx = c.transaction()?;
         append(
@@ -667,6 +693,7 @@ impl Store {
             .collect())
     }
     pub fn create_initialized_actor(&self, actor: &Actor, initial: &Value) -> Result<Actor> {
+        self.recording.barrier(false)?;
         let mut c = self.lock()?;
         let tx = c.transaction()?;
         let created_seq = append(
@@ -710,6 +737,7 @@ impl Store {
         })
     }
     pub fn create_actor(&self, actor: &Actor) -> Result<i64> {
+        self.recording.barrier(false)?;
         let mut connection = self.lock()?;
         let tx = connection.transaction()?;
         let seq = append(
@@ -752,6 +780,7 @@ impl Store {
             .collect()
     }
     pub fn append(&self, actor: &str, event: &Value, handler_seq: i64) -> Result<i64> {
+        self.recording.barrier(false)?;
         let mut connection = self.lock()?;
         let tx = connection.transaction()?;
         ensure!(
@@ -772,6 +801,7 @@ impl Store {
         Ok(seq)
     }
     pub fn update_actor(&self, actor: &Actor) -> Result<i64> {
+        self.recording.barrier(false)?;
         let mut c = self.lock()?;
         let tx = c.transaction()?;
         let seq = append(
@@ -795,6 +825,7 @@ impl Store {
         Ok(seq)
     }
     pub fn append_batch(&self, actor: &str, events: &[Value], handler_seq: i64) -> Result<i64> {
+        self.recording.barrier(false)?;
         let mut c = self.lock()?;
         let tx = c.transaction()?;
         let mut seq: i64 = tx
@@ -814,6 +845,7 @@ impl Store {
         Ok(seq)
     }
     pub fn events(&self, actor: Option<&str>, after: i64, limit: usize) -> Result<Vec<Event>> {
+        self.recording.barrier(false)?;
         let connection = self.lock()?;
         let mut q=connection.prepare("SELECT seq,actor,bytes,handler_seq,ts FROM events WHERE seq>? AND (? IS NULL OR actor=?) ORDER BY seq LIMIT ?")?;
         let mut rows = q.query(params![after, actor, actor, limit.min(1000) as i64])?;
@@ -830,6 +862,7 @@ impl Store {
         Ok(events)
     }
     pub fn snapshot(&self, actor: &str, fold_hash: &str, seq: i64, state: &Value) -> Result<()> {
+        self.recording.barrier(false)?;
         let mut c = self.lock()?;
         let tx = c.transaction()?;
         let hash = put_value(&tx, "state", state)?;
@@ -852,12 +885,50 @@ impl Store {
             None => Ok(None),
         }
     }
+    /// Drain queued recording and synchronize its WAL before an external reply.
+    pub fn flush(&self) -> Result<()> {
+        self.recording.barrier(true)
+    }
+    pub fn recording_commit_count(&self) -> u64 {
+        self.recording.commits()
+    }
+    pub fn enqueue_recording(&self, event: &Value) -> Result<()> {
+        self.recording.event(event)
+    }
+    pub fn enqueue_value<T: serde::Serialize>(&self, kind: &str, value: &T) -> Result<String> {
+        self.recording.value(kind, value)
+    }
+    pub fn enqueue_effect(
+        &self,
+        desc_hash: &str,
+        scope: &str,
+        occurrence: i64,
+        result: &Value,
+    ) -> Result<()> {
+        self.recording.effect(
+            &self.connection,
+            recording::EffectKey {
+                desc_hash: desc_hash.into(),
+                scope: scope.into(),
+                occurrence,
+            },
+            result,
+        )
+    }
     pub fn effect_get(
         &self,
         desc_hash: &str,
         scope: &str,
         occurrence: i64,
     ) -> Result<Option<Value>> {
+        let key = recording::EffectKey {
+            desc_hash: desc_hash.into(),
+            scope: scope.into(),
+            occurrence,
+        };
+        if let Some(value) = self.recording.pending(&key)? {
+            return Ok(Some(value));
+        }
         let c = self.lock()?;
         let bytes: Option<Vec<u8>> = c.query_row(
             "SELECT c.bytes FROM effect_results e JOIN cas c ON c.hash=e.result_hash WHERE e.desc_hash=? AND e.scope=? AND e.occurrence=?",
@@ -872,6 +943,7 @@ impl Store {
         occurrence: i64,
         result: &Value,
     ) -> Result<()> {
+        self.recording.barrier(false)?;
         let mut c = self.lock()?;
         let tx = c.transaction()?;
         let hash = put_value(&tx, "result", result)?;
@@ -949,12 +1021,16 @@ fn record_observed_effect(c: &Connection, event: &Value) -> Result<()> {
     )?;
     Ok(())
 }
+fn executable_definition(c: &Connection, hash: &str) -> Result<Option<Def>> {
+    let value: Option<String> = c.query_row("SELECT json_object('hash',hash,'lang',lang,'component_hash',component_hash,'sig',json(type_sig),'allowed_effects',json(allowed_effects)) FROM defs WHERE hash=?", [hash], |row| row.get(0)).optional()?;
+    value
+        .map(|value| serde_json::from_str(&value).map_err(anyhow::Error::from))
+        .transpose()
+}
 fn definition(c: &Connection, hash: &str) -> Result<Option<Def>> {
-    let value:Option<String>=c.query_row("SELECT json_object('hash',hash,'lang',lang,'component_hash',component_hash,'sig',json(type_sig),'allowed_effects',json(allowed_effects)) FROM defs WHERE hash=?",[hash],|r|r.get(0)).optional()?;
-    let Some(value) = value else {
+    let Some(mut def) = executable_definition(c, hash)? else {
         return Ok(None);
     };
-    let mut def: Def = serde_json::from_str(&value)?;
     let mut q = c.prepare("SELECT op FROM def_effects WHERE def_hash=? ORDER BY op")?;
     def.observed_effects = q
         .query_map([hash], |r| r.get(0))?
