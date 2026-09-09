@@ -10,7 +10,6 @@
     RefreshCw,
     X,
     HelpCircle,
-    ChevronRight,
   } from "lucide-svelte";
   import {
     Client,
@@ -25,6 +24,7 @@
   } from "$lib/api";
   import type { Entry } from "$lib/journal";
   import SessionJournal from "$lib/SessionJournal.svelte";
+  import ConnectionForm from "$lib/ConnectionForm.svelte";
   import Composer from "$lib/Composer.svelte";
   import ActorBrowser from "$lib/ActorBrowser.svelte";
   import DefinitionBrowser from "$lib/DefinitionBrowser.svelte";
@@ -60,7 +60,9 @@
     disposed = false,
     reconnectAuthorized = false;
   let connecting = false;
+  let authenticated = false;
   function unauthorized(problem: AuthenticationError) {
+    authenticated = false;
     connected = false;
     reconnectAuthorized = false;
     if (reconnectTimer) clearTimeout(reconnectTimer);
@@ -160,7 +162,7 @@
     );
   }
   async function save() {
-    if (connecting) return;
+    if (connecting || !token.trim()) return;
     connecting = true;
     const candidate = makeClient(endpoint.trim(), token.trim());
     try {
@@ -173,6 +175,7 @@
       persist();
       settings = false;
       error = "";
+      authenticated = true;
       await refresh();
       if (!settings) connect();
     } catch (problem) {
@@ -194,10 +197,8 @@
     }
     client.dispose();
     client = makeClient(endpoint, token);
-    if (token) {
-      void refresh();
-      connect();
-    } else settings = true;
+    if (token) void save();
+    else settings = true;
     return () => {
       disposed = true;
       client.dispose();
@@ -313,6 +314,17 @@
     content="A live journal for Loom sessions, definitions, actors, and content."
   /><meta name="color-scheme" content="light dark" /></svelte:head
 >
+{#if !authenticated}
+  <main class="authentication-gate">
+    <section class="connection-panel" aria-labelledby="connect-title" aria-busy={connecting}>
+      <a href="/" class="wordmark">loom</a>
+      <h1 id="connect-title">Connect to your workspace</h1>
+      <p class="gate-intro">Enter your token to access sessions, actors, and the content store.</p>
+      {#if error}<p class="gate-error" role="alert">{error}</p>{/if}
+      <ConnectionForm bind:endpoint bind:token bind:session {connecting} submit={save} />
+    </section>
+  </main>
+{:else}
 <header class="workspace-header">
   <a href="/" class="wordmark">loom</a><span class="header-divider">/</span>
   <div class="workspace-identity">
@@ -367,36 +379,7 @@
             on:click={() => (settings = false)}><X size={14} /></button
           >
         </div>
-        <form on:submit|preventDefault={save}>
-          <label
-            >API endpoint<input
-              bind:value={endpoint}
-              placeholder="Same origin"
-              type="url"
-            /></label
-          ><label
-            >Bearer token<input
-              bind:value={token}
-              type="password"
-              autocomplete="off"
-              data-1p-ignore
-              data-lpignore="true"
-              placeholder="Your local daemon token"
-            /></label
-          >
-          <details>
-            <summary><ChevronRight size={11} /> Session identity</summary><label
-              >Session<input
-                bind:value={session}
-                placeholder="Created on first evaluation"
-              /></label
-            >
-          </details>
-          <div class="connection-footer">
-            <p>Saved in this browser’s local storage.</p>
-            <button class="primary" disabled={connecting}>{connecting ? "Checking…" : "Connect"}</button>
-          </div>
-        </form>
+        <ConnectionForm bind:endpoint bind:token bind:session {connecting} submit={save} />
       </section>{/if}{#if help}<div class="help-panel">
         <p>
           <strong>Prompt</strong> ⌘ Enter or Ctrl Enter runs the current input.
@@ -449,3 +432,14 @@
     <span>loom</span><span>Content addressed · Event sourced</span>
   </footer>
 </div>
+
+{/if}
+
+<style>
+  .authentication-gate { min-height:100svh; display:grid; place-items:center; padding:28px 20px; }
+  .authentication-gate .connection-panel { width:100%; max-width:440px; margin:0; padding:32px; }
+  .authentication-gate .wordmark { display:inline-block; margin-bottom:28px; }
+  .authentication-gate h1 { font-size:22px; font-weight:500; letter-spacing:-.6px; margin:0 0 8px; }
+  .gate-intro { color:var(--muted); line-height:1.7; margin:0 0 28px; }
+  .gate-error { color:var(--error); margin:0 0 20px; }
+</style>
