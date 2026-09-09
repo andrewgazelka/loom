@@ -59,12 +59,7 @@ let
         let
           archive = pkgs.fetchurl { inherit (package) url hash; };
           destination = lib.escapeShellArg package.path;
-          bins =
-            if builtins.isString package.bins then
-              { "${builtins.baseNameOf package.name}" = package.bins; }
-            else
-              package.bins;
-          binDirectory = lib.removeSuffix ("/" + package.name) package.path + "/.bin";
+          inherit (package) bins binDirectory;
         in
         ''
           mkdir -p ${destination}
@@ -72,7 +67,7 @@ let
           ${lib.concatStringsSep "\n" (
             lib.mapAttrsToList (name: target: ''
               mkdir -p ${lib.escapeShellArg binDirectory}
-              ln -s ${lib.escapeShellArg ("../" + package.name + "/" + target)} ${
+              ln -s ${lib.escapeShellArg ("../" + package.installedName + "/" + target)} ${
                 lib.escapeShellArg (binDirectory + "/" + name)
               }
             '') bins

@@ -116,6 +116,17 @@ COMPILER
       ;;
     vendor_run) cargo run --locked -p loom-rt --example component_smoke -- "$base/itoa.wasm" rust itoa || status=$? ;;
     sandbox) bash loom-rustc/test-sandbox.sh || status=$? ;;
+    nix)
+      /run/wrappers/bin/sudo -n env NIX_REMOTE=local \
+        NIX_CONFIG=$'max-jobs = 1\ncores = 8\nbuilders =\n' PATH="$PATH" \
+        /run/current-system/sw/bin/bash -c '
+          expected="loom-check-01a084e8-9989-7d50-87aa-0e56e996314f.service"
+          actual=$(cat /proc/self/cgroup)
+          [[ "$actual" == *"$expected"* ]] || { printf "Compiler cgroup escaped: %s\n" "$actual" >&2; exit 1; }
+          printf "Direct Nix store compiler cgroup: %s\n" "$actual"
+          bash scripts/nix-check.sh
+        ' || status=$?
+      ;;
     dag)
       (cd loom-checker && bun install --frozen-lockfile)
       (cd loom-guest-ts && bun install --frozen-lockfile)
@@ -138,7 +149,7 @@ COMPILER
 fi
 
 action=${1:-check}
-case "$action" in prepare|check|test|fetch|tools|targets|machine|e2e|e2e_mcp|e2e_languages|sandbox|acceptance|container|container_verify|vendor|vendor_run|m9|compiler|dag|sdk|container_site) ;; *) echo 'Usage: scripts/remote-check.sh [prepare|check|test|fetch|tools|targets|machine|e2e|e2e_mcp|e2e_languages|sandbox|acceptance|container|container_verify|vendor|vendor_run|m9|compiler|dag|sdk|container_site]' >&2; exit 64;; esac
+case "$action" in prepare|check|test|fetch|tools|targets|machine|e2e|e2e_mcp|e2e_languages|sandbox|acceptance|container|container_verify|vendor|vendor_run|m9|compiler|dag|sdk|container_site|nix) ;; *) echo 'Usage: scripts/remote-check.sh [prepare|check|test|fetch|tools|targets|machine|e2e|e2e_mcp|e2e_languages|sandbox|acceptance|container|container_verify|vendor|vendor_run|m9|compiler|dag|sdk|container_site|nix]' >&2; exit 64;; esac
 cd "$(dirname "$0")/.."
 bash -n scripts/remote-check.sh
 host=dev-compute-4
@@ -146,7 +157,7 @@ base="/home/andrew/loom-$session"
 unit="loom-check-$session"
 ssh "$host" "mkdir -p '$base'; if systemctl --user is-active --quiet '$unit'; then echo 'Linux verification already running' >&2; exit 75; fi; mkdir '$base/staging'"
 inputs=(Cargo.toml crates loom-wit scripts)
-for input in Cargo.lock Dockerfile .dockerignore deploy loom-checker loom-rustc loom-guest-ts loom-ui examples; do
+for input in flake.nix flake.lock nix Cargo.lock Dockerfile .dockerignore deploy loom-checker loom-rustc loom-guest-ts loom-ui examples; do
   [[ ! -e "$input" ]] || inputs+=("$input")
 done
 tar_flags=()

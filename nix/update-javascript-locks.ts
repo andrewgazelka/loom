@@ -22,15 +22,36 @@ for (const directory of ['loom-checker', 'loom-guest-ts', 'loom-ui']) {
     // Bun lock keys describe hoisted placement. A scope and package form one segment.
     const segments = placement.match(/@[^/]+\/[^/]+|[^/]+/g)!;
     const path = `node_modules/${segments.join('/node_modules/')}`;
+    const installedName = segments.at(-1)!;
+    const binDirectory = path.slice(0, -(installedName.length + 1)) + '/.bin';
     const basename = name.split('/').at(-1)!;
     return {
-      name, version, path,
+      name, version, path, installedName, binDirectory,
       url: `https://registry.npmjs.org/${name}/-/${basename}-${version}.tgz`,
       hash: integrity,
       os: metadata.os ?? [], cpu: metadata.cpu ?? [],
-      bins: metadata.bin ?? {},
+      bins: typeof metadata.bin === 'string'
+        ? { [basename]: metadata.bin }
+        : (metadata.bin ?? {}) as Record<string, string>,
     };
   });
+  // npm aliases can expose a bin already owned by the unaliased package.
+  // Preserve the canonical owner, rather than making link order choose a version.
+  const binOwners = new Map<string, (typeof packages)[number]>();
+  for (const pkg of packages) {
+    for (const bin of Object.keys(pkg.bins)) {
+      const key = `${pkg.binDirectory}/${bin}`;
+      const previous = binOwners.get(key);
+      if (!previous) { binOwners.set(key, pkg); continue; }
+      const canonical = pkg.installedName === pkg.name;
+      const previousCanonical = previous.installedName === previous.name;
+      if (canonical === previousCanonical) throw new Error(`Ambiguous bin ${key}`);
+      const winner = canonical ? pkg : previous;
+      const loser = canonical ? previous : pkg;
+      delete loser.bins[bin];
+      binOwners.set(key, winner);
+    }
+  }
   result[directory] = {
     lockHash: new Bun.CryptoHasher('sha256').update(text).digest('hex'), packages,
   };
