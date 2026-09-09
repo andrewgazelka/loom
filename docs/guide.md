@@ -4,6 +4,18 @@ Loom runs TypeScript and Rust WebAssembly components behind one Rust actor host.
 
 ## Run locally
 
+On Apple Silicon macOS or x86-64 Linux, Nix supplies the daemon, Svelte app, checker, and both guest toolchains:
+
+```sh
+nix run .
+```
+
+Open <http://127.0.0.1:8787> and enter the token from the file printed by the launcher. The database, token, and build caches persist under `~/Library/Application Support/loom` on macOS or `~/.local/share/loom` on Linux. `XDG_DATA_HOME` changes the base directory; `LOOM_DATA_DIR` sets the complete directory. The first Nix build downloads and compiles dependencies.
+
+Pass daemon options after `--`, for example `nix run . -- --bind 127.0.0.1:8788` or `nix run . -- --stdio` for an MCP client. Set `LOOM_TOKEN` to choose a token instead of generating one. Linux process isolation uses the packaged Bubblewrap; machine execution remains platform-dependent.
+
+### Development without Nix
+
 Install Rust 1.97 or newer, Bun 1.3.13, `cargo-component` 0.21.1, and the `wasm32-wasip1` and `wasm32-wasip2` targets. Linux machine execution also needs Bubblewrap. The component builder uses the StarlingMonkey engine shipped in the locked `@bytecodealliance/componentize-js` package.
 
 ```sh
@@ -81,6 +93,7 @@ LOOM_TOKEN="$LOOM_TOKEN" bun scripts/e2e.ts
 LOOM_TOKEN="$LOOM_TOKEN" bun scripts/mcp-e2e.ts
 ./scripts/acceptance.sh
 ./scripts/dag-cbor-check.sh
+./scripts/nix-check.sh
 ```
 
 The HTTP and MCP scripts require a running daemon and real language toolchains. They build and execute guest components. `acceptance.sh` reports how many complete specification milestones pass; a missing or failing milestone remains a failure. A passing unit test suite alone does not imply all 11 milestones are delivered. Debug builds of the Wasmtime compiler are substantially slower than release builds when compiling a new TS component.

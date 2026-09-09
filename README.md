@@ -34,10 +34,9 @@ Two effects run concurrently. The function returns a string—no `async`, no `Pr
 ### Try it
 
 ```sh
-export LOOM_TOKEN='choose-a-token'
-podman compose -f deploy/compose.yaml up --build
+nix run .
 ```
 
-Open **http://localhost:8787** for the Svelte app. The same runtime is available through the terminal REPL, HTTP, and MCP.
+Open **http://localhost:8787** for the Svelte app; the launcher prints the token file location. Nix supplies both guest toolchains. The same runtime is available through the terminal REPL, HTTP, and MCP.
 
 [Setup, API, and architecture →](docs/guide.md)
