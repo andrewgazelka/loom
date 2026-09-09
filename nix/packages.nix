@@ -24,8 +24,8 @@ let
   sources = pkgs.runCommand "loom-runtime-sources" { } ''
     mkdir -p $out
     cp -R ${src}/Cargo.toml ${src}/Cargo.lock ${src}/crates ${src}/examples ${src}/loom-wit ${src}/loom-rustc $out/
-    ln -s ${javascript.checker} $out/loom-checker
-    ln -s ${javascript.guest} $out/loom-guest-ts
+    cp -R ${javascript.checker} $out/loom-checker
+    cp -R ${javascript.guest} $out/loom-guest-ts
     mkdir -p $out/loom-ui
     ln -s ${javascript.ui} $out/loom-ui/build
   '';

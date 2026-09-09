@@ -40,6 +40,7 @@ in
       done
       runHook postInstall
     '';
+    passthru.targetPlatforms = [ "aarch64-darwin" "x86_64-linux" ];
     passthru.updateScript = [
       (lib.getExe pkgs.python3)
       (toString ./update-rust-toolchain.py)
