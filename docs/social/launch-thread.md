@@ -45,4 +45,4 @@ Shared jobs are one trust domain. Separate executions have separate memories.
 User code must pass safe-code admission; pinned SDK/std internals remain trusted. This is not a formal proof.
 
 Code and setup:
-https://github.com/andrewgazelka/repl-maxx
+https://github.com/andrewgazelka/loom

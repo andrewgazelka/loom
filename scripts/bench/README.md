@@ -5,7 +5,7 @@ The benchmark calls real Rust guest definitions through streamable HTTP MCP.
 [`largest-fork.rs`](largest-fork.rs) forks one worker per child directory.
 Both find the largest regular file, skip symlinks, and break size ties by relative path.
 
-Latest measured warm medians on an Apple Silicon Mac, September 9, 2026:
+Historical isolated-backend medians on an Apple Silicon Mac, September 9, 2026. See the [project README](../../README.md#performance) for newer shared-backend Linux measurements:
 
 | Path | Median of 7 warm scans |
 | --- | ---: |
@@ -41,6 +41,8 @@ LOOM_URL=http://127.0.0.1:18894 LOOM_TOKEN_FILE="$bench_dir/state/token" \
   bun scripts/bench/largest.ts "$bench_dir/tree" "$bench_dir/native"
 ```
 
+Set `LOOM_BENCH_VARIANTS=all,fork,scoped` to include borrowed scoped jobs. This selects 17 checks; the default `all,fork` selects 12.
+
 The runner reports build time, first-call time, every warm sample, medians,
 ratios, load averages, and `N/12 scan benchmark checks pass`. Four gates check correctness. Each guest variant also has gates for median latency below 15 ms, average retained database growth below 32 KiB per identical scan, fewer than 200,000 effect bytes transferred, and median reply storage wait below 1 ms. Missing metrics fail. Transaction and checkpoint durations are reported separately to diagnose storage waits. Repeating the runner reuses builds
 and filesystem caches. It removes its temporary winner directory on exit;
@@ -56,7 +58,7 @@ LOOM_URL=http://127.0.0.1:18894 LOOM_TOKEN_FILE="$bench_dir/state/token" \
 ```
 
 The command reports `N/15 unified-memory gates pass` and the first failed step.
-The historical command name remains stable; the shared-memory tier is canceled.
+This historical command covers the isolated-instance benchmark. The shared-memory tier is now implemented; see the [shared execution checks](../../docs/plan-shared-execution.md).
 The gate executes isolated `all`/`fork` definitions, checks every changing winner,
 and includes all twelve scan gates plus three compiler checks. Recording transaction counts remain diagnostic. The stats counter is sampled outside scan timing; absent counters
 fail admission rather than defaulting to zero. Missing build-control execution

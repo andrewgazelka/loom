@@ -1,73 +1,24 @@
 # Loom
 
-**A Rust REPL without function coloring.**
+**Concurrent I/O in ordinary Rust functions. No `async`, no `.await`.**
 
-Write an ordinary Rust function. List directories concurrently, call another definition, or wait for a timer. Loom suspends and resumes the guest while the host does the work. Your functions stay `fn`; effectful calls do not require `async` or `.await` throughout the call chain.
-
-Definitions and results persist between sessions. You can inspect recorded effects, replay a call, and reuse a definition by its content hash. The same runtime serves the browser REPL and coding agents over MCP.
-
-## Build a small recursive text search
-
-Find every file containing a string. Fork a search for each child directory, read local files while those searches run, then join the matching paths.
-
-The [complete runnable Rust example](docs/social/fork-join-example.rs) takes `machine`, `path`, and `needle`, and returns sorted matching paths. This is its core, inside an ordinary `fn`:
-
-```rust
-loom::scope(|scope| {
-    let jobs = directories.into_iter().map(|path| {
-        scope.fork(move || search(machine, &path, needle))
-            .expect("fork failed")
-    }).collect::<Vec<_>>();
-
-    let mut matches = files.into_iter().filter(|path| {
-        fs::read(machine, path).expect("read failed").contains(needle)
-    }).collect::<Vec<_>>();
-
-    matches.extend(jobs.into_iter()
-        .flat_map(|job| job.join().expect("join failed")));
-    matches
-}).expect("scope failed")
-```
-
-The helper takes `machine`, `path`, and `needle` as `&str`. Children borrow the machine and search string, and each closure owns its directory path. `job.join()` returns matching paths directly. The scope joins every child before those borrows end, including jobs whose handles were forgotten. `fs::read` returns a Rust `String`; `contains` performs a case-sensitive literal search.
-
-`machine` identifies a host filesystem rooted at a directory you choose. The example skips symlinks and fails on unreadable or invalid UTF-8 files. It reads each file into memory and returns each matching path once. It is a small teaching example, without ripgrep's regex engine, ignore-file handling, binary detection, or streaming search. Guest functions need no `async` or `.await`.
-
-## Separate benchmark: largest-file metadata scan
-
-The content-search example above has correctness checks, but no published timing. The following measurements are for finding the largest file by metadata, using the [fork/join scanner](scripts/bench/largest-fork.rs) and the [concurrent `all` scanner](scripts/bench/largest-all.rs).
-
-Historical baseline from the isolated-instance backend, before shared scoped jobs: warm medians from the same seven-round run on an Apple Silicon Mac, September 9, 2026. These are not measurements of the new shared backend:
-
-| Largest-file scan | Median |
-| --- | ---: |
-| Loom Rust, recursive `fork` / `join` | **12.00 ms** |
-| Loom Rust, concurrent `all` | **10.46 ms** |
-| Native Rust, sequential traversal | **35.20 ms** |
-
-Loom timings include the MCP round trip, guest execution, filesystem observations, and effect recording. The native timing excludes process launch; including launch it was 37.81 ms. Compilation and first-call initialization are excluded. Both filesystem caches and compiled definitions are warm.
-
-The fixture starts with 10,000 files in 256 directories. Every timed round changes a nested winning file, bringing the timed tree to 10,001 files and 257 directories, and verifies the new answer. These scans read directory metadata, not file contents.
-
-Loom uses parallel, batched filesystem operations; the native reference walks sequentially. These timings compare different implementations; they do **not** isolate Wasm overhead against equally optimized native code. The separate single-effect `fs.walk` implementation measured 17.22 ms in a different run and is still being tuned.
-
-**That isolated-backend run passed 10/12 scan gates.** Both variants meet the 15 ms latency target. The two remaining failures are reply storage waits of 1.50 ms and 1.59 ms against a target below 1 ms. The earlier 7 ms figure was an unverified Linux estimate, not a measured Mac result.
-
-[Reproduce the benchmark](scripts/bench/README.md#reproduce) · [Benchmark source](scripts/bench/largest.ts) · [Measurements and remaining work](docs/plan-unified-memory.md#scan-contract-change-2026-09-09)
-
-## Timers use the same interface
+Loom is a Rust execution runtime and REPL with an algebraic-effect model implemented using WebAssembly fibers. Your code performs an operation; a fiber suspends while a host handler does the work, then resumes with the result. Effectful calls keep ordinary Rust function signatures throughout the call chain.
 
 ```rust
 use loom::abilities::sleep;
 
 #[loom::def]
-pub fn main() -> String {
-    loom::all([sleep::desc(100), sleep::desc(200)]).expect("sleep failed");
-    "both finished".into()
+pub fn main() {
+    loom::all([
+        sleep::desc(100),
+        sleep::desc(200),
+    ]).expect("sleep failed");
 }
 ```
 
-The host owns the timers. The guest suspends until both finish, then continues in the same ordinary function. `all` submits effects; `scope.fork` and `job.join` run borrowed closures. Content-addressed calls to other definitions use `loom::fork` and `loom::join`. Actors add persistent state and event history when a task needs to live beyond one call.
+`sleep::desc` describes a timer. `loom::all` starts both timers concurrently and waits for both to finish. Their waits overlap. The host runtime owns the timers; the WebAssembly fiber preserves the suspended Rust execution.
+
+This applies to Loom's effect APIs. It does not make arbitrary blocking Rust libraries asynchronous.
 
 ## Try it
 
@@ -83,7 +34,46 @@ Connect Codex to the same runtime:
 bun scripts/configure-codex-mcp.ts --token-file /path/to/loom/token
 ```
 
-See the [setup and API guide](docs/guide.md) and [MCP setup and verification](docs/guide.md#codex-over-mcp).
+See the [setup and API guide](docs/guide.md) and [MCP setup](docs/guide.md#codex-over-mcp).
+
+## Operations, handlers, and fibers
+
+Rust code describes an operation with `Desc<T>` and performs it with `loom::perform`. The host handles operations such as filesystem reads, timers, and model calls. WebAssembly fibers supply suspension and resumption; the handlers supply the operation's meaning.
+
+Handlers live in the runtime, outside guest Rust. New operations can be added by extending the host dispatcher and exposing an SDK function. The current implementation has built-in handlers, rather than a public registration interface for arbitrary nested, composable handlers. There is no Rust language extension or compiler-checked effect-row system.
+
+`loom::all` runs a collection of described effects concurrently. For concurrent Rust computation, `loom::scope` provides borrowed closures through `scope.fork` and typed results through `job.join`. The scope waits for every child before its borrows end, including children whose handles were forgotten. Calls to separately stored definitions use `loom::fork` and `loom::join`.
+
+## A useful example: recursive text search
+
+The [complete Rust example](docs/social/fork-join-example.rs) finds files containing a string. It forks a search for each child directory, reads files while those searches run, then joins and sorts the matching paths. Children borrow the machine name and search string; each owns its directory path.
+
+`fs::read` returns a `String`, so matching uses ordinary Rust `contains`. The machine argument identifies a host filesystem rooted at a directory you choose. The example skips symlinks and fails on unreadable or invalid UTF-8 files. It reads each file into memory and implements literal search, without ripgrep's regex engine, ignore-file handling, or streaming.
+
+Definitions and results persist between REPL sessions. You can inspect recorded effects, replay a call, and reuse a definition by its content hash. The browser REPL and coding agents over MCP use the same runtime. Actors add persistent state and event history for work that outlives a call.
+
+## Performance
+
+The text-search example has correctness checks but no published timing. Our benchmark finds the largest file by **metadata**, without reading file contents.
+
+September 10, 2026: seven-round warm medians on Linux with an 8-CPU, 24-GiB runtime allocation, using the shared Rust backend:
+
+| Largest-file scan | Median |
+| --- | ---: |
+| Native Rust, sequential traversal | 11.21 ms |
+| Loom Rust, concurrent `all` | 12.06 ms |
+| Loom Rust, cross-definition `fork` / `join` | 21.87 ms |
+| Loom Rust, borrowed scoped jobs | 28.63 ms |
+
+Loom timings include the MCP round trip, guest execution, filesystem operations, and recording. Compilation and first-call initialization are excluded. Native timing excludes process launch. Loom uses parallel, batched filesystem operations; the native reference traverses sequentially. These numbers do not isolate WebAssembly overhead against equally optimized native code.
+
+The fixture begins with 10,000 files in 256 directories. Each timed round changes a nested winning file, giving 10,001 files in 257 directories, and checks the new result. Filesystem caches and compiled definitions are warm.
+
+**12/17 gates passed.** Correctness passed for all variants. The fork/join variants missed the 15 ms latency target, and reply storage waits missed the 1 ms target. Shared scoped jobs are currently slower on this workload. The earlier 7 ms goal remains unachieved.
+
+An older isolated-instance backend measured 10.46 ms for `all`, 12.00 ms for fork/join, and 35.20 ms for sequential native Rust on an Apple Silicon Mac on September 9. Those are a different platform and backend, not a speedup comparison with this Linux run.
+
+[Reproduce the benchmark](scripts/bench/README.md#reproduce) with `LOOM_BENCH_VARIANTS=all,fork,scoped` to include all three guest variants. See the [benchmark source](scripts/bench/largest.ts) and [shared execution checks](docs/plan-shared-execution.md).
 
 ## Isolation and recorded effects
 
