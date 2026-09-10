@@ -64,7 +64,7 @@ def main() -> None:
     assert [g.codepoint for g in enabled.glyph_infos] != [g.codepoint for g in disabled.glyph_infos], "Font has no active programming ligatures"
 
     source = (ROOT / "docs/social/async-example.rs").read_text()
-    excerpt = source[source.index("fn read("):].rstrip()
+    excerpt = source[source.index("#[loom::def]"):].rstrip()
     elements: list[str] = []
 
     def write(text: str, x: float, baseline: float, size: int, color: str, face: Typeface = regular) -> float:
@@ -83,7 +83,7 @@ def main() -> None:
     write("No function coloring.", 96, 160, 64, "#f1f0ed", bold)
     write("Async I/O. Ordinary Rust functions.", 96, 224, 30, "#969ba5")
 
-    tokens = re.compile(r'("[^"\n]*"|\b(?:fn|pub|let|mut|for|in|if|move)\b|\b(?:fork|join|read|main|scope|unwrap|contains)(?=\())')
+    tokens = re.compile(r'("[^"\n]*"|\b(?:fn|pub|let|mut|for|in|if|move)\b|\b(?:fork|join|read|walk|filter|map|collect|main|scope|unwrap|contains)(?=\())')
     for index, line in enumerate(excerpt.splitlines()):
         x = 96.0
         for token in tokens.split(line):
@@ -92,11 +92,11 @@ def main() -> None:
             color = FOREGROUND
             if token.startswith('"'):
                 color = "#9cab9f"
-            elif token in {"fork", "join", "read", "main", "scope", "contains"}:
+            elif token in {"fork", "join", "read", "main", "scope", "walk", "filter", "map", "collect", "contains"}:
                 color = ACCENT
             elif token in {"fn", "pub", "let", "mut", "for", "in", "if", "move"}:
                 color = "#b7a5d8"
-            x = write(token, x, 340 + index * 46, 32, color)
+            x = write(token, x, 380 + index * 52, 32, color)
 
     definitions = []
     for face in [regular, bold]:

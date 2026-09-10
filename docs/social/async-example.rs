@@ -1,14 +1,11 @@
-use loom::abilities::fs;
-
-fn read(path: &str) -> String {
-    fs::read("local", path).unwrap()
-}
+use loom::{abilities::fs, EntryKind};
 
 #[loom::def]
-pub fn main() -> Vec<String> {
-    loom::scope(|s| {
-        let a = s.fork(|| read("a.txt")).unwrap();
-        let b = read("b.txt");
-        vec![a.join().unwrap(), b]
-    }).unwrap()
+pub fn main(machine: String, path: String) -> Vec<String> {
+    let entries = fs::walk(&machine, &path, 64, 10_000).unwrap();
+
+    entries.into_iter()
+        .filter(|entry| entry.kind == EntryKind::File)
+        .map(|entry| entry.name)
+        .collect()
 }

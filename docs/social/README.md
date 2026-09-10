@@ -1,11 +1,11 @@
 # Launch assets
 
 - [Numbered posts, plain text](launch-thread.txt)
-- [Simple concurrent file-read example](async-example.rs)
+- [Recursive file-listing example](async-example.rs)
 - [Complete recursive text-search example](fork-join-example.rs), also [plain text](fork-join-example.txt)
 - [Dark PNG](../assets/loom-grep-dark.png) and [vector SVG](../assets/loom-grep-dark.svg)
 
-The current graphic is rendered from code, with Berkeley Mono and actual contextual programming ligatures. It shows two concurrent file reads using ordinary Rust functions. The example uses `unwrap()` to keep error handling out of the illustration and expects a machine named `local` with `a.txt` and `b.txt`. It is not a benchmark result. The older image-generated graphic is a previous draft.
+The current graphic is rendered from code, with Berkeley Mono and actual contextual programming ligatures. It shows a recursive filesystem walk using an ordinary Rust function. The caller supplies the machine name and root path. The walk is bounded to depth 64 and 10,000 entries; it returns file paths relative to the requested root. The example uses `unwrap()` to keep error handling out of the illustration. It is not a benchmark result. The older image-generated graphic is a previous draft.
 
 To regenerate from the Rust source:
 
