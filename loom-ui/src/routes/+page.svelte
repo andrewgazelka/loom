@@ -395,6 +395,7 @@
         >
       </div>{/if}
     {#key client}{#if view === "Session"}<SessionJournal
+      {client}
         {events}
         {entries}
         {inspect}

@@ -1,4 +1,4 @@
-#[loom::def]
+#[loom::def(effects=["all", "fs.list"])]
 pub fn main(machine: String, path: String) -> loom::Value {
     let mut frontier: Vec<String> = vec![String::new()];
     let mut best_path = String::new();

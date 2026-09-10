@@ -1,4 +1,4 @@
-#[loom::actor]
+#[loom::actor(effects=["send"])]
 pub struct Mailbox;
 impl loom::Actor for Mailbox {
     type State = u64;

@@ -58,3 +58,57 @@ The host sets both bounds before setting a worker's stack pointer or initializin
 TLS. Every guest write to `__stack_pointer` traps unless the unsigned value lies
 inside those bounds, including both endpoints. The compiler disables red zones
 so a frame cannot access memory below the stack pointer before this check.
+
+## Guest handler ABI v2
+
+Core artifacts now carry `core-handlers-v2`. Previous `core-shared-v1`
+artifacts fail admission and must rebuild from their stored source. Component
+artifacts retain their separate protocol marker.
+
+Additional imports from `loom`:
+
+- `handle_push(function:u32,data:u32,labels_ptr:u32,labels_len:u32)->u64`:
+  install a frame; zero refuses. Labels are canonical DAG-CBOR: null matches
+  every label and permits forwarding; an array is a total handler for those
+  labels and rejects `Forward` for a matching operation.
+- `handle_pop(frame:u64)->i32`: remove the top frame after inherited children
+  and active callbacks drain. Zero succeeds; failure must abort before borrowed
+  handler storage can be reclaimed.
+- `resume(k:u64,ptr:u32,len:u32)->i32`: consume a one-shot continuation and
+  supply a canonical DAG-CBOR value. Input bytes remain borrowed for the call.
+- `abandon(k:u64)->i32`: consume a continuation and abort its performer.
+- `continuation_drop(k:u64)->i32`: report an unconsumed deferred continuation;
+  the performer receives `continuation dropped`. This distinct import preserves
+  the diagnostic difference between explicit abandonment and an accidental drop.
+
+Additional exports:
+
+- `loom_handler_run(function:u32,data:u32,k:u64,op_ptr:u32,op_len:u32)->u64`:
+  invoke a handler on a separate instance with its own stack and TLS, over the
+  execution's shared memory. Return packed canonical DAG-CBOR
+  `{resume: value}`, `{forward: null}`, or `{deferred: null}`. The host releases
+  input and returned buffers with their original allocation layouts.
+- `loom_effect_run(ptr:u32,len:u32)->u64`: perform a descriptor from an
+  independently instantiated scheduler child. The host owns the input and
+  frees the packed response after consumption.
+
+An execution can retain up to eight successful callback instances for reuse.
+Checkout resets TLS, stack bounds and pointer, epoch deadline, occurrence keys,
+error context, and the outer handler stack. Check-in releases frame references
+and scheduling permits. Trapped or cancelled callbacks are discarded; execution
+drain releases the cache before execution memory is reclaimed.
+
+Dispatch walks the execution scope's frames from innermost to outermost.
+Handlers are deep: the performer's remaining computation retains its handler
+stack. The callback itself runs with the stack below its own frame, so its
+operations cannot recursively enter that frame. A mutable callback has at most
+one active invocation, enforced by an asynchronous host lock, never a guest
+spinlock held across an effect.
+
+Scoped children inherit the stack at fork time. Cross-definition calls and
+forks start a separate execution memory and do not inherit guest frames.
+Cancellation drains children and callbacks before frame data and borrowed
+parent storage. Handler traps abort the execution and identify the frame.
+Only descriptors reaching the outermost host handler participate in recording
+and replay. Pure execution may install guest handlers; root-bound effects
+remain forbidden.

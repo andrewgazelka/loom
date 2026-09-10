@@ -4,7 +4,7 @@ pub struct Winner {
     size: i64,
 }
 
-#[loom::def]
+#[loom::def(effects=["fs.list"])]
 pub fn main(machine: String, path: String) -> Winner {
     scan(&machine, &path)
 }

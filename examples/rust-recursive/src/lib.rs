@@ -1,4 +1,4 @@
-#[loom::def]
+#[loom::def(effects=["fork", "join"])]
 pub fn descend(depth: u32) -> u32 {
     if depth == 0 {
         return 0;

@@ -183,6 +183,23 @@ impl Runtime {
             "file is not UTF8; use snapshot for binary data"
         )?))
     }
+    pub(crate) async fn read_optional_machine_file(&self, args: &Value) -> Result<Value> {
+        let root = self.machine_handle(required_str(args, "machine")?)?;
+        let path = required_str(args, "path")?.to_owned();
+        let bytes = tokio::task::spawn_blocking(move || root.read_optional(&path)).await??;
+        let content = bytes.map(String::from_utf8).transpose()
+            .context("file is not UTF8; use snapshot for binary data")?;
+        Ok(json!(content))
+    }
+
+    pub(crate) async fn write_machine_file(&self, args: &Value) -> Result<Value> {
+        let root = self.machine_handle(required_str(args, "machine")?)?;
+        let path = required_str(args, "path")?.to_owned();
+        let content = required_str(args, "content")?.to_owned();
+        tokio::task::spawn_blocking(move || root.write(&path, content.as_bytes())).await??;
+        Ok(Value::Null)
+    }
+
     pub(crate) async fn snapshot_tree(&self, args: &Value) -> Result<Value> {
         let root = self.machine_handle(required_str(args, "machine")?)?;
         let path = required_str(args, "path")?.to_owned();
@@ -439,6 +456,61 @@ mod tests {
         );
         Ok(())
     }
+    #[tokio::test]
+    async fn optional_reads_and_writes_use_the_pinned_machine() -> Result<()> {
+        let workspace = tempfile::tempdir()?;
+        let path = workspace.path().join("root");
+        std::fs::create_dir(&path)?;
+        let runtime = Runtime::new(loom_store::Store::memory()?)?;
+        let machine = runtime.create_machine(&path)?;
+        let args = json!({"machine":machine.id,"path":"new.txt","content":"héllo"});
+        assert_eq!(runtime.read_optional_machine_file(&args).await?, Value::Null);
+        assert!(!path.join("new.txt").exists(), "preview must not create files");
+        assert_eq!(runtime.write_machine_file(&args).await?, Value::Null);
+        assert_eq!(runtime.read_optional_machine_file(&args).await?, json!("héllo"));
+        let mut replacement = args.clone();
+        replacement["content"] = json!("short");
+        runtime.write_machine_file(&replacement).await?;
+        assert_eq!(runtime.read_machine_file(&args).await?, json!("short"));
+        std::fs::create_dir(path.join("nested"))?;
+        runtime.write_machine_file(&json!({"machine":machine.id,"path":"nested/file","content":"nested"})).await?;
+        assert_eq!(std::fs::read_to_string(path.join("nested/file"))?, "nested");
+        assert!(!std::fs::read_dir(&path)?.any(|entry| entry.unwrap().file_name().to_string_lossy().starts_with(".loom-write-")));
+        std::fs::rename(&path, workspace.path().join("moved"))?;
+        std::fs::create_dir(&path)?;
+        runtime.write_machine_file(&args).await?;
+        assert_eq!(std::fs::read_to_string(workspace.path().join("moved/new.txt"))?, "héllo");
+        assert!(!path.join("new.txt").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn optional_reads_refuse_invalid_targets_and_writes_do_not_follow_links() -> Result<()> {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir()?;
+        let outside = tempfile::tempdir()?;
+        std::fs::write(outside.path().join("data"), "untouched")?;
+        std::fs::write(root.path().join("binary"), [255])?;
+        std::fs::create_dir(root.path().join("directory"))?;
+        symlink(outside.path(), root.path().join("link-dir"))?;
+        symlink(outside.path().join("data"), root.path().join("link-file"))?;
+        symlink(outside.path().join("absent"), root.path().join("dangling"))?;
+        std::fs::hard_link(outside.path().join("data"), root.path().join("hardlink"))?;
+        let runtime = Runtime::new(loom_store::Store::memory()?)?;
+        let machine = runtime.create_machine(root.path())?;
+        for path in ["../escape", "link-dir/data", "link-file", "dangling", "directory", "missing/child", "."] {
+            let args = json!({"machine":machine.id,"path":path,"content":"changed"});
+            assert!(runtime.read_optional_machine_file(&args).await.is_err(), "{path}");
+            assert!(runtime.write_machine_file(&args).await.is_err(), "{path}");
+        }
+        assert!(runtime.read_optional_machine_file(&json!({"machine":machine.id,"path":"binary"})).await.is_err());
+        runtime.write_machine_file(&json!({"machine":machine.id,"path":"hardlink","content":"changed"})).await?;
+        assert_eq!(std::fs::read_to_string(outside.path().join("data"))?, "untouched");
+        assert_eq!(std::fs::read_to_string(root.path().join("hardlink"))?, "changed");
+        assert!(runtime.write_machine_file(&json!({"machine":"unknown","path":"new","content":"bad"})).await.is_err());
+        Ok(())
+    }
+
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn directory_listing_rejects_unrepresentable_names() -> Result<()> {

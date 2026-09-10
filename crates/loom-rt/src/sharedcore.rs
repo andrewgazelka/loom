@@ -12,6 +12,12 @@ use wasmtime::{
     Caller, ExternType, Instance as CoreInstance, Module, SharedMemory, UpdateDeadline,
 };
 
+mod cancellation;
+mod timing;
+mod bridge;
+mod handlers;
+use handlers::{HandlerFrame, ContinuationState, HandlerInstance};
+
 const MAX_JOBS: usize = 512;
 const STACK_BYTES: u32 = 256 * 1024;
 const MAX_MEMORY: u64 = 256 * 1024 * 1024;
@@ -26,6 +32,7 @@ pub(super) fn engine() -> Result<Engine> {
     Engine::new(&config).map_err(|e| anyhow::anyhow!("{e:#}"))
 }
 struct Job {
+    handlers: Vec<u64>,
     parent: String,
     result: Mutex<Option<std::result::Result<(), String>>>,
     done: Notify,
@@ -35,6 +42,12 @@ struct ScheduledTask {
     completion: RemoteHandle<()>,
 }
 struct Execution {
+    handler_instances: Mutex<Vec<HandlerInstance>>,
+    handler_instance_reuses: AtomicU64,
+    handler_round_trip_us: Mutex<Vec<f64>>,
+    handlers_next: AtomicU64,
+    continuations: Mutex<HashMap<u64, Arc<ContinuationState>>>,
+    handler_failure: Mutex<Option<String>>,
     runtime: Runtime,
     module: Module,
     memory: SharedMemory,
@@ -52,7 +65,9 @@ struct Execution {
 struct Guest {
     execution: Arc<Execution>,
     scope: String,
+    handlers: Vec<Arc<HandlerFrame>>,
     occurrence: i64,
+    last_effect_error: Option<String>,
     permit: Option<OwnedSemaphorePermit>,
 }
 struct Allocation {
@@ -82,6 +97,9 @@ impl Drop for Cleanup {
 impl Execution {
     fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
+        // Parked Stores are not executing. Drop them synchronously to break
+        // Execution -> cached Store -> Execution ownership cycles.
+        self.handler_instances.lock().unwrap().clear();
         self.cancellation.notify_waiters();
         self.runtime.inner.core_engine.increment_epoch();
     }
@@ -149,6 +167,8 @@ impl Execution {
                 task.completion.await;
             }
         }
+        // Also covers a callback that raced cancellation before parking.
+        self.handler_instances.lock().unwrap().clear();
     }
     async fn permit(&self) -> Result<OwnedSemaphorePermit> {
         let cancelled = self.cancellation.notified();
@@ -163,6 +183,7 @@ impl Execution {
         self: &Arc<Self>,
         scope: String,
         allocation: Option<Allocation>,
+        handlers: Vec<Arc<HandlerFrame>>,
     ) -> Result<Running> {
         let permit = self.permit().await?;
         let mut store = wasmtime::Store::new(
@@ -170,7 +191,9 @@ impl Execution {
             Guest {
                 execution: self.clone(),
                 scope,
+                handlers,
                 occurrence: 0,
+                last_effect_error: None,
                 permit: Some(permit),
             },
         );
@@ -271,7 +294,7 @@ impl Execution {
         scope: String,
         invocation: Invocation,
     ) -> Result<EffectOutput> {
-        let mut running = self.instantiate(scope, None).await?;
+        let mut running = self.instantiate(scope, None, Vec::new()).await?;
         let is_run = matches!(invocation, Invocation::Run { .. });
         let packed = match invocation {
             Invocation::Validate => return EffectOutput::value(&Value::Null),
@@ -280,10 +303,10 @@ impl Execution {
                 running
                     .instance
                     .get_typed_func::<(i32, i32), i64>(&mut running.store, "loom_call")
-                    .map_err(error)?
+                    .map_err(|cause| running.error_context(cause))?
                     .call_async(&mut running.store, (buffer.pointer, buffer.length))
                     .await
-                    .map_err(error)? as u64
+                    .map_err(|cause| running.error_context(cause))? as u64
             }
             Invocation::Run { state, message }
             | Invocation::Fold {
@@ -296,13 +319,13 @@ impl Execution {
                 running
                     .instance
                     .get_typed_func::<(i32, i32, i32, i32), i64>(&mut running.store, name)
-                    .map_err(error)?
+                    .map_err(|cause| running.error_context(cause))?
                     .call_async(
                         &mut running.store,
                         (state.pointer, state.length, message.pointer, message.length),
                     )
                     .await
-                    .map_err(error)? as u64
+                    .map_err(|cause| running.error_context(cause))? as u64
             }
         };
         let bytes = copy_out(&self.memory, packed as u32, (packed >> 32) as u32)?;
@@ -371,6 +394,13 @@ fn copy_in(memory: &SharedMemory, pointer: u32, bytes: &[u8]) -> Result<()> {
     }
     Ok(())
 }
+/// Wasm exports alignment zero when there is no TLS block. No allocation is
+/// made in that case; use alignment one for bookkeeping and checked arithmetic.
+fn tls_alignment(size: u32, alignment: u32) -> Result<u32> {
+    if size == 0 { return Ok(1); }
+    anyhow::ensure!(alignment.is_power_of_two() && alignment <= 65536, "invalid guest TLS alignment");
+    Ok(alignment)
+}
 async fn allocate(caller: &mut Caller<'_, Guest>, size: u32, align: u32) -> Result<u32> {
     let function = caller
         .get_export("loom_alloc")
@@ -413,30 +443,44 @@ fn linker(
             |mut caller: Caller<'_, Guest>, (pointer, length): (i32, i32)| {
                 Box::new(async move {
                     let result: Result<i64> = async {
+                        let started = Instant::now();
+                        caller.data_mut().last_effect_error = None;
                         let execution = caller.data().execution.clone();
                         let bytes = copy_out(&execution.memory, pointer as u32, length as u32)?;
-                        anyhow::ensure!(
-                            !execution.pure,
-                            "effects forbidden in pure core execution"
-                        );
                         let mut descriptor =
                             loom_proto::decode(&bytes).map_err(anyhow::Error::msg)?;
                         if let Some(definition) = &execution.effects.def_hash {
                             resolve_self(&mut descriptor, definition);
                         }
-                        let scope = caller.data().scope.clone();
                         let occurrence = caller.data().occurrence;
                         caller.data_mut().occurrence += 1;
+                        if let Some(bytes) = handlers::dispatch(&mut caller, &descriptor, occurrence).await? {
+                            let response = respond(&mut caller, bytes).await?;
+                            let mut samples = execution.handler_round_trip_us.lock().unwrap();
+                            if samples.len() == 100_000 { samples.drain(..50_000); }
+                            samples.push(started.elapsed().as_secs_f64() * 1_000_000.0);
+                            return Ok(response);
+                        }
+                        anyhow::ensure!(!execution.pure, "effects forbidden in pure core execution");
+                        let scope = caller.data().scope.clone();
+                        let bridge = if !caller.data().handlers.is_empty()
+                            && matches!(descriptor.get("op").and_then(Value::as_str), Some("all" | "race")) {
+                            Some(bridge::Bridge::create(&mut caller).await?)
+                        } else { None };
+                        let mut effects = execution.effects.clone();
+                        if let Some(bridge) = &bridge { effects.root_dispatch = Some(Arc::new(bridge.clone())); }
                         caller.data_mut().permit.take();
                         let output = execution
                             .runtime
-                            .perform_contextual(
+                            .dispatch_root(
                                 descriptor,
                                 &scope,
                                 occurrence,
-                                execution.effects.clone(),
+                                effects,
                             )
                             .await;
+                        if let Some(bridge) = bridge { bridge.close(&mut caller).await?; }
+                        caller.data_mut().permit.take();
                         caller.data_mut().permit = Some(execution.permit().await?);
                         let bytes = match output {
                             Ok(output) => {
@@ -489,6 +533,7 @@ fn linker(
         }.await;
         result.map_err(host_error)
     })).map_err(error)?;
+    handlers::link(&mut linker)?;
     Ok(linker)
 }
 async fn fork(caller: &mut Caller<'_, Guest>, function: i32, data: i32) -> Result<i64> {
@@ -534,16 +579,11 @@ async fn fork(caller: &mut Caller<'_, Guest>, function: i32, data: i32) -> Resul
         .get(&mut *caller)
         .i32()
         .context("invalid TLS alignment")? as u32;
-    let tls = if tls_size == 0 {
-        0
-    } else {
-        anyhow::ensure!(
-            tls_align.is_power_of_two() && tls_align <= 65536,
-            "invalid guest TLS alignment"
-        );
-        allocate(caller, tls_size, tls_align).await?
-    };
+    let tls_align = tls_alignment(tls_size, tls_align)?;
+    let tls = if tls_size == 0 { 0 } else { allocate(caller, tls_size, tls_align).await? };
+    let handlers = caller.data().handlers.clone();
     let job = Arc::new(Job {
+        handlers: handlers.iter().map(|frame| frame.id).collect(),
         parent,
         result: Mutex::new(None),
         done: Notify::new(),
@@ -560,6 +600,7 @@ async fn fork(caller: &mut Caller<'_, Guest>, function: i32, data: i32) -> Resul
                         stack: stack + STACK_BYTES,
                         tls,
                     }),
+                    handlers,
                 )
                 .await?;
             let task = running
@@ -568,7 +609,7 @@ async fn fork(caller: &mut Caller<'_, Guest>, function: i32, data: i32) -> Resul
                 .map_err(error)?;
             task.call_async(&mut running.store, (function, data))
                 .await
-                .map_err(error)?;
+                .map_err(|cause| running.error_context(cause))?;
             Ok(())
         }
         .await;
@@ -709,10 +750,16 @@ impl Runtime {
         )
         .map_err(error)?;
         let execution = Arc::new(Execution {
+            handler_instances: Mutex::new(Vec::new()),
+            handler_instance_reuses: AtomicU64::new(0),
+            handler_round_trip_us: Mutex::new(Vec::new()),
+            handlers_next: AtomicU64::new(1),
+            continuations: Mutex::new(HashMap::new()),
+            handler_failure: Mutex::new(None),
             runtime: self.clone(),
             module,
             memory,
-            effects: effects.delegated(hash, definition.allowed_effects.as_deref()),
+            effects: effects.delegated(hash, definition.allowed_effects.as_deref()).with_declared(definition.sig.effects.declared.as_deref()),
             pure,
             jobs: Mutex::new(HashMap::new()),
             tasks: Mutex::new(Vec::new()),
@@ -740,15 +787,19 @@ impl Runtime {
         execution.cancel();
         execution.drain().await;
         cleanup.execution.take();
+        *self.inner.handler_round_trip_us.lock().unwrap() = HandlerMeasurements {
+            scope: scope.to_owned(),
+            samples: std::mem::take(&mut *execution.handler_round_trip_us.lock().unwrap()),
+        };
         let result = result.map_err(|error| {
-            let failure = execution.jobs.lock().unwrap().values().find_map(|job| {
+            let failure = execution.handler_failure.lock().unwrap().clone().or_else(|| execution.jobs.lock().unwrap().values().find_map(|job| {
                 job.result
                     .lock()
                     .unwrap()
                     .as_ref()
                     .and_then(|result| result.as_ref().err())
                     .cloned()
-            });
+            }));
             match failure {
                 Some(failure) => error.context(failure),
                 None => error.context(format!("shared execution {scope}")),
@@ -771,6 +822,13 @@ struct Buffer {
     length: i32,
 }
 impl Running {
+    fn error_context(&self, cause: wasmtime::Error) -> anyhow::Error {
+        let cause = error(cause);
+        match &self.store.data().last_effect_error {
+            Some(message) => cause.context(format!("last returned guest effect error: {message}")),
+            None => cause,
+        }
+    }
     async fn input_encoded(&mut self, bytes: &[u8]) -> Result<Buffer> {
         let length = bytes.len().try_into()?;
         let pointer = self
@@ -780,7 +838,8 @@ impl Running {
             .call_async(&mut self.store, (length, 1))
             .await
             .map_err(error)?;
-        copy_in(&self.store.data().execution.memory, pointer as u32, &bytes)?;
+        anyhow::ensure!(bytes.is_empty() || pointer != 0, "guest input allocation failed");
+        copy_in(&self.store.data().execution.memory, pointer as u32, bytes)?;
         Ok(Buffer { pointer, length })
     }
 }
@@ -788,6 +847,14 @@ impl Running {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn empty_tls_exports_need_no_alignment_but_nonempty_tls_is_checked() {
+        assert_eq!(tls_alignment(0, 0).unwrap(), 1);
+        assert_eq!(tls_alignment(16, 16).unwrap(), 16);
+        assert!(tls_alignment(16, 0).is_err());
+        assert!(tls_alignment(16, 3).is_err());
+        assert!(tls_alignment(16, 131072).is_err());
+    }
     #[test]
     fn shared_copy_checks_ranges_and_preserves_concurrent_atomic_access() {
         let engine = engine().unwrap();
@@ -830,6 +897,12 @@ mod tests {
         )
         .map_err(error)?;
         let execution = Arc::new(Execution {
+            handler_instances: Mutex::new(Vec::new()),
+            handler_instance_reuses: AtomicU64::new(0),
+            handler_round_trip_us: Mutex::new(Vec::new()),
+            handlers_next: AtomicU64::new(1),
+            continuations: Mutex::new(HashMap::new()),
+            handler_failure: Mutex::new(None),
             runtime,
             module,
             memory,
@@ -848,7 +921,7 @@ mod tests {
             let child = execution.clone();
             execution.schedule(async move {
                 let mut guest = child
-                    .instantiate(format!("root:{index}"), None)
+                    .instantiate(format!("root:{index}"), None, Vec::new())
                     .await
                     .unwrap();
                 let spin = guest
@@ -889,6 +962,12 @@ mod tests {
             .context("memory")?;
         let memory = SharedMemory::new(&runtime.inner.core_engine, memory_type).map_err(error)?;
         let execution = Arc::new(Execution {
+            handler_instances: Mutex::new(Vec::new()),
+            handler_instance_reuses: AtomicU64::new(0),
+            handler_round_trip_us: Mutex::new(Vec::new()),
+            handlers_next: AtomicU64::new(1),
+            continuations: Mutex::new(HashMap::new()),
+            handler_failure: Mutex::new(None),
             runtime,
             module,
             memory,

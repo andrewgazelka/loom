@@ -201,6 +201,7 @@
     </div>{:else if tab === "state"}<section class="actor-state">
       {#if evaluated}<div class="state-caption">LATEST EVALUATION</div>
         <EvaluationView
+            {client}
           value={record(state).result}
           source={typeof record(state).source === "string"
             ? String(record(state).source)
@@ -216,6 +217,7 @@
           <ValueView value={state} {inspect} />
         </div>{/if}
     </section>{:else}{#each logs as event}<EventCard
+        {client}
         row={eventRow(event)}
         {inspect}
         {loadSource}

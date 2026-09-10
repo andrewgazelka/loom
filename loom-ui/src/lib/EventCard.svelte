@@ -11,7 +11,7 @@
     Clock,
     ExternalLink,
   } from "lucide-svelte";
-  import { format, record, short } from "./api";
+  import { format, record, short, type Client } from "./api";
   import { definitionHash, type JournalRow } from "./journal";
   import SignatureView from "./SignatureView.svelte";
   import ReferenceLink from "./ReferenceLink.svelte";
@@ -20,6 +20,7 @@
   let language: CodeLanguage = "typescript";
   import ValueView from "./ValueView.svelte";
   import EvaluationView from "./EvaluationView.svelte";
+  export let client: Client;
   export let row: JournalRow;
   export let inspect: (hash: string) => void;
   export let loadSource: (hash: string) => Promise<string>;
@@ -112,6 +113,7 @@
     {:else if evaluated || row.entry}<div class="execution-card">
         {#if evaluated && row.value !== undefined && !failed}
           <EvaluationView
+            {client}
             value={row.value}
             source={row.source || title}
             {inspect}
@@ -127,7 +129,7 @@
             </div>
           </div>
           {#if row.value !== undefined && !failed}<div class="execution-result">
-              <ValueView value={row.value} {inspect} />
+              <EvaluationView value={row.value} {client} {inspect} />
             </div>{/if}
         {/if}
         {#if failed}<div class="error-inline">

@@ -25,7 +25,7 @@ try {
   });
   let rustHash='';
   await check('Rust build and Wasmtime execution',async()=>{
-    const rejected=await request('define',{lang:'rust',name:'e2e-rust-rejected',source:'#[loom::def] pub fn main() -> i64 { "wrong" }'});
+    const rejected=await request('define',{lang:'rust',name:'e2e-rust-rejected',source:'#[loom::def(effects=[])] pub fn main() -> i64 { "wrong" }'});
     assert(!rejected.ok && rejected.diagnostics.some(diagnostic=>diagnostic.code==='E0308'),'Rust type error lacked structured E0308');
     const source=await readFile(new URL('../examples/rust-add/src/lib.rs',import.meta.url),'utf8');
     const reply=await accepted('define',{lang:'rust',name:'e2e-rust-add',source});rustHash=reply.result.def.hash;

@@ -27,7 +27,7 @@ try {
   }
   for(const definition of [
     {name:'nix-ts',lang:'ts',source:'export function main(a: number, b: number): number { return a + b; }'},
-    {name:'nix-rust',lang:'rust',source:'#[loom::def] pub fn main(a: i64,b: i64)->i64 { a+b }'},
+    {name:'nix-rust',lang:'rust',source:'#[loom::def(effects=[])] pub fn main(a: i64,b: i64)->i64 { a+b }'},
   ]) {
     const result=await request('define',definition);
     const answer=await request('command',{command:'call',args:{hash:result.def.hash,args:[20,22]}});

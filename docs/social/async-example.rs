@@ -1,6 +1,6 @@
 use loom::abilities::sleep;
 
-#[loom::def]
+#[loom::def(effects=["all", "sleep"])]
 pub fn main() {
     loom::all([
         sleep::desc(100),

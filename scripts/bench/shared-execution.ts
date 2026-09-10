@@ -34,7 +34,7 @@ async function gate(name:string, run:()=>Promise<void>) {
 const captures=`
 use std::sync::atomic::{AtomicU32,Ordering};
 static COUNT:AtomicU32=AtomicU32::new(0);
-#[loom::def]
+#[loom::def(effects=[])]
 pub fn main()->Vec<u32> {
     let values=vec![1_u32,2,3,4];
     loom::scope(|s| {
@@ -48,7 +48,7 @@ pub fn main()->Vec<u32> {
     }).expect("scope")
 }`;
 const effects=`
-#[loom::def]
+#[loom::def(effects=["sleep"])]
 pub fn main()->Vec<String> {
     let label=String::from("borrowed");
     loom::scope(|s| {
@@ -92,9 +92,9 @@ try {
     }
   });
   const refusals=[
-    {name:names[3]!,source:'#[loom::def] pub fn main()->u32 { unsafe { std::ptr::read_volatile(&1) } }',reason:/unsafe/i},
-    {name:names[4]!,source:'#[loom::def] pub fn main()->u32 { let value=std::rc::Rc::new(1); loom::scope(|s| s.fork(move || *value).expect("fork").join().expect("join")).expect("scope") }',reason:/Send|sent between threads/},
-    {name:names[5]!,source:'#[loom::def] pub fn main()->String { loom::scope(|s| { let job=s.fork(|| { let value=String::from("local"); value.as_str() }).expect("fork"); job.join().expect("join").to_owned() }).expect("scope") }',reason:/E0515|cannot return.*(?:local|owned)|borrowed|does not live long enough/},
+    {name:names[3]!,source:'#[loom::def(effects=[])] pub fn main()->u32 { unsafe { std::ptr::read_volatile(&1) } }',reason:/unsafe/i},
+    {name:names[4]!,source:'#[loom::def(effects=[])] pub fn main()->u32 { let value=std::rc::Rc::new(1); loom::scope(|s| s.fork(move || *value).expect("fork").join().expect("join")).expect("scope") }',reason:/Send|sent between threads/},
+    {name:names[5]!,source:'#[loom::def(effects=[])] pub fn main()->String { loom::scope(|s| { let job=s.fork(|| { let value=String::from("local"); value.as_str() }).expect("fork"); job.join().expect("join").to_owned() }).expect("scope") }',reason:/E0515|cannot return.*(?:local|owned)|borrowed|does not live long enough/},
   ];
   for(const control of refusals) await gate(control.name,async()=>{
     const reply=await client!.callTool('loom_define',{lang:'rust',name:'shared-gate-refusal',source:control.source});

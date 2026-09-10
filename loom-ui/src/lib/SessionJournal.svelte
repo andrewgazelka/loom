@@ -1,8 +1,9 @@
 <script lang="ts">
   import { Search } from "lucide-svelte";
-  import { record, type LogEvent } from "./api";
+  import { record, type LogEvent, type Client } from "./api";
   import { eventRow, localRow, groupDefinitions, type Entry } from "./journal";
   import EventCard from "./EventCard.svelte";
+  export let client: Client;
   export let events: LogEvent[] = [];
   export let entries: Entry[] = [];
   export let inspect: (hash: string) => void;
@@ -88,6 +89,7 @@
       >Show {Math.min(30, visible.length - limit)} earlier events</button
     >{/if}
   {#each visible.slice(-limit) as row (row.id)}<EventCard
+    {client}
       {row}
       {inspect}
       {loadSource}

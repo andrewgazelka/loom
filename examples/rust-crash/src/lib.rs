@@ -1,4 +1,4 @@
-#[loom::actor]
+#[loom::actor(effects=["exec"])]
 pub struct Crash;
 impl loom::Actor for Crash {
     type State = u64;

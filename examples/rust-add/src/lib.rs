@@ -1,4 +1,4 @@
-#[loom::def]
+#[loom::def(effects=[])]
 pub fn add(left: i64, right: i64) -> i64 {
     left + right
 }
@@ -15,7 +15,7 @@ mod tests {
         assert_eq!(super::ADD_DEF.hash, "$self");
         assert_eq!(
             super::add_signature()["exports"][0]["effects"],
-            loom::serde_json::json!({"labels":[],"unknown":true})
+            loom::serde_json::json!({"labels":[],"unknown":true,"declared":[]})
         );
         let signature: loom::TypeSig =
             loom::serde_json::from_value(super::add_signature()).unwrap();

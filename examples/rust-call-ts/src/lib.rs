@@ -1,4 +1,4 @@
-#[loom::def]
+#[loom::def(effects=["call"])]
 pub fn invoke(hash: String, left: i64, right: i64) -> i64 {
     loom::perform(loom::Desc::new(
         "call",

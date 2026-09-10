@@ -78,8 +78,8 @@ export class Client {
     public token: string,
     private onUnauthorized?: (error: AuthenticationError) => void,
   ) {}
-  async bytes(hash: string, limit = 262144): Promise<Uint8Array> {
-    const response = await this.fetch(`${this.endpoint.replace(/\/$/, "")}/v1/cas/${encodeURIComponent(hash)}`, {headers:{Accept:"application/octet-stream", ...(this.token ? {Authorization:`Bearer ${this.token}`} : {})}});
+  async bytes(hash: string, limit = 262144, accept = "application/octet-stream"): Promise<Uint8Array> {
+    const response = await this.fetch(`${this.endpoint.replace(/\/$/, "")}/v1/cas/${encodeURIComponent(hash)}`, {headers:{Accept:accept, ...(this.token ? {Authorization:`Bearer ${this.token}`} : {})}});
     if (!response.ok) throw new Error(`Could not read content: HTTP ${response.status}`);
     const reader = response.body?.getReader();
     if (!reader) throw new Error("Content body unavailable");

@@ -659,6 +659,7 @@ impl Service {
                 stats["last_reply_storage_nanos"] =
                     json!(self.last_reply_storage_nanos.load(Ordering::Relaxed));
                 stats["effect_wire_bytes"] = json!(self.runtime.effect_wire_bytes());
+                stats["handler_round_trip_us"] = self.runtime.handler_round_trip_us();
                 Ok(stats)
             }
             "gc" => Ok(serde_json::to_value(
@@ -1350,7 +1351,7 @@ mod tests {
     #[test]
     fn rust_macro_source_is_not_a_bundle_reference() {
         assert_eq!(
-            source_reference("#[loom::def] pub fn add(x:i32)->i32{x+1}"),
+            source_reference("#[loom::def(effects=[])] pub fn add(x:i32)->i32{x+1}"),
             None
         );
         assert_eq!(
@@ -1384,7 +1385,7 @@ mod tests {
                 .unwrap()
                 .contains("Rust source bundle not found")
         );
-        let source = "#[loom::def] pub fn main() { std::fs::read(\"secret\").unwrap(); }";
+        let source = "#[loom::def(effects=[])] pub fn main() { std::fs::read(\"secret\").unwrap(); }";
         let checked = service
             .define(DefineRequest {
                 allowed_effects: None,

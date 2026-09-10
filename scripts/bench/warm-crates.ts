@@ -25,7 +25,7 @@ try {
   const manifest=`[package]\nname="warm-five-crates"\nversion="0.1.0"\nedition="2024"\n[loom.crates]\n${dependencies.join('\n')}\n`;
   const seed=Date.now();
   function source(marker:number) {
-    return `#[loom::def] pub fn main() -> u64 {
+    return `#[loom::def(effects=[])] pub fn main() -> u64 {
       assert_eq!(heck::AsSnakeCase("SomeValue").to_string(), "some_value");
       assert_eq!(strsim::levenshtein("abc", "adc"), 1);
       assert_eq!(adler2::adler32_slice(b""), 1);

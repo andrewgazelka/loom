@@ -7,7 +7,7 @@ Loom is a Rust execution runtime and REPL with an algebraic-effect model impleme
 ```rust
 use loom::abilities::sleep;
 
-#[loom::def]
+#[loom::def(effects=["all", "sleep"])]
 pub fn main() {
     loom::all([
         sleep::desc(100),
@@ -40,7 +40,25 @@ See the [setup and API guide](docs/guide.md) and [MCP setup](docs/guide.md#codex
 
 Rust code describes an operation with `Desc<T>` and performs it with `loom::perform`. The host handles operations such as filesystem reads, timers, and model calls. WebAssembly fibers supply suspension and resumption; the handlers supply the operation's meaning.
 
-Handlers live in the runtime, outside guest Rust. New operations can be added by extending the host dispatcher and exposing an SDK function. The current implementation has built-in handlers, rather than a public registration interface for arbitrary nested, composable handlers. There is no Rust language extension or compiler-checked effect-row system.
+Rust users can install and nest handlers with `loom::handle` or select a total label set with `loom::handle_labels`. A handler can supply a value, forward to an outer handler, or retain a one-shot continuation to resume later. The callback's own operations run in the outer context. The host is the outermost handler and implements external operations.
+
+```rust
+#[loom::def(effects = [])]
+pub fn main() -> loom::Value {
+    loom::handle_labels(["sleep"], |_, _| {
+        loom::Reply::Resume(loom::Value::String("fake clock".into()))
+    }, || loom::abilities::sleep(200).expect("sleep failed"))
+    .expect("handler failed")
+}
+```
+
+Total labeled handlers remove their labels from the body's inferred residual row. Unknown dispatch requires a declaration such as `#[loom::def(effects = ["sleep"])]`, and the runtime enforces it when an operation reaches the host. This is Loom's source checker and runtime policy, not rustc effect typing.
+
+[Stored handler definitions](docs/content-addressed-handlers.md) can be linked by literal content hash using `loom::handle_with`. [`loom::preview::writes`](examples/rust-preview/src/lib.rs) is a guest handler that returns file diffs without applying those writes. The REPL renders those diffs. Recording and replay wrap only operations reaching the root handler; guest-handled effects are guest computation.
+
+The compiler is unmodified Rust 1.97.0. Loom enables unstable build options through `RUSTC_BOOTSTRAP` to rebuild atomics-enabled standard libraries and configure immediate-abort panics. Guest code uses ordinary Rust syntax; this is not a stable-only compiler setup. See the [handler guide](docs/guide.md#guest-defined-effect-handlers) for continuation lifetime, inheritance, and effect-row rules.
+
+The complete guest-handler round trip measured **13.811 µs median, 24.356 µs p99** over 10,000 warm calls on Linux on September 10, 2026, within an 8-CPU, 24-GiB allocation. The interval includes installing the handler, typed guest encoding, dispatch, resumption, and removing the handler. Before the bounded instance cache, the fixture measured 31.738 µs median. Reproduce with `bun scripts/bench/effects-handlers.ts`; the gate requires a median below 20 µs and also checks handler semantics, stored handlers, replay, and previews.
 
 `loom::all` runs a collection of described effects concurrently. For concurrent Rust computation, `loom::scope` provides borrowed closures through `scope.fork` and typed results through `job.join`. The scope waits for every child before its borrows end, including children whose handles were forgotten. Calls to separately stored definitions use `loom::fork` and `loom::join`.
 

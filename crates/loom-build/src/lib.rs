@@ -1,5 +1,6 @@
 //! Component builders. No successful response exists without component bytes.
 mod direct;
+mod handler_dependencies;
 mod preparation;
 pub mod registry;
 mod sdk;
@@ -576,6 +577,7 @@ fn build_fingerprint(root: &Path, lang: Lang) -> Result<String, BuildError> {
     hash.update(include_bytes!("direct/compiler_cache.rs"));
     hash.update(include_bytes!("direct/trusted_sources.rs"));
     hash.update(include_bytes!("preparation.rs"));
+    hash.update(include_bytes!("handler_dependencies.rs"));
     for path in files {
         let relative = path
             .strip_prefix(root)
@@ -600,6 +602,7 @@ async fn materialize_rust(
     dependency: bool,
     isolated: bool,
 ) -> Result<(), BuildError> {
+    handler_dependencies::validate(definition, dependencies)?;
     let mut files = if definition.source.trim_start().starts_with('{') {
         let bundle: loom_check::SourceBundle = serde_json::from_str(&definition.source)
             .map_err(|error| BuildError::Rejected(error.to_string()))?;
@@ -932,7 +935,17 @@ async fn materialize_rust(
                             .is_some_and(|segment| segment.ident == "def")
                         {
                             let hash = &definition.hash;
-                            *attribute = syn::parse_quote!(#[loom::def(hash = #hash)]);
+                            let parsed = if matches!(&attribute.meta, syn::Meta::Path(_)) {
+                                syn::punctuated::Punctuated::<syn::MetaNameValue, syn::Token![,]>::new()
+                            } else {
+                                attribute.parse_args_with(syn::punctuated::Punctuated::<syn::MetaNameValue, syn::Token![,]>::parse_terminated)
+                                    .map_err(|error| BuildError::Rejected(error.to_string()))?
+                            };
+                            let mut arguments = parsed.into_iter()
+                                .filter(|argument| !argument.path.is_ident("hash"))
+                                .collect::<Vec<_>>();
+                            arguments.push(syn::parse_quote!(hash = #hash));
+                            *attribute = syn::parse_quote!(#[loom::def(#(#arguments),*)]);
                         }
                     }
                 }

@@ -6,6 +6,12 @@ pub mod core;
 mod scoped;
 #[cfg(any(loom_core, test))]
 pub use scoped::{scope, Scope, ScopedJoinHandle};
+#[cfg(any(loom_core, test))]
+mod handlers;
+#[cfg(any(loom_core, test))]
+pub mod preview;
+#[cfg(any(loom_core, test))]
+pub use handlers::{handle, handle_labels, Continuation, Op, Reply};
 pub use loom_guest_macros::{actor, def};
 pub use serde;
 use serde::{Serialize, de::DeserializeOwned};
@@ -195,6 +201,20 @@ pub mod abilities {
                 "fs.read",
                 serde_json::json!({"machine":machine,"path":path}),
             ))
+        }
+        /// Read a UTF-8 file, returning None only when the final path is absent.
+        pub fn read_optional(machine: &str, path: &str) -> Result<Option<String>, EffectError> {
+            perform(Desc::new("fs.read_optional", serde_json::json!({"machine":machine,"path":path})))
+        }
+        /// Replace a UTF-8 file relative to a machine's pinned filesystem root.
+        pub fn write(machine: &str, path: &str, content: &str) -> Result<(), EffectError> {
+            perform(write::desc(machine, path, content))
+        }
+        pub mod write {
+            use super::*;
+            pub fn desc(machine: &str, path: &str, content: &str) -> Desc<()> {
+                Desc::new("fs.write", serde_json::json!({"machine":machine,"path":path,"content":content}))
+            }
         }
         pub fn snapshot(machine: Value, path: &str) -> Result<Value, EffectError> {
             perform(Desc::new(

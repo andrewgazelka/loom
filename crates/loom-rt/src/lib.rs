@@ -1,5 +1,6 @@
 mod filesystem;
 mod machine;
+mod root_handler;
 mod sharedcore;
 mod trace;
 use anyhow::{Context, Result, bail};
@@ -44,10 +45,13 @@ struct Inner {
     actor_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     effect_locks: Mutex<HashMap<String, Weak<AsyncMutex<()>>>>,
     fibers: Mutex<HashMap<String, FiberTask>>,
+    handler_round_trip_us: Mutex<HandlerMeasurements>,
     effect_wire_bytes: AtomicU64,
     trace_locks: Mutex<HashMap<String, Weak<AsyncMutex<()>>>>,
     machine_roots: Mutex<HashMap<String, Arc<filesystem::PinnedRoot>>>,
 }
+#[derive(Default)]
+struct HandlerMeasurements { scope: String, samples: Vec<f64> }
 struct ScopedTask {
     scope: String,
     task: FiberTask,
@@ -61,12 +65,17 @@ impl Drop for FiberTask {
         self.task.abort();
     }
 }
+trait RootDispatch: Send + Sync {
+    fn dispatch<'a>(&'a self, desc: Value, scope: &'a str, occurrence: i64,
+        effects: EffectContext) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<EffectOutput>> + Send + 'a>>;
+}
 #[derive(Clone, Default)]
 struct EffectContext {
     def_hash: Option<String>,
     actor_id: Option<String>,
     allowed: Option<BTreeSet<String>>,
     trace: Option<Arc<trace::ExecutionTrace>>,
+    root_dispatch: Option<Arc<dyn RootDispatch>>,
 }
 impl EffectContext {
     fn delegated(&self, def_hash: &str, allowed: Option<&[String]>) -> Self {
@@ -81,7 +90,19 @@ impl EffectContext {
             actor_id: self.actor_id.clone(),
             allowed,
             trace: self.trace.clone(),
+            // Guest handler frames belong to the caller's linear memory.
+            root_dispatch: None,
         }
+    }
+    fn with_declared(mut self, declared: Option<&[String]>) -> Self {
+        if let Some(declared) = declared {
+            let declared = declared.iter().cloned().collect::<BTreeSet<_>>();
+            self.allowed = Some(match self.allowed.take() {
+                Some(allowed) => allowed.intersection(&declared).cloned().collect(),
+                None => declared,
+            });
+        }
+        self
     }
     fn permits(&self, op: &str) -> bool {
         self.allowed
@@ -140,7 +161,7 @@ impl loom::host::abilities::Host for ContextData {
             let occurrence = self.occurrence;
             self.occurrence += 1;
             self.runtime
-                .perform_contextual(desc, &self.scope, occurrence, self.effects.clone())
+                .dispatch_root(desc, &self.scope, occurrence, self.effects.clone())
                 .await
                 .map(|output| output.bytes)
                 .map_err(|error| format!("{error:#}"))
@@ -334,6 +355,17 @@ impl Runtime {
             }
         }
     }
+    /// Host-observed handler samples from the latest completed core execution.
+    /// Includes request copy/decode, guest handler execution and response copy;
+    /// excludes the performer's descriptor encoding and final response decoding.
+    pub fn handler_round_trip_us(&self) -> Value {
+        let measurements = self.inner.handler_round_trip_us.lock().unwrap();
+        let mut samples = measurements.samples.clone();
+        samples.sort_by(f64::total_cmp);
+        if samples.is_empty() { return json!({"scope": measurements.scope, "measurement": "host_dispatch", "samples": 0, "median": null, "p99": null}); }
+        json!({"scope": measurements.scope, "measurement": "host_dispatch", "samples": samples.len(), "median": samples[samples.len() / 2],
+            "p99": samples[(samples.len() * 99 / 100).min(samples.len() - 1)]})
+    }
     pub fn effect_wire_bytes(&self) -> u64 {
         self.inner.effect_wire_bytes.load(Ordering::Relaxed)
     }
@@ -369,6 +401,7 @@ impl Runtime {
                 actor_locks: Mutex::new(HashMap::new()),
                 effect_locks: Mutex::new(HashMap::new()),
                 fibers: Mutex::new(HashMap::new()),
+                handler_round_trip_us: Mutex::new(HandlerMeasurements::default()),
                 effect_wire_bytes: AtomicU64::new(0),
                 trace_locks: Mutex::new(HashMap::new()),
                 machine_roots: Mutex::new(HashMap::new()),
@@ -402,7 +435,8 @@ impl Runtime {
             .store
             .executable_definition(hash)?
             .context("definition not found")?;
-        let effects = parent.delegated(hash, def.allowed_effects.as_deref());
+        let effects = parent.delegated(hash, def.allowed_effects.as_deref())
+            .with_declared(def.sig.effects.declared.as_deref());
         let component_hash = match def.component_hash {
             Some(hash) => hash,
             None => {
@@ -932,268 +966,18 @@ impl Runtime {
                 ..EffectContext::default()
             };
             let outcome = self
-                .perform_contextual(desc, scope, occurrence, effects)
+                .dispatch_root(desc, scope, occurrence, effects)
                 .await;
             session.finish(&outcome)?;
             outcome?.decode()
         })
     }
-    fn perform_contextual<'a>(
-        &'a self,
-        desc: Value,
-        scope: &'a str,
-        occurrence: i64,
-        effects: EffectContext,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<EffectOutput>> + Send + 'a>>
-    {
-        Box::pin(async move {
-            let op = desc
-                .get("op")
-                .and_then(Value::as_str)
-                .context("descriptor op required")?;
-            let scheduler = matches!(op, "fork" | "join" | "all" | "race" | "call");
-            let execution = effects
-                .trace
-                .clone()
-                .unwrap_or_else(|| trace::ExecutionTrace::fresh(scope));
-            let mut effects = effects;
-            effects.trace = Some(execution.clone());
-            if !scheduler
-                && effects.permits(op)
-                && let Some(definition_hash) = &effects.def_hash
-            {
-                execution.observe(definition_hash, op)?;
-            }
-            let tracked = !scheduler || op == "race" || !effects.permits(op);
-            let guard = if tracked {
-                match execution.begin(scope, occurrence, &desc, op == "race")? {
-                    trace::StartedEffect::Replayed(output) => {
-                        anyhow::ensure!(effects.permits(op), "effect {op} is not allowed");
-                        return Ok(output);
-                    }
-                    trace::StartedEffect::Recorded(guard) => Some(guard),
-                }
-            } else {
-                None
-            };
-            let hash = if matches!(op, "send" | "spawn" | "cas.get" | "cas.put" | "exec") {
-                blake3::hash(&encode(&desc)?).to_hex().to_string()
-            } else {
-                String::new()
-            };
-            let args = desc.get("args").cloned().unwrap_or(Value::Null);
-            let outcome: Result<EffectOutput> = async {
-                if !effects.permits(op) {
-                    bail!(
-                        "effect {op} is not allowed for definition {}",
-                        effects.def_hash.as_deref().unwrap_or("<host>")
-                    );
-                }
-                match op {
-                    "all" | "race" => {
-                        let mut args = args;
-                        let descs = match args.get_mut("descs").map(Value::take) {
-                            Some(Value::Array(descs)) => descs,
-                            _ => bail!("descs required"),
-                        };
-                        let child_scope = format!("{scope}/{op}:{occurrence}");
-                        let futures = descs
-                            .into_iter()
-                            .enumerate()
-                            .map(|(index, desc)| {
-                                self.perform_contextual(
-                                    desc,
-                                    &child_scope,
-                                    index as i64,
-                                    effects.clone(),
-                                )
-                            })
-                            .collect::<Vec<_>>();
-                        if op == "all" {
-                            let results = futures::future::try_join_all(futures).await?;
-                            return Ok(EffectOutput {
-                                bytes: loom_proto::encode_host_array(
-                                    results.iter().map(|result| result.bytes.as_slice()),
-                                )
-                                .map_err(anyhow::Error::msg)?,
-                            });
-                        }
-                        if futures.is_empty() {
-                            bail!("race requires at least one descriptor");
-                        }
-                        return futures::future::select_all(futures).await.0;
-                    }
-                    "call" => {
-                        return self
-                            .call_scoped(
-                                required_str(&args, "def")?,
-                                args.get("args").cloned().unwrap_or(Value::Null),
-                                &format!("{scope}/call:{occurrence}"),
-                                effects.clone(),
-                            )
-                            .await;
-                    }
-                    "fork" => {
-                        let hash = required_str(&args, "def")?.to_owned();
-                        let args = args.get("args").cloned().unwrap_or(Value::Null);
-                        let runtime = self.clone();
-                        let child_scope = format!("{scope}/fork:{occurrence}");
-                        let id = child_scope.clone();
-                        let child_effects = effects.clone();
-                        let task = tokio::spawn(async move {
-                            runtime
-                                .call_scoped(&hash, args, &child_scope, child_effects)
-                                .await
-                        });
-                        self.inner.fibers.lock().unwrap().insert(
-                            id.clone(),
-                            FiberTask {
-                                scope: scope.into(),
-                                task,
-                            },
-                        );
-                        return EffectOutput::value(&json!(id));
-                    }
-                    "join" => {
-                        let mut out = Vec::new();
-                        for id in args
-                            .get("fibers")
-                            .and_then(Value::as_array)
-                            .context("fibers required")?
-                        {
-                            let mut task = self.take_fiber(
-                                id.as_str().context("fiber id must be string")?,
-                                scope,
-                            )?;
-                            out.push((&mut task.task).await??);
-                        }
-                        return Ok(EffectOutput {
-                            bytes: loom_proto::encode_host_array(
-                                out.iter()
-                                    .map(|result: &EffectOutput| result.bytes.as_slice()),
-                            )
-                            .map_err(anyhow::Error::msg)?,
-                        });
-                    }
-                    "send" => {
-                        let key = format!("{scope}:{occurrence}:{hash}");
-                        let message = self.inner.store.enqueue_once(
-                            required_str(&args, "actor")?,
-                            &args.get("msg").cloned().unwrap_or(Value::Null),
-                            &key,
-                        )?;
-                        return self
-                            .schedule_message(message)
-                            .and_then(|result| EffectOutput::value(&result));
-                    }
-                    "spawn" => {
-                        let key = format!("spawn:{scope}:{occurrence}:{hash}");
-                        let actor_id = blake3::hash(key.as_bytes()).to_hex().to_string();
-                        let actor = self
-                            .spawn_identified(
-                                required_str(&args, "def")?,
-                                args.get("state").cloned().unwrap_or(Value::Null),
-                                actor_id,
-                            )
-                            .await?;
-                        let result = serde_json::to_value(actor)?;
-                        return EffectOutput::value(&result);
-                    }
-                    _ => {}
-                }
-                let class = match op {
-                    "cas.get" | "cas.put" => "hermetic",
-                    "exec" if args.get("tree").and_then(Value::as_str).is_some() => "hermetic",
-                    "exec" if args.get("key").and_then(Value::as_str).is_some() => "keyed",
-                    _ => "observational",
-                };
-                let memoized = class == "hermetic" || class == "keyed";
-                let lock = memoized.then(|| self.effect_lock(hash.clone()));
-                let _guard = match &lock {
-                    Some(lock) => Some(lock.lock().await),
-                    None => None,
-                };
-                if memoized {
-                    if let Some(result) = self.inner.store.effect_get(&hash, "global", 0)? {
-                        return EffectOutput::value(&result);
-                    }
-                }
-                let result = match op {
-                    "llm" => serde_json::to_value(
-                        self.inner
-                            .model
-                            .complete(serde_json::from_value(args.clone())?)
-                            .await?,
-                    )?,
-                    "sleep" => {
-                        let ms = args
-                            .get("ms")
-                            .and_then(Value::as_u64)
-                            .context("ms required")?;
-                        if ms > 86_400_000 {
-                            bail!("sleep exceeds one day limit");
-                        }
-                        tokio::time::sleep(Duration::from_millis(ms)).await;
-                        Value::Null
-                    }
-                    "now" => json!(
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)?
-                            .as_millis()
-                    ),
-                    "random" => json!(
-                        (uuid::Uuid::new_v4().as_u128() as u64 & ((1u64 << 53) - 1)) as f64
-                            / ((1u64 << 53) as f64)
-                    ),
-                    "cas.put" => {
-                        let hash = self.inner.store.put_value("blob", &args)?;
-                        self.inner
-                            .store
-                            .reference(&hash, loom_proto::DAG_CBOR_CODEC)?
-                    }
-                    "cas.get" => self
-                        .inner
-                        .store
-                        .get_value(required_str(&args, "hash")?)?
-                        .context("CAS value not found")?,
-                    "exec" if args.get("tree").is_some() => self.hermetic_exec(&args).await?,
-                    "exec" => {
-                        let program = required_str(&args, "program")?;
-                        let mut command = tokio::process::Command::new(program);
-                        if let Some(arguments) = args.get("args").and_then(Value::as_array) {
-                            for argument in arguments {
-                                command.arg(
-                                    argument
-                                        .as_str()
-                                        .context("exec arguments must be strings")?,
-                                );
-                            }
-                        }
-                        self.execute_command(command, capture_paths(&args)?).await?
-                    }
-                    "fs.snapshot" => self.snapshot_tree(&args).await?,
-                    "fs.read" => self.read_machine_file(&args).await?,
-                    "fs.stat" => self.stat_machine_path(&args).await?,
-                    "fs.walk" => return self.walk_machine_directory(&args).await,
-                    "fs.list" => return self.list_machine_directory(&args).await,
-                    _ => bail!("unsupported ability: {op}"),
-                };
-                if memoized {
-                    self.inner
-                        .store
-                        .enqueue_effect(&hash, "global", 0, &result)?;
-                }
-                EffectOutput::value(&result)
-            }
-            .await;
-            let recorded = guard.map(|guard| guard.finish(&outcome)).transpose();
-            if effects.actor_id.is_some() && tracked {
-                execution.checkpoint(&self.inner.store)?;
-            }
-            recorded?;
-            outcome
-        })
+    fn dispatch_root<'a>(
+        &'a self, desc: Value, scope: &'a str, occurrence: i64, effects: EffectContext,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<EffectOutput>> + Send + 'a>> {
+        root_handler::dispatch(self, desc, scope, occurrence, effects)
     }
+
 }
 fn capture_paths(args: &Value) -> Result<Vec<std::path::PathBuf>> {
     match args.get("capture_paths") {
@@ -1515,7 +1299,7 @@ mod tests {
         runtime.perform(desc.clone(), "warm", 0).await?;
         let denied = EffectContext::default().delegated("restricted", Some(&[]));
         let error = runtime
-            .perform_contextual(desc.clone(), "denied", 0, denied.clone())
+            .dispatch_root(desc.clone(), "denied", 0, denied.clone())
             .await
             .unwrap_err();
         assert!(error.to_string().contains("not allowed"));
@@ -1532,7 +1316,7 @@ mod tests {
         let nested = json!({"op":"all","args":{"descs":[desc]}});
         assert!(
             runtime
-                .perform_contextual(nested, "nested", 0, child)
+                .dispatch_root(nested, "nested", 0, child)
                 .await
                 .is_err()
         );
@@ -1752,7 +1536,7 @@ mod tests {
             ..EffectContext::default()
         };
         runtime
-            .perform_contextual(
+            .dispatch_root(
                 json!({"op":"sleep","args":{"ms":0}}),
                 "root",
                 0,
@@ -1760,7 +1544,7 @@ mod tests {
             )
             .await?;
         runtime
-            .perform_contextual(
+            .dispatch_root(
                 json!({"op":"sleep","args":{"ms":0}}),
                 "root/child",
                 0,
@@ -1769,7 +1553,7 @@ mod tests {
             .await?;
         assert!(
             runtime
-                .perform_contextual(
+                .dispatch_root(
                     json!({"op":"now"}),
                     "root/denied",
                     0,

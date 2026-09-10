@@ -1,4 +1,9 @@
 <script lang="ts">
+  import { record, type Client } from "./api";
+  import FilesystemChanges from "./FilesystemChanges.svelte";
+  export let client: Client;
+  $: preview = record(value);
+  $: isPreview = record(preview.filesystem_capture).preview === true && Array.isArray(preview.filesystem_changes);
   import CodeBlock from "./CodeBlock.svelte";
   import ValueView from "./ValueView.svelte";
   import ReferenceLink from "./ReferenceLink.svelte";
@@ -13,7 +18,7 @@
   {#if source && !resultFirst}<div class="evaluation-source">
       <CodeBlock code={source} language="typescript" />
     </div>{/if}
-  <div class="evaluation-value"><ValueView {value} {inspect} /></div>
+  <div class="evaluation-value"><ValueView value={isPreview ? preview.result : value} {inspect} />{#if isPreview}<FilesystemChanges {value} {client} {inspect} />{/if}</div>
   {#if source && resultFirst}<div class="evaluation-source">
       <CodeBlock code={source} language="typescript" />
     </div>{/if}{#if definition}<div class="evaluation-definition">

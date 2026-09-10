@@ -5,6 +5,16 @@ use serde::Serialize;
 #[cfg(target_arch = "wasm32")]
 #[link(wasm_import_module = "loom")]
 unsafe extern "C" {
+    #[link_name = "handle_push"]
+    pub(crate) fn host_handle_push(function: u32, data: u32, labels_ptr: u32, labels_len: u32) -> u64;
+    #[link_name = "handle_pop"]
+    pub(crate) fn host_handle_pop(frame: u64) -> i32;
+    #[link_name = "resume"]
+    pub(crate) fn host_resume(k: u64, pointer: u32, length: u32) -> i32;
+    #[link_name = "abandon"]
+    pub(crate) fn host_abandon(k: u64) -> i32;
+    #[link_name = "continuation_drop"]
+    pub(crate) fn host_continuation_drop(k: u64) -> i32;
     #[link_name = "perform"]
     fn host_perform(pointer: u32, length: u32) -> u64;
     #[link_name = "fork"]
@@ -221,4 +231,48 @@ macro_rules! export_core {
             $crate::core::encoded_response(Ok(<$guest as $crate::core::Guest>::fold(state, event)))
         }
     };
+}
+
+/// # Safety
+/// Host supplies an installed frame, serializes its callbacks, and retains the
+/// immutable op allocation until return. Returned bytes transfer to the host,
+/// which frees them with loom_dealloc(pointer, length, 1).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn loom_handler_run(function: u32, data: u32, k: u64, op_ptr: u32, op_len: u32) -> u64 {
+    let op = crate::decode_host(unsafe { input(op_ptr, op_len) }).expect("invalid handler operation");
+    let run: crate::handlers::HandlerRun = unsafe { std::mem::transmute(function as usize) };
+    let reply = unsafe { run(data as *mut (), k, op) };
+    #[derive(Serialize)]
+    #[serde(untagged)]
+    enum WireReply { Resume { resume: crate::Value }, Forward { forward: () }, Deferred { deferred: () } }
+    let wire = match reply {
+        crate::Reply::Resume(resume) => WireReply::Resume { resume },
+        crate::Reply::Forward => WireReply::Forward { forward: () },
+        crate::Reply::Deferred => WireReply::Deferred { deferred: () },
+    };
+    let bytes = crate::encode(&wire).expect("invalid handler reply").into_boxed_slice();
+    let length = bytes.len() as u64;
+    let pointer = Box::into_raw(bytes) as *mut u8 as u32;
+    (length << 32) | pointer as u64
+}
+
+/// Enter ordinary effect dispatch from a host-scheduled child instance. This
+/// bridge deliberately preserves the descriptor and response bytes: compound
+/// operations use exactly the same handler stack and canonical admission as a
+/// direct guest perform, without a second codec round trip.
+///
+/// # Safety
+/// Input names a live immutable allocation retained by the host until return.
+/// The host owns the returned response allocation and must release it through
+/// loom_dealloc(pointer, length, 1). This function does not consume the input.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn loom_effect_run(pointer: u32, length: u32) -> u64 {
+    #[cfg(target_arch = "wasm32")]
+    { unsafe { host_perform(pointer, length) } }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = pointer;
+        let _ = length;
+        response::<()>(Err("core effects require wasm32".into()))
+    }
 }

@@ -42,7 +42,7 @@ try {
   });
   await check('TS and Rust actors exchange messages in both directions',async()=>{
     const tsSource='import {send} from "loom";type Message=number|{actor:string;value:number};export function run(_state:number,msg:Message):number[]{if(typeof msg==="number")return [msg];send(msg.actor,msg.value);return [msg.value];}export function fold(state:number,event:number):number{return state+event;}';
-    const rustSource=`#[loom::actor]
+    const rustSource=`#[loom::actor(effects=["send"])]
 pub struct Messenger;
 impl loom::Actor for Messenger {
  type State=i64;type Event=i64;type Msg=serde_json::Value;
@@ -69,8 +69,8 @@ impl loom::Actor for Messenger {
   });
   await check('new Rust source builds in under five seconds with warm dependencies',async()=>{
     const nonce=Date.now();
-    await define('m6-warm-baseline','rust',`#[loom::def]pub fn warm()->i64{${nonce}}`);
-    const measured=await define('m6-warm-measured','rust',`#[loom::def]pub fn warm()->i64{${nonce+1}}`);
+    await define('m6-warm-baseline','rust',`#[loom::def(effects=[])]pub fn warm()->i64{${nonce}}`);
+    const measured=await define('m6-warm-measured','rust',`#[loom::def(effects=[])]pub fn warm()->i64{${nonce+1}}`);
     assert(measured.build.size>0,'no component artifact');
     assert(measured.build.ms<5000,`warm build took ${measured.build.ms} ms`);
     assert(await call<number>(measured.def.hash,[])===nonce+1,'measured component did not consume new source');

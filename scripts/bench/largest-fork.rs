@@ -1,5 +1,5 @@
 // Each subtree advances independently; join merges only its winning entry.
-#[loom::def]
+#[loom::def(effects=["fork", "join", "fs.list"])]
 pub fn main(machine: String, path: String) -> loom::Value {
     let entries = loom::abilities::fs::list(&machine, &path)
         .expect("directory listing failed");

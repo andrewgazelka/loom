@@ -1,4 +1,5 @@
-#[loom::def]
+// This fixture exercises CAS plus delegated call/fork capability checks.
+#[loom::def(effects=["cas.put", "call", "fork", "join"])]
 pub fn exercise(desc: loom::Value) -> loom::Value {
     let Some(op) = desc["op"].as_str() else {
         return loom::serde_json::json!({"ok":false,"error":"descriptor op must be a string"});

@@ -6,7 +6,7 @@ use std::{
     collections::VecDeque,
     ffi::CString,
     fs::File,
-    io::Read,
+    io::{Read, Write},
     os::fd::{AsRawFd, FromRawFd, RawFd},
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
@@ -31,6 +31,11 @@ pub(crate) struct PinnedRoot {
     directory: File,
     pub path: PathBuf,
     pub identity: RootIdentity,
+}
+
+struct FileTarget {
+    parent: File,
+    name: String,
 }
 
 #[derive(Clone, Copy)]
@@ -71,6 +76,63 @@ impl PinnedRoot {
         let file = open_at(&self.directory, &relative_path(path)?, false)?;
         read_regular(file)
     }
+    // Resolve the parent separately: preview must not turn a missing directory
+    // into a valid proposed file creation. Only an absent final entry is optional.
+    pub fn read_optional(&self, path: &str) -> Result<Option<Vec<u8>>> {
+        let target = self.file_target(path)?;
+        match open_at(&target.parent, &target.name, false) {
+            Ok(file) => Ok(Some(read_regular(file)?)),
+            Err(error) if error.downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn file_target(&self, path: &str) -> Result<FileTarget> {
+        let relative = relative_path(path)?;
+        ensure!(relative != ".", "file operation requires a file path");
+        let name = relative.rsplit('/').next().context("file name missing")?;
+        let parent = relative.strip_suffix(name).unwrap_or("").trim_end_matches('/');
+        let parent = open_at(&self.directory, if parent.is_empty() { "." } else { parent }, true)?;
+        Ok(FileTarget { parent, name: name.to_owned() })
+    }
+
+    pub fn write(&self, path: &str, content: &[u8]) -> Result<()> {
+        ensure!(content.len() as u64 <= READ_LIMIT, "file exceeds 64 MiB write limit");
+        let target = self.file_target(path)?;
+        match stat_child(&target.parent, &target.name) {
+            Ok(entry) => ensure!(entry.kind == EntryKind::File, "write requires a regular file"),
+            Err(error) if error.downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) => {},
+            Err(error) => return Err(error),
+        }
+        // Never truncate an existing inode: it could be a hardlink outside the
+        // machine. Rename replaces the directory entry, even if it races with a
+        // symlink substitution, and cannot follow that symlink to its target.
+        let temporary = CString::new(format!(".loom-write-{}", uuid::Uuid::new_v4()))?;
+        let destination = CString::new(target.name)?;
+        // SAFETY: parent owns a live directory fd, names are NUL terminated;
+        // O_EXCL ensures the newly owned fd cannot refer to a substituted link.
+        let mut file = owned(unsafe {
+            libc::openat(target.parent.as_raw_fd(), temporary.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                0o600 as libc::mode_t)
+        })?;
+        let result = (|| -> Result<()> {
+            file.write_all(content)?;
+            // SAFETY: both names and the pinned parent remain live for renameat.
+            let result = unsafe { libc::renameat(target.parent.as_raw_fd(), temporary.as_ptr(),
+                target.parent.as_raw_fd(), destination.as_ptr()) };
+            if result < 0 { return Err(std::io::Error::last_os_error().into()); }
+            Ok(())
+        })();
+        if result.is_err() {
+            // SAFETY: remove only our freshly created temporary directory entry.
+            unsafe { libc::unlinkat(target.parent.as_raw_fd(), temporary.as_ptr(), 0); }
+        }
+        result
+    }
+
     pub fn stat(&self, path: &str) -> Result<DirEntry> {
         let relative = relative_path(path)?;
         let mut names = relative.rsplitn(2, '/');

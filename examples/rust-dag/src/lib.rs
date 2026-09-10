@@ -1,5 +1,5 @@
 /// Exercise a link through both the host CAS and the other guest language.
-#[loom::def]
+#[loom::def(effects=["cas.get", "call"])]
 pub fn dag(payload: loom::Value, target: String) -> loom::Value {
     if target.is_empty() {
         return payload;

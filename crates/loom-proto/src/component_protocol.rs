@@ -1,7 +1,7 @@
 //! Executable admission for the typed effect wire protocol.
 const HEADER: &[u8] = b"\0asm\x0d\0\x01\0";
 const CORE_HEADER: &[u8] = b"\0asm\x01\0\0\0";
-const CORE_VERSION: &[u8] = b"core-shared-v1";
+const CORE_VERSION: &[u8] = b"core-handlers-v2";
 const NAME: &[u8] = b"loom.effect-protocol";
 const VERSION: &[u8] = b"typed-fs-list-v1";
 
@@ -98,6 +98,15 @@ mod tests {
         stamp(&mut component);
         assert!(is_current(&component));
         assert!(!is_core_current(&component));
+    }
+    #[test]
+    fn previous_shared_core_requires_rebuild() {
+        let mut old = CORE_HEADER.to_vec();
+        let previous = b"core-shared-v1";
+        old.extend_from_slice(&[0, (1 + NAME.len() + previous.len()) as u8, NAME.len() as u8]);
+        old.extend_from_slice(NAME);
+        old.extend_from_slice(previous);
+        assert!(!is_current(&old));
     }
     #[test]
     fn admits_only_one_current_complete_marker() {

@@ -1,7 +1,7 @@
 use loom::abilities::fs;
 
 // Literal search of UTF-8 files. Paths are relative to the machine root.
-#[loom::def]
+#[loom::def(effects=["fs.list", "fs.read"])]
 pub fn main(machine: String, path: String, needle: String) -> Vec<String> {
     let mut matches = search(&machine, &path, &needle);
     matches.sort();

@@ -1,4 +1,4 @@
-#[loom::actor]
+#[loom::actor(effects=[])]
 pub struct Counter;
 impl loom::Actor for Counter {
     type State = i64;

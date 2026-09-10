@@ -6,25 +6,32 @@ use syn::{FnArg, ItemFn, ItemStruct, Pat, parse_macro_input};
 #[proc_macro_attribute]
 pub fn def(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut definition_hash = syn::LitStr::new("$self", proc_macro2::Span::call_site());
+    let mut declared_effects: Option<Vec<syn::LitStr>> = None;
+    // The host checker validates residual rows. Accept the same declaration here
+    // without presenting it as a Rust type-system guarantee.
     if !attr.is_empty() {
-        let argument = parse_macro_input!(attr as syn::MetaNameValue);
-        if !argument.path.is_ident("hash") {
-            return syn::Error::new_spanned(argument, "expected hash = \"definition hash\"")
-                .to_compile_error()
-                .into();
-        }
-        match argument.value {
-            syn::Expr::Lit(syn::ExprLit {
-                lit: syn::Lit::Str(hash),
-                ..
-            }) => definition_hash = hash,
-            other => {
-                return syn::Error::new_spanned(other, "hash must be a string literal")
-                    .to_compile_error()
-                    .into();
+        let arguments = parse_macro_input!(attr with syn::punctuated::Punctuated::<syn::MetaNameValue, syn::Token![,]>::parse_terminated);
+        let mut seen = std::collections::BTreeSet::new();
+        for argument in arguments {
+            let key = argument.path.get_ident().map(ToString::to_string).unwrap_or_default();
+            if !seen.insert(key.clone()) {
+                return syn::Error::new_spanned(argument, "duplicate definition attribute").to_compile_error().into();
+            }
+            match (key.as_str(), &argument.value) {
+                ("hash", syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(hash), .. })) => definition_hash = hash.clone(),
+                ("effects", syn::Expr::Array(array)) if array.elems.iter().all(|value| matches!(value, syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(label), .. }) if !label.value().is_empty() && label.value() != "*")) => {
+                    declared_effects = Some(array.elems.iter().filter_map(|value| {
+                        if let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(label), .. }) = value { Some(label.clone()) } else { None }
+                    }).collect());
+                },
+                _ => return syn::Error::new_spanned(argument, "expected hash = \"definition hash\" or effects = [\"label\"]").to_compile_error().into(),
             }
         }
     }
+    let declared_metadata = match declared_effects {
+        Some(labels) => quote!(::loom::serde_json::json!([#(#labels),*])),
+        None => quote!(::loom::serde_json::Value::Null),
+    };
     let function = parse_macro_input!(item as ItemFn);
     if function.sig.asyncness.is_some() || !function.sig.generics.params.is_empty() {
         return syn::Error::new_spanned(
@@ -107,7 +114,7 @@ pub fn def(attr: TokenStream, item: TokenStream) -> TokenStream {
     quote! {
         #function
         pub fn #signature() -> ::loom::Value {
-            ::loom::serde_json::json!({"effects":{"labels":[],"unknown":true},"exports":[{"name":#export_name,"params":[#(#parameter_signatures),*],"returns":#return_shape,"effects":{"labels":[],"unknown":true}}]})
+            ::loom::serde_json::json!({"effects":{"labels":[],"unknown":true,"declared":#declared_metadata},"exports":[{"name":#export_name,"params":[#(#parameter_signatures),*],"returns":#return_shape,"effects":{"labels":[],"unknown":true,"declared":#declared_metadata}}]})
         }
         #invocation
         pub struct #component;
@@ -130,7 +137,16 @@ pub fn def(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 /// Export an Actor implementation. Place this attribute on its named struct.
 #[proc_macro_attribute]
-pub fn actor(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn actor(attr: TokenStream, item: TokenStream) -> TokenStream {
+    if !attr.is_empty() {
+        let declaration = parse_macro_input!(attr as syn::MetaNameValue);
+        let valid = declaration.path.is_ident("effects") && matches!(&declaration.value,
+            syn::Expr::Array(array) if array.elems.iter().all(|value| matches!(value,
+                syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(label), .. }) if !label.value().is_empty() && label.value() != "*")));
+        if !valid {
+            return syn::Error::new_spanned(declaration, "expected effects = [\"label\"]").to_compile_error().into();
+        }
+    }
     let structure = parse_macro_input!(item as ItemStruct);
     let name = &structure.ident;
     quote! {

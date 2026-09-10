@@ -294,7 +294,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
             .trim(),
     );
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"loom-rustc-contract-v3-core-shared-safe-dependencies");
+    hasher.update(b"loom-rustc-contract-v4-core-handlers-residual-rows");
     let manifest_bytes = fs::read_to_string(directory.join("Cargo.toml"))
         .await?
         .replace(root.to_string_lossy().as_ref(), "$SDK")

@@ -2,6 +2,7 @@
 mod crates;
 pub use crates::{CrateDependency, crate_dependencies};
 mod rust_effects;
+mod handler_references;
 mod safety;
 pub use safety::{safety_policy_bytes, untrusted_package_diagnostics, untrusted_source_diagnostics};
 use loom_proto::{DefineRequest, Diagnostic, ExportSig, Lang, ParamSig, TypeSig, ValueShape};
@@ -320,6 +321,7 @@ fn check_rust(request: &DefineRequest, signatures: &BTreeMap<String, TypeSig>) -
                 allowed_effects: request.allowed_effects.clone(),
             };
             let file = check_rust_file(&file_request, signatures);
+            checked.deps.extend(file.deps.clone());
             *source = file.source;
             if name == "src/lib.rs" {
                 checked.sig = file.sig;
@@ -364,6 +366,9 @@ fn check_rust(request: &DefineRequest, signatures: &BTreeMap<String, TypeSig>) -
         checked.sig.effects.unknown = true;
         for export in &mut checked.sig.exports {
             export.effects.unknown = true;
+            if export.effects.declared.is_none() {
+                checked.diagnostics.push(diagnostic(Lang::Rust, "LOOM_EFFECT_ROW", &format!("{} has unknown dependency effects; declare its residual host row", export.name)));
+            }
         }
     }
     match serde_json::to_string(&bundle) {
@@ -379,10 +384,12 @@ fn check_rust(request: &DefineRequest, signatures: &BTreeMap<String, TypeSig>) -
 fn check_rust_file(request: &DefineRequest, signatures: &BTreeMap<String, TypeSig>) -> CheckedDef {
     let source = request.source.replace("\r\n", "\n");
     let mut diagnostics = Vec::new();
+    let mut deps = request.deps.clone();
     let mut exports = Vec::new();
     let mut aggregate_effects = loom_proto::EffectSet::default();
     let source = match syn::parse_file(&source) {
-        Ok(file) => {
+        Ok(mut file) => {
+            handler_references::lower(&mut file, &mut deps, &mut diagnostics);
             struct EntryVisitor {
                 count: usize,
             }
@@ -407,6 +414,7 @@ fn check_rust_file(request: &DefineRequest, signatures: &BTreeMap<String, TypeSi
             diagnostics.extend(rust_effects::unsafe_source_diagnostics(&file));
             diagnostics.extend(rust_effects::unsupported_mode_diagnostics(&file));
             let effects = rust_effects::infer(&file, signatures);
+            diagnostics.extend(rust_effects::declaration_diagnostics(&file, &effects));
             for item in &file.items {
                 if let syn::Item::Fn(function) = item
                     && function.attrs.iter().any(|attribute| {
@@ -452,6 +460,7 @@ fn check_rust_file(request: &DefineRequest, signatures: &BTreeMap<String, TypeSi
                 }
             }
             aggregate_effects = rust_effects::aggregate(&file, signatures, &effects, &exports);
+            diagnostics.extend(rust_effects::actor_declaration_diagnostics(&file, &aggregate_effects));
             fn ambient_macro(tokens: proc_macro2::TokenStream) -> bool {
                 tokens.into_iter().any(|token| match token {
                     proc_macro2::TokenTree::Ident(name) => [
@@ -593,7 +602,7 @@ fn check_rust_file(request: &DefineRequest, signatures: &BTreeMap<String, TypeSi
         lang: Lang::Rust,
         name: request.name.clone(),
         source,
-        deps: request.deps.clone(),
+        deps,
         sig: TypeSig {
             exports,
             effects: aggregate_effects,
@@ -680,7 +689,7 @@ mod tests {
     async fn external_crate_initialization_is_not_claimed_pure() {
         let request=DefineRequest {
             lang:Lang::Rust,name:"external".into(),deps:BTreeMap::new(),allowed_effects:None,
-            source:serde_json::json!({"files":{"Cargo.toml":"[package]\nname='external'\nversion='0.1.0'\n[dependencies]\nthird_party='1'\n","src/lib.rs":"#[loom::def] pub fn main()->i64 {42}"}}).to_string(),
+            source:serde_json::json!({"files":{"Cargo.toml":"[package]\nname='external'\nversion='0.1.0'\n[dependencies]\nthird_party='1'\n","src/lib.rs":"#[loom::def(effects=[])] pub fn main()->i64 {42}"}}).to_string(),
         };
         let checked = Checker::new(PathBuf::new()).check(&request).await.unwrap();
         assert!(checked.diagnostics.is_empty());

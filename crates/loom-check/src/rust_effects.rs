@@ -3,11 +3,17 @@ use loom_proto::{EffectSet, TypeSig};
 use std::collections::{BTreeMap, BTreeSet};
 use syn::visit::{self, Visit};
 
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct Call {
+    name: String,
+    handled: BTreeSet<String>,
+}
+
 #[derive(Clone, Default, PartialEq, Eq)]
 struct Summary {
     labels: BTreeSet<String>,
     unknown: bool,
-    calls: BTreeSet<String>,
+    calls: BTreeSet<Call>,
 }
 impl Summary {
     fn merge(&mut self, other: &Self) {
@@ -72,6 +78,22 @@ impl Analysis<'_> {
             .collect::<Vec<_>>()
             .join("::")
     }
+    fn callable(&mut self, expression: &syn::Expr) {
+        if let syn::Expr::Path(path) = expression {
+            let name = self.path(&path.path);
+            if self.functions.contains(&name) {
+                self.summary.calls.insert(Call { name, handled: BTreeSet::new() });
+            } else if let Some((alias, export)) = name.split_once("::")
+                && let Some(signature) = self.signatures.get(alias)
+            {
+                self.summary.dependency(signature, Some(export));
+            } else {
+                self.summary.unknown = true;
+            }
+        } else {
+            self.visit_expr(expression);
+        }
+    }
     fn target(&mut self, target: Option<&syn::Expr>) {
         let Some(syn::Expr::Path(path)) = target else {
             self.summary.unknown = true;
@@ -89,7 +111,7 @@ impl Analysis<'_> {
             .iter()
             .find(|function| format!("{}_DEF", function.to_uppercase()) == name)
         {
-            self.summary.calls.insert(function.clone());
+            self.summary.calls.insert(Call { name: function.clone(), handled: BTreeSet::new() });
             return;
         }
         self.summary.unknown = true;
@@ -139,8 +161,36 @@ impl<'ast> Visit<'ast> for Analysis<'_> {
         } else {
             String::new()
         };
-        if self.functions.contains(&name) {
-            self.summary.calls.insert(name.clone());
+        if name == "loom::handle_labels" && call.args.len() == 3 {
+            // Labels are a runtime-enforced total-handling contract. Forwarding a
+            // discharged label must fail rather than silently reaching the root.
+            if let Some(labels) = literal_labels(&call.args[0]) {
+                self.visit_expr(&call.args[0]);
+                self.callable(&call.args[1]);
+                let outer = std::mem::take(&mut self.summary);
+                self.callable(&call.args[2]);
+                let mut body = std::mem::take(&mut self.summary);
+                body.labels.retain(|label| !labels.contains(label));
+                body.calls = body.calls.into_iter().map(|mut call| {
+                    call.handled.extend(labels.iter().cloned());
+                    call
+                }).collect();
+                self.summary = outer;
+                self.summary.merge(&body);
+                self.summary.calls.extend(body.calls);
+                return;
+            }
+            self.summary.unknown = true;
+        } else if name == "loom::handle" && call.args.len() == 2 {
+            // A wildcard handler may Forward any operation.
+            self.callable(&call.args[0]);
+            self.callable(&call.args[1]);
+            return;
+        } else if name == "loom::scope" && call.args.len() == 1 {
+            self.callable(&call.args[0]);
+            return;
+        } else if self.functions.contains(&name) {
+            self.summary.calls.insert(Call { name: name.clone(), handled: BTreeSet::new() });
         } else if let Some(operation) = name.strip_prefix("loom::abilities::") {
             let label = operation.replace("::", ".");
             if [
@@ -153,6 +203,9 @@ impl<'ast> Visit<'ast> for Analysis<'_> {
                 "fs.list",
                 "fs.stat",
                 "fs.read",
+                "fs.read_optional",
+                "fs.write",
+                "fs.walk",
                 "fs.snapshot",
             ]
             .contains(&label.as_str())
@@ -214,6 +267,66 @@ impl<'ast> Visit<'ast> for Analysis<'_> {
         visit::visit_expr_struct(self, node);
     }
 }
+
+/// Literal labels are deliberately required: arbitrary expressions cannot establish
+/// a statically known handler contract.
+fn literal_labels(expression: &syn::Expr) -> Option<BTreeSet<String>> {
+    let expression = match expression {
+        syn::Expr::Reference(reference) => reference.expr.as_ref(),
+        other => other,
+    };
+    let syn::Expr::Array(array) = expression else { return None; };
+    array.elems.iter().map(|element| match element {
+        syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(label), .. })
+            if !label.value().is_empty() && label.value() != "*" => Some(label.value()),
+        _ => None,
+    }).collect()
+}
+
+/// Declared rows constrain the operations the outer host must supply. They are
+/// not rustc effect types: unknown Rust dispatch remains marked unknown.
+pub(crate) fn declaration_diagnostics(
+    file: &syn::File,
+    inferred: &BTreeMap<String, EffectSet>,
+) -> Vec<loom_proto::Diagnostic> {
+    let mut diagnostics = Vec::new();
+    for item in &file.items {
+        let syn::Item::Fn(function) = item else { continue; };
+        for attribute in &function.attrs {
+            if !attribute.path().segments.last().is_some_and(|segment| segment.ident == "def") {
+                continue;
+            }
+            let mut declared = None;
+            let parsed = if matches!(attribute.meta, syn::Meta::Path(_)) { Ok(()) } else {
+                attribute.parse_nested_meta(|meta| {
+                    if meta.path.is_ident("effects") {
+                        if declared.is_some() { return Err(meta.error("duplicate effects declaration")); }
+                        let value: syn::Expr = meta.value()?.parse()?;
+                        declared = Some(literal_labels(&value).ok_or_else(|| meta.error("effects must be an array of nonempty literal labels, without wildcard"))?);
+                    } else if meta.path.is_ident("hash") {
+                        let _: syn::LitStr = meta.value()?.parse()?;
+                    } else { return Err(meta.error("expected effects or hash")); }
+                    Ok(())
+                })
+            };
+            if let Err(error) = parsed {
+                diagnostics.push(super::diagnostic(loom_proto::Lang::Rust, "LOOM_EFFECT_ROW", &error.to_string()));
+                continue;
+            }
+            let Some(row) = inferred.get(&function.sig.ident.to_string()) else { continue; };
+            if let Some(declared) = declared {
+                let residual: Vec<_> = row.labels.iter().filter(|label| !declared.contains(*label)).cloned().collect();
+                if !residual.is_empty() {
+                    diagnostics.push(super::diagnostic(loom_proto::Lang::Rust, "LOOM_EFFECT_ROW", &format!("{} requires residual host effects [{}] outside its declared row", function.sig.ident, residual.join(", "))));
+                }
+            } else if row.unknown {
+                diagnostics.push(super::diagnostic(loom_proto::Lang::Rust, "LOOM_EFFECT_ROW", &format!("{} has unknown effect dispatch; declare the residual host row with #[loom::def(effects = [\"label\"])]", function.sig.ident)));
+            }
+        }
+    }
+    diagnostics
+}
+
 struct Bindings {
     names: BTreeSet<String>,
 }
@@ -323,8 +436,9 @@ pub(crate) fn infer(
         let previous = summaries.clone();
         for summary in summaries.values_mut() {
             for call in summary.calls.clone() {
-                if let Some(called) = previous.get(&call) {
-                    summary.merge(called);
+                if let Some(called) = previous.get(&call.name) {
+                    summary.labels.extend(called.labels.difference(&call.handled).cloned());
+                    summary.unknown |= called.unknown;
                 } else {
                     summary.unknown = true;
                 }
@@ -341,10 +455,39 @@ pub(crate) fn infer(
             EffectSet {
                 labels: summary.labels.into_iter().collect(),
                 unknown: summary.unknown,
+                declared: None,
             },
         );
     }
+    for item in &file.items {
+        if let syn::Item::Fn(function) = item {
+            if let Some(row) = effects.get_mut(&function.sig.ident.to_string()) {
+                row.declared = declared_labels(function);
+            }
+        }
+    }
     effects
+}
+
+fn declared_labels(function: &syn::ItemFn) -> Option<Vec<String>> {
+    declared_attributes(&function.attrs)
+}
+
+fn declared_attributes(attributes: &[syn::Attribute]) -> Option<Vec<String>> {
+    let mut declared = None;
+    for attribute in attributes {
+        if !attribute.path().segments.last().is_some_and(|part| part.ident == "def" || part.ident == "actor") { continue; }
+        let _ = attribute.parse_nested_meta(|meta| {
+            if meta.path.is_ident("effects") {
+                let expression: syn::Expr = meta.value()?.parse()?;
+                declared = literal_labels(&expression).map(|labels| labels.into_iter().collect());
+            } else if meta.path.is_ident("hash") {
+                let _: syn::LitStr = meta.value()?.parse()?;
+            }
+            Ok(())
+        });
+    }
+    declared
 }
 
 pub(crate) fn aggregate(
@@ -389,8 +532,8 @@ pub(crate) fn aggregate(
             };
             analysis.visit_block(&method.block);
             for called in analysis.summary.calls.clone() {
-                if let Some(effects) = inferred.get(&called) {
-                    analysis.summary.labels.extend(effects.labels.clone());
+                if let Some(effects) = inferred.get(&called.name) {
+                    analysis.summary.labels.extend(effects.labels.iter().filter(|label| !called.handled.contains(*label)).cloned());
                     analysis.summary.unknown |= effects.unknown;
                 } else {
                     analysis.summary.unknown = true;
@@ -403,7 +546,46 @@ pub(crate) fn aggregate(
     EffectSet {
         labels: summary.labels.into_iter().collect(),
         unknown: summary.unknown,
+        declared: if exports.len() == 1 { exports[0].effects.declared.clone() } else {
+            file.items.iter().find_map(|item| if let syn::Item::Struct(item) = item {
+                declared_attributes(&item.attrs)
+            } else { None })
+        },
     }
+}
+
+/// Actors use the same root-row contract; fold remains pure at runtime even if
+/// handle/init declare root effects. Guest-handled effects never reach that root.
+pub(crate) fn actor_declaration_diagnostics(file: &syn::File, row: &EffectSet) -> Vec<loom_proto::Diagnostic> {
+    let mut diagnostics = Vec::new();
+    for item in &file.items {
+        let syn::Item::Struct(item) = item else { continue; };
+        for attribute in &item.attrs {
+            if !attribute.path().segments.last().is_some_and(|part| part.ident == "actor") { continue; }
+            let mut labels = None;
+            let parsed = if matches!(attribute.meta, syn::Meta::Path(_)) { Ok(()) } else {
+                attribute.parse_nested_meta(|meta| {
+                    if !meta.path.is_ident("effects") || labels.is_some() {
+                        return Err(meta.error("expected one effects = [\"label\"] declaration"));
+                    }
+                    let expression: syn::Expr = meta.value()?.parse()?;
+                    labels = Some(literal_labels(&expression).ok_or_else(|| meta.error("effects must be literal labels without wildcard"))?);
+                    Ok(())
+                })
+            };
+            if let Err(error) = parsed {
+                diagnostics.push(super::diagnostic(loom_proto::Lang::Rust, "LOOM_EFFECT_ROW", &error.to_string()));
+            } else if let Some(labels) = labels {
+                let residual: Vec<_> = row.labels.iter().filter(|label| !labels.contains(*label)).cloned().collect();
+                if !residual.is_empty() {
+                    diagnostics.push(super::diagnostic(loom_proto::Lang::Rust, "LOOM_EFFECT_ROW", &format!("{} requires residual host effects [{}] outside its declared row", item.ident, residual.join(", "))));
+                }
+            } else if row.unknown {
+                diagnostics.push(super::diagnostic(loom_proto::Lang::Rust, "LOOM_EFFECT_ROW", "actor has unknown effect dispatch; declare #[loom::actor(effects = [\"label\"])]"));
+            }
+        }
+    }
+    diagnostics
 }
 
 #[cfg(test)]
@@ -415,12 +597,84 @@ mod tests {
             .unwrap()
     }
     #[test]
+    fn labeled_handlers_discharge_body_helpers_but_not_handler_effects() {
+        let row = infer_source(r#"
+            fn read() { loom::abilities::fs::read("local", "."); }
+            fn main() {
+                loom::abilities::sleep(1);
+                loom::handle_labels(["fs.read"], |op, k| { loom::abilities::now(); }, || read());
+            }
+        "#);
+        assert_eq!(row.labels, vec!["now", "sleep"]);
+        assert!(!row.unknown);
+        let row = infer_source(r#"fn main() {
+            loom::handle(|op,k| {}, || loom::abilities::fs::read("local", "."));
+        }"#);
+        assert_eq!(row.labels, vec!["fs.read"]);
+    }
+
+    #[test]
+    fn handler_function_values_contribute_outer_effects() {
+        let row = infer_source(r#"
+            fn handler() { loom::abilities::now(); }
+            fn body() { loom::abilities::sleep(1); }
+            fn main() { loom::handle_labels(["sleep"], handler, body); }
+        "#);
+        assert_eq!(row.labels, vec!["now"]);
+        assert!(!row.unknown);
+        assert!(infer_source("fn main() { loom::handle(external::handler, || 1); }").unknown);
+    }
+
+    #[test]
+    fn residual_declaration_names_unhandled_labels() {
+        let bad = syn::parse_file(r#"#[loom::def(effects=["sleep"])] fn main() {
+            loom::abilities::sleep(1); loom::abilities::fs::read("local", ".");
+        }"#).unwrap();
+        let diagnostics = declaration_diagnostics(&bad, &infer(&bad, &BTreeMap::new()));
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "LOOM_EFFECT_ROW");
+        let good = syn::parse_file(r#"#[loom::def(effects=["sleep"])] fn main() {
+            loom::abilities::sleep(1);
+            loom::handle_labels(["fs.read"], |op,k| {}, || loom::abilities::fs::read("local", "."));
+        }"#).unwrap();
+        let rows = infer(&good, &BTreeMap::new());
+        assert!(declaration_diagnostics(&good, &rows).is_empty());
+        assert_eq!(rows["main"].declared, Some(vec!["sleep".into()]));
+        let dynamic = syn::parse_file("#[loom::def] fn main() { callback(); }").unwrap();
+        assert_eq!(declaration_diagnostics(&dynamic, &infer(&dynamic, &BTreeMap::new())).len(), 1);
+        let explicit = syn::parse_file("#[loom::def(effects=[])] fn main() { callback(); }").unwrap();
+        let rows = infer(&explicit, &BTreeMap::new());
+        assert!(rows["main"].unknown);
+        assert!(declaration_diagnostics(&explicit, &rows).is_empty());
+    }
+
+    #[test]
+    fn nested_handler_rows_and_unknown_dispatch_stay_conservative() {
+        let row = infer_source(r#"fn work() { loom::abilities::fs::read("local", "."); }
+            fn main() {
+                work();
+                loom::handle_labels(["fs.read"], |op,k| {}, || work());
+            }"#);
+        assert_eq!(row.labels, vec!["fs.read"]);
+        let row = infer_source(r#"fn main() {
+            loom::handle_labels(["fs.read"], |op,k| {}, || callback());
+        }"#);
+        assert!(row.unknown);
+        let row = infer_source(r#"fn main() {
+            loom::handle_labels(labels, |op,k| {}, || loom::abilities::fs::read("local", "."));
+        }"#);
+        assert_eq!(row.labels, vec!["fs.read"]);
+        assert!(row.unknown);
+    }
+
+    #[test]
     fn primitive_arithmetic_is_known_and_helpers_propagate() {
         assert_eq!(
             infer_source("fn main(a:i64)->i64 {a+1}"),
             EffectSet {
                 labels: vec![],
-                unknown: false
+                unknown: false,
+                declared: None
             }
         );
         let effects = infer_source(
@@ -430,7 +684,8 @@ mod tests {
             effects,
             EffectSet {
                 labels: vec!["now".into()],
-                unknown: false
+                unknown: false,
+                declared: None
             }
         );
     }
@@ -470,10 +725,33 @@ mod tests {
             effects,
             EffectSet {
                 labels: vec!["fork".into(), "llm".into()],
-                unknown: false
+                unknown: false,
+                declared: None
             }
         );
     }
+    #[test]
+    fn actor_declaration_tracks_root_requirements_without_claiming_fold_permission() {
+        let file = syn::parse_file(r#"
+            #[loom::actor(effects=[])] struct Counter;
+            impl Counter { fn fold() {
+                loom::handle_labels(["sleep"], |op,k| {}, || loom::abilities::sleep(1));
+            } }
+        "#).unwrap();
+        let inferred = infer(&file, &BTreeMap::new());
+        let row = aggregate(&file, &BTreeMap::new(), &inferred, &[]);
+        assert_eq!(row.declared, Some(vec![]));
+        assert!(row.labels.is_empty());
+        assert!(row.unknown);
+        assert!(actor_declaration_diagnostics(&file, &row).is_empty());
+        let file = syn::parse_file(r#"
+            #[loom::actor(effects=[])] struct Counter;
+            impl Counter { fn fold() { loom::abilities::sleep(1); } }
+        "#).unwrap();
+        let row = aggregate(&file, &BTreeMap::new(), &infer(&file, &BTreeMap::new()), &[]);
+        assert_eq!(actor_declaration_diagnostics(&file, &row).len(), 1);
+    }
+
     #[test]
     fn actor_summary_keeps_handler_effects_without_inventing_free_exports() {
         let file = syn::parse_file(

@@ -22,7 +22,7 @@ async function define(name:string,source:string) {
   return hash;
 }
 const source=`
-#[loom::actor]
+#[loom::actor(effects=["sleep"])]
 pub struct Counter;
 impl loom::Actor for Counter {
     type State=i64;

@@ -88,7 +88,7 @@ Opening an older database performs a transactional migration of structured value
 | `loom-mcp` | MCP tools, prompts and resources |
 | `loom-cli`, `loomd` | Terminal client and server entrypoint |
 
-The WIT contract is in `loom-wit/handler.wit`. Guest code reaches the host through `loom:host/abilities.perform`; ambient WASI imports trap. Folds cannot perform effects.
+Rust definitions use the [shared-core ABI](shared-core-abi.md), with `loom.perform` dispatching through guest handlers to the outermost host handler. Component definitions use `loom-wit/handler.wit` and `loom:host/abilities.perform`; ambient WASI imports trap. Folds can handle operations locally, but an operation reaching the host is refused.
 
 ## Verify
 
@@ -159,3 +159,83 @@ serde = { hash = "<returned 64-digit hash>", features = ["derive"] }
 ```
 
 Updating a definition name leaves existing dependency hashes intact. Run `loom --token "$LOOM_TOKEN" upgrade <old-hash> <new-hash>` or MCP `loom_upgrade` to rewrite named dependents explicitly. Both definition hashes and crate source hashes use this command; its result lists the changed identities. Actor behavior changes remain a separate `actor.upgrade` command with `{actor, hash}`.
+
+## Guest-defined effect handlers
+
+`loom::handle(handler, body)` installs a deep handler around an ordinary Rust
+closure. The handler receives an `Op` and a one-shot `Continuation`, then returns
+`Reply::Resume(value)`, `Reply::Forward`, or `Reply::Deferred`.
+
+```rust
+use loom::{Continuation, Op, Reply, Value};
+
+#[loom::def(effects = [])]
+pub fn main() -> Value {
+    loom::handle_labels(["sleep"], |_op: Op, _k: Continuation| {
+        Reply::Resume(Value::String("no waiting".into()))
+    }, || loom::abilities::sleep(200).expect("sleep failed"))
+    .expect("handler failed")
+}
+```
+
+`handle_labels` promises to handle its selected labels. Returning `Forward`
+for one of those labels aborts the execution. Use `handle` for a handler that
+examines arbitrary labels and may forward. Forwarding continues at the next
+outer frame. Operations made inside a handler callback also start below that
+frame, so a logging handler can perform its own I/O without calling itself.
+The suspended body's continuation retains the installed handler: this is the
+meaning of a deep handler.
+
+A scoped child inherits the forker's handler stack. A call or fork into another
+stored definition has a separate execution memory and does not inherit guest
+handlers. Handler closures may borrow values, but must be `Send`. The runtime
+serializes calls to each mutable handler, and drains inherited children before
+releasing borrowed handler storage. A handler trap aborts its execution and
+identifies the frame.
+
+`Reply::Deferred` lets a handler retain its continuation and resume it later.
+`Continuation::resume(value)` consumes the continuation. `abandon()` explicitly
+aborts the suspended performer; dropping an unresolved deferred continuation
+fails with `continuation dropped`. Continuations cannot be cloned or resumed
+more than once. Retaining one forever prevents progress and is bounded by the
+execution deadline. A handler must return before it can be invoked again; do
+not wait inside a mutable callback for another invocation of the same frame.
+
+Recording observes only the outermost host handler. A guest-handled operation
+is guest computation and creates no root-effect record. If that handler reads
+a real file, the read reaches the host and is recorded. Replay reruns the guest
+handlers and supplies their recorded root-effect results. Root recording and
+replay are implemented by the same host handler chain used for execution.
+Pure actor folds may install handlers, but any operation reaching the root
+still fails.
+
+For content-addressed reuse, see [stored handler definitions](content-addressed-handlers.md).
+
+### Residual effect declarations
+
+`#[loom::def(effects = ["sleep"])]` declares the effect labels that the host must
+supply. `loom-check` rejects known residual labels outside that set. A total
+`handle_labels` removes its selected labels from the body's inferred row;
+operations performed by the handler itself remain in the outer row. Unknown
+dispatch requires an explicit declaration, which the runtime enforces at the
+root. Actor definitions use `#[loom::actor(effects = [...])]`.
+
+This is Loom's conservative source analysis and runtime capability check, not
+an effect type system inside rustc. A declaration does not grant additional
+host capabilities: it intersects the caller's allowed effects. Omitting `exec`
+from the permitted root row prevents guest code from reaching the host's exec
+implementation even through dynamic dispatch.
+
+### Preview filesystem writes
+
+`loom::preview::writes(body)` is a guest handler for `fs.write`, `fs.read`, and
+`fs.read_optional`. Writes update an in-memory overlay; reads in the body see
+that overlay. Repeated writes produce one before/final-after change, and
+unchanged content produces no change. The returned `Preview` includes the
+body's result and content-addressed before/after values, rendered by the REPL's
+filesystem changes view. See [the complete preview example](../examples/rust-preview/src/lib.rs).
+
+Only those filesystem operations are intercepted. Reads used to capture the
+original file and CAS writes remain real root effects. Other operations and
+calls into separate definitions are not automatically previewed. Restrict the
+root effect row when the body must not execute other external operations.
