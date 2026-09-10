@@ -11,7 +11,6 @@ import html
 import io
 import re
 import subprocess
-import textwrap
 from pathlib import Path
 
 import uharfbuzz as hb
@@ -64,9 +63,8 @@ def main() -> None:
     disabled = regular.shape(ligature_text, {"liga": False, "calt": False})
     assert [g.codepoint for g in enabled.glyph_infos] != [g.codepoint for g in disabled.glyph_infos], "Font has no active programming ligatures"
 
-    source = (ROOT / "docs/social/fork-join-example.rs").read_text()
-    end = source.index('    }).expect("scope failed")') + len('    }).expect("scope failed")')
-    excerpt = textwrap.dedent(source[source.index("    loom::scope"):end]).rstrip()
+    source = (ROOT / "docs/social/async-example.rs").read_text()
+    excerpt = source[source.index("fn read("):].rstrip()
     elements: list[str] = []
 
     def write(text: str, x: float, baseline: float, size: int, color: str, face: Typeface = regular) -> float:
@@ -82,9 +80,10 @@ def main() -> None:
         assert cursor <= WIDTH - 80, f"Text overflow: {text}"
         return cursor
 
-    write("Async Rust. No function coloring.", 96, 190, 45, "#f1f0ed", bold)
+    write("No function coloring.", 96, 160, 64, "#f1f0ed", bold)
+    write("Async I/O. Ordinary Rust functions.", 96, 224, 30, "#969ba5")
 
-    tokens = re.compile(r'("[^"\n]*"|\b(?:let|mut|for|in|if|move)\b|\b(?:fork|join|read|contains)(?=\())')
+    tokens = re.compile(r'("[^"\n]*"|\b(?:fn|pub|let|mut|for|in|if|move)\b|\b(?:fork|join|read|main|scope|unwrap|contains)(?=\())')
     for index, line in enumerate(excerpt.splitlines()):
         x = 96.0
         for token in tokens.split(line):
@@ -93,11 +92,11 @@ def main() -> None:
             color = FOREGROUND
             if token.startswith('"'):
                 color = "#9cab9f"
-            elif token in {"fork", "join", "read", "contains"}:
+            elif token in {"fork", "join", "read", "main", "scope", "contains"}:
                 color = ACCENT
-            elif token in {"let", "mut", "for", "in", "if", "move"}:
-                color = "#aeb6c7"
-            x = write(token, x, 320 + index * 42, 30, color)
+            elif token in {"fn", "pub", "let", "mut", "for", "in", "if", "move"}:
+                color = "#b7a5d8"
+            x = write(token, x, 340 + index * 46, 32, color)
 
     definitions = []
     for face in [regular, bold]:

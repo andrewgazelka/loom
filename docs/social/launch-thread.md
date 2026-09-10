@@ -1,18 +1,18 @@
 # Loom launch thread
 
-Attach [the code-rendered dark graphic](../assets/loom-grep-dark.png) to post 1. [Full runnable example](fork-join-example.rs). Prepared for review; not posted.
+Attach [the code-rendered dark graphic](../assets/loom-grep-dark.png) to post 1. [Graphic source](async-example.rs). Prepared for review; not posted.
 
 ## 1
 
 I'm building Loom: a Rust REPL without function coloring.
 
-Here's a tiny recursive text search: fork directory searches, read local files, join matching paths.
+Two file reads, running concurrently. Both call an ordinary Rust function.
 
 Ordinary fn. No async or .await. 🧵
 
 ## 2
 
-Children borrow the same machine and search string. Each closure owns its directory path.
+The first read runs in a child job. The second runs in the parent.
 
 scope.fork(...) starts a job; job.join() returns typed results. The scope waits for forgotten handles too.
 
@@ -32,7 +32,7 @@ This example searches UTF-8 files for a literal string, skips symlinks and retur
 
 It's small: no regex, ignore-file handling or streaming.
 
-The complete Rust example is in the repo; the graphic shows the fork/join part.
+The repo also includes this recursive search; the graphic keeps it to two file reads.
 
 ## 5
 
