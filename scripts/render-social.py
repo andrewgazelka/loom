@@ -82,7 +82,7 @@ def main() -> None:
         assert cursor <= WIDTH - 80, f"Text overflow: {text}"
         return cursor
 
-    write("grep, without function coloring.", 96, 190, 45, "#f1f0ed", bold)
+    write("Async Rust. No function coloring.", 96, 190, 45, "#f1f0ed", bold)
 
     tokens = re.compile(r'("[^"\n]*"|\b(?:let|mut|for|in|if|move)\b|\b(?:fork|join|read|contains)(?=\())')
     for index, line in enumerate(excerpt.splitlines()):
@@ -105,7 +105,7 @@ def main() -> None:
             definitions.append(f'<path id="{identity}" d="{html.escape(path, quote=True)}"/>')
     svg = '\n'.join([
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{WIDTH}" height="{HEIGHT}" viewBox="0 0 {WIDTH} {HEIGHT}" role="img">',
-        '<title>Loom: recursive text search without function coloring</title>',
+        '<title>Async Rust. No function coloring.</title>',
         '<desc>Berkeley Mono with liga and calt shaping. Code excerpt from the runnable Rust example.</desc>',
         '<metadata>' + html.escape(excerpt) + '</metadata>',
         '<defs>' + ''.join(definitions) + '</defs>',

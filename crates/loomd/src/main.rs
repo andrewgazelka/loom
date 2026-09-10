@@ -1,4 +1,5 @@
 mod static_files;
+use axum::serve::ListenerExt;
 use clap::Parser;
 use std::{path::PathBuf, process::ExitCode, sync::Arc};
 
@@ -109,6 +110,13 @@ async fn serve() -> anyhow::Result<()> {
         .fallback_service(static_files::router(ui));
     let listener = tokio::net::TcpListener::bind(args.bind).await?;
     eprintln!("loomd listening on {}", listener.local_addr()?);
+    // MCP streams headers before its result. Nagle plus delayed acknowledgments
+    // otherwise adds a ~40 ms floor even to an empty loopback request on Linux.
+    let listener = listener.tap_io(|stream| {
+        if let Err(error) = stream.set_nodelay(true) {
+            eprintln!("failed to disable TCP buffering for an accepted connection: {error}");
+        }
+    });
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown.wait())
         .await?;

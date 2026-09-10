@@ -40,7 +40,10 @@ let passed=0;
 const failures:string[]=[];
 interface Gate {name:string;pass:boolean;detail:string}
 const gates:Gate[]=[];
-const totalChecks=12;
+const variantNames=(process.env.LOOM_BENCH_VARIANTS??'all,fork').split(',');
+assert(variantNames.length>0&&new Set(variantNames).size===variantNames.length
+  &&variantNames.every(name=>['all','fork','scoped'].includes(name)),'Invalid LOOM_BENCH_VARIANTS');
+const totalChecks=2+5*variantNames.length;
 function gate(ok:boolean, name:string,detail='') {gates.push({name,pass:ok,detail});if(ok)passed++;else failures.push(name);}
 function counter(stats:Record<string,unknown>, key:string):number {const value=stats[key];return typeof value==='number' && Number.isFinite(value) && value>=0 ? value : Number.NaN;}
 try {
@@ -51,7 +54,7 @@ try {
   gate(true,'native correctness','10000 files, tie and symlink control');
   const machine=object(await command('machine.create',{root:fixture}));
   const existing=process.env.LOOM_BENCH_HASHES?object(JSON.parse(process.env.LOOM_BENCH_HASHES)):{};
-  for(const name of ['all','fork']) {
+  for(const name of variantNames) {
     let hash=existing[name];
     if(hash===undefined) {
     const source=await readFile(new URL(`largest-${name}.rs`,import.meta.url),'utf8');
@@ -78,7 +81,7 @@ try {
     await writeFile(join(mutation,'winner.dat'),new Uint8Array(16387+round));
     const expected={path:'nested/middle/deep/benchmark-child/winner.dat',size:16387+round};
     // Rotate order; every variant checks the changed winner, never a cached old answer.
-    const names=round%2===0?['native','all','fork']:['fork','all','native'];
+    const names=round%2===0?['native',...variantNames]:[...variantNames].reverse().concat('native');
     for(const name of names) {
       if(name==='native') {
         const result=await nativeScan();same(result,expected);
@@ -101,7 +104,7 @@ try {
       }
     }
   }
-  gate(true,'changing winners','all seven changes match native for both variants');
+  gate(true,'changing winners','all seven changes match native for every variant');
   function median(samples:number[]) {return [...samples].sort((a,b)=>a-b)[Math.floor(samples.length/2)]!;}
   // Growth is measured on identical scans after the changing-winner controls.
   // SQLite allocated pages include indexes; CAS payload bytes alone are insufficient.
