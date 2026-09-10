@@ -1,38 +1,26 @@
 # Largest-file scan: `all`, recursive forks, native Rust
 
 The benchmark calls real Rust guest definitions through streamable HTTP MCP.
-`largest-all.rs` lists directories concurrently at each tree level.
-`largest-fork.rs` forks one worker per child directory; each subtree advances
-independently and returns its winner. Both skip symlinks and break size ties
-by relative path. The native Rust baseline uses sequential traversal with the
-same non-following metadata reads and tie rule; it has no Loom runtime or log.
+[`largest-all.rs`](largest-all.rs) lists directories concurrently at each tree level.
+[`largest-fork.rs`](largest-fork.rs) forks one worker per child directory.
+Both find the largest regular file, skip symlinks, and break size ties by relative path.
 
-Initial baseline on Apple Silicon macOS, September 9, 2026, with 10,000 files and
-256 directories, plus one changing nested file during timed runs:
+Latest measured warm medians on an Apple Silicon Mac, September 9, 2026:
 
-| Path | Median of 7 warm scans | Relative to native |
-| --- | ---: | ---: |
-| Native Rust, scan only | 25.7 ms | 1× |
-| Native Rust, including process launch | 28.2 ms | 1.1× |
-| Rust `all`, including MCP round trip | 161.5 ms | 6.3× |
-| Rust recursive `fork`/`join`, including MCP round trip | 314.0 ms | 12.2× |
+| Path | Median of 7 warm scans |
+| --- | ---: |
+| Loom Rust `all`, including MCP and recording | **10.46 ms** |
+| Loom Rust recursive `fork` / `join`, including MCP and recording | **12.00 ms** |
+| Native Rust, sequential scan only | **35.20 ms** |
+| Native Rust, including process launch | **37.81 ms** |
 
-All four correctness gates passed. Recursive forks were 1.94× slower than
-`all` on this mostly broad, shallow tree. Forks introduce component instances
-and additional host operations; this experiment does not separately attribute
-their costs. Uneven, deep trees or expensive per-subtree computation may behave
-differently. The results do not establish throughput for cold disks, network
-filesystems, millions of entries, or arbitrary concurrency. The recursive
-example has no worker bound; it is a fixture benchmark, not a recommended
-unbounded scanner for arbitrary trees.
+The fixture begins with 10,000 files and 256 directories. During timed rounds, one added directory contains a changing winning file, for 10,001 files and 257 directories. Every implementation must find each new winner. The scan reads metadata, not file contents. Compilation and first-call initialization are excluded; filesystem caches and compiled definitions are warm. The run reported load averages of 26.16, 40.95 and 46.06.
 
-The timings include fresh filesystem observations, guest serialization, effect
-recording, and MCP transport; they are not a measure of WASM overhead alone.
-Filesystem caches and compiled definitions are warm. Each round changes the
-winning file size and verifies every result. File contents are not read.
-The new fork definition built in 1,120 ms with existing dependency artifacts;
-its first call took 389 ms. Build and first-call time are excluded from warm
-medians. The `all` definition reused an existing component build.
+The native reference uses sequential traversal and individual non-following metadata reads. Loom uses parallel, batched metadata operations. These are different algorithms; the comparison does not isolate Wasm overhead or establish an advantage over equally optimized native code. The recursive example has no worker bound and is a fixture workload, not a general scanner for arbitrarily large trees.
+
+**10/12 gates pass.** Correctness, scan latency, retained database growth and wire-size gates pass. Reply storage wait medians are 1.50 / 1.59 ms for all/fork, above the 1 ms target. Identical scans add about 22.3 / 24 KiB of database pages and transfer 167,656 / 186,932 effect bytes. Each call records one queued transaction. The standalone single-effect [`largest-walk.rs`](largest-walk.rs) measured 17.22 ms in a separate run; its target remains unmet.
+
+The initial implementation measured 161.5 ms for `all` and 314.0 ms for fork/join. Those earlier runs had different load and storage histories; use the [staged measurements](../../docs/plan-unified-memory.md#scan-contract-change-2026-09-09) for the change history, rather than treating historical ratios as controlled experiments.
 
 ## Reproduce
 
