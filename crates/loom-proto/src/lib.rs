@@ -1,4 +1,5 @@
 mod cas;
+pub mod component_protocol;
 pub use cas::*;
 use serde::{Deserialize, Serialize};
 pub use serde_json::Value;
@@ -212,12 +213,17 @@ impl<T> Desc<T> {
 mod codec;
 mod fs;
 mod trace;
-pub use trace::{CallTrace, TraceBlob, TraceBlobKind, TraceBundle, TraceEntry, TraceKey, TraceMemo, TraceOutcome};
-pub use fs::{DirEntry, EntryKind};
 pub use codec::host::{HostValue, decode_host, encode_host, encode_host_array};
 pub use codec::{
     ContentAddress, DAG_CBOR_CODEC, RAW_CODEC, cid_for_hash, decode, encode, parse_reference,
     reference,
+};
+pub use fs::{DirEntry, EntryKind};
+pub use trace::{
+    TRACE_MAX_ENTRIES, TRACE_MAX_BLOB_BYTES, TRACE_MAX_METADATA_BYTES, TRACE_MAX_SCOPE_BYTES,
+    TRACE_MAX_ERROR_BYTES, validate_call_trace_limits,
+    TraceObservation, CallTrace, TraceBlob, TraceBlobKind, TraceBundle, TraceEntry, TraceKey, TraceMemo,
+    TraceOutcome, decode_call_trace, encode_call_trace,
 };
 #[cfg(test)]
 mod tests {

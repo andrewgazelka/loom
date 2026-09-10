@@ -66,6 +66,10 @@ The Rust and TS guests use deterministic DAG-CBOR at the WIT boundary. Structure
 
 Maps have string keys ordered by encoded length and then bytes. Decoders reject duplicate keys, nonminimal or indefinite encodings, other tags, malformed CIDs, undefined, nonfinite floats, and trailing bytes. Floats use 64 bits. The shared JSON value model encodes safe integral numbers as integers; Rust integers outside JavaScript's safe range are rejected instead of losing precision across languages.
 
+Filesystem results have typed Rust SDK values. `DirEntry` has named `name`, `size`, and `kind` fields and encodes as a DAG-CBOR array. Host-produced results decode directly in the guest without rebuilding and re-encoding an intermediate value. Foreign bytes whose content determines a hash still receive strict canonical validation. HTTP and MCP envelopes use JSON; the guest boundary and structured CAS payloads use DAG-CBOR.
+
+Compiled components carry an effect-protocol version. Components built against the earlier map-shaped filesystem results must be rebuilt before execution; their historical source and CAS records remain readable. This prevents an old guest decoder from silently interpreting the new result shape.
+
 Opening an older database performs a transactional migration of structured values and links and invalidates compiled guests that used the old codec. The migration preserves event sequence numbers and verifies references before committing. Older databases with recorded effects whose descriptors were never stored, or pending handlers, require explicit recovery before migration: opening fails without changing the database rather than risking duplicate external effects. Back up the database before upgrading.
 
 ## Crate ownership
@@ -138,6 +142,12 @@ The runner creates a separate 10,000-file fixture, starts Codex with only Loom c
 Definition signatures distinguish inferred effects, the host-enforced `allowed_effects` policy, and effects observed during execution. Inference is conservative: dynamic calls, getters, iterators, and unexpanded Rust code can leave the set unknown. Omitting `allowed_effects` permits all host operations; `[]` permits none. Explicit policies are part of definition identity. Calls and forks inherit the intersection of caller and callee permissions, including on cache hits.
 
 The Effects view shows individual invocations and their outcomes. To capture file content changes from a process, pass `capture_paths: ["note.txt"]` to `exec` or `process.start`. Paths are resolved within the process root; the capture records actual before/after bytes in CAS and displays created, modified, and deleted files as diffs. Capture is limited to 64 explicitly selected regular files, at most 1 MiB each. Symlinks, unsupported files, and unavailable reads are reported explicitly.
+
+A completed call records one content-addressed trace and a `call_completed` event. Each trace occurrence identifies its job scope, descriptor and outcome; result blobs deduplicate across calls. Actors retain recovery checkpoints. The Effects view expands trace pages and keeps historical per-effect events readable. Opening an older store migrates recoverable effect records transactionally and refuses ambiguous records without partially applying the migration.
+
+Use `call.replay` with the original definition `hash`, `args`, and recorded call `scope` to replay a completed successful or failed call. Replay checks the definition and argument identity, consumes the recorded occurrences, and verifies the final outcome, including recorded errors. Cancelled calls cannot be resumed through `call.replay`; actor recovery uses its saved checkpoint. A fresh call executes its external effects again unless an effect has a valid global memoization key.
+
+Machine filesystem operations resolve from a pinned root directory handle. Parent traversal and symlinks cannot redirect resolution outside that root. `fs.list` supports guest-driven traversal; `fs.walk` performs a bounded traversal in the host. Both return the same typed entry values. Persisted root identity prevents a restart from silently accepting a replacement directory.
 
 These snapshots observe selected files across the process interval. They do not enumerate every write, track metadata-only changes, or distinguish concurrent writers. Historical effects without snapshots remain browsable, with no invented diff.
 

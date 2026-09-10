@@ -10,7 +10,7 @@ use std::{
     os::fd::{AsRawFd, FromRawFd, RawFd},
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
-    sync::{Condvar, Mutex},
+    sync::Arc,
 };
 
 #[cfg(target_os = "macos")]
@@ -79,122 +79,77 @@ impl PinnedRoot {
         let parent = open_at(&self.directory, parent, true)?;
         stat_child(&parent, name)
     }
-    pub fn walk(&self, path: &str, limits: WalkLimits) -> Result<Vec<DirEntry>> {
+    pub async fn walk(&self, path: &str, limits: WalkLimits) -> Result<Vec<DirEntry>> {
         ensure!(limits.max_depth <= 256, "walk max_depth exceeds 256");
         ensure!(
             limits.max_entries <= 1_000_000,
             "walk max_entries exceeds 1000000"
         );
-        let root = self.directory(path)?;
+        let root = Arc::new(self.directory(path)?);
         if limits.max_depth == 0 {
             return Ok(Vec::new());
         }
         struct Job {
             path: String,
-            prefix: String,
             depth: u32,
         }
-        struct State {
-            jobs: VecDeque<Job>,
-            active: usize,
+        struct DirectoryBatch {
+            job: Job,
             entries: Vec<DirEntry>,
-            bytes: usize,
-            error: Option<anyhow::Error>,
         }
-        let state = Mutex::new(State {
-            jobs: VecDeque::from([Job {
-                path: ".".into(),
-                prefix: String::new(),
-                depth: 1,
-            }]),
-            active: 0,
-            entries: Vec::new(),
-            bytes: 0,
-            error: None,
-        });
-        let changed = Condvar::new();
-        let workers = std::thread::available_parallelism()
-            .map(usize::from)
-            .unwrap_or(1)
-            .min(8);
-        std::thread::scope(|scope| {
-            for _ in 0..workers {
-                let state = &state;
-                let changed = &changed;
-                let root = &root;
-                scope.spawn(move || {
-                    loop {
-                        let job = {
-                            let mut state = state.lock().unwrap();
-                            loop {
-                                if state.error.is_some() {
-                                    return;
-                                }
-                                if let Some(job) = state.jobs.pop_front() {
-                                    state.active += 1;
-                                    break job;
-                                }
-                                if state.active == 0 {
-                                    return;
-                                }
-                                state = changed.wait(state).unwrap();
-                            }
-                        };
-                        let outcome = (|| -> Result<Vec<DirEntry>> {
-                            list_directory(&open_at(root, &job.path, true)?, limits.max_entries)
-                        })();
-                        let mut state = state.lock().unwrap();
-                        state.active -= 1;
-                        match outcome {
-                            Err(error) => {
-                                state.error =
-                                    Some(error.context(format!("walk directory {}", job.path)))
-                            }
-                            Ok(entries) => {
-                                if state.entries.len().saturating_add(entries.len())
-                                    > limits.max_entries
-                                {
-                                    state.error =
-                                        Some(anyhow::anyhow!("walk entry limit exceeded"));
-                                } else {
-                                    for mut entry in entries {
-                                        entry.name = if job.prefix.is_empty() {
-                                            entry.name
-                                        } else {
-                                            format!("{}/{}", job.prefix, entry.name)
-                                        };
-                                        state.bytes =
-                                            state.bytes.saturating_add(entry.name.len() + 32);
-                                        if state.bytes > RESULT_LIMIT {
-                                            state.error =
-                                                Some(anyhow::anyhow!("walk result exceeds 64 MiB"));
-                                            break;
-                                        }
-                                        if entry.kind == EntryKind::Directory
-                                            && job.depth < limits.max_depth
-                                        {
-                                            state.jobs.push_back(Job {
-                                                path: entry.name.clone(),
-                                                prefix: entry.name.clone(),
-                                                depth: job.depth + 1,
-                                            });
-                                        }
-                                        state.entries.push(entry);
-                                    }
-                                }
-                            }
-                        }
-                        changed.notify_all();
+        let mut jobs = VecDeque::from([Job {
+            path: String::new(),
+            depth: 1,
+        }]);
+        let mut running = tokio::task::JoinSet::new();
+        let mut entries = Vec::new();
+        let mut bytes = 0_usize;
+        let result = async {
+            while !jobs.is_empty() || !running.is_empty() {
+                while running.len() < 64 {
+                    let Some(job) = jobs.pop_front() else { break };
+                    let root = root.clone();
+                    running.spawn_blocking(move || -> Result<DirectoryBatch> {
+                        let relative = if job.path.is_empty() { "." } else { &job.path };
+                        let directory = open_at(&root, relative, true)
+                            .with_context(|| format!("walk directory {relative}"))?;
+                        let entries = list_directory(&directory, limits.max_entries)
+                            .with_context(|| format!("walk directory {relative}"))?;
+                        Ok(DirectoryBatch { job, entries })
+                    });
+                }
+                let batch = running
+                    .join_next()
+                    .await
+                    .context("walk worker missing")???;
+                ensure!(
+                    entries.len().saturating_add(batch.entries.len()) <= limits.max_entries,
+                    "walk entry limit exceeded"
+                );
+                for mut entry in batch.entries {
+                    if !batch.job.path.is_empty() {
+                        entry.name = format!("{}/{}", batch.job.path, entry.name);
                     }
-                });
+                    bytes = bytes.saturating_add(entry.name.len() + 32);
+                    ensure!(bytes <= RESULT_LIMIT, "walk result exceeds 64 MiB");
+                    if entry.kind == EntryKind::Directory && batch.job.depth < limits.max_depth {
+                        jobs.push_back(Job {
+                            path: entry.name.clone(),
+                            depth: batch.job.depth + 1,
+                        });
+                    }
+                    entries.push(entry);
+                }
             }
-        });
-        let mut state = state.into_inner().unwrap();
-        if let Some(error) = state.error {
-            return Err(error);
+            Ok::<(), anyhow::Error>(())
         }
-        state.entries.sort_unstable_by(|a, b| a.name.cmp(&b.name));
-        Ok(state.entries)
+        .await;
+        // Blocking jobs cannot be canceled once started; finish bounded in-flight
+        // reads before releasing this execution's filesystem resources.
+        while running.join_next().await.is_some() {}
+        result?;
+        entries.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+        Ok(entries)
     }
 }
 
@@ -319,6 +274,89 @@ mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires LOOM_SCAN_FIXTURE and an otherwise idle host; run release mode"]
+    async fn native_walk_timing() -> Result<()> {
+        #[derive(Serialize)]
+        struct Measurement {
+            files: usize,
+            directories: usize,
+            winner: String,
+            size: u64,
+            samples_ms: Vec<f64>,
+            median_ms: f64,
+            limit_ms: f64,
+        }
+        let fixture = std::env::var_os("LOOM_SCAN_FIXTURE")
+            .context("LOOM_SCAN_FIXTURE must name the standard 10000-file fixture")?;
+        let root = PinnedRoot::open(Path::new(&fixture))?;
+        let mut samples_ms = Vec::with_capacity(7);
+        for _ in 0..7 {
+            let start = std::time::Instant::now();
+            let entries = root
+                .walk(
+                    ".",
+                    WalkLimits {
+                        max_depth: 64,
+                        max_entries: 20_000,
+                    },
+                )
+                .await?;
+            samples_ms.push(start.elapsed().as_secs_f64() * 1000.0);
+            let files = entries
+                .iter()
+                .filter(|entry| entry.kind == EntryKind::File)
+                .count();
+            let directories = entries
+                .iter()
+                .filter(|entry| entry.kind == EntryKind::Directory)
+                .count();
+            ensure!(
+                files == 10_000 && directories == 256,
+                "unexpected fixture counts: {files} files, {directories} directories"
+            );
+            let winner = entries
+                .iter()
+                .filter(|entry| entry.kind == EntryKind::File)
+                .max_by(|left, right| {
+                    left.size
+                        .cmp(&right.size)
+                        .then_with(|| right.name.cmp(&left.name))
+                })
+                .context("fixture contains no regular files")?;
+            ensure!(
+                winner.name == "nested/middle/deep/alpha.dat" && winner.size == 8193,
+                "fixture tie winner changed"
+            );
+            ensure!(
+                entries
+                    .iter()
+                    .any(|entry| entry.name == "nested/middle/deep/zeta.dat"
+                        && entry.kind == EntryKind::File
+                        && entry.size == 8193),
+                "fixture tied competitor missing"
+            );
+        }
+        let mut ordered = samples_ms.clone();
+        ordered.sort_by(f64::total_cmp);
+        let measurement = Measurement {
+            files: 10_000,
+            directories: 256,
+            winner: "nested/middle/deep/alpha.dat".into(),
+            size: 8193,
+            samples_ms,
+            median_ms: ordered[3],
+            limit_ms: 8.0,
+        };
+        println!("{}", serde_json::to_string(&measurement)?);
+        ensure!(
+            measurement.median_ms < measurement.limit_ms,
+            "native walk median {:.3} ms must be below 8 ms",
+            measurement.median_ms
+        );
+        Ok(())
+    }
+
     #[test]
     fn pinned_root_closes_canonicalize_then_rename_escape() -> Result<()> {
         let parent = tempfile::tempdir()?;
@@ -372,21 +410,23 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn walk_is_sorted_bounded_and_does_not_follow_links() -> Result<()> {
+    #[tokio::test]
+    async fn walk_is_sorted_bounded_and_does_not_follow_links() -> Result<()> {
         let root_dir = tempfile::tempdir()?;
         std::fs::create_dir(root_dir.path().join("sub"))?;
         std::fs::write(root_dir.path().join("z"), b"abc")?;
         std::fs::write(root_dir.path().join("sub/a"), b"hello")?;
         symlink(root_dir.path(), root_dir.path().join("sub/cycle"))?;
         let root = PinnedRoot::open(root_dir.path())?;
-        let entries = root.walk(
-            "/",
-            WalkLimits {
-                max_depth: 64,
-                max_entries: 10,
-            },
-        )?;
+        let entries = root
+            .walk(
+                "/",
+                WalkLimits {
+                    max_depth: 64,
+                    max_entries: 10,
+                },
+            )
+            .await?;
         let names: Vec<_> = entries.iter().map(|entry| entry.name.as_str()).collect();
         assert_eq!(names, ["sub", "sub/a", "sub/cycle", "z"]);
         assert_eq!(entries[1].size, 5);
@@ -398,7 +438,8 @@ mod tests {
                     max_depth: 1,
                     max_entries: 10
                 }
-            )?
+            )
+            .await?
             .len(),
             2
         );
@@ -410,6 +451,7 @@ mod tests {
                     max_entries: 3
                 }
             )
+            .await
             .is_err()
         );
         assert!(
@@ -419,7 +461,8 @@ mod tests {
                     max_depth: 0,
                     max_entries: 0
                 }
-            )?
+            )
+            .await?
             .is_empty()
         );
         Ok(())

@@ -292,7 +292,9 @@ fn check_rust(request: &DefineRequest, signatures: &BTreeMap<String, TypeSig>) -
         }
     }
     if let Err(error) = crate_dependencies(bundle.files["Cargo.toml"].as_text().unwrap()) {
-        checked.diagnostics.push(diagnostic(Lang::Rust, "LOOM_CRATE", &error));
+        checked
+            .diagnostics
+            .push(diagnostic(Lang::Rust, "LOOM_CRATE", &error));
     }
     for (name, contents) in &mut bundle.files {
         if name.starts_with("vendor/") {
@@ -340,7 +342,11 @@ fn check_rust(request: &DefineRequest, signatures: &BTreeMap<String, TypeSig>) -
             }
         })
     }
-    if manifest.get("loom").and_then(|loom| loom.get("crates")).and_then(toml::Value::as_table).is_some_and(|crates| !crates.is_empty())
+    if manifest
+        .get("loom")
+        .and_then(|loom| loom.get("crates"))
+        .and_then(toml::Value::as_table)
+        .is_some_and(|crates| !crates.is_empty())
         || opaque_dependencies(&manifest, signatures)
         || manifest
             .get("package")

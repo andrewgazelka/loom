@@ -84,7 +84,9 @@ pub struct CasInspection {
 
 /// Canonical directory schema shared by machine snapshots and registry sources.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Tree { pub entries: Vec<TreeEntry> }
+pub struct Tree {
+    pub entries: Vec<TreeEntry>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TreeEntry {
     pub name: String,

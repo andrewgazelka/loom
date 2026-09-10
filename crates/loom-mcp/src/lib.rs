@@ -48,9 +48,15 @@ pub struct ResolveArgs {
     hash: String,
 }
 #[derive(Deserialize, JsonSchema)]
-pub struct CrateAddArgs { name: String, version: String }
+pub struct CrateAddArgs {
+    name: String,
+    version: String,
+}
 #[derive(Deserialize, JsonSchema)]
-pub struct UpgradeArgs { old: String, new: String }
+pub struct UpgradeArgs {
+    old: String,
+    new: String,
+}
 #[tool_router]
 impl LoomMcp {
     pub fn new(service: Arc<Service>, default_access: Access) -> Self {
@@ -61,14 +67,42 @@ impl LoomMcp {
             tool_router: Self::tool_router(),
         }
     }
-    #[tool(name = "crate_add", description = "Fetch and checksum-verify a crates.io release into the content-addressed source store.")]
-    async fn crate_add(&self, Parameters(args): Parameters<CrateAddArgs>, context: RequestContext<rmcp::RoleServer>) -> String {
-        let response = self.service_for(&context).command(CommandRequest { session: Some(self.session.clone()), command: "crate.add".into(), args: serde_json::json!({"name":args.name,"version":args.version}) }).await;
+    #[tool(
+        name = "crate_add",
+        description = "Fetch and checksum-verify a crates.io release into the content-addressed source store."
+    )]
+    async fn crate_add(
+        &self,
+        Parameters(args): Parameters<CrateAddArgs>,
+        context: RequestContext<rmcp::RoleServer>,
+    ) -> String {
+        let response = self
+            .service_for(&context)
+            .command(CommandRequest {
+                session: Some(self.session.clone()),
+                command: "crate.add".into(),
+                args: serde_json::json!({"name":args.name,"version":args.version}),
+            })
+            .await;
         serde_json::to_string(&response).unwrap()
     }
-    #[tool(name = "loom_upgrade", description = "Explicitly replace a definition or crate hash in named dependents and report their new identities.")]
-    async fn loom_upgrade(&self, Parameters(args): Parameters<UpgradeArgs>, context: RequestContext<rmcp::RoleServer>) -> String {
-        let response = self.service_for(&context).command(CommandRequest { session: Some(self.session.clone()), command: "upgrade".into(), args: serde_json::json!({"old":args.old,"new":args.new}) }).await;
+    #[tool(
+        name = "loom_upgrade",
+        description = "Explicitly replace a definition or crate hash in named dependents and report their new identities."
+    )]
+    async fn loom_upgrade(
+        &self,
+        Parameters(args): Parameters<UpgradeArgs>,
+        context: RequestContext<rmcp::RoleServer>,
+    ) -> String {
+        let response = self
+            .service_for(&context)
+            .command(CommandRequest {
+                session: Some(self.session.clone()),
+                command: "upgrade".into(),
+                args: serde_json::json!({"old":args.old,"new":args.new}),
+            })
+            .await;
         serde_json::to_string(&response).unwrap()
     }
     #[tool(

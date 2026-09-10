@@ -1668,6 +1668,7 @@ dependencies = [
  "anyhow",
  "blake3",
  "futures",
+ "libc",
  "loom-model",
  "loom-process",
  "loom-proto",

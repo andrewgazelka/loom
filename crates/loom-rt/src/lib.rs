@@ -1,3 +1,4 @@
+mod filesystem;
 mod machine;
 mod trace;
 use anyhow::{Context, Result, bail};
@@ -6,7 +7,10 @@ use loom_store::Store;
 use serde_json::json;
 use std::{
     collections::{BTreeSet, HashMap},
-    sync::{Arc, Mutex, Weak, atomic::{AtomicU64, Ordering}},
+    sync::{
+        Arc, Mutex, Weak,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 use tokio::sync::Mutex as AsyncMutex;
@@ -37,6 +41,12 @@ struct Inner {
     effect_locks: Mutex<HashMap<String, Weak<AsyncMutex<()>>>>,
     fibers: Mutex<HashMap<String, FiberTask>>,
     effect_wire_bytes: AtomicU64,
+    trace_locks: Mutex<HashMap<String, Weak<AsyncMutex<()>>>>,
+    machine_roots: Mutex<HashMap<String, Arc<filesystem::PinnedRoot>>>,
+}
+struct ScopedTask {
+    scope: String,
+    task: FiberTask,
 }
 struct FiberTask {
     scope: String,
@@ -86,29 +96,61 @@ struct ContextData {
 }
 impl Drop for ContextData {
     fn drop(&mut self) {
-        if let Ok(mut fibers) = self.runtime.inner.fibers.lock() {
+        let mut has_children = false;
+        if let Ok(fibers) = self.runtime.inner.fibers.lock() {
             let prefix = format!("{}/", self.scope);
-            fibers
-                .retain(|_, fiber| fiber.scope != self.scope && !fiber.scope.starts_with(&prefix));
+            for fiber in fibers
+                .values()
+                .filter(|fiber| fiber.scope == self.scope || fiber.scope.starts_with(&prefix))
+            {
+                has_children = true;
+                fiber.task.abort();
+            }
+        }
+        if has_children
+            && self
+                .effects
+                .trace
+                .as_ref()
+                .is_some_and(|trace| trace.is_root(&self.scope))
+        {
+            let runtime = self.runtime.clone();
+            let scope = self.scope.clone();
+            tokio::spawn(async move {
+                runtime.cancel_fibers(&scope).await;
+            });
         }
     }
 }
 impl loom::host::abilities::Host for ContextData {
     async fn perform(&mut self, desc: Vec<u8>) -> std::result::Result<Vec<u8>, String> {
-        if self.pure {
-            return Err("fold cannot perform effects".into());
+        let result = async {
+            if self.pure {
+                return Err("fold cannot perform effects".into());
+            }
+            if desc.len() > loom_proto::TRACE_MAX_BLOB_BYTES {
+                return Err("effect descriptor exceeds trace byte limit".into());
+            }
+            let mut desc = loom_proto::decode::<Value>(&desc)?;
+            resolve_self(&mut desc, &self.def_hash);
+            let occurrence = self.occurrence;
+            self.occurrence += 1;
+            self.runtime
+                .perform_contextual(desc, &self.scope, occurrence, self.effects.clone())
+                .await
+                .map(|output| output.bytes)
+                .map_err(|error| format!("{error:#}"))
         }
-        let mut desc = loom_proto::decode_host::<Value>(&desc)?;
-        resolve_self(&mut desc, &self.def_hash);
-        let occurrence = self.occurrence;
-        self.occurrence += 1;
-        let result = self
-            .runtime
-            .perform_contextual(desc, &self.scope, occurrence, self.effects.clone())
-            .await
-            .map_err(|e| format!("{e:#}"))?;
-        self.runtime.inner.effect_wire_bytes.fetch_add(result.bytes.len() as u64, Ordering::Relaxed);
-        Ok(result.bytes)
+        .await;
+        let bytes = match &result {
+            Ok(bytes) => bytes.len(),
+            Err(message) => message.len(),
+        };
+        self.runtime
+            .inner
+            .effect_wire_bytes
+            .fetch_add(bytes as u64, Ordering::Relaxed);
+        result
     }
 }
 #[derive(Debug, Clone)]
@@ -116,8 +158,23 @@ struct EffectOutput {
     bytes: Vec<u8>,
 }
 impl EffectOutput {
-    fn value(value: &Value) -> Result<Self> { Ok(Self { bytes: encode(value)? }) }
-    fn decode(&self) -> Result<Value> { loom_proto::decode_host(&self.bytes).map_err(anyhow::Error::msg) }
+    fn from_guest(bytes: Vec<u8>) -> Result<Self> {
+        anyhow::ensure!(
+            bytes.len() <= loom_proto::TRACE_MAX_BLOB_BYTES,
+            "guest result exceeds trace byte limit"
+        );
+        // Guest bytes cross the admission boundary before hashing or recording success.
+        decode(&bytes)?;
+        Ok(Self { bytes })
+    }
+    fn value(value: &Value) -> Result<Self> {
+        Ok(Self {
+            bytes: encode(value)?,
+        })
+    }
+    fn decode(&self) -> Result<Value> {
+        loom_proto::decode_host(&self.bytes).map_err(anyhow::Error::msg)
+    }
 }
 fn encode(value: &Value) -> Result<Vec<u8>> {
     loom_proto::encode(value).map_err(anyhow::Error::msg)
@@ -140,6 +197,7 @@ pub struct RuntimeTiming {
 }
 #[derive(Debug, serde::Serialize)]
 pub struct TimedCall {
+    pub scope: String,
     pub value: Value,
     pub timing: RuntimeTiming,
 }
@@ -159,22 +217,117 @@ impl Runtime {
     fn effect_lock(&self, key: String) -> Arc<AsyncMutex<()>> {
         let mut locks = self.inner.effect_locks.lock().unwrap();
         locks.retain(|_, lock| lock.strong_count() != 0);
-        if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) { return lock; }
+        if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+            return lock;
+        }
         let lock = Arc::new(AsyncMutex::new(()));
         locks.insert(key, Arc::downgrade(&lock));
         lock
+    }
+    fn trace_lock(&self, scope: &str) -> Arc<AsyncMutex<()>> {
+        let mut locks = self.inner.trace_locks.lock().unwrap();
+        locks.retain(|_, lock| lock.strong_count() != 0);
+        if let Some(lock) = locks.get(scope).and_then(Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(AsyncMutex::new(()));
+        locks.insert(scope.into(), Arc::downgrade(&lock));
+        lock
+    }
+    fn take_fiber(&self, id: &str, scope: &str) -> Result<FiberTask> {
+        let mut fibers = self.inner.fibers.lock().unwrap();
+        let task = fibers.get(id).context("unknown or already joined fiber")?;
+        anyhow::ensure!(
+            task.scope == scope || task.scope.starts_with(&format!("{scope}/")),
+            "cannot join a fiber from another scope"
+        );
+        Ok(fibers.remove(id).expect("validated fiber"))
+    }
+    async fn drain_recorded_fibers(
+        &self,
+        scope: &str,
+        trace: Option<&Arc<trace::ExecutionTrace>>,
+    ) -> Result<()> {
+        self.drain_recorded_fibers_until(
+            scope,
+            trace,
+            tokio::time::Instant::now() + Duration::from_secs(10),
+        )
+        .await
+    }
+    async fn drain_recorded_fibers_until(
+        &self,
+        scope: &str,
+        trace: Option<&Arc<trace::ExecutionTrace>>,
+        deadline: tokio::time::Instant,
+    ) -> Result<()> {
+        let Some(trace) = trace else {
+            return Ok(());
+        };
+        if !trace.start_draining(scope) {
+            return Ok(());
+        }
+        enum Drained {
+            Outcomes,
+            Task,
+        }
+        loop {
+            let child = {
+                let mut fibers = self.inner.fibers.lock().unwrap();
+                let id = fibers
+                    .iter()
+                    .find(|(id, task)| task.scope == scope && trace.requires_replay(id))
+                    .map(|(id, _)| id.clone());
+                id.map(|id| ScopedTask {
+                    scope: id.clone(),
+                    task: fibers.remove(&id).expect("selected fiber"),
+                })
+            };
+            let Some(mut child) = child else {
+                break;
+            };
+            let drained = tokio::time::timeout_at(deadline, async {
+                tokio::select! {
+                    _ = trace.wait_replayed(&child.scope) => Drained::Outcomes,
+                    _ = &mut child.task.task => Drained::Task,
+                }
+            })
+            .await;
+            if !matches!(drained, Ok(Drained::Task)) {
+                child.task.task.abort();
+                let _ = (&mut child.task.task).await;
+            }
+            anyhow::ensure!(
+                drained.is_ok(),
+                "replay child drain deadline exceeded at {}",
+                child.scope
+            );
+        }
+        Ok(())
     }
     async fn cancel_fibers(&self, scope: &str) {
         loop {
             let tasks = {
                 let mut fibers = self.inner.fibers.lock().unwrap();
                 let prefix = format!("{scope}/");
-                let ids: Vec<_> = fibers.iter().filter(|(_, fiber)| fiber.scope == scope || fiber.scope.starts_with(&prefix)).map(|(id, _)| id.clone()).collect();
-                ids.into_iter().filter_map(|id| fibers.remove(&id)).collect::<Vec<_>>()
+                let ids: Vec<_> = fibers
+                    .iter()
+                    .filter(|(_, fiber)| fiber.scope == scope || fiber.scope.starts_with(&prefix))
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                ids.into_iter()
+                    .filter_map(|id| fibers.remove(&id))
+                    .collect::<Vec<_>>()
             };
-            if tasks.is_empty() { break; }
-            for task in &tasks { task.task.abort(); }
-            for mut task in tasks { let _ = (&mut task.task).await; }
+            if tasks.is_empty() {
+                break;
+            }
+            for task in &tasks {
+                task.task.abort();
+            }
+            for mut task in tasks {
+                let _ = (&mut task.task).await;
+            }
         }
     }
     pub fn effect_wire_bytes(&self) -> u64 {
@@ -210,6 +363,8 @@ impl Runtime {
                 effect_locks: Mutex::new(HashMap::new()),
                 fibers: Mutex::new(HashMap::new()),
                 effect_wire_bytes: AtomicU64::new(0),
+                trace_locks: Mutex::new(HashMap::new()),
+                machine_roots: Mutex::new(HashMap::new()),
             }),
         };
         let weak = Arc::downgrade(&runtime.inner);
@@ -291,6 +446,10 @@ impl Runtime {
                     .store
                     .get(&component_hash)?
                     .context("component missing from CAS")?;
+                anyhow::ensure!(
+                    loom_proto::component_protocol::is_current(&bytes),
+                    "component uses an obsolete host protocol; migrate fs.list consumers to typed DirEntry and redefine the definition before execution"
+                );
                 timing.load_ms = elapsed_ms(load_start);
                 let engine = self.inner.engine.clone();
                 let compile_start = Instant::now();
@@ -362,9 +521,49 @@ impl Runtime {
             .output)
     }
     async fn call_scoped_timed(&self, hash: &str, args: Value, scope: &str) -> Result<TimedCall> {
-        let execution = trace::ExecutionTrace::fresh(scope);
+        self.call_traced_timed(hash, args, scope, trace::ExecutionTrace::fresh(scope))
+            .await
+    }
+    pub async fn replay_def_timed(
+        &self,
+        hash: &str,
+        args: Value,
+        scope: &str,
+    ) -> Result<TimedCall> {
+        let lock = self.trace_lock(scope);
+        let _guard = lock.lock().await;
+        let bundle = self
+            .inner
+            .store
+            .load_call_trace(scope)?
+            .context("call trace not found")?;
+        anyhow::ensure!(
+            bundle.trace.outcome.is_some(),
+            "cannot explicitly replay an incomplete call trace"
+        );
+        anyhow::ensure!(
+            !matches!(
+                bundle.trace.outcome,
+                Some(loom_proto::TraceOutcome::Cancelled)
+            ),
+            "recorded execution was cancelled before completion"
+        );
+        let execution = trace::ExecutionTrace::loaded(bundle)?;
+        self.call_traced_timed(hash, args, scope, execution).await
+    }
+    async fn call_traced_timed(
+        &self,
+        hash: &str,
+        args: Value,
+        scope: &str,
+        execution: Arc<trace::ExecutionTrace>,
+    ) -> Result<TimedCall> {
+        execution.identity(hash, &args)?;
         let session = trace::TraceSession::new(self.inner.store.clone(), execution.clone());
-        let effects = EffectContext { trace: Some(execution), ..EffectContext::default() };
+        let effects = EffectContext {
+            trace: Some(execution),
+            ..EffectContext::default()
+        };
         let result = self.call_scoped_delegated(hash, args, scope, effects).await;
         let outcome = match &result {
             Ok(call) => Ok(call.output.clone()),
@@ -372,7 +571,11 @@ impl Runtime {
         };
         session.finish(&outcome)?;
         let call = result?;
-        Ok(TimedCall { value: call.output.decode()?, timing: call.timing })
+        Ok(TimedCall {
+            scope: scope.into(),
+            value: call.output.decode()?,
+            timing: call.timing,
+        })
     }
     async fn call_scoped_delegated(
         &self,
@@ -390,9 +593,16 @@ impl Runtime {
             .bindings
             .call_call(&mut instance.store, &encode(&json!(hash))?, &encode(&args)?)
             .await;
+        let drained = self
+            .drain_recorded_fibers(scope, effects.trace.as_ref())
+            .await;
         self.cancel_fibers(scope).await;
+        if let Some(trace) = &effects.trace {
+            trace.finish_draining(scope);
+        }
+        drained?;
         let result = result?.map_err(anyhow::Error::msg)?;
-        let output = EffectOutput { bytes: result };
+        let output = EffectOutput::from_guest(result)?;
         instance.timing.run_ms = elapsed_ms(run_start);
         instance.timing.total_ms = elapsed_ms(call_start);
         Ok(EncodedCall {
@@ -522,9 +732,20 @@ impl Runtime {
             Some(bundle) => trace::ExecutionTrace::loaded(bundle)?,
             None => trace::ExecutionTrace::fresh(&scope),
         };
-        let session = trace::TraceSession::new(self.inner.store.clone(), execution.clone()).recoverable();
-        let effects = EffectContext { trace: Some(execution), actor_id: Some(actor.clone()), ..EffectContext::default() };
-        let mut instance = self.instance_delegated(&metadata.behavior_hash, &scope, false, &effects).await?;
+        execution.identity(
+            &metadata.behavior_hash,
+            &json!({"state":state,"message":message.msg}),
+        )?;
+        let session =
+            trace::TraceSession::new(self.inner.store.clone(), execution.clone()).recoverable();
+        let effects = EffectContext {
+            trace: Some(execution),
+            actor_id: Some(actor.clone()),
+            ..EffectContext::default()
+        };
+        let mut instance = self
+            .instance_delegated(&metadata.behavior_hash, &scope, false, &effects)
+            .await?;
         instance.store.data_mut().effects.actor_id = Some(actor.clone());
         let bytes = instance
             .bindings
@@ -533,8 +754,16 @@ impl Runtime {
                 &encode(&state)?,
                 &encode(&message.msg)?,
             )
-            .await?
-            .map_err(anyhow::Error::msg)?;
+            .await;
+        let drained = self
+            .drain_recorded_fibers(&scope, effects.trace.as_ref())
+            .await;
+        self.cancel_fibers(&scope).await;
+        if let Some(trace) = &effects.trace {
+            trace.finish_draining(&scope);
+        }
+        drained?;
+        let bytes = bytes?.map_err(anyhow::Error::msg)?;
         let events = decode(&bytes)?
             .as_array()
             .context("run must return array of events")?
@@ -637,13 +866,21 @@ impl Runtime {
         occurrence: i64,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send + 'a>> {
         Box::pin(async move {
+            let lock = self.trace_lock(scope);
+            let _guard = lock.lock().await;
+
             let execution = match self.inner.store.load_call_trace(scope)? {
                 Some(bundle) => trace::ExecutionTrace::loaded(bundle)?,
                 None => trace::ExecutionTrace::fresh(scope),
             };
             let session = trace::TraceSession::new(self.inner.store.clone(), execution.clone());
-            let effects = EffectContext { trace: Some(execution), ..EffectContext::default() };
-            let outcome = self.perform_contextual(desc, scope, occurrence, effects).await;
+            let effects = EffectContext {
+                trace: Some(execution),
+                ..EffectContext::default()
+            };
+            let outcome = self
+                .perform_contextual(desc, scope, occurrence, effects)
+                .await;
             session.finish(&outcome)?;
             outcome?.decode()
         })
@@ -654,220 +891,253 @@ impl Runtime {
         scope: &'a str,
         occurrence: i64,
         effects: EffectContext,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<EffectOutput>> + Send + 'a>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<EffectOutput>> + Send + 'a>>
+    {
         Box::pin(async move {
             let op = desc
                 .get("op")
                 .and_then(Value::as_str)
                 .context("descriptor op required")?;
             let scheduler = matches!(op, "fork" | "join" | "all" | "race" | "call");
-            let execution = effects.trace.clone().unwrap_or_else(|| trace::ExecutionTrace::fresh(scope));
+            let execution = effects
+                .trace
+                .clone()
+                .unwrap_or_else(|| trace::ExecutionTrace::fresh(scope));
             let mut effects = effects;
             effects.trace = Some(execution.clone());
+            if !scheduler
+                && effects.permits(op)
+                && let Some(definition_hash) = &effects.def_hash
+            {
+                execution.observe(definition_hash, op)?;
+            }
             let tracked = !scheduler || op == "race" || !effects.permits(op);
             let guard = if tracked {
                 match execution.begin(scope, occurrence, &desc, op == "race")? {
                     trace::StartedEffect::Replayed(output) => {
                         anyhow::ensure!(effects.permits(op), "effect {op} is not allowed");
                         return Ok(output);
-                    },
+                    }
                     trace::StartedEffect::Recorded(guard) => Some(guard),
                 }
-            } else { None };
-            let hash = if tracked { blake3::hash(&encode(&desc)?).to_hex().to_string() } else { String::new() };
+            } else {
+                None
+            };
+            let hash = if matches!(op, "send" | "spawn" | "cas.get" | "cas.put" | "exec") {
+                blake3::hash(&encode(&desc)?).to_hex().to_string()
+            } else {
+                String::new()
+            };
             let args = desc.get("args").cloned().unwrap_or(Value::Null);
             let outcome: Result<EffectOutput> = async {
-            if !effects.permits(op) {
-                bail!("effect {op} is not allowed for definition {}", effects.def_hash.as_deref().unwrap_or("<host>"));
-            }
-            match op {
-                "all" | "race" => {
-                    let mut args = args;
-                    let descs = match args.get_mut("descs").map(Value::take) {
-                        Some(Value::Array(descs)) => descs,
-                        _ => bail!("descs required"),
-                    };
-                    let child_scope = format!("{scope}/{op}:{occurrence}");
-                    let futures = descs
-                        .into_iter()
-                        .enumerate()
-                        .map(|(index, desc)| {
-                            self.perform_contextual(
-                                desc,
-                                &child_scope,
-                                index as i64,
+                if !effects.permits(op) {
+                    bail!(
+                        "effect {op} is not allowed for definition {}",
+                        effects.def_hash.as_deref().unwrap_or("<host>")
+                    );
+                }
+                match op {
+                    "all" | "race" => {
+                        let mut args = args;
+                        let descs = match args.get_mut("descs").map(Value::take) {
+                            Some(Value::Array(descs)) => descs,
+                            _ => bail!("descs required"),
+                        };
+                        let child_scope = format!("{scope}/{op}:{occurrence}");
+                        let futures = descs
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, desc)| {
+                                self.perform_contextual(
+                                    desc,
+                                    &child_scope,
+                                    index as i64,
+                                    effects.clone(),
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        if op == "all" {
+                            let results = futures::future::try_join_all(futures).await?;
+                            return Ok(EffectOutput {
+                                bytes: loom_proto::encode_host_array(
+                                    results.iter().map(|result| result.bytes.as_slice()),
+                                )
+                                .map_err(anyhow::Error::msg)?,
+                            });
+                        }
+                        if futures.is_empty() {
+                            bail!("race requires at least one descriptor");
+                        }
+                        return futures::future::select_all(futures).await.0;
+                    }
+                    "call" => {
+                        return self
+                            .call_scoped(
+                                required_str(&args, "def")?,
+                                args.get("args").cloned().unwrap_or(Value::Null),
+                                &format!("{scope}/call:{occurrence}"),
                                 effects.clone(),
                             )
-                        })
-                        .collect::<Vec<_>>();
-                    if op == "all" {
-                        let results = futures::future::try_join_all(futures).await?;
-                        return Ok(EffectOutput { bytes: loom_proto::encode_host_array(results.iter().map(|result| result.bytes.as_slice())).map_err(anyhow::Error::msg)? });
+                            .await;
                     }
-                    if futures.is_empty() {
-                        bail!("race requires at least one descriptor");
+                    "fork" => {
+                        let hash = required_str(&args, "def")?.to_owned();
+                        let args = args.get("args").cloned().unwrap_or(Value::Null);
+                        let runtime = self.clone();
+                        let child_scope = format!("{scope}/fork:{occurrence}");
+                        let id = child_scope.clone();
+                        let child_effects = effects.clone();
+                        let task = tokio::spawn(async move {
+                            runtime
+                                .call_scoped(&hash, args, &child_scope, child_effects)
+                                .await
+                        });
+                        self.inner.fibers.lock().unwrap().insert(
+                            id.clone(),
+                            FiberTask {
+                                scope: scope.into(),
+                                task,
+                            },
+                        );
+                        return EffectOutput::value(&json!(id));
                     }
-                    return futures::future::select_all(futures).await.0;
-                }
-                "call" => {
-                    return self
-                        .call_scoped(
-                            required_str(&args, "def")?,
-                            args.get("args").cloned().unwrap_or(Value::Null),
-                            &format!("{scope}/call:{occurrence}"),
-                            effects.clone(),
-                        )
-                        .await;
-                }
-                "fork" => {
-                    let hash = required_str(&args, "def")?.to_owned();
-                    let args = args.get("args").cloned().unwrap_or(Value::Null);
-                    let runtime = self.clone();
-                    let child_scope = format!("{scope}/fork:{occurrence}");
-                    let id = child_scope.clone();
-                    let child_effects = effects.clone();
-                    let task = tokio::spawn(async move {
-                        runtime
-                            .call_scoped(&hash, args, &child_scope, child_effects)
-                            .await
-                    });
-                    self.inner.fibers.lock().unwrap().insert(
-                        id.clone(),
-                        FiberTask {
-                            scope: scope.into(),
-                            task,
-                        },
-                    );
-                    return EffectOutput::value(&json!(id));
-                }
-                "join" => {
-                    let mut out = Vec::new();
-                    for id in args
-                        .get("fibers")
-                        .and_then(Value::as_array)
-                        .context("fibers required")?
-                    {
-                        let mut task = self
-                            .inner
-                            .fibers
-                            .lock()
-                            .unwrap()
-                            .remove(id.as_str().context("fiber id must be string")?)
-                            .context("unknown or already joined fiber")?;
-                        out.push((&mut task.task).await??);
+                    "join" => {
+                        let mut out = Vec::new();
+                        for id in args
+                            .get("fibers")
+                            .and_then(Value::as_array)
+                            .context("fibers required")?
+                        {
+                            let mut task = self.take_fiber(
+                                id.as_str().context("fiber id must be string")?,
+                                scope,
+                            )?;
+                            out.push((&mut task.task).await??);
+                        }
+                        return Ok(EffectOutput {
+                            bytes: loom_proto::encode_host_array(
+                                out.iter()
+                                    .map(|result: &EffectOutput| result.bytes.as_slice()),
+                            )
+                            .map_err(anyhow::Error::msg)?,
+                        });
                     }
-                    return Ok(EffectOutput { bytes: loom_proto::encode_host_array(out.iter().map(|result: &EffectOutput| result.bytes.as_slice())).map_err(anyhow::Error::msg)? });
-                }
-                "send" => {
-                    let key = format!("{scope}:{occurrence}:{hash}");
-                    let message = self.inner.store.enqueue_once(
-                        required_str(&args, "actor")?,
-                        &args.get("msg").cloned().unwrap_or(Value::Null),
-                        &key,
-                    )?;
-                    return self.schedule_message(message).and_then(|result| EffectOutput::value(&result));
-                }
-                "spawn" => {
-                    let key = format!("spawn:{scope}:{occurrence}:{hash}");
-                    let actor_id = blake3::hash(key.as_bytes()).to_hex().to_string();
-                    let actor = self
-                        .spawn_identified(
-                            required_str(&args, "def")?,
-                            args.get("state").cloned().unwrap_or(Value::Null),
-                            actor_id,
-                        )
-                        .await?;
-                    let result = serde_json::to_value(actor)?;
-                    return EffectOutput::value(&result);
-                }
-                _ => {}
-            }
-            let class = match op {
-                "cas.get" | "cas.put" => "hermetic",
-                "exec" if args.get("tree").and_then(Value::as_str).is_some() => "hermetic",
-                "exec" if args.get("key").and_then(Value::as_str).is_some() => "keyed",
-                _ => "observational",
-            };
-            let memoized = class == "hermetic" || class == "keyed";
-            let lock = memoized.then(|| self.effect_lock(hash.clone()));
-            let _guard = match &lock { Some(lock) => Some(lock.lock().await), None => None };
-            if memoized {
-                if let Some(result) = self.inner.store.effect_get(&hash, "global", 0)? {
-                    return EffectOutput::value(&result);
-                }
-            }
-            let result = match op {
-                "llm" => serde_json::to_value(
-                    self.inner
-                        .model
-                        .complete(serde_json::from_value(args.clone())?)
-                        .await?,
-                )?,
-                "sleep" => {
-                    let ms = args
-                        .get("ms")
-                        .and_then(Value::as_u64)
-                        .context("ms required")?;
-                    if ms > 86_400_000 {
-                        bail!("sleep exceeds one day limit");
+                    "send" => {
+                        let key = format!("{scope}:{occurrence}:{hash}");
+                        let message = self.inner.store.enqueue_once(
+                            required_str(&args, "actor")?,
+                            &args.get("msg").cloned().unwrap_or(Value::Null),
+                            &key,
+                        )?;
+                        return self
+                            .schedule_message(message)
+                            .and_then(|result| EffectOutput::value(&result));
                     }
-                    tokio::time::sleep(Duration::from_millis(ms)).await;
-                    Value::Null
+                    "spawn" => {
+                        let key = format!("spawn:{scope}:{occurrence}:{hash}");
+                        let actor_id = blake3::hash(key.as_bytes()).to_hex().to_string();
+                        let actor = self
+                            .spawn_identified(
+                                required_str(&args, "def")?,
+                                args.get("state").cloned().unwrap_or(Value::Null),
+                                actor_id,
+                            )
+                            .await?;
+                        let result = serde_json::to_value(actor)?;
+                        return EffectOutput::value(&result);
+                    }
+                    _ => {}
                 }
-                "now" => json!(
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)?
-                        .as_millis()
-                ),
-                "random" => json!(
-                    (uuid::Uuid::new_v4().as_u128() as u64 & ((1u64 << 53) - 1)) as f64
-                        / ((1u64 << 53) as f64)
-                ),
-                "cas.put" => {
-                    let hash = self.inner.store.put_value("blob", &args)?;
+                let class = match op {
+                    "cas.get" | "cas.put" => "hermetic",
+                    "exec" if args.get("tree").and_then(Value::as_str).is_some() => "hermetic",
+                    "exec" if args.get("key").and_then(Value::as_str).is_some() => "keyed",
+                    _ => "observational",
+                };
+                let memoized = class == "hermetic" || class == "keyed";
+                let lock = memoized.then(|| self.effect_lock(hash.clone()));
+                let _guard = match &lock {
+                    Some(lock) => Some(lock.lock().await),
+                    None => None,
+                };
+                if memoized {
+                    if let Some(result) = self.inner.store.effect_get(&hash, "global", 0)? {
+                        return EffectOutput::value(&result);
+                    }
+                }
+                let result = match op {
+                    "llm" => serde_json::to_value(
+                        self.inner
+                            .model
+                            .complete(serde_json::from_value(args.clone())?)
+                            .await?,
+                    )?,
+                    "sleep" => {
+                        let ms = args
+                            .get("ms")
+                            .and_then(Value::as_u64)
+                            .context("ms required")?;
+                        if ms > 86_400_000 {
+                            bail!("sleep exceeds one day limit");
+                        }
+                        tokio::time::sleep(Duration::from_millis(ms)).await;
+                        Value::Null
+                    }
+                    "now" => json!(
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)?
+                            .as_millis()
+                    ),
+                    "random" => json!(
+                        (uuid::Uuid::new_v4().as_u128() as u64 & ((1u64 << 53) - 1)) as f64
+                            / ((1u64 << 53) as f64)
+                    ),
+                    "cas.put" => {
+                        let hash = self.inner.store.put_value("blob", &args)?;
+                        self.inner
+                            .store
+                            .reference(&hash, loom_proto::DAG_CBOR_CODEC)?
+                    }
+                    "cas.get" => self
+                        .inner
+                        .store
+                        .get_value(required_str(&args, "hash")?)?
+                        .context("CAS value not found")?,
+                    "exec" if args.get("tree").is_some() => self.hermetic_exec(&args).await?,
+                    "exec" => {
+                        let program = required_str(&args, "program")?;
+                        let mut command = tokio::process::Command::new(program);
+                        if let Some(arguments) = args.get("args").and_then(Value::as_array) {
+                            for argument in arguments {
+                                command.arg(
+                                    argument
+                                        .as_str()
+                                        .context("exec arguments must be strings")?,
+                                );
+                            }
+                        }
+                        self.execute_command(command, capture_paths(&args)?).await?
+                    }
+                    "fs.snapshot" => self.snapshot_tree(&args).await?,
+                    "fs.read" => self.read_machine_file(&args).await?,
+                    "fs.stat" => self.stat_machine_path(&args).await?,
+                    "fs.walk" => return self.walk_machine_directory(&args).await,
+                    "fs.list" => return self.list_machine_directory(&args).await,
+                    _ => bail!("unsupported ability: {op}"),
+                };
+                if memoized {
                     self.inner
                         .store
-                        .reference(&hash, loom_proto::DAG_CBOR_CODEC)?
+                        .enqueue_effect(&hash, "global", 0, &result)?;
                 }
-                "cas.get" => self
-                    .inner
-                    .store
-                    .get_value(required_str(&args, "hash")?)?
-                    .context("CAS value not found")?,
-                "exec" if args.get("tree").is_some() => self.hermetic_exec(&args).await?,
-                "exec" => {
-                    let program = required_str(&args, "program")?;
-                    let mut command = tokio::process::Command::new(program);
-                    if let Some(arguments) = args.get("args").and_then(Value::as_array) {
-                        for argument in arguments {
-                            command.arg(
-                                argument
-                                    .as_str()
-                                    .context("exec arguments must be strings")?,
-                            );
-                        }
-                    }
-                    self.execute_command(command, capture_paths(&args)?).await?
-                }
-                "fs.snapshot" => self.snapshot_tree(&args).await?,
-                "fs.read" => self.read_machine_file(&args).await?,
-                "fs.stat" => {
-                    let metadata = tokio::fs::metadata(self.machine_path(&args)?).await?;
-                    json!({"size":metadata.len(),"is_dir":metadata.is_dir(),"is_file":metadata.is_file()})
-                }
-                "fs.list" => return self.list_machine_directory(&args).await,
-                _ => bail!("unsupported ability: {op}"),
-            };
-            if memoized {
-                self.inner.store.enqueue_effect(&hash, "global", 0, &result)?;
+                EffectOutput::value(&result)
             }
-            EffectOutput::value(&result)
-            }.await;
-            if let Some(guard) = guard { guard.finish(&outcome); }
+            .await;
+            let recorded = guard.map(|guard| guard.finish(&outcome)).transpose();
             if effects.actor_id.is_some() && tracked {
-                let snapshot = execution.snapshot(None, false)?;
-                self.inner.store.persist_call_trace(&snapshot)?;
+                execution.checkpoint(&self.inner.store)?;
             }
+            recorded?;
             outcome
         })
     }
@@ -980,22 +1250,99 @@ impl Runtime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn padded_cid() -> Vec<u8> {
+        let mut bytes = vec![0xd8, 0x2a, 0x58, 0x26, 0, 1, 0x71, 0x1e, 0x20];
+        bytes.extend_from_slice(&[0; 32]);
+        bytes.push(0);
+        bytes
+    }
+
+    #[test]
+    fn guest_results_require_strict_admission() -> Result<()> {
+        let reference = loom_proto::reference(&"00".repeat(32), loom_proto::DAG_CBOR_CODEC)
+            .map_err(anyhow::Error::msg)?;
+        let canonical = encode(&reference)?;
+        assert_eq!(EffectOutput::from_guest(canonical)?.decode()?, reference);
+        assert!(EffectOutput::from_guest(padded_cid()).is_err());
+        assert!(EffectOutput::from_guest(vec![0, 0]).is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn guest_descriptors_are_validated_before_effect_occurrence() -> Result<()> {
+        let runtime = Runtime::new(Store::memory()?)?;
+        let mut context = ContextData {
+            runtime,
+            scope: "guest-admission-control".into(),
+            def_hash: "00".repeat(32),
+            occurrence: 0,
+            limits: StoreLimitsBuilder::new().build(),
+            pure: false,
+            effects: EffectContext::default(),
+        };
+        // Canonical map order, with a padded CID nested in otherwise valid sleep args.
+        let mut padded = b"\xa2\x62op\x65sleep\x64args\xa2\x61x".to_vec();
+        padded.extend(padded_cid());
+        padded.extend_from_slice(b"\x62ms\x00");
+        let canonical = encode(&json!({"op":"sleep", "args":{"ms":0}}))?;
+        let mut trailing = canonical.clone();
+        trailing.push(0);
+        for invalid in [padded, trailing] {
+            assert!(
+                loom::host::abilities::Host::perform(&mut context, invalid)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(context.occurrence, 0);
+        }
+        loom::host::abilities::Host::perform(&mut context, canonical)
+            .await
+            .map_err(anyhow::Error::msg)?;
+        assert_eq!(context.occurrence, 1);
+        Ok(())
+    }
     #[tokio::test]
     async fn scheduling_records_only_leaf_effects() -> Result<()> {
         let store = Store::memory()?;
         let runtime = Runtime::new(store.clone())?;
-        let result = runtime.perform(json!({"op":"all","args":{"descs":[
-            {"op":"sleep","args":{"ms":0}},
-            {"op":"sleep","args":{"ms":1}}
-        ]}}), "scheduler-control", 0).await?;
+        let result = runtime
+            .perform(
+                json!({"op":"all","args":{"descs":[
+                    {"op":"sleep","args":{"ms":0}},
+                    {"op":"sleep","args":{"ms":1}}
+                ]}}),
+                "scheduler-control",
+                0,
+            )
+            .await?;
         assert_eq!(result.as_array().map(Vec::len), Some(2));
         store.flush()?;
         let events = store.events(None, 0, 100)?;
-        assert_eq!(events.iter().filter(|event| event.event["type"] == "call_completed").count(), 1);
-        assert!(events.iter().all(|event| event.event["type"] != "effect_invoked" && event.event["type"] != "effect_completed"));
-        let bundle = store.load_call_trace("scheduler-control")?.context("trace")?;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event["type"] == "call_completed")
+                .count(),
+            1
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event.event["type"] != "effect_invoked"
+                    && event.event["type"] != "effect_completed")
+        );
+        let bundle = store
+            .load_call_trace("scheduler-control")?
+            .context("trace")?;
         assert_eq!(bundle.trace.entries.len(), 2);
-        assert!(bundle.trace.entries.iter().all(|entry| entry.key.scope == "scheduler-control/all:0"));
+        assert!(
+            bundle
+                .trace
+                .entries
+                .iter()
+                .all(|entry| entry.key.scope == "scheduler-control/all:0")
+        );
         Ok(())
     }
     #[tokio::test]
@@ -1066,7 +1413,9 @@ mod tests {
             {"op":"exec","args":{"program":"sh","args":["-c","(sleep 1; printf orphan > \"$2\") & printf ready > \"$1\"; wait","loom",ready,orphan]}},
             {"op":"exec","args":{"program":"sh","args":["-c","while [ ! -f \"$1\" ]; do sleep .01; done","loom",ready]}}
         ]}});
-        let result = tokio::time::timeout(Duration::from_secs(5), runtime.perform(desc, "cancel", 0)).await??;
+        let result =
+            tokio::time::timeout(Duration::from_secs(5), runtime.perform(desc, "cancel", 0))
+                .await??;
         assert_eq!(result["code"], 0);
         assert!(
             ready.exists(),
@@ -1136,12 +1485,370 @@ mod tests {
         );
         Ok(())
     }
+    #[tokio::test]
+    async fn cancellation_persists_an_explicit_cancelled_trace() -> Result<()> {
+        let store = Store::memory()?;
+        let runtime = Runtime::new(store.clone())?;
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(10),
+                runtime.perform(
+                    json!({"op":"sleep","args":{"ms":5000}}),
+                    "cancelled-root",
+                    0
+                )
+            )
+            .await
+            .is_err()
+        );
+        let bundle = store
+            .load_call_trace("cancelled-root")?
+            .context("cancelled trace missing")?;
+        assert!(matches!(
+            bundle.trace.outcome,
+            Some(loom_proto::TraceOutcome::Cancelled)
+        ));
+        assert_eq!(bundle.trace.entries.len(), 1);
+        assert!(matches!(
+            bundle.trace.entries[0].outcome,
+            loom_proto::TraceOutcome::Cancelled
+        ));
+        Ok(())
+    }
+    #[tokio::test]
+    async fn unjoined_replay_drains_saved_success_and_error_before_cancellation() -> Result<()> {
+        let runtime = Runtime::new(Store::memory()?)?;
+        for completed in [false, true] {
+            for failed in [false, true] {
+                let original = trace::ExecutionTrace::fresh("root");
+                let descriptor = json!({"op":"random"});
+                let trace::StartedEffect::Recorded(guard) =
+                    original.begin("root/fork:0", 0, &descriptor, false)?
+                else {
+                    bail!("fresh trace")
+                };
+                let child_result = if failed {
+                    Err(anyhow::anyhow!("child failure"))
+                } else {
+                    EffectOutput::value(&json!(17))
+                };
+                guard.finish(&child_result)?;
+                let root_result = EffectOutput::value(&json!(3));
+                let checkpoint =
+                    original.snapshot(if completed { Some(&root_result) } else { None }, true)?;
+                let replay = trace::ExecutionTrace::loaded(checkpoint)?;
+                let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let child_observed = observed.clone();
+                let child_trace = replay.clone();
+                let task = tokio::spawn(async move {
+                    tokio::task::yield_now().await;
+                    let output = child_trace.begin("root/fork:0", 0, &descriptor, false);
+                    if failed {
+                        anyhow::ensure!(
+                            output
+                                .err()
+                                .context("missing recorded failure")?
+                                .to_string()
+                                == "child failure"
+                        );
+                    } else {
+                        anyhow::ensure!(
+                            matches!(output?, trace::StartedEffect::Replayed(_)),
+                            "executed recorded effect"
+                        );
+                    }
+                    anyhow::ensure!(
+                        child_trace
+                            .begin("root/fork:0", 1, &json!({"op":"now"}), false)
+                            .is_err(),
+                        "drain started a new external effect"
+                    );
+                    child_observed.store(true, Ordering::Release);
+                    std::future::pending::<()>().await;
+                    EffectOutput::value(&Value::Null)
+                });
+                runtime.inner.fibers.lock().unwrap().insert(
+                    "root/fork:0".into(),
+                    FiberTask {
+                        scope: "root".into(),
+                        task,
+                    },
+                );
+                runtime.drain_recorded_fibers("root", Some(&replay)).await?;
+                runtime.cancel_fibers("root").await;
+                replay.finish_draining("root");
+                assert!(
+                    observed.load(Ordering::Acquire),
+                    "cancelled child before replaying its recorded outcome"
+                );
+                replay.snapshot(Some(&root_result), true)?;
+            }
+        }
+        Ok(())
+    }
+    #[tokio::test]
+    async fn replay_drain_deadline_aborts_child_without_accepting_missing_outcomes() -> Result<()> {
+        let runtime = Runtime::new(Store::memory()?)?;
+        let original = trace::ExecutionTrace::fresh("root");
+        let trace::StartedEffect::Recorded(guard) =
+            original.begin("root/fork:0", 0, &json!({"op":"random"}), false)?
+        else {
+            bail!("fresh")
+        };
+        let result = EffectOutput::value(&json!(1));
+        guard.finish(&result)?;
+        let replay = trace::ExecutionTrace::loaded(original.snapshot(Some(&result), true)?)?;
+        let task = tokio::spawn(async {
+            std::future::pending::<()>().await;
+            EffectOutput::value(&Value::Null)
+        });
+        runtime.inner.fibers.lock().unwrap().insert(
+            "root/fork:0".into(),
+            FiberTask {
+                scope: "root".into(),
+                task,
+            },
+        );
+        let error = runtime
+            .drain_recorded_fibers_until(
+                "root",
+                Some(&replay),
+                tokio::time::Instant::now() + Duration::from_millis(20),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("deadline exceeded at root/fork:0")
+        );
+        assert!(runtime.inner.fibers.lock().unwrap().is_empty());
+        assert!(replay.snapshot(Some(&result), true).is_err());
+        Ok(())
+    }
+    #[tokio::test]
+    async fn caller_cancellation_does_not_wait_for_replay_drain_budget() -> Result<()> {
+        struct ChildDrop {
+            done: Option<tokio::sync::oneshot::Sender<()>>,
+        }
+        impl Drop for ChildDrop {
+            fn drop(&mut self) {
+                if let Some(done) = self.done.take() {
+                    let _ = done.send(());
+                }
+            }
+        }
+        let runtime = Runtime::new(Store::memory()?)?;
+        let original = trace::ExecutionTrace::fresh("root");
+        let trace::StartedEffect::Recorded(guard) =
+            original.begin("root/fork:0", 0, &json!({"op":"random"}), false)?
+        else {
+            bail!("fresh")
+        };
+        let result = EffectOutput::value(&json!(1));
+        guard.finish(&result)?;
+        let replay = trace::ExecutionTrace::loaded(original.snapshot(Some(&result), true)?)?;
+        let (done, dropped) = tokio::sync::oneshot::channel();
+        let (ready, started) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _drop = ChildDrop { done: Some(done) };
+            let _ = ready.send(());
+            std::future::pending::<()>().await;
+            EffectOutput::value(&Value::Null)
+        });
+        runtime.inner.fibers.lock().unwrap().insert(
+            "root/fork:0".into(),
+            FiberTask {
+                scope: "root".into(),
+                task,
+            },
+        );
+        started.await?;
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(20),
+                runtime.drain_recorded_fibers("root", Some(&replay))
+            )
+            .await
+            .is_err()
+        );
+        tokio::time::timeout(Duration::from_millis(200), dropped).await??;
+        assert!(runtime.inner.fibers.lock().unwrap().is_empty());
+        Ok(())
+    }
+    #[tokio::test]
+    async fn unstarted_cancelled_child_does_not_block_replay_completion() -> Result<()> {
+        let runtime = Runtime::new(Store::memory()?)?;
+        let original = trace::ExecutionTrace::fresh("root");
+        drop(original.begin("root/fork:0", 0, &json!({"op":"sleep"}), false)?);
+        let result = EffectOutput::value(&json!(1));
+        let replay = trace::ExecutionTrace::loaded(original.snapshot(Some(&result), true)?)?;
+        runtime.drain_recorded_fibers("root", Some(&replay)).await?;
+        runtime.cancel_fibers("root").await;
+        replay.finish_draining("root");
+        replay.snapshot(Some(&result), true)?;
+        Ok(())
+    }
+    #[tokio::test]
+    async fn effect_observations_follow_delegated_definition_and_exclude_denials() -> Result<()> {
+        let runtime = Runtime::new(Store::memory()?)?;
+        let execution = trace::ExecutionTrace::fresh("root");
+        let parent = EffectContext {
+            def_hash: Some("parent".into()),
+            trace: Some(execution.clone()),
+            ..EffectContext::default()
+        };
+        runtime
+            .perform_contextual(
+                json!({"op":"sleep","args":{"ms":0}}),
+                "root",
+                0,
+                parent.clone(),
+            )
+            .await?;
+        runtime
+            .perform_contextual(
+                json!({"op":"sleep","args":{"ms":0}}),
+                "root/child",
+                0,
+                parent.delegated("child", None),
+            )
+            .await?;
+        assert!(
+            runtime
+                .perform_contextual(
+                    json!({"op":"now"}),
+                    "root/denied",
+                    0,
+                    parent.delegated("denied", Some(&[]))
+                )
+                .await
+                .is_err()
+        );
+        let bundle = execution.snapshot(None, true)?;
+        assert_eq!(
+            bundle.observations,
+            vec![
+                loom_proto::TraceObservation {
+                    definition_hash: "child".into(),
+                    op: "sleep".into()
+                },
+                loom_proto::TraceObservation {
+                    definition_hash: "parent".into(),
+                    op: "sleep".into()
+                },
+            ]
+        );
+        Ok(())
+    }
+    #[tokio::test]
+    async fn concurrent_execution_of_one_scope_publishes_one_observation() -> Result<()> {
+        let store = Store::memory()?;
+        let runtime = Runtime::new(store.clone())?;
+        let descriptor = json!({"op":"random"});
+        let outputs = futures::future::try_join_all(
+            (0..8).map(|_| runtime.perform(descriptor.clone(), "same-scope", 0)),
+        )
+        .await?;
+        assert!(outputs.iter().all(|output| output == &outputs[0]));
+        let events = store.events(Some("system"), 0, 100)?;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event["type"] == "call_completed")
+                .count(),
+            1
+        );
+        Ok(())
+    }
+    #[tokio::test]
+    async fn joining_another_scope_does_not_remove_its_fiber() -> Result<()> {
+        let runtime = Runtime::new(Store::memory()?)?;
+        let task = tokio::spawn(async { EffectOutput::value(&json!(1)) });
+        runtime.inner.fibers.lock().unwrap().insert(
+            "owner/fork:0".into(),
+            FiberTask {
+                scope: "owner".into(),
+                task,
+            },
+        );
+        assert!(runtime.take_fiber("owner/fork:0", "other").is_err());
+        let mut task = runtime.take_fiber("owner/fork:0", "owner")?;
+        assert_eq!((&mut task.task).await??.decode()?, json!(1));
+        Ok(())
+    }
+    #[tokio::test]
+    async fn scoped_cancellation_waits_for_child_destruction() -> Result<()> {
+        struct Dropped {
+            flag: Arc<std::sync::atomic::AtomicBool>,
+        }
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.flag.store(true, Ordering::Release);
+            }
+        }
+        let runtime = Runtime::new(Store::memory()?)?;
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = dropped.clone();
+        let (ready, started) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _drop = Dropped { flag };
+            let _ = ready.send(());
+            std::future::pending::<()>().await;
+            EffectOutput::value(&Value::Null)
+        });
+        runtime.inner.fibers.lock().unwrap().insert(
+            "root/fork:0".into(),
+            FiberTask {
+                scope: "root".into(),
+                task,
+            },
+        );
+        started.await?;
+        runtime.cancel_fibers("root").await;
+        assert!(dropped.load(Ordering::Acquire));
+        assert!(runtime.inner.fibers.lock().unwrap().is_empty());
+        Ok(())
+    }
+    #[tokio::test]
+    async fn fresh_observations_do_not_accumulate_global_locks_or_effect_rows() -> Result<()> {
+        let store = Store::memory()?;
+        let runtime = Runtime::new(store.clone())?;
+        for index in 0..8 {
+            runtime
+                .perform(json!({"op":"random"}), &format!("fresh-{index}"), 0)
+                .await?;
+        }
+        assert!(runtime.inner.effect_locks.lock().unwrap().is_empty());
+        let events = store.events(Some("system"), 0, 1000)?;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event["type"] == "call_completed")
+                .count(),
+            8
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event.event["type"] != "effect_recorded")
+        );
+        Ok(())
+    }
     #[test]
     fn shared_memory_is_rejected_by_the_execution_engine() -> Result<()> {
         let runtime = Runtime::new(Store::memory()?)?;
-        Component::new(&runtime.inner.engine, "(component (core module (memory 1)))")?;
-        assert!(Component::new(&runtime.inner.engine,
-            "(component (core module (memory 1 1 shared)))").is_err());
+        Component::new(
+            &runtime.inner.engine,
+            "(component (core module (memory 1)))",
+        )?;
+        assert!(
+            Component::new(
+                &runtime.inner.engine,
+                "(component (core module (memory 1 1 shared)))"
+            )
+            .is_err()
+        );
         Ok(())
     }
     #[test]

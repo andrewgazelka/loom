@@ -29,6 +29,8 @@ pub fn main() -> String {
 
 Two effects run concurrently. Both examples use ordinary synchronous functions; the host handles suspension and resumption.
 
+Guests keep separate WebAssembly memories and exchange DAG-CBOR values. Rust's safety checks are not a formally proven security boundary; the [isolation decision](docs/plan-unified-memory.md#memory-isolation-decision) explains the risk and the longer-term goal of a formally verified language and toolchain.
+
 - **One REPL, two languages.** Define interactively, call across languages, `fork` work by hash, and `join` the results.
 - **Actors with history.** State is folded from events. Fork a session, replay an actor, or upgrade its behavior.
 - **Effects you can inspect.** The host records results and reuses them during replay. Descriptors make fan-out and caching explicit.

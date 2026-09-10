@@ -19,6 +19,25 @@ It checks correctness against a native scan, including ties, symlinks, and seven
 
 The first run of the extended scan command passed 4/12 checks. On the existing history database, `all` was 184.2 ms and fork/join 149.1 ms at a load average of 23.3. Identical scans added about 690 KB. Wire and storage-wait metrics were absent and failed explicitly. This loaded run is a baseline, not a controlled attribution of individual costs.
 
+The staged measurements preserve that distinction:
+
+| Implementation | Checks | All median | Fork/join median | Reply storage wait, all / fork |
+| --- | --- | --- | --- | --- |
+| Trace and typed codec, original filesystem calls | 8/12 | 17.491 ms | 19.490 ms | 1.383 / 1.638 ms |
+| Pinned roots and batched filesystem calls | 10/12 | 11.896 ms | 12.382 ms | 1.778 / 1.616 ms |
+| Pooled host traversal, batched metadata retained | 10/12 | 10.246 ms | 11.335 ms | 1.535 / 1.349 ms |
+| Strict guest admission and replay corrections | 10/12 | 10.457 ms | 12.003 ms | 1.498 / 1.591 ms |
+
+The second run added an average 20,480 / 26,331 bytes per identical all/fork scan and transferred 167,656 / 186,932 effect bytes. All correctness checks passed, including seven changing winners. Its load averages were 16.61, 24.92 and 24.26. The first remaining gate is reply storage wait below 1 ms. These measurements still use the existing explicit checkpoint barrier; the background durability candidate is separate and has not changed the store contract.
+
+The native codec benchmark uses the actual 10,000-file fixture and 257 listing payloads. Encoding took 0.129 ms and decoding 0.321 ms across 200 rounds; the 167,607 encoded bytes matched the strict encoder exactly. The host `fs.walk` path has a separate target below 8 ms, which remains unmet. Its standalone full Loom median is 17.215 ms. A mixed workload measured 8.765 ms, but interleaved native scans changed macOS metadata-cache behavior; that result does not establish standalone walk latency.
+
+A comparison of two immutable builds, with identical guest components and cloned histories, rejected separate size lookups as the production path. Batched metadata completed all/fork in 10.645 / 12.040 ms, while batched names followed by per-file size reads took 16.488 / 14.472 ms. All 48 results were correct. The implementation retains batched metadata and pooled traversal without cache-priming state.
+
+The isolated background durability candidate passed 41 store tests and 10 native syscall/crash controls. Requests and recording made zero sync calls, while maintenance made 60 across 20 rotations. Acknowledged effects survived SIGKILL before periodic maintenance. However, adding 100 ms to each real background sync increased contended request-round medians from 33.840 to 334.886 ms through the shared connection lock. It therefore does not establish zero sync-dependent reply waits. Its WAL bound was measured for one cooperating writer and a finite workload, not arbitrary transactions or indefinitely pinned readers. Selecting a different reply policy and enforcing production capacity limits remain unresolved; main still uses its explicit checkpoint barrier.
+
+The final correctness snapshot passed 105 affected Linux tests, including strict guest descriptor/result admission, partial actor recovery and cancellation-sensitive replay of unjoined children. An earlier broader snapshot passed 152 tests; these counts overlap and must not be added. The six native compiler checks and exact README Rust example also passed. The UI's production parser consumed 257 effects across two actual API pages; visual verification was blocked by Computer Use's native pipe startup failure.
+
 Implementation order and contracts:
 
 1. A completed call stores one trace object and one `call_completed` event. The trace identifies each effect by descriptor, deterministic job scope and occurrence, and references its result. Repeated descriptors and concurrent completion order must not change replay. Result blobs deduplicate. Fresh calls keep their trace in memory and do not query SQLite for newly generated scopes. Global memoization is limited to effects with a valid hermetic or explicit cache key. Pending actors retain recovery checkpoints; failure, cancellation and race outcomes must remain replayable. Historical effects stay readable through a verified migration and trace-backed projections.

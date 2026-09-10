@@ -12,7 +12,7 @@ if (!process.argv[2] || !native || !process.env.LOOM_URL || !process.env.LOOM_TO
 const client = new LoomMcpClient({endpoint:process.env.LOOM_URL, token:(await readFile(process.env.LOOM_TOKEN_FILE,'utf8')).trim()});
 interface Winner {path:string;size:number}
 interface Measurement extends Winner {ms:number;wall_ms:number;files:number;directories:number}
-interface Variant {name:string;hash:string;samples:number[];recordingCommits:(number|null)[];growthBytes:number[];usedGrowthBytes:number[];wireBytes:number[];storageMs:number[]}
+interface Variant {name:string;hash:string;samples:number[];recordingCommits:(number|null)[];growthBytes:number[];usedGrowthBytes:number[];wireBytes:number[];storageMs:number[];transactionMs:number[];checkpointMs:number[]}
 function assert(value:unknown, message:string):asserts value {if(!value)throw new Error(message);}
 async function nativeScan():Promise<Measurement> {
   const start=performance.now();
@@ -66,7 +66,7 @@ try {
       console.log(JSON.stringify({stage:'reuse-compiled-definition',name,hash}));
     }
     assert(typeof hash==='string'&&/^[0-9a-f]{64}$/.test(hash),'Invalid definition hash');
-    variants.push({name,hash,samples:[],recordingCommits:[],growthBytes:[],usedGrowthBytes:[],wireBytes:[],storageMs:[]});
+    variants.push({name,hash,samples:[],recordingCommits:[],growthBytes:[],usedGrowthBytes:[],wireBytes:[],storageMs:[],transactionMs:[],checkpointMs:[]});
     const callStart=performance.now();
     same(await command('call',{hash,args:[machine.id,'.']}),baseline);
     console.log(JSON.stringify({stage:'first-call',name,ms:performance.now()-callStart}));
@@ -95,6 +95,8 @@ try {
         const after=afterStats.recording_commits;
         variant.wireBytes.push(counter(afterStats,'effect_wire_bytes')-counter(beforeStats,'effect_wire_bytes'));
         variant.storageMs.push(counter(afterStats,'last_reply_storage_nanos')/1e6);
+        variant.transactionMs.push((counter(afterStats,'recording_transaction_nanos')-counter(beforeStats,'recording_transaction_nanos'))/1e6);
+        variant.checkpointMs.push((counter(afterStats,'recording_checkpoint_nanos')-counter(beforeStats,'recording_checkpoint_nanos'))/1e6);
         variant.recordingCommits.push(typeof before==='number'&&typeof after==='number'&&Number.isSafeInteger(before)&&Number.isSafeInteger(after)&&after>=before ? after-before : null);
       }
     }
@@ -117,7 +119,7 @@ try {
     gate(variant.storageMs.every(value=>Number.isFinite(value)&&value>=0)&&median(variant.storageMs)<1,`${variant.name}: median reply storage wait <1ms`,JSON.stringify(variant.storageMs));
   }
   const nativeMedian=median(nativeSamples);
-  console.log(JSON.stringify({stage:'warm-summary',load_average:loadavg(),native:{samples_ms:nativeSamples,median_ms:nativeMedian,wall_samples_ms:nativeWall,wall_median_ms:median(nativeWall)},variants:variants.map(variant=>({name:variant.name,samples_ms:variant.samples,queued_recording_commits:variant.recordingCommits,database_bytes_per_identical_scan:variant.growthBytes,used_database_bytes_per_identical_scan:variant.usedGrowthBytes,wire_bytes:variant.wireBytes,reply_storage_ms:variant.storageMs,median_ms:median(variant.samples),ratio_to_native:median(variant.samples)/nativeMedian}))}));
+  console.log(JSON.stringify({stage:'warm-summary',load_average:loadavg(),native:{samples_ms:nativeSamples,median_ms:nativeMedian,wall_samples_ms:nativeWall,wall_median_ms:median(nativeWall)},variants:variants.map(variant=>({name:variant.name,samples_ms:variant.samples,queued_recording_commits:variant.recordingCommits,database_bytes_per_identical_scan:variant.growthBytes,used_database_bytes_per_identical_scan:variant.usedGrowthBytes,wire_bytes:variant.wireBytes,reply_storage_ms:variant.storageMs,transaction_ms:variant.transactionMs,checkpoint_ms:variant.checkpointMs,median_ms:median(variant.samples),ratio_to_native:median(variant.samples)/nativeMedian}))}));
 } finally {
   if(created)await rm(mutation,{recursive:true});
   await client.close();

@@ -17,7 +17,15 @@ use loom_proto::{CommandRequest, Def, DefineRequest, EvalRequest, Lang, Response
 use loom_store::Store;
 use serde::Deserialize;
 use serde_json::json;
-use std::{collections::BTreeMap, path::PathBuf, sync::{Arc, atomic::{AtomicU64, Ordering}}, time::{Duration, Instant}};
+use std::{
+    collections::BTreeMap,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
 #[derive(Clone)]
 pub struct Service {
@@ -288,18 +296,31 @@ impl Service {
             }
             if candidate.lang == Lang::Rust && candidate.source.trim_start().starts_with('{') {
                 let mut bundle: loom_check::SourceBundle = serde_json::from_str(&candidate.source)?;
-                if let Some(manifest) = bundle.files.get_mut("Cargo.toml").and_then(loom_check::SourceFile::text_mut) {
+                if let Some(manifest) = bundle
+                    .files
+                    .get_mut("Cargo.toml")
+                    .and_then(loom_check::SourceFile::text_mut)
+                {
                     let mut document: toml::Value = manifest.parse()?;
-                    if let Some(deps) = document.get_mut("loom").and_then(|loom| loom.get_mut("deps")).and_then(toml::Value::as_table_mut) {
+                    if let Some(deps) = document
+                        .get_mut("loom")
+                        .and_then(|loom| loom.get_mut("deps"))
+                        .and_then(toml::Value::as_table_mut)
+                    {
                         for dependency in deps.iter_mut().map(|entry| entry.1) {
-                            if let Some(replacement) = dependency.as_str().and_then(|hash| replacements.get(hash.trim_start_matches('#'))) {
+                            if let Some(replacement) = dependency
+                                .as_str()
+                                .and_then(|hash| replacements.get(hash.trim_start_matches('#')))
+                            {
                                 *dependency = toml::Value::String(replacement.clone());
                             }
                         }
                     }
                     *manifest = toml::to_string(&document)?;
                 }
-                bundle.files.retain(|name, _| !name.starts_with("vendor/") && !name.starts_with(".cargo/"));
+                bundle
+                    .files
+                    .retain(|name, _| !name.starts_with("vendor/") && !name.starts_with(".cargo/"));
                 candidate.source = serde_json::to_string(&bundle)?;
             }
             let request = DefineRequest {
@@ -314,7 +335,12 @@ impl Service {
                 deps: candidate.deps,
             };
             let response = self.define_inner(request.clone()).await?;
-            ensure!(response.ok, "upgrade of {} failed: {}", request.name, serde_json::to_string(&response)?);
+            ensure!(
+                response.ok,
+                "upgrade of {} failed: {}",
+                request.name,
+                serde_json::to_string(&response)?
+            );
             let def: Def = serde_json::from_value(response.result["def"].clone())?;
             replacements.insert(hash.clone(), def.hash.clone());
             updates
@@ -414,49 +440,125 @@ impl Service {
     async fn command_inner(&self, request: CommandRequest) -> Result<Value> {
         let args = &request.args;
         match request.command.as_str() {
-            "crate.add" => Ok(serde_json::to_value(loom_build::registry::CrateRegistry::new(self.store.clone()).add(field(args, "name")?, field(args, "version")?).await?)?),
+            "crate.add" => Ok(serde_json::to_value(
+                loom_build::registry::CrateRegistry::new(self.store.clone())
+                    .add(field(args, "name")?, field(args, "version")?)
+                    .await?,
+            )?),
             "upgrade" => {
                 let _guard = self.definitions_gate.lock().await;
                 let old = field(args, "old")?;
                 let new = field(args, "new")?;
                 if let Some(previous) = self.store.definition(old)? {
-                    let current = self.store.definition(new)?.context("replacement definition missing")?;
+                    let current = self
+                        .store
+                        .definition(new)?
+                        .context("replacement definition missing")?;
                     let updates = self.rehash_dependents(Some(&previous), &current).await?;
-                    return Ok(serde_json::json!({"rehashed":updates.rehashed,"stale_actors":updates.stale_actors}));
+                    return Ok(
+                        serde_json::json!({"rehashed":updates.rehashed,"stale_actors":updates.stale_actors}),
+                    );
                 }
-                let _: loom_proto::Tree = self.store.get_value(old)?.context("old crate tree missing")?;
-                let _: loom_proto::Tree = self.store.get_value(new)?.context("replacement crate tree missing")?;
+                let _: loom_proto::Tree = self
+                    .store
+                    .get_value(old)?
+                    .context("old crate tree missing")?;
+                let _: loom_proto::Tree = self
+                    .store
+                    .get_value(new)?
+                    .context("replacement crate tree missing")?;
                 let mut changed = Vec::new();
-                struct CrateReplacement { previous: Def, current: Def }
+                struct CrateReplacement {
+                    previous: Def,
+                    current: Def,
+                }
                 let mut replacements = Vec::new();
                 for def in self.store.definitions()? {
-                    if def.lang != Lang::Rust { continue; }
-                    let Some(name) = self.store.definition_name(&def.hash)? else { continue };
-                    if self.store.resolve(&name)?.is_none_or(|current| current.hash != def.hash) { continue; }
-                    let source = self.store.source(&def.hash)?.context("definition source missing")?;
-                    let Ok(mut bundle) = serde_json::from_str::<loom_check::SourceBundle>(&source) else { continue };
-                    let Some(manifest) = bundle.files.get_mut("Cargo.toml").and_then(loom_check::SourceFile::text_mut) else { continue };
+                    if def.lang != Lang::Rust {
+                        continue;
+                    }
+                    let Some(name) = self.store.definition_name(&def.hash)? else {
+                        continue;
+                    };
+                    if self
+                        .store
+                        .resolve(&name)?
+                        .is_none_or(|current| current.hash != def.hash)
+                    {
+                        continue;
+                    }
+                    let source = self
+                        .store
+                        .source(&def.hash)?
+                        .context("definition source missing")?;
+                    let Ok(mut bundle) = serde_json::from_str::<loom_check::SourceBundle>(&source)
+                    else {
+                        continue;
+                    };
+                    let Some(manifest) = bundle
+                        .files
+                        .get_mut("Cargo.toml")
+                        .and_then(loom_check::SourceFile::text_mut)
+                    else {
+                        continue;
+                    };
                     let mut document: toml::Value = manifest.parse()?;
-                    let Some(crates) = document.get_mut("loom").and_then(|loom| loom.get_mut("crates")).and_then(toml::Value::as_table_mut) else { continue };
+                    let Some(crates) = document
+                        .get_mut("loom")
+                        .and_then(|loom| loom.get_mut("crates"))
+                        .and_then(toml::Value::as_table_mut)
+                    else {
+                        continue;
+                    };
                     let mut replaced = false;
                     for entry in crates.iter_mut().map(|entry| entry.1) {
-                        if entry.get("hash").and_then(toml::Value::as_str) == Some(old) { entry["hash"] = toml::Value::String(new.into()); replaced = true; }
+                        if entry.get("hash").and_then(toml::Value::as_str) == Some(old) {
+                            entry["hash"] = toml::Value::String(new.into());
+                            replaced = true;
+                        }
                     }
-                    if !replaced { continue; }
+                    if !replaced {
+                        continue;
+                    }
                     *manifest = toml::to_string(&document)?;
-                    bundle.files.retain(|name, _| !name.starts_with("vendor/") && !name.starts_with(".cargo/"));
-                    let response = self.define_inner(DefineRequest { lang: def.lang, name, source: serde_json::to_string(&bundle)?, deps: self.store.definition_deps(&def.hash)?, allowed_effects: def.allowed_effects.clone() }).await?;
-                    ensure!(response.ok, "crate upgrade failed: {}", serde_json::to_string(&response)?);
+                    bundle.files.retain(|name, _| {
+                        !name.starts_with("vendor/") && !name.starts_with(".cargo/")
+                    });
+                    let response = self
+                        .define_inner(DefineRequest {
+                            lang: def.lang,
+                            name,
+                            source: serde_json::to_string(&bundle)?,
+                            deps: self.store.definition_deps(&def.hash)?,
+                            allowed_effects: def.allowed_effects.clone(),
+                        })
+                        .await?;
+                    ensure!(
+                        response.ok,
+                        "crate upgrade failed: {}",
+                        serde_json::to_string(&response)?
+                    );
                     let current: Def = serde_json::from_value(response.result["def"].clone())?;
                     changed.push(serde_json::json!({"old":def.hash,"result":response.result}));
-                    replacements.push(CrateReplacement { previous: def, current });
+                    replacements.push(CrateReplacement {
+                        previous: def,
+                        current,
+                    });
                 }
                 let mut rehashed = Vec::new();
                 for replacement in replacements {
-                    let current = if let Some(name) = self.store.definition_name(&replacement.current.hash)? {
-                        self.store.resolve(&name)?.context("upgraded definition name missing")?
-                    } else { replacement.current };
-                    let updates = self.rehash_dependents(Some(&replacement.previous), &current).await?;
+                    let current = if let Some(name) =
+                        self.store.definition_name(&replacement.current.hash)?
+                    {
+                        self.store
+                            .resolve(&name)?
+                            .context("upgraded definition name missing")?
+                    } else {
+                        replacement.current
+                    };
+                    let updates = self
+                        .rehash_dependents(Some(&replacement.previous), &current)
+                        .await?;
                     rehashed.extend(updates.rehashed);
                 }
                 Ok(serde_json::json!({"upgraded":changed,"rehashed":rehashed}))
@@ -473,6 +575,27 @@ impl Service {
             "cas.inspect" => Ok(serde_json::to_value(
                 self.inspect_cas(serde_json::from_value(request.args.clone())?)?,
             )?),
+            "trace.effects" => {
+                let offset = match args.get("offset") {
+                    None => 0,
+                    Some(value) => usize::try_from(
+                        value
+                            .as_u64()
+                            .context("offset must be a nonnegative integer")?,
+                    )?,
+                };
+                let limit = match args.get("limit") {
+                    None => 256,
+                    Some(value) => usize::try_from(
+                        value.as_u64().context("limit must be a positive integer")?,
+                    )?,
+                };
+                Ok(serde_json::to_value(self.store.trace_effects(
+                    field(args, "hash")?,
+                    offset,
+                    limit,
+                )?)?)
+            }
             "model.state" => Ok(serde_json::to_value(self.runtime.model().state()?)?),
             "model.list" => Ok(serde_json::to_value(self.runtime.model().list()?)?),
             "process.start" => Ok(serde_json::to_value(
@@ -530,7 +653,11 @@ impl Service {
             "stats" => {
                 let mut stats = serde_json::to_value(loom_maintenance::stats(&self.store)?)?;
                 stats["recording_commits"] = json!(self.store.recording_commit_count());
-                stats["last_reply_storage_nanos"] = json!(self.last_reply_storage_nanos.load(Ordering::Relaxed));
+                let recording = self.store.recording_timings();
+                stats["recording_transaction_nanos"] = json!(recording.transaction_nanos);
+                stats["recording_checkpoint_nanos"] = json!(recording.checkpoint_nanos);
+                stats["last_reply_storage_nanos"] =
+                    json!(self.last_reply_storage_nanos.load(Ordering::Relaxed));
                 stats["effect_wire_bytes"] = json!(self.runtime.effect_wire_bytes());
                 Ok(stats)
             }
@@ -620,6 +747,15 @@ impl Service {
                     .call_def(field(args, "hash")?, args["args"].clone())
                     .await
             }
+            "call.replay" => Ok(self
+                .runtime
+                .replay_def_timed(
+                    field(args, "hash")?,
+                    args["args"].clone(),
+                    field(args, "scope")?,
+                )
+                .await?
+                .value),
             "resolve" => {
                 let hash = field(args, "hash")?;
                 if let Some(def) = self.store.resolve(hash)? {
@@ -1008,7 +1144,11 @@ mod tests {
     #[tokio::test]
     async fn response_refuses_success_when_recording_cannot_commit() -> Result<()> {
         let store = Store::memory()?;
-        let service = Service::new(store.clone(), PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."), vec![Lang::Rust])?;
+        let service = Service::new(
+            store.clone(),
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
+            vec![Lang::Rust],
+        )?;
         store.with_connection(|connection| {
             connection.execute_batch("CREATE TRIGGER refuse_recording BEFORE INSERT ON log BEGIN SELECT RAISE(ABORT, 'recording control'); END;")?;
             Ok(())
@@ -1017,7 +1157,12 @@ mod tests {
         let response = service.response(Ok(json!(42)));
         assert!(!response.ok);
         assert_eq!(response.result["code"], "store_unavailable");
-        assert!(response.result["error"].as_str().unwrap().contains("recording control"));
+        assert!(
+            response.result["error"]
+                .as_str()
+                .unwrap()
+                .contains("recording control")
+        );
         Ok(())
     }
     use tower::ServiceExt;
@@ -1145,8 +1290,17 @@ mod tests {
             })
             .await;
         assert!(second.ok, "{second:?}");
-        assert_eq!(service.store.resolve("caller").unwrap().unwrap().hash, before.result["def"]["hash"].as_str().unwrap());
-        let upgraded = service.command(CommandRequest { session: None, command: "upgrade".into(), args: json!({"old":first.result["def"]["hash"],"new":second.result["def"]["hash"]}) }).await;
+        assert_eq!(
+            service.store.resolve("caller").unwrap().unwrap().hash,
+            before.result["def"]["hash"].as_str().unwrap()
+        );
+        let upgraded = service
+            .command(CommandRequest {
+                session: None,
+                command: "upgrade".into(),
+                args: json!({"old":first.result["def"]["hash"],"new":second.result["def"]["hash"]}),
+            })
+            .await;
         assert!(upgraded.ok, "{upgraded:?}");
         assert_eq!(upgraded.result["rehashed"].as_array().unwrap().len(), 1);
         let current = service.store.resolve("caller").unwrap().unwrap();
@@ -1586,7 +1740,15 @@ impl loom_rt::ComponentResolver for BuildResolver {
                 .store
                 .definition(hash)?
                 .context("definition not found")?;
-            if def.component_hash.is_some() {
+            if let Some(component_hash) = &def.component_hash {
+                let component = self
+                    .store
+                    .get(component_hash)?
+                    .context("component missing from CAS")?;
+                ensure!(
+                    loom_proto::component_protocol::is_current(&component),
+                    "component uses an obsolete host protocol; migrate fs.list consumers to typed DirEntry and redefine the definition before execution"
+                );
                 return Ok(());
             }
             let checked = stored_definition(&self.store, hash)?;

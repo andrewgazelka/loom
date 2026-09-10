@@ -7,7 +7,7 @@ independently and returns its winner. Both skip symlinks and break size ties
 by relative path. The native Rust baseline uses sequential traversal with the
 same non-following metadata reads and tie rule; it has no Loom runtime or log.
 
-Measured on Apple Silicon macOS, September 9, 2026, with 10,000 files and
+Initial baseline on Apple Silicon macOS, September 9, 2026, with 10,000 files and
 256 directories, plus one changing nested file during timed runs:
 
 | Path | Median of 7 warm scans | Relative to native |
@@ -54,7 +54,7 @@ LOOM_URL=http://127.0.0.1:18894 LOOM_TOKEN_FILE="$bench_dir/state/token" \
 ```
 
 The runner reports build time, first-call time, every warm sample, medians,
-ratios, and `4/4 scan benchmark checks pass`. Repeating the runner reuses builds
+ratios, load averages, and `N/12 scan benchmark checks pass`. Four gates check correctness. Each guest variant also has gates for median latency below 15 ms, average retained database growth below 32 KiB per identical scan, fewer than 200,000 effect bytes transferred, and median reply storage wait below 1 ms. Missing metrics fail. Transaction and checkpoint durations are reported separately to diagnose storage waits. Repeating the runner reuses builds
 and filesystem caches. It removes its temporary winner directory on exit;
 the fixture and isolated database remain available for inspection.
 
@@ -67,13 +67,14 @@ LOOM_URL=http://127.0.0.1:18894 LOOM_TOKEN_FILE="$bench_dir/state/token" \
   bun scripts/bench/unified-memory.ts "$bench_dir/tree" "$bench_dir/native"
 ```
 
-The command reports `N/7 unified-memory gates pass` and the first failed step.
+The command reports `N/15 unified-memory gates pass` and the first failed step.
 The historical command name remains stable; the shared-memory tier is canceled.
 The gate executes isolated `all`/`fork` definitions, checks every changing winner,
-and enforces 55/70 ms median limits and at most three queued recording transactions
-per warm scan. The stats counter is sampled outside scan timing; absent counters
+and includes all twelve scan gates plus three compiler checks. Recording transaction counts remain diagnostic. The stats counter is sampled outside scan timing; absent counters
 fail admission rather than defaulting to zero. Missing build-control execution
 witnesses count as failures. It never starts a daemon or substitutes saved results.
+
+The [implementation plan](../../docs/plan-unified-memory.md#scan-contract-change-2026-09-09) records the staged trace, codec and filesystem measurements. The earlier 7 ms estimate referred to Linux and was not a measured Mac result. `largest-walk.rs` exercises a single bounded host traversal; its performance is measured separately from the guest-driven `all` and fork/join workloads.
 
 The five-crate delta gate uses `heck`, `strsim`, `adler2`, `version_check`, and
 `cfg-if`, exercising each dependency in the resulting definition. The compiler's

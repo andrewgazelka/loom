@@ -265,6 +265,7 @@ impl Builder {
             .ok();
         if cached_inputs.as_deref() == Some(inputs.as_str())
             && let Ok(component) = fs::read(&component_path).await
+            && loom_proto::component_protocol::is_current(&component)
         {
             validate_component(&component)?;
             return Ok(BuildOutput {
@@ -372,7 +373,7 @@ impl Builder {
                     });
                 }
                 let encoding_started = Instant::now();
-                let component = {
+                let mut component = {
                     wit_component::ComponentEncoder::default()
                         .module(&built.bytes).map_err(|error| BuildError::Rejected(error.to_string()))?
                         .adapter(wasi_preview1_component_adapter_provider::WASI_SNAPSHOT_PREVIEW1_ADAPTER_NAME,
@@ -380,6 +381,7 @@ impl Builder {
                         .map_err(|error| BuildError::Rejected(error.to_string()))?
                         .validate(true).encode().map_err(|error| BuildError::Rejected(error.to_string()))?
                 };
+                loom_proto::component_protocol::stamp(&mut component);
                 built.logs.push_str(&format!(
                     "\n{}\n",
                     serde_json::json!({"build_stages":{
@@ -426,7 +428,9 @@ impl Builder {
             }
             return Err(BuildError::Rejected(logs));
         }
-        let component = fs::read(&component_path).await?;
+        let mut component = fs::read(&component_path).await?;
+        loom_proto::component_protocol::stamp(&mut component);
+        fs::write(&component_path, &component).await?;
         validate_component(&component)?;
         fs::write(directory.join("component.inputs"), inputs).await?;
         Ok(BuildOutput {

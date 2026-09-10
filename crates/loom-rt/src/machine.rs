@@ -1,14 +1,18 @@
+use crate::filesystem::{self, PinnedRoot, RootIdentity, WalkLimits};
 use crate::{Runtime, required_str};
 use anyhow::{Context, Result, bail, ensure};
-use loom_proto::{Actor, Lang, Value, Tree, TreeEntry, DirEntry, EntryKind};
+#[cfg(test)]
+use loom_proto::DirEntry;
+use loom_proto::{Actor, EntryKind, Lang, Tree, TreeEntry, Value};
 use serde_json::json;
-use std::path::{Path, PathBuf};
-
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 impl Runtime {
-    pub fn create_machine(&self, root: &Path) -> Result<Actor> {
-        let root = root.canonicalize()?;
-        ensure!(root.is_dir(), "machine root must be a directory");
+    pub fn create_machine(&self, path: &Path) -> Result<Actor> {
+        let root = Arc::new(PinnedRoot::open(path)?);
         let actor = Actor {
             id: uuid::Uuid::new_v4().to_string(),
             behavior_hash: "loom:machine".into(),
@@ -18,11 +22,26 @@ impl Runtime {
             created_seq: 0,
             parent: None,
         };
+        let actor = self.inner.store.create_initialized_actor(
+            &actor,
+            &json!({"root":root.path,"identity":root.identity}),
+        )?;
         self.inner
-            .store
-            .create_initialized_actor(&actor, &json!({"root":root}))
+            .machine_roots
+            .lock()
+            .map_err(|_| anyhow::anyhow!("machine root cache poisoned"))?
+            .insert(actor.id.clone(), root);
+        Ok(actor)
     }
-    pub fn machine_root(&self, id: &str) -> Result<PathBuf> {
+    fn machine_handle(&self, id: &str) -> Result<Arc<PinnedRoot>> {
+        let mut roots = self
+            .inner
+            .machine_roots
+            .lock()
+            .map_err(|_| anyhow::anyhow!("machine root cache poisoned"))?;
+        if let Some(root) = roots.get(id) {
+            return Ok(root.clone());
+        }
         let actor = self
             .inner
             .store
@@ -32,13 +51,29 @@ impl Runtime {
             actor.behavior_hash == "loom:machine",
             "actor is not a machine"
         );
-        let state = self
+        let mut state = self
             .inner
             .store
             .latest_snapshot(id, "loom:machine")?
             .context("machine state missing")?
             .state;
-        Ok(PathBuf::from(required_str(&state, "root")?))
+        let root = Arc::new(PinnedRoot::open(Path::new(required_str(&state, "root")?))?);
+        if let Some(identity) = state.get("identity") {
+            let expected: RootIdentity = serde_json::from_value(identity.clone())?;
+            ensure!(
+                root.identity == expected,
+                "machine root identity changed; register the replacement as a new machine"
+            );
+        } else {
+            // Path-only legacy machines are pinned once and persisted before use.
+            state["identity"] = serde_json::to_value(root.identity)?;
+            self.inner.store.pin_machine_root(id, &state)?;
+        }
+        roots.insert(id.into(), root.clone());
+        Ok(root)
+    }
+    pub fn machine_root(&self, id: &str) -> Result<PathBuf> {
+        Ok(self.machine_handle(id)?.path.clone())
     }
     pub async fn start_process(&self, mut args: Value) -> Result<loom_process::ProcessState> {
         let machine = required_str(&args, "machine")?.to_owned();
@@ -92,76 +127,70 @@ impl Runtime {
             .await
     }
     pub(crate) fn machine_path(&self, args: &Value) -> Result<PathBuf> {
-        let id = required_str(args, "machine")?;
-        let actor = self
-            .inner
-            .store
-            .actor(id)?
-            .context("machine actor not found")?;
+        let root = self.machine_handle(required_str(args, "machine")?)?;
         ensure!(
-            actor.behavior_hash == "loom:machine",
-            "actor is not a machine"
+            root.path == Path::new("/"),
+            "process paths require an unrestricted root machine"
         );
-        let state = self
-            .inner
-            .store
-            .latest_snapshot(id, "loom:machine")?
-            .context("machine state missing")?
-            .state;
-        let root = PathBuf::from(required_str(&state, "root")?);
         let requested = required_str(args, "path")?;
-        let path = root
-            .join(requested.trim_start_matches('/'))
-            .canonicalize()?;
-        ensure!(path.starts_with(&root), "path escapes machine root");
-        Ok(path)
+        let _directory = root.directory(requested)?;
+        Ok(root.path.join(filesystem::relative_path(requested)?))
     }
     pub(crate) async fn list_machine_directory(&self, args: &Value) -> Result<crate::EffectOutput> {
-        let path = self.machine_path(args)?;
-        let entries = tokio::task::spawn_blocking(move || -> Result<Vec<DirEntry>> {
-            let mut entries = Vec::new();
-            for entry in std::fs::read_dir(&path)? {
-                ensure!(entries.len() < 100_000, "directory entry limit exceeded");
-                let entry = entry?;
-                // DirEntry::metadata does not follow symlinks.
-                let metadata = entry.metadata()?;
-                entries.push(DirEntry {
-                    name: entry
-                        .file_name()
-                        .into_string()
-                        .map_err(|_| anyhow::anyhow!("directory entry name is not UTF8"))?,
-                    size: if metadata.is_file() { metadata.len() } else { 0 },
-                    kind: if metadata.is_dir() { EntryKind::Directory } else if metadata.is_file() { EntryKind::File } else if metadata.file_type().is_symlink() { EntryKind::Symlink } else { EntryKind::Other },
-                });
-            }
-            entries.sort_unstable_by(|left, right| left.name.cmp(&right.name));
-            Ok(entries)
+        let root = self.machine_handle(required_str(args, "machine")?)?;
+        let path = required_str(args, "path")?.to_owned();
+        let entries = tokio::task::spawn_blocking(move || root.list(&path, 100_000)).await??;
+        Ok(crate::EffectOutput {
+            bytes: loom_proto::encode_host(&entries).map_err(anyhow::Error::msg)?,
         })
-        .await??;
-        Ok(crate::EffectOutput { bytes: loom_proto::encode_host(&entries).map_err(anyhow::Error::msg)? })
+    }
+    pub(crate) async fn walk_machine_directory(&self, args: &Value) -> Result<crate::EffectOutput> {
+        fn limit(args: &Value, name: &str, default: u64) -> Result<u64> {
+            args.get(name).map_or(Ok(default), |value| {
+                value
+                    .as_u64()
+                    .with_context(|| format!("{name} must be a nonnegative integer"))
+            })
+        }
+        let root = self.machine_handle(required_str(args, "machine")?)?;
+        let path = required_str(args, "path")?.to_owned();
+        let max_depth = u32::try_from(limit(args, "max_depth", 64)?)?;
+        let max_entries = usize::try_from(limit(args, "max_entries", 100_000)?)?;
+        let entries = root
+            .walk(
+                &path,
+                WalkLimits {
+                    max_depth,
+                    max_entries,
+                },
+            )
+            .await?;
+        Ok(crate::EffectOutput {
+            bytes: loom_proto::encode_host(&entries).map_err(anyhow::Error::msg)?,
+        })
+    }
+    pub(crate) async fn stat_machine_path(&self, args: &Value) -> Result<Value> {
+        let root = self.machine_handle(required_str(args, "machine")?)?;
+        let path = required_str(args, "path")?.to_owned();
+        let entry = tokio::task::spawn_blocking(move || root.stat(&path)).await??;
+        Ok(serde_json::to_value(entry)?)
     }
     pub(crate) async fn read_machine_file(&self, args: &Value) -> Result<Value> {
-        use tokio::io::AsyncReadExt;
-        const LIMIT: u64 = 64 * 1024 * 1024;
-        let file = tokio::fs::File::open(self.machine_path(args)?).await?;
-        ensure!(
-            file.metadata().await?.len() <= LIMIT,
-            "file exceeds 64 MiB read limit"
-        );
-        let mut bytes = Vec::new();
-        file.take(LIMIT + 1).read_to_end(&mut bytes).await?;
-        ensure!(
-            bytes.len() as u64 <= LIMIT,
-            "file exceeds 64 MiB read limit"
-        );
+        let root = self.machine_handle(required_str(args, "machine")?)?;
+        let path = required_str(args, "path")?.to_owned();
+        let bytes = tokio::task::spawn_blocking(move || root.read(&path)).await??;
         Ok(json!(String::from_utf8(bytes).context(
             "file is not UTF8; use snapshot for binary data"
         )?))
     }
     pub(crate) async fn snapshot_tree(&self, args: &Value) -> Result<Value> {
-        let path = self.machine_path(args)?;
+        let root = self.machine_handle(required_str(args, "machine")?)?;
+        let path = required_str(args, "path")?.to_owned();
         let store = self.inner.store.clone();
-        let hash = tokio::task::spawn_blocking(move || snapshot(&store, &path, &mut 0)).await??;
+        let hash = tokio::task::spawn_blocking(move || {
+            snapshot(&store, &root.directory(&path)?, &mut 0, 0)
+        })
+        .await??;
         self.inner
             .store
             .reference(&hash, loom_proto::DAG_CBOR_CODEC)
@@ -217,50 +246,43 @@ impl Runtime {
         self.execute_command(command, Vec::new()).await
     }
 }
-fn snapshot(store: &loom_store::Store, path: &Path, count: &mut usize) -> Result<String> {
-    let mut paths = std::fs::read_dir(path)?.collect::<std::io::Result<Vec<_>>>()?;
-    paths.sort_by_key(|entry| entry.file_name());
+fn snapshot(
+    store: &loom_store::Store,
+    directory: &std::fs::File,
+    count: &mut usize,
+    depth: usize,
+) -> Result<String> {
+    use std::os::unix::fs::PermissionsExt;
+    ensure!(depth < 128, "snapshot depth limit exceeded");
     let mut entries = Vec::new();
-    for entry in paths {
+    for entry in filesystem::list_directory(directory, 100_000)? {
         *count += 1;
         ensure!(*count <= 100_000, "snapshot entry limit exceeded");
-        let metadata = entry.path().symlink_metadata()?;
         ensure!(
-            !metadata.file_type().is_symlink(),
-            "snapshot symlinks are not supported"
+            entry.kind == EntryKind::File || entry.kind == EntryKind::Directory,
+            "snapshot requires regular files and directories; symlinks are not supported"
         );
-        let directory = metadata.is_dir();
-        let hash = if directory {
-            snapshot(store, &entry.path(), count)?
+        let child =
+            filesystem::open_at(directory, &entry.name, entry.kind == EntryKind::Directory)?;
+        let metadata = child.metadata()?;
+        let is_directory = metadata.is_dir();
+        let executable = metadata.permissions().mode() & 0o111 != 0;
+        let hash = if is_directory {
+            snapshot(store, &child, count, depth + 1)?
         } else {
-            ensure!(metadata.is_file(), "snapshot requires regular files");
-            ensure!(
-                metadata.len() <= 64 * 1024 * 1024,
-                "snapshot file exceeds 64 MiB"
-            );
-            store.put("blob", &std::fs::read(entry.path())?)?
+            store.put("blob", &filesystem::read_regular(child)?)?
         };
-        #[cfg(unix)]
-        let executable = {
-            use std::os::unix::fs::PermissionsExt;
-            metadata.permissions().mode() & 0o111 != 0
-        };
-        #[cfg(not(unix))]
-        let executable = false;
         entries.push(TreeEntry {
-            name: entry
-                .file_name()
-                .into_string()
-                .map_err(|_| anyhow::anyhow!("non-UTF8 tree entry"))?,
+            name: entry.name,
             reference: store.reference(
                 &hash,
-                if directory {
+                if is_directory {
                     loom_proto::DAG_CBOR_CODEC
                 } else {
                     loom_proto::RAW_CODEC
                 },
             )?,
-            directory,
+            directory: is_directory,
             executable,
         });
     }
@@ -336,25 +358,23 @@ mod tests {
                 0,
             )
             .await?;
-        let top = top.as_array().context("listing array")?;
+        let top: Vec<DirEntry> = serde_json::from_value(top)?;
         let names = top
             .iter()
-            .map(|entry| entry["name"].as_str().unwrap())
+            .map(|entry| entry.name.as_str())
             .collect::<Vec<_>>();
         assert_eq!(
             names,
             vec!["external-dir", "external-file", "small", "socket", "sub"]
         );
         for name in ["external-dir", "external-file"] {
-            let entry = top.iter().find(|entry| entry["name"] == name).unwrap();
-            assert_eq!(entry["is_symlink"], true);
-            assert_eq!(entry["is_dir"], false);
-            assert_eq!(entry["is_file"], false);
+            let entry = top.iter().find(|entry| entry.name == name).unwrap();
+            assert_eq!(entry.kind, EntryKind::Symlink);
+            assert_eq!(entry.size, 0);
         }
-        let socket = top.iter().find(|entry| entry["name"] == "socket").unwrap();
-        assert_eq!(socket["is_file"], false);
-        assert_eq!(socket["is_dir"], false);
-        assert_eq!(socket["is_symlink"], false);
+        let socket = top.iter().find(|entry| entry.name == "socket").unwrap();
+        assert_eq!(socket.kind, EntryKind::Other);
+        assert_eq!(socket.size, 0);
         struct FoundFile {
             path: String,
             size: u64,
@@ -371,20 +391,17 @@ mod tests {
             let entries = runtime
                 .perform(
                     json!({"op":"fs.list","args":{"machine":machine.id,"path":path}}),
-                    "traversal",
-                    directories,
+                    &format!("traversal:{directories}"),
+                    0,
                 )
                 .await?;
-            for entry in entries.as_array().context("entries")? {
-                let path = format!(
-                    "{}/{}",
-                    path.trim_end_matches('/'),
-                    entry["name"].as_str().unwrap()
-                );
-                if entry["is_dir"] == true {
+            let entries: Vec<DirEntry> = serde_json::from_value(entries)?;
+            for entry in entries {
+                let path = format!("{}/{}", path.trim_end_matches('/'), entry.name);
+                if entry.kind == EntryKind::Directory {
                     pending.push(path);
-                } else if entry["is_file"] == true {
-                    let size = entry["size"].as_u64().unwrap();
+                } else if entry.kind == EntryKind::File {
+                    let size = entry.size;
                     if largest.as_ref().is_none_or(|file| size > file.size) {
                         largest = Some(FoundFile { path, size });
                     }
@@ -395,6 +412,21 @@ mod tests {
         assert_eq!(largest.path, "/sub/largest");
         assert_eq!(largest.size, 9);
         assert_eq!(directories, 2);
+        let walked = runtime
+            .perform(
+                json!({"op":"fs.walk","args":{"machine":machine.id,"path":"/","max_depth":4,"max_entries":20}}),
+                "walk",
+                0,
+            )
+            .await?;
+        let walked: Vec<DirEntry> = serde_json::from_value(walked)?;
+        assert_eq!(walked.len(), 7);
+        assert!(walked.windows(2).all(|pair| pair[0].name < pair[1].name));
+        assert!(
+            walked
+                .iter()
+                .any(|entry| entry.name == "sub/largest" && entry.size == 9)
+        );
         assert!(
             runtime
                 .perform(
@@ -422,6 +454,64 @@ mod tests {
         assert!(error.to_string().contains("UTF8"));
         Ok(())
     }
+    #[tokio::test]
+    async fn machine_pin_survives_rename_and_restart_rejects_replacement() -> Result<()> {
+        let workspace = tempfile::tempdir()?;
+        let root = workspace.path().join("root");
+        std::fs::create_dir(&root)?;
+        std::fs::write(root.join("data"), "original")?;
+        let db = workspace.path().join("state.sqlite");
+        let runtime = Runtime::new(loom_store::Store::open(&db)?)?;
+        let machine = runtime.create_machine(&root)?;
+        let args = json!({"machine":machine.id,"path":"data"});
+        let tree_args = json!({"machine":machine.id,"path":"/"});
+        let original_tree = runtime.snapshot_tree(&tree_args).await?;
+        std::fs::rename(&root, workspace.path().join("moved"))?;
+        std::fs::create_dir(&root)?;
+        std::fs::write(root.join("data"), "replacement")?;
+        assert_eq!(runtime.read_machine_file(&args).await?, json!("original"));
+        assert_eq!(runtime.snapshot_tree(&tree_args).await?, original_tree);
+        drop(runtime);
+        let store = loom_store::Store::open(&db)?;
+        store.rebuild_views()?;
+        let restarted = Runtime::new(store)?;
+        let error = restarted.read_machine_file(&args).await.unwrap_err();
+        assert!(error.to_string().contains("identity changed"), "{error:#}");
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_machine_pin_is_migrated_and_rebuilt() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let store = loom_store::Store::memory()?;
+        let actor = Actor {
+            id: uuid::Uuid::new_v4().to_string(),
+            behavior_hash: "loom:machine".into(),
+            lang: Lang::Rust,
+            component_hash: None,
+            last_seq: 0,
+            created_seq: 0,
+            parent: None,
+        };
+        store.create_initialized_actor(&actor, &json!({"root":root.path()}))?;
+        let runtime = Runtime::new(store.clone())?;
+        assert_eq!(
+            runtime.machine_root(&actor.id)?,
+            root.path().canonicalize()?
+        );
+        store.rebuild_views()?;
+        let snapshot = store
+            .latest_snapshot(&actor.id, "loom:machine")?
+            .context("snapshot")?;
+        assert!(snapshot.state.get("identity").is_some());
+        let reopened = Runtime::new(store)?;
+        assert_eq!(
+            reopened.machine_root(&actor.id)?,
+            root.path().canonicalize()?
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn snapshots_are_content_keyed_and_observations_are_scoped() -> Result<()> {
         let root = tempfile::tempdir()?;

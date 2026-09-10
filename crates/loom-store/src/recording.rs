@@ -23,6 +23,10 @@ pub struct RecordingTimings {
     pub transaction_nanos: u64,
     pub checkpoint_attempts: u64,
     pub checkpoint_nanos: u64,
+    /// Encoded trace submission bytes in committed batches, including idempotent repeats.
+    pub trace_bytes: u64,
+    /// Trace submissions in committed batches, including idempotent repeats.
+    pub traces: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -69,6 +73,11 @@ struct ObservedEffect {
 }
 
 enum Record {
+    Trace {
+        bundle: loom_proto::TraceBundle,
+        hash: String,
+        bytes: Vec<u8>,
+    },
     Event {
         event: Value,
     },
@@ -101,6 +110,8 @@ struct Shared {
     transaction_nanos: AtomicU64,
     checkpoint_attempts: AtomicU64,
     checkpoint_nanos: AtomicU64,
+    trace_bytes: AtomicU64,
+    traces: AtomicU64,
     effects_generation: AtomicU64,
 }
 pub(crate) struct Writer {
@@ -163,6 +174,49 @@ impl Writer {
             .send(Message::Record { record })
             .map_err(|_| anyhow!("recording writer disconnected"))?;
         self.check()
+    }
+    pub fn trace(&self, bundle: &loom_proto::TraceBundle) -> Result<String> {
+        self.check()?;
+        let total_bytes = bundle.blobs.iter().try_fold(0usize, |total, blob| {
+            total
+                .checked_add(blob.bytes.len())
+                .ok_or_else(|| anyhow!("trace byte count overflow"))
+        })?;
+        ensure!(
+            total_bytes <= loom_proto::TRACE_MAX_BLOB_BYTES,
+            "trace blob byte limit exceeded"
+        );
+        ensure!(
+            bundle.observations.len() <= loom_proto::TRACE_MAX_ENTRIES
+                && bundle.memos.len() <= loom_proto::TRACE_MAX_ENTRIES,
+            "trace summary entry limit exceeded"
+        );
+        let summary_bytes = bundle
+            .observations
+            .iter()
+            .fold(0usize, |total, observation| {
+                total
+                    .saturating_add(observation.definition_hash.len())
+                    .saturating_add(observation.op.len())
+            });
+        let summary_bytes = bundle.memos.iter().fold(summary_bytes, |total, memo| {
+            total
+                .saturating_add(memo.descriptor_hash.len())
+                .saturating_add(memo.scope.len())
+                .saturating_add(memo.result_hash.len())
+        });
+        ensure!(
+            summary_bytes <= loom_proto::TRACE_MAX_METADATA_BYTES,
+            "trace summary metadata limit exceeded"
+        );
+        let bytes = loom_proto::encode_call_trace(&bundle.trace).map_err(anyhow::Error::msg)?;
+        let hash = blake3::hash(&bytes).to_hex().to_string();
+        self.send(Record::Trace {
+            bundle: bundle.clone(),
+            hash: hash.clone(),
+            bytes,
+        })?;
+        Ok(hash)
     }
     pub fn event(&self, event: &Value) -> Result<()> {
         ensure!(
@@ -284,6 +338,8 @@ impl Writer {
             transaction_nanos: self.shared.transaction_nanos.load(Ordering::Relaxed),
             checkpoint_attempts: self.shared.checkpoint_attempts.load(Ordering::Relaxed),
             checkpoint_nanos: self.shared.checkpoint_nanos.load(Ordering::Relaxed),
+            trace_bytes: self.shared.trace_bytes.load(Ordering::Relaxed),
+            traces: self.shared.traces.load(Ordering::Relaxed),
         }
     }
     pub fn commits(&self) -> u64 {
@@ -327,6 +383,13 @@ fn commit(
         let transaction = connection.transaction()?;
         for record in records.iter() {
             match record {
+                Record::Trace {
+                    bundle,
+                    hash,
+                    bytes,
+                } => {
+                    crate::trace::persist(&transaction, bundle, hash, bytes)?;
+                }
                 Record::Event { event } => {
                     append(&transaction, "system", event, 0)?;
                 }
@@ -363,6 +426,14 @@ fn commit(
         shared
             .transaction_nanos
             .fetch_add(elapsed_nanos(transaction_started), Ordering::Relaxed);
+        for record in records.iter() {
+            if let Record::Trace { bytes, .. } = record {
+                shared
+                    .trace_bytes
+                    .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                shared.traces.fetch_add(1, Ordering::Relaxed);
+            }
+        }
         shared.commits.fetch_add(1, Ordering::Relaxed);
         shared.effects_generation.fetch_add(1, Ordering::Release);
     }

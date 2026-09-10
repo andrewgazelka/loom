@@ -137,19 +137,38 @@ pub mod abilities {
         pub mod list {
             use super::*;
             pub fn desc(machine: &str, path: &str) -> Desc<Vec<DirEntry>> {
-                Desc::new("fs.list", serde_json::json!({"machine":machine,"path":path}))
+                Desc::new(
+                    "fs.list",
+                    serde_json::json!({"machine":machine,"path":path}),
+                )
             }
         }
         pub fn stat(machine: &str, path: &str) -> Result<DirEntry, EffectError> {
-            perform(Desc::new("fs.stat", serde_json::json!({"machine":machine,"path":path})))
+            perform(Desc::new(
+                "fs.stat",
+                serde_json::json!({"machine":machine,"path":path}),
+            ))
         }
-        pub fn walk(machine: &str, path: &str, max_depth: u32, max_entries: u32) -> Result<Vec<DirEntry>, EffectError> {
+        pub fn walk(
+            machine: &str,
+            path: &str,
+            max_depth: u32,
+            max_entries: u32,
+        ) -> Result<Vec<DirEntry>, EffectError> {
             perform(walk::desc(machine, path, max_depth, max_entries))
         }
         pub mod walk {
             use super::*;
-            pub fn desc(machine: &str, path: &str, max_depth: u32, max_entries: u32) -> Desc<Vec<DirEntry>> {
-                Desc::new("fs.walk", serde_json::json!({"machine":machine,"path":path,"max_depth":max_depth,"max_entries":max_entries}))
+            pub fn desc(
+                machine: &str,
+                path: &str,
+                max_depth: u32,
+                max_entries: u32,
+            ) -> Desc<Vec<DirEntry>> {
+                Desc::new(
+                    "fs.walk",
+                    serde_json::json!({"machine":machine,"path":path,"max_depth":max_depth,"max_entries":max_entries}),
+                )
             }
         }
         pub fn read(machine: Value, path: &str) -> Result<Value, EffectError> {

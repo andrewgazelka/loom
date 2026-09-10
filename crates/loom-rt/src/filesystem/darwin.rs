@@ -15,7 +15,7 @@ fn word(bytes: &[u8], offset: usize) -> Result<u32> {
 fn record(bytes: &[u8]) -> Result<DirEntry> {
     // Packed attrlist fields have four-byte alignment, including the u64 size.
     // RETURNED_ATTRS is first; requested common attributes follow bit order.
-    ensure!(bytes.len() >= 44, "truncated getattrlistbulk record");
+    ensure!(bytes.len() >= 36, "truncated getattrlistbulk record");
     let common = word(bytes, 4)?;
     let file = word(bytes, 16)?;
     ensure!(
@@ -32,8 +32,13 @@ fn record(bytes: &[u8]) -> Result<DirEntry> {
     let name_end = name_start
         .checked_add(name_length)
         .context("name length overflow")?;
+    let fixed_length = if file & libc::ATTR_FILE_DATALENGTH != 0 {
+        44
+    } else {
+        36
+    };
     ensure!(
-        name_start >= 44 && name_length > 1,
+        name_start >= fixed_length && name_length > 1,
         "invalid getattrlistbulk name reference"
     );
     let name = bytes
@@ -61,7 +66,13 @@ fn record(bytes: &[u8]) -> Result<DirEntry> {
             file & libc::ATTR_FILE_DATALENGTH != 0,
             "getattrlistbulk omitted file length"
         );
-        let size = i64::from_ne_bytes(bytes[36..44].try_into().unwrap());
+        let size = i64::from_ne_bytes(
+            bytes
+                .get(36..44)
+                .context("truncated getattrlistbulk file length")?
+                .try_into()
+                .unwrap(),
+        );
         u64::try_from(size).context("negative getattrlistbulk file length")?
     } else {
         0
@@ -107,7 +118,7 @@ pub(super) fn list(directory: &File, limit: usize) -> Result<Vec<DirEntry>> {
             ensure!(entries.len() < limit, "directory entry limit exceeded");
             let length = word(&buffer, offset)? as usize;
             ensure!(
-                length >= 44 && length % 4 == 0,
+                length >= 36 && length % 4 == 0,
                 "invalid getattrlistbulk record length"
             );
             let end = offset
@@ -127,6 +138,22 @@ pub(super) fn list(directory: &File, limit: usize) -> Result<Vec<DirEntry>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn directory_record_omits_file_attribute_group() {
+        // Native getattrlistbulk returns a 36-byte prefix for directories even
+        // with FSOPT_PACK_INVAL_ATTRS; file records have a 44-byte prefix.
+        let mut bytes = vec![0_u8; 40];
+        bytes[4..8].copy_from_slice(&(libc::ATTR_CMN_NAME | libc::ATTR_CMN_OBJTYPE).to_ne_bytes());
+        bytes[24..28].copy_from_slice(&12_i32.to_ne_bytes());
+        bytes[28..32].copy_from_slice(&4_u32.to_ne_bytes());
+        bytes[32..36].copy_from_slice(&2_u32.to_ne_bytes());
+        bytes[36..40].copy_from_slice(b"sub\0");
+        let entry = record(&bytes).unwrap();
+        assert_eq!(entry.name, "sub");
+        assert_eq!(entry.kind, EntryKind::Directory);
+        assert_eq!(entry.size, 0);
+    }
+
     #[test]
     fn packed_record_checks_name_bounds_and_signed_offsets() {
         let mut bytes = vec![0_u8; 48];

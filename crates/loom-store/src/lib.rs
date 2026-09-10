@@ -3,6 +3,7 @@ mod dag_migration;
 mod effect_index;
 mod migration;
 mod recording;
+mod trace;
 use anyhow::{Context, Result, anyhow, ensure};
 use loom_proto::{Actor, Def, Event, Snapshot, Value};
 pub use recording::RecordingTimings;
@@ -12,6 +13,7 @@ use std::{
     path::Path,
     sync::{Arc, Mutex, MutexGuard},
 };
+pub use trace::{TraceEffect, TraceEffectsPage};
 
 #[derive(Debug, Default, serde::Serialize)]
 pub struct Compaction {
@@ -63,11 +65,24 @@ impl Store {
                     .map_err(|e| rusqlite::Error::UserFunctionError(e.into()))
             },
         )?;
+        connection.create_scalar_function(
+            "loom_trace_json",
+            1,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+            |context| {
+                let bytes: Vec<u8> = context.get(0)?;
+                let trace = loom_proto::decode_call_trace(&bytes)
+                    .map_err(|error| rusqlite::Error::UserFunctionError(anyhow!(error).into()))?;
+                serde_json::to_vec(&trace)
+                    .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))
+            },
+        )?;
         dag_migration::run(&mut connection)?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         connection.execute_batch(include_str!("schema.sql"))?;
         migration::run(&mut connection)?;
-        effect_index::rebuild(&mut connection)?;
+        effect_index::migrate(&mut connection)?;
         connection.execute_batch("PRAGMA synchronous=NORMAL;")?;
         durability.verify(&connection)?;
         let connection = Arc::new(Mutex::new(connection));
@@ -170,7 +185,23 @@ impl Store {
             self.codec(hash)?.is_none_or(|codec| codec == 113),
             "CAS object is raw bytes, not DAG-CBOR"
         );
-        self.get(hash)?.map(|b| decode(&b)).transpose()
+        let Some(bytes) = self.get(hash)? else {
+            return Ok(None);
+        };
+        let address = loom_proto::parse_reference(hash).map_err(anyhow::Error::msg)?;
+        let kind: Option<String> = self
+            .lock()?
+            .query_row(
+                "SELECT kind FROM cas WHERE hash=?",
+                [&address.hash],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if kind.as_deref() == Some("trace") {
+            let trace = loom_proto::decode_call_trace(&bytes).map_err(anyhow::Error::msg)?;
+            return Ok(Some(serde_json::from_value(serde_json::to_value(trace)?)?));
+        }
+        Ok(Some(decode(&bytes)?))
     }
     pub fn codec(&self, hash: &str) -> Result<Option<u64>> {
         self.recording.barrier(false)?;
@@ -316,6 +347,10 @@ impl Store {
         for record in recorded {
             let e = &record.event;
             if record.actor != "system" {
+                if let Some(initial) = e.get("__loom_init") {
+                    let hash = put_value(&tx, "state", initial)?;
+                    tx.execute("INSERT OR REPLACE INTO snapshots SELECT id,behavior_hash,?,? FROM actors WHERE id=?", params![record.seq,hash,record.actor])?;
+                }
                 tx.execute(
                     "UPDATE actors SET last_seq=? WHERE id=?",
                     params![record.seq, record.actor],
@@ -323,6 +358,13 @@ impl Store {
                 continue;
             }
             match e.get("type").and_then(Value::as_str) {
+                Some("machine_root_pinned") => {
+                    let actor = e["actor"].as_str().context("machine pin missing actor")?;
+                    let hash = e["state_hash"]
+                        .as_str()
+                        .context("machine pin missing state")?;
+                    tx.execute("INSERT OR REPLACE INTO snapshots SELECT id,behavior_hash,?,? FROM actors WHERE id=?", params![record.seq,hash,actor])?;
+                }
                 Some("effect_invoked") => {
                     record_observed_effect(&tx, e)?;
                 }
@@ -429,6 +471,8 @@ impl Store {
                 _ => {}
             }
         }
+        trace::rebuild(&tx)?;
+        trace::migrate_legacy(&tx)?;
         tx.commit()?;
         self.recording.effects_changed();
         Ok(())
@@ -777,6 +821,36 @@ impl Store {
         )?;
         tx.commit()?;
         Ok(seq)
+    }
+    pub fn pin_machine_root(&self, actor: &str, state: &Value) -> Result<()> {
+        self.recording.barrier(false)?;
+        let mut connection = self.lock()?;
+        let tx = connection.transaction()?;
+        let behavior: String = tx
+            .query_row(
+                "SELECT behavior_hash FROM actors WHERE id=?",
+                [actor],
+                |row| row.get(0),
+            )
+            .optional()?
+            .context("machine not found")?;
+        ensure!(
+            behavior == "loom:machine",
+            "root pin requires machine actor"
+        );
+        let hash = put_value(&tx, "state", state)?;
+        let seq = append(
+            &tx,
+            "system",
+            &serde_json::json!({"type":"machine_root_pinned","actor":actor,"state_hash":hash}),
+            0,
+        )?;
+        tx.execute(
+            "INSERT OR REPLACE INTO snapshots VALUES (?,?,?,?)",
+            params![actor, behavior, seq, hash],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
     pub fn actor(&self, id: &str) -> Result<Option<Actor>> {
         let connection = self.lock()?;
@@ -1360,6 +1434,7 @@ mod tests {
         })?;
         drop(store);
         let store = Store::open(path)?;
+        store.rebuild_views()?;
         assert_eq!(store.effect_get("desc", "global", 0)?, Some(json!(123)));
         assert!(store.effect_put("desc", "global", 0, &json!(124)).is_err());
         store.complete_message("a", message.handler_seq, &[json!("done")])?;
