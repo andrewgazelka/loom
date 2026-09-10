@@ -22,3 +22,5 @@ sha2 = "0.10"
 tar = "0.4"
 flate2 = "1"
 
+wasmparser = "0.254"
+wasm-encoder = "0.254"

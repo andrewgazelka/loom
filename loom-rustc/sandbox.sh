@@ -81,7 +81,23 @@ if [[ $mode == vendor ]]; then
   [[ -f $ca_bundle ]] || { echo 'trusted CA bundle unavailable' >&2; exit 69; }
   args+=(--ro-bind "$(realpath "$ca_bundle")" /opt/ca-bundle.crt
     --setenv CARGO_HTTP_CAINFO /opt/ca-bundle.crt --setenv SSL_CERT_FILE /opt/ca-bundle.crt)
-  run=(/bin/sh -eu -c 'cargo metadata --format-version=1 > /dev/null; cargo vendor --locked vendor > .cargo/config.toml')
+  if [[ ${LOOM_RUST_TARGET:-wasm32-wasip1} == wasm32-unknown-unknown ]]; then
+    library_manifest="$rust_root/lib/rustlib/src/rust/library/Cargo.toml"
+    [[ -f $library_manifest ]] || { echo 'shared core builds require matching rust-src' >&2; exit 69; }
+    args+=(--setenv RUSTC_BOOTSTRAP 1 --setenv LOOM_RUST_SRC_MANIFEST "$library_manifest")
+    run=(/bin/sh -eu -c '
+      cargo metadata --format-version=1 > /dev/null
+      cargo vendor --locked --sync "$LOOM_RUST_SRC_MANIFEST" vendor > .cargo/config.toml
+      # Preserve original archives for offline compiler-lock source verification.
+      # These bytes are checked against the selected compiler lock before trust.
+      for archive in "$CARGO_HOME"/registry/cache/*/*.crate; do
+        [ -f "$archive" ] || continue
+        cp "$archive" "vendor/.loom-archive-${archive##*/}"
+      done
+    ')
+  else
+    run=(/bin/sh -eu -c 'cargo metadata --format-version=1 > /dev/null; cargo vendor --locked vendor > .cargo/config.toml')
+  fi
 
 else
   [[ -f $crate_dir/Cargo.lock && -f $crate_dir/.cargo/config.toml && -d $crate_dir/vendor ]] || {
@@ -98,7 +114,8 @@ else
     args+=(--ro-bind "$LOOM_COMPILER_CACHE_OWNER" "$LOOM_COMPILER_CACHE_OWNER"
       --setenv LOOM_COMPILER_CACHE_OWNER "$LOOM_COMPILER_CACHE_OWNER"
       --setenv LOOM_COMPILER_CACHE_MIRROR "$LOOM_COMPILER_CACHE_MIRROR"
-      --setenv LOOM_ROOT_INCREMENTAL "$LOOM_ROOT_INCREMENTAL")
+      --setenv LOOM_ROOT_INCREMENTAL "$LOOM_ROOT_INCREMENTAL"
+      --setenv LOOM_TRUSTED_SOURCES "$LOOM_TRUSTED_SOURCES")
   fi
   run=(/bin/sh /opt/build.sh "$crate_dir" "$target_dir")
   if [[ $mode == rustc ]]; then

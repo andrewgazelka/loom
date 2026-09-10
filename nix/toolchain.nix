@@ -10,7 +10,7 @@
     }.${
       pkgs.stdenv.hostPlatform.system
     } or (throw "loom.toolchain: unsupported host platform");
-  archives = map (name: pkgs.fetchurl manifest.archives.${name}) [hostArchive "wasip1" "wasip2"];
+  archives = map (name: pkgs.fetchurl manifest.archives.${name}) [hostArchive "wasip1" "wasip2" "rust-src"];
 in
   pkgs.stdenv.mkDerivation {
     pname = "loom-rust-toolchain";
@@ -49,7 +49,7 @@ in
       (lib.getExe pkgs.gnupg)
     ];
     meta = {
-      description = "Matched official Rust compiler, host libraries and both WASI targets for Loom";
+      description = "Matched Rust compiler, WASI targets and standard-library source for Loom";
       license = [lib.licenses.mit lib.licenses.asl20];
       mainProgram = "cargo";
       platforms = ["aarch64-darwin" "x86_64-linux"];

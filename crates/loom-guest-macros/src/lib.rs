@@ -137,6 +137,8 @@ pub fn actor(_attr: TokenStream, item: TokenStream) -> TokenStream {
         #structure
         #[cfg(not(feature = "loom-dependency"))]
         impl ::loom::bindings::Guest for #name {
+            #[cfg(loom_core)]
+            fn init() -> Result<Vec<u8>, String> { ::loom::encode(&<Self as ::loom::Actor>::init()) }
             fn run(state: Vec<u8>, msg: Vec<u8>) -> Result<Vec<u8>, String> {
                 let state = if ::loom::decode_host::<::loom::Value>(&state)?.is_null() { <Self as ::loom::Actor>::init() } else { ::loom::decode_host(&state)? };
                 let msg = ::loom::decode_host(&msg)?;

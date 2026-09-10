@@ -2,6 +2,8 @@
 mod crates;
 pub use crates::{CrateDependency, crate_dependencies};
 mod rust_effects;
+mod safety;
+pub use safety::{safety_policy_bytes, untrusted_package_diagnostics, untrusted_source_diagnostics};
 use loom_proto::{DefineRequest, Diagnostic, ExportSig, Lang, ParamSig, TypeSig, ValueShape};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf, process::Stdio};
@@ -256,6 +258,11 @@ fn check_rust(request: &DefineRequest, signatures: &BTreeMap<String, TypeSig>) -
         checked
             .diagnostics
             .push(diagnostic(Lang::Rust, "LOOM_BUNDLE", &error));
+        return checked;
+    }
+    let package_diagnostics = untrusted_package_diagnostics(&bundle);
+    if !package_diagnostics.is_empty() {
+        checked.diagnostics.extend(package_diagnostics);
         return checked;
     }
     let manifest = bundle

@@ -1,5 +1,7 @@
 # Plan: content-addressed crates with isolated Wasm memory
 
+The shared-memory cancellation recorded below was superseded on 2026-09-10 by the user's instruction, "ok lets do shared memory but force safe etc". The current implementation contract is [shared execution](plan-shared-execution.md): sibling jobs share memory within one execution; separate executions remain isolated. Earlier scan measurements below used isolated components and do not measure the new backend. Rust safety admission is not a formal proof, and sibling jobs are one trust domain.
+
 Status: implementation in progress, 2026-09-09. The consolidated command is
 `LOOM_URL=<isolated daemon> LOOM_TOKEN_FILE=<token file> bun scripts/bench/unified-memory.ts <fixture> <native binary>`.
 It prints the passing gate count and first failure. Performance targets below

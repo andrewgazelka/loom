@@ -13,23 +13,23 @@ Find every file containing a string. Fork a search for each child directory, rea
 The [complete runnable Rust example](docs/social/fork-join-example.rs) takes `machine`, `path`, and `needle`, and returns sorted matching paths. This is its core, inside an ordinary `fn`:
 
 ```rust
-let jobs = directories.into_iter().map(|path| {
-    loom::fork(MAIN_DEF, MainArgs {
-        machine: machine.clone(), path, needle: needle.clone(),
-    }).expect("fork failed")
-}).collect::<Vec<_>>();
+loom::scope(|scope| {
+    let jobs = directories.into_iter().map(|path| {
+        scope.fork(move || search(machine, &path, needle))
+            .expect("fork failed")
+    }).collect::<Vec<_>>();
 
-let mut matches = Vec::new();
-for file in files {
-    if fs::read(&machine, &file).expect("read failed").contains(&needle) {
-        matches.push(file);
-    }
-}
-matches.extend(loom::join(jobs).expect("join failed")
-    .into_iter().flatten());
+    let mut matches = files.into_iter().filter(|path| {
+        fs::read(machine, path).expect("read failed").contains(needle)
+    }).collect::<Vec<_>>();
+
+    matches.extend(jobs.into_iter()
+        .flat_map(|job| job.join().expect("join failed")));
+    matches
+}).expect("scope failed")
 ```
 
-`#[loom::def]` generates `MAIN_DEF` and the named `MainArgs` struct for the recursive call. `fs::read` returns a Rust `String`; `contains` performs a case-sensitive literal search. Collecting the jobs starts every directory search before the local file reads and the final `join`.
+The helper takes `machine`, `path`, and `needle` as `&str`. Children borrow the machine and search string, and each closure owns its directory path. `job.join()` returns matching paths directly. The scope joins every child before those borrows end, including jobs whose handles were forgotten. `fs::read` returns a Rust `String`; `contains` performs a case-sensitive literal search.
 
 `machine` identifies a host filesystem rooted at a directory you choose. The example skips symlinks and fails on unreadable or invalid UTF-8 files. It reads each file into memory and returns each matching path once. It is a small teaching example, without ripgrep's regex engine, ignore-file handling, binary detection, or streaming search. Guest functions need no `async` or `.await`.
 
@@ -37,7 +37,7 @@ matches.extend(loom::join(jobs).expect("join failed")
 
 The content-search example above has correctness checks, but no published timing. The following measurements are for finding the largest file by metadata, using the [fork/join scanner](scripts/bench/largest-fork.rs) and the [concurrent `all` scanner](scripts/bench/largest-all.rs).
 
-Warm medians from the same seven-round run on an Apple Silicon Mac, September 9, 2026:
+Historical baseline from the isolated-instance backend, before shared scoped jobs: warm medians from the same seven-round run on an Apple Silicon Mac, September 9, 2026. These are not measurements of the new shared backend:
 
 | Largest-file scan | Median |
 | --- | ---: |
@@ -51,7 +51,7 @@ The fixture starts with 10,000 files in 256 directories. Every timed round chang
 
 Loom uses parallel, batched filesystem operations; the native reference walks sequentially. These timings compare different implementations; they do **not** isolate Wasm overhead against equally optimized native code. The separate single-effect `fs.walk` implementation measured 17.22 ms in a different run and is still being tuned.
 
-**10/12 scan gates pass.** Both variants meet the 15 ms latency target. The two remaining failures are reply storage waits of 1.50 ms and 1.59 ms against a target below 1 ms. The earlier 7 ms figure was an unverified Linux estimate, not a measured Mac result.
+**That isolated-backend run passed 10/12 scan gates.** Both variants meet the 15 ms latency target. The two remaining failures are reply storage waits of 1.50 ms and 1.59 ms against a target below 1 ms. The earlier 7 ms figure was an unverified Linux estimate, not a measured Mac result.
 
 [Reproduce the benchmark](scripts/bench/README.md#reproduce) · [Benchmark source](scripts/bench/largest.ts) · [Measurements and remaining work](docs/plan-unified-memory.md#scan-contract-change-2026-09-09)
 
@@ -67,7 +67,7 @@ pub fn main() -> String {
 }
 ```
 
-The host owns the timers. The guest suspends until both finish, then continues in the same ordinary function. `all` submits effects; `fork` and `join` run and collect other definitions. Actors add persistent state and event history when a task needs to live beyond one call.
+The host owns the timers. The guest suspends until both finish, then continues in the same ordinary function. `all` submits effects; `scope.fork` and `job.join` run borrowed closures. Content-addressed calls to other definitions use `loom::fork` and `loom::join`. Actors add persistent state and event history when a task needs to live beyond one call.
 
 ## Try it
 
@@ -87,6 +87,8 @@ See the [setup and API guide](docs/guide.md) and [MCP setup and verification](do
 
 ## Isolation and recorded effects
 
-Each guest instance has a separate WebAssembly memory. Host operations cross a typed DAG-CBOR boundary, and recorded results live in a content-addressed store. HTTP and MCP envelopes use JSON; guest values and structured CAS payloads use DAG-CBOR.
+Each Rust execution owns a shared WebAssembly memory; its scoped jobs borrow values in that memory. Separate executions have separate memories. Host operations cross a typed DAG-CBOR boundary, and recorded results live in a content-addressed store. HTTP and MCP envelopes use JSON; guest values and structured CAS payloads use DAG-CBOR.
 
-Loom rejects explicit unsafe guest code as a correctness check. Safe Rust can still expose compiler or library soundness bugs, so Rust's type system is not the security boundary. Keeping guest memories separate is a deliberate architectural requirement. Neither Rust nor the complete Loom sandbox has an end-to-end formal proof. A formally verified language and toolchain are a longer-term goal; see the [isolation decision and supporting evidence](docs/plan-unified-memory.md#memory-isolation-decision).
+Loom enforces safe-code admission for user code and untrusted dependencies, including macro bodies. It rejects untrusted build scripts and procedural macros, and the compiler rejects non-`Send` captures and escaping borrows. Pinned SDK, standard-library and compiler dependencies contain trusted unsafe internals. Stack bounds, job and memory limits, and cancellation draining are enforced separately by the runtime.
+
+Safe Rust can still expose compiler or library soundness bugs. Sibling jobs are one trust domain; these checks are not a proven security boundary between mutually hostile jobs. Neither Rust nor the complete Loom sandbox has an end-to-end formal proof. A formally verified language and toolchain remain a longer-term goal. See the [shared execution contract and checks](docs/plan-shared-execution.md) and [supporting isolation reasoning](docs/plan-unified-memory.md#memory-isolation-decision).

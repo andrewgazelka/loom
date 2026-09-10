@@ -1,12 +1,26 @@
 //! Synchronous guest interface to the language-independent Loom host.
+#[cfg(loom_core)]
+#[doc(hidden)]
+pub mod core;
+#[cfg(any(loom_core, test))]
+mod scoped;
+#[cfg(any(loom_core, test))]
+pub use scoped::{scope, Scope, ScopedJoinHandle};
 pub use loom_guest_macros::{actor, def};
 pub use serde;
 use serde::{Serialize, de::DeserializeOwned};
 pub use serde_json;
 use std::marker::PhantomData;
 
+#[cfg(not(loom_core))]
 pub mod bindings {
     wit_bindgen::generate!({ path: "../../loom-wit", world: "handler", pub_export_macro: true, default_bindings_module: "::loom::bindings" });
+}
+
+#[cfg(loom_core)]
+pub mod bindings {
+    pub use crate::core::Guest;
+    pub use crate::export_core as export;
 }
 
 pub type EffectError = String;
@@ -14,8 +28,13 @@ pub use loom_proto::{Desc, DirEntry, EntryKind, TypeSig, Value, decode, decode_h
 
 pub fn perform<T: DeserializeOwned>(desc: Desc<T>) -> Result<T, EffectError> {
     let bytes = encode(&desc)?;
-    let result = bindings::loom::host::abilities::perform(&bytes)?;
-    decode_host(&result)
+    #[cfg(not(loom_core))]
+    {
+        let result = bindings::loom::host::abilities::perform(&bytes)?;
+        decode_host(&result)
+    }
+    #[cfg(loom_core)]
+    { core::perform(&bytes) }
 }
 
 pub struct Def<F> {

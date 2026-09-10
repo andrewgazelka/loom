@@ -1,5 +1,6 @@
 mod filesystem;
 mod machine;
+mod sharedcore;
 mod trace;
 use anyhow::{Context, Result, bail};
 use loom_proto::{Actor, Value};
@@ -35,6 +36,9 @@ struct Inner {
     resolver: Option<Arc<dyn ComponentResolver>>,
     store: Store,
     engine: Engine,
+    core_engine: Engine,
+    core_executor: futures::executor::ThreadPool,
+    core_modules: Mutex<HashMap<String, wasmtime::Module>>,
     components: Mutex<HashMap<String, HandlerPre<ContextData>>>,
     component_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     actor_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
@@ -357,6 +361,9 @@ impl Runtime {
                 resolver,
                 store,
                 engine,
+                core_engine: sharedcore::engine()?,
+                core_executor: futures::executor::ThreadPoolBuilder::new().pool_size(8).name_prefix("loom-guest-").create()?,
+                core_modules: Mutex::new(HashMap::new()),
                 components: Mutex::new(HashMap::new()),
                 component_locks: Mutex::new(HashMap::new()),
                 actor_locks: Mutex::new(HashMap::new()),
@@ -373,6 +380,7 @@ impl Runtime {
                 std::thread::sleep(Duration::from_millis(10));
                 let Some(inner) = weak.upgrade() else { break };
                 inner.engine.increment_epoch();
+                inner.core_engine.increment_epoch();
             }
         });
         Ok(runtime)
@@ -584,6 +592,14 @@ impl Runtime {
         scope: &str,
         effects: EffectContext,
     ) -> Result<EncodedCall> {
+        let core = self.core_call(hash, &args, scope, &effects).await;
+        if !matches!(core, Ok(None)) {
+            let drained = self.drain_recorded_fibers(scope, effects.trace.as_ref()).await;
+            self.cancel_fibers(scope).await;
+            if let Some(trace) = &effects.trace { trace.finish_draining(scope); }
+            drained?;
+            return core?.context("core dispatch lost its result");
+        }
         let call_start = Instant::now();
         let mut instance = self
             .instance_delegated(hash, scope, false, &effects)
@@ -619,7 +635,13 @@ impl Runtime {
             return Ok(actor);
         }
         // Instantiate before publishing an actor so missing imports/components fail immediately.
-        self.instance(hash, "spawn", true).await?;
+        if self
+            .core_execute(hash, "spawn", &EffectContext::default(), true, sharedcore::Entry::Validate)
+            .await?
+            .is_none()
+        {
+            self.instance(hash, "spawn", true).await?;
+        }
         let def = self
             .inner
             .store
@@ -656,6 +678,19 @@ impl Runtime {
                     && let Some(initial) = event.event.get("__loom_init")
                 {
                     state = initial.clone();
+                    continue;
+                }
+                if let Some(folded) = self
+                    .core_execute(
+                        &actor.behavior_hash,
+                        "fold",
+                        &EffectContext::default(),
+                        true,
+                        sharedcore::Entry::Fold { state: &state, event: &event.event },
+                    )
+                    .await?
+                {
+                    state = folded.output.decode()?;
                     continue;
                 }
                 if instance.is_none() {
@@ -743,18 +778,30 @@ impl Runtime {
             actor_id: Some(actor.clone()),
             ..EffectContext::default()
         };
-        let mut instance = self
-            .instance_delegated(&metadata.behavior_hash, &scope, false, &effects)
-            .await?;
-        instance.store.data_mut().effects.actor_id = Some(actor.clone());
-        let bytes = instance
-            .bindings
-            .call_run(
-                &mut instance.store,
-                &encode(&state)?,
-                &encode(&message.msg)?,
+        let bytes = match self
+            .core_execute(
+                &metadata.behavior_hash,
+                &scope,
+                &effects,
+                false,
+                sharedcore::Entry::Run { state: &state, message: &message.msg },
             )
-            .await;
+            .await
+        {
+            Ok(Some(call)) => Ok(call.output.bytes),
+            Ok(None) => {
+                let mut instance = self
+                    .instance_delegated(&metadata.behavior_hash, &scope, false, &effects)
+                    .await?;
+                instance.bindings.call_run(
+                    &mut instance.store,
+                    &encode(&state)?,
+                    &encode(&message.msg)?,
+                ).await.map_err(anyhow::Error::from)
+                    .and_then(|result| result.map_err(anyhow::Error::msg))
+            }
+            Err(error) => Err(error),
+        };
         let drained = self
             .drain_recorded_fibers(&scope, effects.trace.as_ref())
             .await;
@@ -763,7 +810,7 @@ impl Runtime {
             trace.finish_draining(&scope);
         }
         drained?;
-        let bytes = bytes?.map_err(anyhow::Error::msg)?;
+        let bytes = bytes?;
         let events = decode(&bytes)?
             .as_array()
             .context("run must return array of events")?
@@ -848,7 +895,13 @@ impl Runtime {
         if actor.lang != def.lang {
             bail!("cross-language upgrade requires a migration");
         }
-        self.instance(hash, "upgrade", true).await?;
+        if self
+            .core_execute(hash, "upgrade", &EffectContext::default(), true, sharedcore::Entry::Validate)
+            .await?
+            .is_none()
+        {
+            self.instance(hash, "upgrade", true).await?;
+        }
         let def = self
             .inner
             .store

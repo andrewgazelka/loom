@@ -18,6 +18,7 @@ TARGETS = {
     "host-linux": {"package": "rust", "target": "x86_64-unknown-linux-gnu"},
     "wasip1": {"package": "rust-std", "target": "wasm32-wasip1"},
     "wasip2": {"package": "rust-std", "target": "wasm32-wasip2"},
+    "rust-src": {"package": "rust-src", "target": "*"},
 }
 
 

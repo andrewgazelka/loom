@@ -65,7 +65,8 @@ def main() -> None:
     assert [g.codepoint for g in enabled.glyph_infos] != [g.codepoint for g in disabled.glyph_infos], "Font has no active programming ligatures"
 
     source = (ROOT / "docs/social/fork-join-example.rs").read_text()
-    excerpt = textwrap.dedent(source[source.index("    let jobs ="):source.index("    matches.sort();")]).rstrip()
+    end = source.index('    }).expect("scope failed")') + len('    }).expect("scope failed")')
+    excerpt = textwrap.dedent(source[source.index("    loom::scope"):end]).rstrip()
     elements: list[str] = []
 
     def write(text: str, x: float, baseline: float, size: int, color: str, face: Typeface = regular) -> float:
@@ -81,10 +82,9 @@ def main() -> None:
         assert cursor <= WIDTH - 80, f"Text overflow: {text}"
         return cursor
 
-    write("loom", 96, 90, 25, ACCENT, bold)
     write("grep, without function coloring.", 96, 190, 45, "#f1f0ed", bold)
 
-    tokens = re.compile(r'("[^"\n]*"|\b(?:let|mut|for|in|if)\b|\b(?:fork|join|read|contains)(?=\())')
+    tokens = re.compile(r'("[^"\n]*"|\b(?:let|mut|for|in|if|move)\b|\b(?:fork|join|read|contains)(?=\())')
     for index, line in enumerate(excerpt.splitlines()):
         x = 96.0
         for token in tokens.split(line):
@@ -95,10 +95,9 @@ def main() -> None:
                 color = "#9cab9f"
             elif token in {"fork", "join", "read", "contains"}:
                 color = ACCENT
-            elif token in {"let", "mut", "for", "in", "if"}:
+            elif token in {"let", "mut", "for", "in", "if", "move"}:
                 color = "#aeb6c7"
             x = write(token, x, 320 + index * 42, 30, color)
-    write("recursive text search / excerpt", 96, 1020, 17, "#72767e")
 
     definitions = []
     for face in [regular, bold]:

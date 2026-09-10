@@ -3,6 +3,7 @@ mod direct;
 mod preparation;
 pub mod registry;
 mod sdk;
+mod threaded_module;
 use loom_check::{CheckedDef, SourceBundle, SourceFile};
 use loom_proto::{Diagnostic, Lang};
 use std::{
@@ -15,6 +16,60 @@ use tokio::{fs, process::Command, sync::Mutex};
 // Build workspaces own mutable files; immutable SDK permissions must not leak in.
 async fn seed_build_lock(source: &Path, destination: &Path) -> Result<(), std::io::Error> {
     fs::write(destination, fs::read(source).await?).await
+}
+
+// Fetching the compiler workspace resolves archives without executing build
+// scripts. Do this before cache lookup: prepared definition metadata can outlive
+// the host Cargo cache that supplies independently verified compiler sources.
+async fn prepare_compiler_dependencies() -> Result<(), BuildError> {
+    let compiler = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    let output = Command::new(compiler)
+        .args(["--print", "sysroot"])
+        .output()
+        .await?;
+    if !output.status.success() {
+        return Err(BuildError::Rejected(format!(
+            "compiler sysroot: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    let sysroot = String::from_utf8(output.stdout)
+        .map_err(|error| BuildError::Rejected(error.to_string()))?;
+    let manifest = Path::new(sysroot.trim()).join("lib/rustlib/src/rust/library/Cargo.toml");
+    let mut command = Command::new("cargo");
+    command.env_clear();
+    for name in [
+        "PATH",
+        "HOME",
+        "RUSTUP_HOME",
+        "RUSTUP_TOOLCHAIN",
+        "CARGO_HOME",
+        "TMPDIR",
+        "RUSTC",
+    ] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    command
+        .env("RUSTC_BOOTSTRAP", "1")
+        .args(["fetch", "--locked", "--manifest-path"])
+        .arg(manifest);
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(300),
+        command.kill_on_drop(true).output(),
+    )
+    .await
+    .map_err(|_| {
+        BuildError::Rejected("compiler dependency intake exceeded 300 seconds".into())
+    })??;
+    if !output.status.success() {
+        return Err(BuildError::Rejected(format!(
+            "compiler dependency intake: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    Ok(())
 }
 
 pub struct Builder {
@@ -125,6 +180,9 @@ impl Builder {
                 .get("package")
                 .is_some_and(|package| package.get("build").is_some())
             || dependencies.values().any(is_vendored);
+        if !isolated {
+            prepare_compiler_dependencies().await?;
+        }
         let preparation_inputs = serde_json::json!({
             "contract": "loom-preparation-v2-registry-identity",
             "manifest": manifest,
@@ -184,6 +242,7 @@ impl Builder {
             let mut command = Command::new(self.root.join("loom-rustc/sandbox.sh"));
             command
                 .arg("vendor")
+                .env("LOOM_RUST_TARGET", "wasm32-unknown-unknown")
                 .arg(&staging)
                 .arg(&crate_dir)
                 .arg(staging.join("target"))
@@ -266,6 +325,8 @@ impl Builder {
         if cached_inputs.as_deref() == Some(inputs.as_str())
             && let Ok(component) = fs::read(&component_path).await
             && loom_proto::component_protocol::is_current(&component)
+            && (definition.lang != Lang::Rust
+                || loom_proto::component_protocol::is_core_current(&component))
         {
             validate_component(&component)?;
             return Ok(BuildOutput {
@@ -373,15 +434,14 @@ impl Builder {
                     });
                 }
                 let encoding_started = Instant::now();
-                let mut component = {
-                    wit_component::ComponentEncoder::default()
-                        .module(&built.bytes).map_err(|error| BuildError::Rejected(error.to_string()))?
-                        .adapter(wasi_preview1_component_adapter_provider::WASI_SNAPSHOT_PREVIEW1_ADAPTER_NAME,
-                            wasi_preview1_component_adapter_provider::WASI_SNAPSHOT_PREVIEW1_REACTOR_ADAPTER)
-                        .map_err(|error| BuildError::Rejected(error.to_string()))?
-                        .validate(true).encode().map_err(|error| BuildError::Rejected(error.to_string()))?
-                };
+                let mut component =
+                    threaded_module::prepare(&built.bytes).map_err(BuildError::Rejected)?;
                 loom_proto::component_protocol::stamp(&mut component);
+                if !loom_proto::component_protocol::is_core_current(&component) {
+                    return Err(BuildError::Rejected(
+                        "Rust compiler did not produce a core module".into(),
+                    ));
+                }
                 built.logs.push_str(&format!(
                     "\n{}\n",
                     serde_json::json!({"build_stages":{
@@ -509,7 +569,9 @@ fn build_fingerprint(root: &Path, lang: Lang) -> Result<String, BuildError> {
     files.sort();
     let mut hash = blake3::Hasher::new();
     hash.update(b"loom-component-build-v2-dag-cbor");
+    hash.update(loom_check::safety_policy_bytes());
     hash.update(include_bytes!("direct.rs"));
+    hash.update(include_bytes!("threaded_module.rs"));
     hash.update(include_bytes!("direct/artifacts.rs"));
     hash.update(include_bytes!("direct/compiler_cache.rs"));
     hash.update(include_bytes!("direct/trusted_sources.rs"));
@@ -946,9 +1008,9 @@ fn cargo_artifact(output: &str, manifest: &Path, target: &Path) -> Result<PathBu
 }
 
 fn validate_component(bytes: &[u8]) -> Result<(), BuildError> {
-    if !bytes.starts_with(b"\0asm\x0d\0\x01\0") {
+    if !loom_proto::component_protocol::is_current(bytes) {
         return Err(BuildError::Rejected(
-            "builder output is not a WebAssembly component".into(),
+            "builder output has no supported executable ABI".into(),
         ));
     }
     Ok(())

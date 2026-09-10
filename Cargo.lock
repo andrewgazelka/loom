@@ -707,6 +707,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "dlmalloc"
+version = "0.2.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ad5208a115eaba24916f7456929832e310a81518c641f93fee4f89aa93aa3675"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "dyn-clone"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1461,6 +1472,8 @@ dependencies = [
  "tokio",
  "toml",
  "wasi-preview1-component-adapter-provider",
+ "wasm-encoder 0.254.0",
+ "wasmparser 0.254.0",
  "wit-component 0.254.0",
 ]
 
@@ -1583,6 +1596,7 @@ dependencies = [
 name = "loom-guest-rs"
 version = "0.1.0"
 dependencies = [
+ "dlmalloc",
  "loom-guest-macros",
  "loom-proto",
  "serde",

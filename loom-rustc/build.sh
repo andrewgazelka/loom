@@ -18,5 +18,6 @@ export LOOM_COMPILER_LIB="$("${RUSTC:-rustc}" --print sysroot)/lib"
 mkdir -p "$CARGO_TARGET_DIR"
 locked=
 if [ "${LOOM_LOCKED:-0}" = 1 ]; then locked=--locked; fi
-export RUSTFLAGS=
-exec cargo build $locked --release --lib --target wasm32-wasip1 --message-format=json
+export RUSTFLAGS="--cfg loom_core --check-cfg=cfg(loom_core) -Cno-redzone=yes -C target-feature=+atomics,+bulk-memory,+mutable-globals -Zunstable-options -Cpanic=immediate-abort -C link-arg=--shared-memory -C link-arg=--import-memory -C link-arg=--max-memory=268435456 -C link-arg=--export=__stack_low -C link-arg=--export=__stack_pointer -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align"
+export RUSTC_BOOTSTRAP=1
+exec cargo build -Zbuild-std=std,panic_abort $locked --release --lib --target "${LOOM_RUST_TARGET:-wasm32-unknown-unknown}" --message-format=json

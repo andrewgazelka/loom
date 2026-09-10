@@ -11,9 +11,9 @@ anyhow = "1"
 serde_json = "1"
 blake3 = "1"
 tokio = { version = "1", features = ["full"] }
-futures = "0.3"
+futures = { version = "0.3", features = ["thread-pool"] }
 uuid = { version = "1", features = ["v4"] }
-wasmtime = { version = "48.0.0", default-features = false, features = ["anyhow", "async", "component-model", "cranelift", "runtime", "pooling-allocator", "parallel-compilation", "std", "wat"] }
+wasmtime = { version = "48.0.0", default-features = false, features = ["threads", "anyhow", "async", "component-model", "cranelift", "runtime", "pooling-allocator", "parallel-compilation", "std", "wat"] }
 
 serde = { version = "1", features = ["derive"] }
 tempfile = "3"

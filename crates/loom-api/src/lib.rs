@@ -1747,7 +1747,7 @@ impl loom_rt::ComponentResolver for BuildResolver {
                     .context("component missing from CAS")?;
                 ensure!(
                     loom_proto::component_protocol::is_current(&component),
-                    "component uses an obsolete host protocol; migrate fs.list consumers to typed DirEntry and redefine the definition before execution"
+                    "executable uses an obsolete or unsupported Loom ABI; update its SDK and redefine it before execution"
                 );
                 return Ok(());
             }

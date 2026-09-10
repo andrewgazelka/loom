@@ -17,6 +17,10 @@
     "wasip2": {
       "url": "https://static.rust-lang.org/dist/2026-07-09/rust-std-1.97.0-wasm32-wasip2.tar.xz",
       "hash": "sha256-3yikEH2VMJvreejl0xIQ+RLS8onyYnGAxjhUr0+fS94="
+    },
+    "rust-src": {
+      "url": "https://static.rust-lang.org/dist/2026-07-09/rust-src-1.97.0.tar.xz",
+      "hash": "sha256-8lMKzWtNolohFR41YNkIsx8ILt1paPltJoLIwsFcZrc="
     }
   }
 }

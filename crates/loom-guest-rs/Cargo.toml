@@ -9,3 +9,9 @@ serde_json = "1"
 loom-proto = { path = "../loom-proto" }
 wit-bindgen = "0.46"
 loom-guest-macros = { path = "../loom-guest-macros" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+dlmalloc = "=0.2.14"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom_core)'] }

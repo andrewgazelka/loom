@@ -4,43 +4,47 @@ Attach [the code-rendered dark graphic](../assets/loom-grep-dark.png) to post 1.
 
 ## 1
 
-I’m building Loom: a Rust REPL without function coloring.
+I'm building Loom: a Rust REPL without function coloring.
 
-Here’s a small recursive text search. Fork work across directories, read files, then join the matching paths.
+Here's a tiny recursive text search: fork directory searches, read local files, join matching paths.
 
-All inside an ordinary Rust fn. 🧵
+Ordinary fn. No async or .await. 🧵
 
 ## 2
 
-Each child directory gets its own search. While those run, the parent reads its local files.
+Children borrow the same machine and search string. Each closure owns its directory path.
 
-fs::read returns a String. contains checks the text. join collects the child results.
+scope.fork(...) starts a job; job.join() returns typed results. The scope waits for forgotten handles too.
 
-The runtime handles suspension; the guest code has no async or .await.
+No argument structs or value wrappers.
 
 ## 3
 
-That’s the REPL I want for small tools: change the Rust code, call it, inspect what happened.
+While a job waits for a file or timer, the runtime can run other jobs.
 
-Effects are recorded for replay. Definitions and results have content hashes, so a coding agent can reuse the same work through MCP.
+Effects are recorded for replay. Definitions and results have content hashes.
+
+Use the same runtime from the browser REPL or a coding agent over MCP.
 
 ## 4
 
-The example is a case-sensitive literal search of UTF-8 files. It skips symlinks and returns each matching path once.
+This example searches UTF-8 files for a literal string, skips symlinks and returns sorted paths.
 
-It’s intentionally small: no regex or ignore-file handling. The complete example is in the repo.
+It's small: no regex, ignore-file handling or streaming.
+
+The complete Rust example is in the repo; the graphic shows the fork/join part.
 
 ## 5
 
-Separate benchmark: our largest-file metadata scan takes 12.00 ms with fork/join, or 10.46 ms with all.
+Benchmark details are in the README: the workload, warm-run timings and native comparison.
 
-Warm medians of 7 runs on an Apple Silicon Mac, including MCP and recording.
-
-Those are metadata timings, not timings for this text search.
+The text-search example has correctness checks. Metadata-scan timings measure a different workload.
 
 ## 6
 
-Still early: 10/12 metadata-scan gates pass. Storage waits remain around 1.5 ms against a target below 1 ms.
+Shared jobs are one trust domain. Separate executions have separate memories.
 
-The README has the text-search example, benchmark details and reproduction steps:
+User code must pass safe-code admission; pinned SDK/std internals remain trusted. This is not a formal proof.
+
+Code and setup:
 https://github.com/andrewgazelka/repl-maxx

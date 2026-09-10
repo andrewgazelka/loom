@@ -14,32 +14,38 @@ for argument in "$@"; do
 done
 if [ -z "${CARGO_MANIFEST_DIR:-}" ]; then exec "$@"; fi
 if [ "$compile" = no ]; then exec "$@"; fi
-# Every user definition, including definition dependencies, gets a correctness
-# lint. The isolated Wasm runtime remains the execution boundary.
-case "${CARGO_PRIMARY_PACKAGE:-}:${CARGO_PKG_NAME:-}" in
-  1:*|*:loom-definition-*)
-    # A dependency's Cargo cap-lints=allow otherwise downgrades even forbid.
-    remaining=$#
-    while [ "$remaining" -gt 0 ]; do
-      argument=$1
-      shift
-      remaining=$((remaining - 1))
-      case "$argument" in
-        --cap-lints) shift; remaining=$((remaining - 1)) ;;
-        --cap-lints=*) ;;
-        *) set -- "$@" "$argument" ;;
-      esac
-    done
-    set -- "$@" -Funsafe-code
-    ;;
-  *)
-    # A content-addressed external source is still an external dependency. Give
-    # it Cargo's registry lint cap, rather than workspace path lint semantics.
-    if [ -n "${LOOM_CAS_SOURCES:-}" ]; then
-      case "$CARGO_MANIFEST_DIR/" in "$LOOM_CAS_SOURCES/"*|*/loom-crates/*) set -- "$@" --cap-lints allow ;; esac
-    fi
-    ;;
-esac
+# Trusted exceptions are exact source trees admitted before any host code runs.
+trusted=no
+manifest_dir=$(cd "$CARGO_MANIFEST_DIR" && pwd -P)
+compiler_std="${LOOM_COMPILER_LIB:?missing selected compiler}/rustlib/src/rust/library"
+case "$manifest_dir/" in "$compiler_std/"*) trusted=yes ;; esac
+if [ -n "${LOOM_TRUSTED_SOURCES:-}" ]; then
+  while IFS= read -r source; do
+    if [ "$source" = "$manifest_dir" ]; then trusted=yes; break; fi
+  done < "$LOOM_TRUSTED_SOURCES"
+fi
+if [ "$trusted" = no ]; then
+  previous=
+  for argument in "$@"; do
+    case "$previous:$argument" in
+      --crate-type:proc-macro|--crate-type:bin|--crate-name:build_script_build)
+        echo "untrusted host compilation rejected: $CARGO_MANIFEST_DIR" >&2
+        exit 65 ;;
+    esac
+    previous=$argument
+  done
+  remaining=$#
+  while [ "$remaining" -gt 0 ]; do
+    argument=$1; shift; remaining=$((remaining - 1))
+    case "$argument" in
+      --cap-lints) shift; remaining=$((remaining - 1)) ;;
+      --cap-lints=*) ;;
+      *) set -- "$@" "$argument" ;;
+    esac
+  done
+  export RUSTC_BOOTSTRAP=1
+  set -- "$@" -Funsafe-code -Zallow-features=
+fi
 # rustc randomizes archive object-member names when incremental is enabled.
 # Dependency artifacts must reproduce byte-for-byte; only the root keeps its
 # incremental workspace for edits to that definition.

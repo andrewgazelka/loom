@@ -321,6 +321,7 @@ pub(crate) async fn reconcile(job: Rebuild<'_>) -> Result<(), BuildError> {
             Duration::from_secs(300),
             Command::new(job.root.join("loom-rustc/sandbox.sh"))
                 .arg("vendor")
+                .env("LOOM_RUST_TARGET", "wasm32-unknown-unknown")
                 .arg(job.cache)
                 .arg(&crate_dir)
                 .arg(overlay.join("target"))
@@ -434,6 +435,20 @@ fn merge_vendor(source: &Path, destination: &Path) -> Result<(), BuildError> {
     for entry in std::fs::read_dir(source)? {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {
+            let name = entry.file_name();
+            if entry.file_type()?.is_file() && name.to_string_lossy().starts_with(".loom-archive-")
+            {
+                let path = destination.join(name);
+                if path.exists() {
+                    if std::fs::read(&path)? != std::fs::read(entry.path())? {
+                        return Err(BuildError::Rejected(
+                            "compiler archive evidence changed".into(),
+                        ));
+                    }
+                } else {
+                    std::fs::copy(entry.path(), path)?;
+                }
+            }
             continue;
         }
         let identity = vendor_identity(&entry.path())?;

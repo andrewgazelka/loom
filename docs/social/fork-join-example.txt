@@ -3,7 +3,13 @@ use loom::abilities::fs;
 // Literal search of UTF-8 files. Paths are relative to the machine root.
 #[loom::def]
 pub fn main(machine: String, path: String, needle: String) -> Vec<String> {
-    let entries = fs::list(&machine, &path).expect("directory listing failed");
+    let mut matches = search(&machine, &path, &needle);
+    matches.sort();
+    matches
+}
+
+fn search(machine: &str, path: &str, needle: &str) -> Vec<String> {
+    let entries = fs::list(machine, path).expect("directory listing failed");
     let mut directories = Vec::new();
     let mut files = Vec::new();
     for entry in entries {
@@ -15,20 +21,18 @@ pub fn main(machine: String, path: String, needle: String) -> Vec<String> {
         }
     }
 
-    let jobs = directories.into_iter().map(|path| {
-        loom::fork(MAIN_DEF, MainArgs {
-            machine: machine.clone(), path, needle: needle.clone(),
-        }).expect("fork failed")
-    }).collect::<Vec<_>>();
+    loom::scope(|scope| {
+        let jobs = directories.into_iter().map(|path| {
+            scope.fork(move || search(machine, &path, needle))
+                .expect("fork failed")
+        }).collect::<Vec<_>>();
 
-    let mut matches = Vec::new();
-    for file in files {
-        if fs::read(&machine, &file).expect("read failed").contains(&needle) {
-            matches.push(file);
-        }
-    }
-    matches.extend(loom::join(jobs).expect("join failed")
-        .into_iter().flatten());
-    matches.sort();
-    matches
+        let mut matches = files.into_iter().filter(|path| {
+            fs::read(machine, path).expect("read failed").contains(needle)
+        }).collect::<Vec<_>>();
+
+        matches.extend(jobs.into_iter()
+            .flat_map(|job| job.join().expect("join failed")));
+        matches
+    }).expect("scope failed")
 }

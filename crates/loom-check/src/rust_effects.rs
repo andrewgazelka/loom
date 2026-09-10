@@ -503,9 +503,17 @@ pub(crate) fn unsafe_source_diagnostics(file: &syn::File) -> Vec<loom_proto::Dia
     }
     impl<'ast> Visit<'ast> for UnsafeSource {
         fn visit_macro(&mut self, node: &'ast syn::Macro) {
+            if node
+                .path
+                .segments
+                .last()
+                .is_some_and(|segment| segment.ident == "include")
+            {
+                self.reject("external source inclusion");
+            }
             fn contains_unsafe(tokens: proc_macro2::TokenStream) -> bool {
                 tokens.into_iter().any(|token| match token {
-                    proc_macro2::TokenTree::Ident(name) => name == "unsafe",
+                    proc_macro2::TokenTree::Ident(name) => name == "unsafe" || name == "include",
                     proc_macro2::TokenTree::Group(group) => contains_unsafe(group.stream()),
                     _ => false,
                 })
@@ -514,6 +522,21 @@ pub(crate) fn unsafe_source_diagnostics(file: &syn::File) -> Vec<loom_proto::Dia
                 self.reject("unsafe tokens in macro input or definition");
             }
             visit::visit_macro(self, node);
+        }
+        fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+            fn includes(tree: &syn::UseTree) -> bool {
+                match tree {
+                    syn::UseTree::Name(name) => name.ident == "include",
+                    syn::UseTree::Rename(name) => name.ident == "include",
+                    syn::UseTree::Path(path) => includes(&path.tree),
+                    syn::UseTree::Group(group) => group.items.iter().any(includes),
+                    syn::UseTree::Glob(_) => false,
+                }
+            }
+            if includes(&item.tree) {
+                self.reject("source inclusion macro import");
+            }
+            visit::visit_item_use(self, item);
         }
         fn visit_expr_unsafe(&mut self, expression: &'ast syn::ExprUnsafe) {
             self.reject("unsafe block");
@@ -538,15 +561,58 @@ pub(crate) fn unsafe_source_diagnostics(file: &syn::File) -> Vec<loom_proto::Dia
             visit::visit_item_trait(self, item);
         }
         fn visit_item_foreign_mod(&mut self, item: &'ast syn::ItemForeignMod) {
-            if item.unsafety.is_some() {
-                self.reject("unsafe extern block");
-            }
+            self.reject("foreign extern block");
             visit::visit_item_foreign_mod(self, item);
         }
         fn visit_attribute(&mut self, attribute: &'ast syn::Attribute) {
-            if attribute.path().is_ident("unsafe") {
-                self.reject("unsafe attribute");
+            fn inspect(meta: &syn::Meta, checker: &mut UnsafeSource) {
+                let path = meta.path();
+                let name = path
+                    .segments
+                    .last()
+                    .map(|segment| segment.ident.to_string())
+                    .unwrap_or_default();
+                if name.starts_with("rustc_")
+                    || [
+                        "unsafe",
+                        "feature",
+                        "allow_internal_unsafe",
+                        "allow_internal_unstable",
+                        "no_core",
+                        "lang",
+                        "prelude_import",
+                        "global_allocator",
+                        "panic_handler",
+                        "alloc_error_handler",
+                        "no_mangle",
+                        "export_name",
+                        "link_section",
+                        "link",
+                        "link_name",
+                        "path",
+                        "proc_macro",
+                        "proc_macro_attribute",
+                        "proc_macro_derive",
+                    ]
+                    .contains(&name.as_str())
+                {
+                    checker.reject(&format!("compiler or ABI attribute {name}"));
+                }
+                if let syn::Meta::List(list) = meta {
+                    if name == "cfg_attr" {
+                        use syn::parse::Parser;
+                        if let Ok(nested)=syn::punctuated::Punctuated::<syn::Meta,syn::Token![,]>::parse_terminated.parse2(list.tokens.clone()) {
+                            for attribute in nested.iter().skip(1) {inspect(attribute,checker);}
+                        } else {checker.reject("unparseable conditional attribute");}
+                    }
+                    if name == "allow" || name == "expect" {
+                        if list.tokens.clone().into_iter().any(|token|matches!(token,proc_macro2::TokenTree::Ident(name) if name=="unsafe_code" || name=="unsafe_op_in_unsafe_fn")) {
+                            checker.reject("unsafe lint override");
+                        }
+                    }
+                }
             }
+            inspect(&attribute.meta, self);
             visit::visit_attribute(self, attribute);
         }
     }
@@ -577,6 +643,16 @@ mod unsafe_tests {
             "#![allow(unsafe_code)] fn main() { unsafe { operation(); } }",
             "macro_rules! hidden { () => { unsafe { operation(); } } }",
             "fn main() { generate!({unsafe fn hidden() {}}); }",
+            "extern \"C\" { fn legacy_foreign(); }",
+            "#![feature(core_intrinsics)] fn main() {}",
+            "#![cfg_attr(any(), feature(core_intrinsics))] fn main() {}",
+            "#![cfg_attr(all(), cfg_attr(all(), allow(unsafe_code)))] fn main() {}",
+            "#[allow_internal_unsafe] macro_rules! bad {()=>{0}}",
+            "#[rustc_allow_const_fn_unstable(foo)] fn main() {}",
+            "#![expect(unsafe_code)] fn main() {}",
+            "#[path=\"../outside.rs\"] mod outside;",
+            "include!(\"outside.rs\");",
+            "use core::include as load; load!(\"outside.rs\");",
         ] {
             let file = syn::parse_file(source).unwrap();
             assert!(
@@ -617,7 +693,7 @@ pub(crate) fn unsupported_mode_diagnostics(file: &syn::File) -> Vec<loom_proto::
         vec![super::diagnostic(
             loom_proto::Lang::Rust,
             "LOOM_THREADS_UNSUPPORTED",
-            "#[loom::def(threads)] is unsupported; definitions use isolated Wasm instances and CBOR messages",
+            "#[loom::def(threads)] is unsupported; use the ordinary #[loom::def] entrypoint",
         )]
     } else {
         Vec::new()

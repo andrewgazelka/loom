@@ -271,7 +271,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
     let root = root_path.as_path();
     let cache = cache_path.as_path();
     let directory = directory_path.as_path();
-    let target_name = "wasm32-wasip1";
+    let target_name = "wasm32-unknown-unknown";
     let compiler_owner = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".into());
     let mut compiler_command = Command::new(&compiler_owner);
     compiler_environment(&mut compiler_command);
@@ -294,7 +294,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
             .trim(),
     );
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"loom-rustc-contract-v2-opt2-cgu16-no-lto-forbid-user-unsafe");
+    hasher.update(b"loom-rustc-contract-v3-core-shared-safe-dependencies");
     let manifest_bytes = fs::read_to_string(directory.join("Cargo.toml"))
         .await?
         .replace(root.to_string_lossy().as_ref(), "$SDK")
@@ -425,7 +425,13 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
         }
     }
     artifacts::initialize_index(store)?;
-    let shareable = graph_shareable(root, cache, directory, &target, isolated).await?;
+    let shareable =
+        graph_shareable(root, cache, directory, &target, isolated, Some(&sysroot)).await?;
+    if !shareable {
+        return Err(rejected(
+            "untrusted host build scripts and procedural macros are not admitted",
+        ));
+    }
     let mirror = graph.join("unit-cache");
     compiler_cache::prepare(store, &mirror, &target, &compiler_identity)?;
     let helper_owner = std::env::var_os("LOOM_COMPILER_CACHE_OWNER")
@@ -453,7 +459,8 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
         .env("LOOM_CAS_SOURCES", cache.join("source-trees"))
         .env("LOOM_COMPILER_CACHE_OWNER", helper_owner)
         .env("LOOM_COMPILER_CACHE_MIRROR", &mirror)
-        .env("LOOM_ROOT_INCREMENTAL", &root_incremental);
+        .env("LOOM_ROOT_INCREMENTAL", &root_incremental)
+        .env("LOOM_TRUSTED_SOURCES", graph.join("trusted-sources"));
     let output = run(command).await?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let graph_identity = serde_json::json!({"dependency_graph":key});
@@ -488,6 +495,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
             root.join("crates/loom-guest-rs"),
             root.join("crates/loom-guest-macros"),
             root.join("crates/loom-proto"),
+            sysroot.join("lib/rustlib/src/rust/library"),
         ];
         if !isolated {
             let cargo_home = std::env::var_os("CARGO_HOME")
@@ -824,7 +832,8 @@ mod tests {
                 &directory,
                 &directory,
                 &directory.join("target"),
-                false
+                false,
+                None,
             )
             .await
             .unwrap()
@@ -835,15 +844,16 @@ mod tests {
         )
         .unwrap();
         assert!(
-            !graph_shareable(
+            graph_shareable(
                 root,
                 &directory,
                 &directory,
                 &directory.join("target"),
-                false
+                false,
+                None,
             )
             .await
-            .unwrap()
+            .is_err()
         );
         assert!(!directory.join("executed").exists());
         let store = Store::memory().unwrap();
@@ -881,9 +891,10 @@ mod tests {
             &directory,
             &directory.join("target"),
             false,
+            None,
         )
         .await
-        .unwrap();
+        .unwrap_or(false);
         artifacts::publish_units(&store, admitted, &[unit]).unwrap();
         let after = store
             .with_connection(|connection| {
@@ -1137,6 +1148,7 @@ async fn graph_shareable(
     directory: &Path,
     target: &Path,
     isolated: bool,
+    compiler_sysroot: Option<&Path>,
 ) -> Result<bool, BuildError> {
     let mut command = if isolated {
         let mut command = Command::new(root.join("loom-rustc/sandbox.sh"));
@@ -1169,6 +1181,60 @@ async fn graph_shareable(
     let nodes = metadata["resolve"]["nodes"]
         .as_array()
         .ok_or_else(|| rejected("Cargo metadata has no resolved graph"))?;
+    let mut trusted = Vec::new();
+    if let Some(sysroot) = compiler_sysroot {
+        trusted.extend(
+            trusted_sources::compiler_sources(
+                sysroot,
+                directory
+                    .join("vendor")
+                    .is_dir()
+                    .then(|| directory.join("vendor"))
+                    .as_deref(),
+            )?
+            .into_iter()
+            .map(|path| path.to_string_lossy().into_owned()),
+        );
+    }
+    for package in packages {
+        let manifest = package["manifest_path"]
+            .as_str()
+            .ok_or_else(|| rejected("package source missing"))?;
+        let source = Path::new(manifest)
+            .parent()
+            .ok_or_else(|| rejected("package source missing"))?;
+        if trusted_sources::approved(root, source)? {
+            trusted.push(source.canonicalize()?.to_string_lossy().into_owned());
+        } else {
+            for target in package["targets"]
+                .as_array()
+                .ok_or_else(|| rejected("package targets missing"))?
+            {
+                let input = target["src_path"]
+                    .as_str()
+                    .ok_or_else(|| rejected("compiler source input missing"))?;
+                let input = Path::new(input).canonicalize()?;
+                if !input.starts_with(source.canonicalize()?) {
+                    return Err(rejected("compiler source escapes admitted package"));
+                }
+                let diagnostics =
+                    loom_check::untrusted_source_diagnostics(&std::fs::read_to_string(&input)?);
+                if !diagnostics.is_empty() {
+                    return Err(rejected(format!(
+                        "untrusted compiler input {}: {}",
+                        input.display(),
+                        serde_json::to_string(&diagnostics).map_err(rejected)?
+                    )));
+                }
+            }
+            inspect_untrusted_source(source, source.canonicalize()? == directory.canonicalize()?)?;
+        }
+    }
+    let trusted_path = target
+        .parent()
+        .ok_or_else(|| rejected("graph directory missing"))?
+        .join("trusted-sources");
+    fs::write(trusted_path, trusted.join("\n") + "\n").await?;
     let mut pending = Vec::new();
     for package in packages {
         let targets = package["targets"]
@@ -1261,5 +1327,67 @@ fn materialize_root_workspace(source: &Path, workspace: &Path) -> Result<(), Bui
         std::fs::remove_dir_all(workspace)?;
     }
     std::fs::rename(temporary, workspace)?;
+    Ok(())
+}
+
+fn inspect_untrusted_source(directory: &Path, generated_root: bool) -> Result<(), BuildError> {
+    fn collect(
+        root: &Path,
+        directory: &Path,
+        generated_root: bool,
+        files: &mut BTreeMap<String, loom_check::SourceFile>,
+    ) -> Result<(), BuildError> {
+        for entry in std::fs::read_dir(directory)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            if generated_root
+                && ["vendor", "loom-crates", ".cargo"].contains(&name.to_string_lossy().as_ref())
+            {
+                continue;
+            }
+            let path = entry.path();
+            let kind = entry.file_type()?;
+            if kind.is_symlink() {
+                return Err(rejected(format!(
+                    "untrusted source symlink: {}",
+                    path.display()
+                )));
+            }
+            if kind.is_dir() {
+                collect(root, &path, false, files)?;
+            } else if kind.is_file() {
+                let relative = path
+                    .strip_prefix(root)
+                    .map_err(rejected)?
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if path.extension().is_some_and(|extension| extension == "rs")
+                    || name == "Cargo.toml"
+                    || name == "rust-toolchain"
+                    || name == "rust-toolchain.toml"
+                    || relative.split('/').any(|part| part == ".cargo")
+                {
+                    files.insert(
+                        relative,
+                        loom_check::SourceFile::Text(std::fs::read_to_string(&path)?),
+                    );
+                }
+            } else {
+                return Err(rejected("untrusted source contains a special file"));
+            }
+        }
+        Ok(())
+    }
+    let mut files = BTreeMap::new();
+    collect(directory, directory, generated_root, &mut files)?;
+    let diagnostics =
+        loom_check::untrusted_package_diagnostics(&loom_check::SourceBundle { files });
+    if !diagnostics.is_empty() {
+        return Err(rejected(format!(
+            "untrusted package {}: {}",
+            directory.display(),
+            serde_json::to_string(&diagnostics).map_err(rejected)?
+        )));
+    }
     Ok(())
 }
