@@ -5,7 +5,7 @@
 - [Complete recursive text-search example](fork-join-example.rs), also [plain text](fork-join-example.txt)
 - [Dark PNG](../assets/loom-grep-dark.png) and [vector SVG](../assets/loom-grep-dark.svg)
 
-The current graphic is rendered from code, with Berkeley Mono and actual contextual programming ligatures. It shows a 100 ms timer and a 200 ms timer submitted together with `loom::all`. `sleep::desc` describes each timer; `all` executes them concurrently and waits for both. The ordinary Rust function then returns `"both finished"`. It is not a benchmark result. The older image-generated graphic is a previous draft.
+The current graphic is rendered from code, with Berkeley Mono and actual contextual programming ligatures. It shows a 100 ms timer and a 200 ms timer submitted together with `loom::all`. `sleep::desc` describes each timer; `all` executes them concurrently and waits for both. The ordinary Rust function returns `()` after both timers finish. The image contains only code; the post supplies the headline. It is not a benchmark result. The older image-generated graphic is a previous draft.
 
 To regenerate from the Rust source:
 

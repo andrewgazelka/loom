@@ -18,8 +18,8 @@ from fontTools.pens.svgPathPen import SVGPathPen
 from fontTools.ttLib import TTFont
 
 ROOT = Path(__file__).resolve().parents[1]
-WIDTH = 1600
-HEIGHT = 1100
+WIDTH = 1120
+HEIGHT = 640
 BACKGROUND = "#101114"
 FOREGROUND = "#d5d7dc"
 ACCENT = "#d58c68"
@@ -80,9 +80,6 @@ def main() -> None:
         assert cursor <= WIDTH - 80, f"Text overflow: {text}"
         return cursor
 
-    write("No function coloring.", 96, 160, 64, "#f1f0ed", bold)
-    write("Concurrent waits. Ordinary Rust functions.", 96, 224, 30, "#969ba5")
-
     tokens = re.compile(r'("[^"\n]*"|\b(?:use|fn|pub|let|mut|for|in|if|move)\b|\b(?:all|desc|sleep|fork|join|read|walk|filter|map|collect|main|scope|unwrap|contains)(?=\())')
     for index, line in enumerate(excerpt.splitlines()):
         x = 96.0
@@ -96,7 +93,7 @@ def main() -> None:
                 color = ACCENT
             elif token in {"use", "fn", "pub", "let", "mut", "for", "in", "if", "move"}:
                 color = "#b7a5d8"
-            x = write(token, x, 350 + index * 48, 38, color)
+            x = write(token, x, 120 + index * 52, 38, color)
 
     definitions = []
     for face in [regular, bold]:
