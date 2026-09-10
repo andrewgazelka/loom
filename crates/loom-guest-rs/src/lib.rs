@@ -171,7 +171,7 @@ pub mod abilities {
                 )
             }
         }
-        pub fn read(machine: Value, path: &str) -> Result<Value, EffectError> {
+        pub fn read(machine: &str, path: &str) -> Result<String, EffectError> {
             perform(Desc::new(
                 "fs.read",
                 serde_json::json!({"machine":machine,"path":path}),

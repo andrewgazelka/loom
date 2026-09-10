@@ -1,8 +1,4 @@
-# Loom launch thread
-
-Attach [the code-rendered dark graphic](../assets/loom-grep-dark.png) to post 1. [Full runnable example](fork-join-example.rs). Prepared for review; not posted.
-
-## 1
+1/6
 
 I’m building Loom: a Rust REPL without function coloring.
 
@@ -10,7 +6,9 @@ Here’s a small recursive text search. Fork work across directories, read files
 
 All inside an ordinary Rust fn. 🧵
 
-## 2
+--------------------
+
+2/6
 
 Each child directory gets its own search. While those run, the parent reads its local files.
 
@@ -18,19 +16,25 @@ fs::read returns a String. contains checks the text. join collects the child res
 
 The runtime handles suspension; the guest code has no async or .await.
 
-## 3
+--------------------
+
+3/6
 
 That’s the REPL I want for small tools: change the Rust code, call it, inspect what happened.
 
 Effects are recorded for replay. Definitions and results have content hashes, so a coding agent can reuse the same work through MCP.
 
-## 4
+--------------------
+
+4/6
 
 The example is a case-sensitive literal search of UTF-8 files. It skips symlinks and returns each matching path once.
 
 It’s intentionally small: no regex or ignore-file handling. The complete example is in the repo.
 
-## 5
+--------------------
+
+5/6
 
 Separate benchmark: our largest-file metadata scan takes 12.00 ms with fork/join, or 10.46 ms with all.
 
@@ -38,7 +42,9 @@ Warm medians of 7 runs on an Apple Silicon Mac, including MCP and recording.
 
 Those are metadata timings, not timings for this text search.
 
-## 6
+--------------------
+
+6/6
 
 Still early: 10/12 metadata-scan gates pass. Storage waits remain around 1.5 ms against a target below 1 ms.
 

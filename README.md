@@ -6,44 +6,50 @@ Write an ordinary Rust function. List directories concurrently, call another def
 
 Definitions and results persist between sessions. You can inspect recorded effects, replay a call, and reuse a definition by its content hash. The same runtime serves the browser REPL and coding agents over MCP.
 
-## Useful Rust, interactively
+## Build a small recursive text search
 
-Inspect two directories at once:
+Find every file containing a string. Fork a search for each child directory, read local files while those searches run, then join the matching paths.
+
+The [complete runnable Rust example](docs/social/fork-join-example.rs) takes `machine`, `path`, and `needle`, and returns sorted matching paths. This is its core, inside an ordinary `fn`:
 
 ```rust
-use loom::abilities::fs;
+let jobs = directories.into_iter().map(|path| {
+    loom::fork(MAIN_DEF, MainArgs {
+        machine: machine.clone(), path, needle: needle.clone(),
+    }).expect("fork failed")
+}).collect::<Vec<_>>();
 
-#[loom::def]
-pub fn main(machine: String) -> Vec<Vec<loom::DirEntry>> {
-    loom::all([
-        fs::list::desc(&machine, "src"),
-        fs::list::desc(&machine, "tests"),
-    ])
-    .expect("directory listing failed")
+let mut matches = Vec::new();
+for file in files {
+    if fs::read(&machine, &file).expect("read failed").contains(&needle) {
+        matches.push(file);
+    }
 }
+matches.extend(loom::join(jobs).expect("join failed")
+    .into_iter().flatten());
 ```
 
-`machine` identifies a host filesystem rooted at a directory you choose. Each `desc` describes an operation; `loom::all` runs both concurrently and returns their typed results in input order. A `DirEntry` has `name`, `size`, and `kind` fields. The guest has no direct filesystem access.
+`#[loom::def]` generates `MAIN_DEF` and the named `MainArgs` struct for the recursive call. `fs::read` returns a Rust `String`; `contains` performs a case-sensitive literal search. Collecting the jobs starts every directory search before the local file reads and the final `join`.
 
-This scales to a useful REPL task: **find the largest file in a directory tree**. The [complete Rust example](scripts/bench/largest-all.rs) lists each level concurrently, descends into directories, and chooses the largest regular file. It skips symlinks and breaks size ties by path. A [recursive fork/join version](scripts/bench/largest-fork.rs) gives each subtree its own worker.
+`machine` identifies a host filesystem rooted at a directory you choose. The example skips symlinks and fails on unreadable or invalid UTF-8 files. It reads each file into memory and returns each matching path once. It is a small teaching example, without ripgrep's regex engine, ignore-file handling, binary detection, or streaming search. Guest functions need no `async` or `.await`.
 
-The short example above lists only `src` and `tests`; the recursive programs below are what we benchmark.
+## Separate benchmark: largest-file metadata scan
 
-## 10,000 files in 10.46 ms
+The content-search example above has correctness checks, but no published timing. The following measurements are for finding the largest file by metadata, using the [fork/join scanner](scripts/bench/largest-fork.rs) and the [concurrent `all` scanner](scripts/bench/largest-all.rs).
 
 Warm medians from the same seven-round run on an Apple Silicon Mac, September 9, 2026:
 
 | Largest-file scan | Median |
 | --- | ---: |
-| Loom Rust, concurrent `all` | **10.46 ms** |
 | Loom Rust, recursive `fork` / `join` | **12.00 ms** |
+| Loom Rust, concurrent `all` | **10.46 ms** |
 | Native Rust, sequential traversal | **35.20 ms** |
 
 Loom timings include the MCP round trip, guest execution, filesystem observations, and effect recording. The native timing excludes process launch; including launch it was 37.81 ms. Compilation and first-call initialization are excluded. Both filesystem caches and compiled definitions are warm.
 
 The fixture starts with 10,000 files in 256 directories. Every timed round changes a nested winning file, bringing the timed tree to 10,001 files and 257 directories, and verifies the new answer. These scans read directory metadata, not file contents.
 
-Loom uses parallel, batched filesystem operations; the native reference walks sequentially. The 3.4× difference compares those implementations. It does **not** measure Wasm overhead against equally optimized native code. The separate single-effect `fs.walk` implementation measured 17.22 ms in a different run and is still being tuned.
+Loom uses parallel, batched filesystem operations; the native reference walks sequentially. These timings compare different implementations; they do **not** isolate Wasm overhead against equally optimized native code. The separate single-effect `fs.walk` implementation measured 17.22 ms in a different run and is still being tuned.
 
 **10/12 scan gates pass.** Both variants meet the 15 ms latency target. The two remaining failures are reply storage waits of 1.50 ms and 1.59 ms against a target below 1 ms. The earlier 7 ms figure was an unverified Linux estimate, not a measured Mac result.
 
