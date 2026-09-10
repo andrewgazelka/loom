@@ -6,13 +6,13 @@ Attach [the code-rendered dark graphic](../assets/loom-grep-dark.png) to post 1.
 
 I'm building Loom: a Rust REPL without function coloring.
 
-Walk a directory recursively. Return its file paths. The I/O suspends through an ordinary Rust function.
+Fork a job. Start two one-second timers. Join. Their waits overlap, using ordinary Rust functions.
 
 Ordinary fn. No async or .await. 🧵
 
 ## 2
 
-For concurrent work, Loom also has scoped fork/join.
+The child starts one timer; the parent starts another. Loom suspends each job while its timer runs.
 
 scope.fork(...) starts a job; job.join() returns typed results. The scope waits for forgotten handles too.
 
@@ -32,7 +32,7 @@ The repo also has a recursive text-search example. It searches UTF-8 files for a
 
 It's small: no regex, ignore-file handling or streaming.
 
-The graphic keeps it to listing file paths.
+The graphic uses two timers to show fork/join.
 
 ## 5
 
