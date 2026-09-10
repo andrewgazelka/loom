@@ -6,17 +6,15 @@ Attach [the code-rendered dark graphic](../assets/loom-grep-dark.png) to post 1.
 
 I'm building Loom: a Rust REPL without function coloring.
 
-Fork a job. Start two one-second timers. Join. Their waits overlap, using ordinary Rust functions.
+Start two timers together. Wait for both. Return a string, using an ordinary Rust function.
 
 Ordinary fn. No async or .await. 🧵
 
 ## 2
 
-The child starts one timer; the parent starts another. Loom suspends each job while its timer runs.
+`sleep::desc` describes a timer. `loom::all` runs both timers concurrently and waits for both to finish.
 
-scope.fork(...) starts a job; job.join() returns typed results. The scope waits for forgotten handles too.
-
-No argument structs or value wrappers.
+The waits overlap. The function returns "both finished" once both complete.
 
 ## 3
 
@@ -32,7 +30,7 @@ The repo also has a recursive text-search example. It searches UTF-8 files for a
 
 It's small: no regex, ignore-file handling or streaming.
 
-The graphic uses two timers to show fork/join.
+The graphic keeps it to two concurrent timers.
 
 ## 5
 

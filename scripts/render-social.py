@@ -83,7 +83,7 @@ def main() -> None:
     write("No function coloring.", 96, 160, 64, "#f1f0ed", bold)
     write("Concurrent waits. Ordinary Rust functions.", 96, 224, 30, "#969ba5")
 
-    tokens = re.compile(r'("[^"\n]*"|\b(?:use|fn|pub|let|mut|for|in|if|move)\b|\b(?:sleep|fork|join|read|walk|filter|map|collect|main|scope|unwrap|contains)(?=\())')
+    tokens = re.compile(r'("[^"\n]*"|\b(?:use|fn|pub|let|mut|for|in|if|move)\b|\b(?:all|desc|sleep|fork|join|read|walk|filter|map|collect|main|scope|unwrap|contains)(?=\())')
     for index, line in enumerate(excerpt.splitlines()):
         x = 96.0
         for token in tokens.split(line):
@@ -92,11 +92,11 @@ def main() -> None:
             color = FOREGROUND
             if token.startswith('"'):
                 color = "#9cab9f"
-            elif token in {"sleep", "fork", "join", "read", "main", "scope", "walk", "filter", "map", "collect", "contains"}:
+            elif token in {"all", "desc", "sleep", "fork", "join", "read", "main", "scope", "walk", "filter", "map", "collect", "contains"}:
                 color = ACCENT
             elif token in {"use", "fn", "pub", "let", "mut", "for", "in", "if", "move"}:
                 color = "#b7a5d8"
-            x = write(token, x, 350 + index * 48, 34, color)
+            x = write(token, x, 350 + index * 48, 38, color)
 
     definitions = []
     for face in [regular, bold]:

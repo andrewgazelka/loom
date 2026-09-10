@@ -5,7 +5,7 @@
 - [Complete recursive text-search example](fork-join-example.rs), also [plain text](fork-join-example.txt)
 - [Dark PNG](../assets/loom-grep-dark.png) and [vector SVG](../assets/loom-grep-dark.svg)
 
-The current graphic is rendered from code, with Berkeley Mono and actual contextual programming ligatures. It shows two one-second timers in a scoped fork/join. One timer runs in the child and one in the parent, so their waits can overlap. `sleep` is imported from Loom's SDK; it suspends a guest job. The example uses `unwrap()` to keep error handling out of the illustration. It is not a benchmark result. The older image-generated graphic is a previous draft.
+The current graphic is rendered from code, with Berkeley Mono and actual contextual programming ligatures. It shows a 100 ms timer and a 200 ms timer submitted together with `loom::all`. `sleep::desc` describes each timer; `all` executes them concurrently and waits for both. The ordinary Rust function then returns `"both finished"`. It is not a benchmark result. The older image-generated graphic is a previous draft.
 
 To regenerate from the Rust source:
 
