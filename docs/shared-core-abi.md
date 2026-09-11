@@ -4,24 +4,36 @@ Rust core definitions use `--cfg loom_core` and one imported shared memory
 per execution. The backend rebuilds `wasm32-unknown-unknown` standard libraries
 with atomics and immediate-abort panics. The stock `wasm32-wasip1-threads`
 SDK probe emitted pthread waits outside initialization, so it is rejected. Siblings are trusted code in
-one execution, not security boundaries. Component definitions retain their WIT ABI.
+one execution, not security boundaries. Component definitions retain their WIT ABI and have no scoped concurrency API.
 
 All pointers and lengths are unsigned wasm32 values. Packed byte results use
-pointer in low 32 bits and length in high 32 bits. Byte results are canonical
-DAG-CBOR envelopes `{ok: value}` or `{error: string}`. The receiver owns returned
+pointer in low 32 bits and length in high 32 bits. Except for `join_error`, byte
+results are canonical DAG-CBOR envelopes `{ok: value}` or `{error: string}`. The receiver owns returned
 allocations and calls `loom_dealloc(ptr,len,1)`. Input slices are borrowed only
 for the duration of the call. Host effect requests are copied and strictly
 validated before scheduling, identity, or recording.
 
+The `spawn` and `join` core imports implement scoped and detached closures;
+they are not root effects. Scoped jobs must finish before entry returns.
+Detached jobs still running when `loom_call`, `loom_run`, or `loom_fold`
+returns are cancelled without an implicit join.
+
 Imports from `loom`:
 
 - `perform(ptr:i32,len:i32)->i64`: suspend this Store, return copied response.
-- `fork(fn:i32,data:i32)->i64`: schedule exactly one task; zero refuses without
-  starting a task. Nonzero IDs are execution-local and never reused.
+- `spawn(fn:i32,data:i32,detached:i32)->i64`: schedule exactly one task;
+  `detached` is 0 for scoped or 1 for detached; other values trap. Zero refuses
+  without starting a task. Nonzero IDs are execution-local and never reused.
 - `join(id:i64)->i32`: zero means task completed and all its writes are visible.
-  Nonzero means failure; guest aborts the whole execution. The host must stop
-  and drain all workers before freeing execution memory. Failure cannot resume
-  arbitrary borrowed Rust state after a sibling trap.
+  Scoped jobs can only be joined by their spawning fiber; a scoped failure traps
+  and cancels the execution before borrowed Rust state can resume. Detached jobs
+  can be joined by any fiber in the same execution. Their task failure returns
+  1 without cancelling the execution; an unjoined detached failure is discarded.
+  The host stops and drains all workers before freeing execution memory.
+- `join_error(id:i64)->i64`: retrieve a failed detached job's full
+  `shared job {scope}: ...` diagnostic as packed UTF-8 bytes, without a CBOR
+  envelope. The receiver owns this allocation and frees it with alignment 1.
+  Unknown, scoped, unfinished, and successful jobs trap.
 
 Exports:
 
@@ -48,6 +60,12 @@ an invariant lexical scope lifetime prevent borrowed values from escaping.
 The scope object stays on its owner; children can create nested scopes.
 The owning scope joins every registered task, including forgotten handles,
 before reclaiming task storage. Results publish with release/acquire atomics.
+Detached closures and results require `Send + 'static`. Their closure slot,
+result slot, and publication flag share one reference-counted allocation.
+The task and handle each own a reference; dropping an unjoined handle leaves
+the task running, and the last reference frees the storage. Guest traps and
+execution cancellation do not run guest destructors; execution memory teardown
+reclaims allocations left behind by those paths.
 Allocator locking uses only short spin critical sections with no effects,
 imports, suspension, or atomic waits. Runtime memory maximum bounds the heap.
 
@@ -70,7 +88,7 @@ Additional imports from `loom`:
 - `handle_push(function:u32,data:u32,labels_ptr:u32,labels_len:u32)->u64`:
   install a frame; zero refuses. Labels are canonical DAG-CBOR: null matches
   every label and permits forwarding; an array is a total handler for those
-  labels and rejects `Forward` for a matching operation.
+  labels and rejects `Forward` for a matching effect.
 - `handle_pop(frame:u64)->i32`: remove the top frame after inherited children
   and active callbacks drain. Zero succeeds; failure must abort before borrowed
   handler storage can be reclaimed.
@@ -88,7 +106,7 @@ Additional exports:
   execution's shared memory. Return packed canonical DAG-CBOR
   `{resume: value}`, `{forward: null}`, or `{deferred: null}`. The host releases
   input and returned buffers with their original allocation layouts.
-- `loom_effect_run(ptr:u32,len:u32)->u64`: perform a descriptor from an
+- `loom_effect_run(ptr:u32,len:u32)->u64`: perform an effect from an
   independently instantiated scheduler child. The host owns the input and
   frees the packed response after consumption.
 
@@ -101,14 +119,19 @@ drain releases the cache before execution memory is reclaimed.
 Dispatch walks the execution scope's frames from innermost to outermost.
 Handlers are deep: the performer's remaining computation retains its handler
 stack. The callback itself runs with the stack below its own frame, so its
-operations cannot recursively enter that frame. A mutable callback has at most
+effects cannot recursively enter that frame. A mutable callback has at most
 one active invocation, enforced by an asynchronous host lock, never a guest
 spinlock held across an effect.
 
-Scoped children inherit the stack at fork time. Cross-definition calls and
-forks start a separate execution memory and do not inherit guest frames.
+Scoped and detached children inherit the stack at spawn time. A lexical
+handler's removal still waits for every inheriting child, including detached
+children, because handler callbacks can borrow its owner's stack. This is the
+handler's lifetime obligation; entry return adds no detached join. A trap in a
+borrowed handler callback still cancels the execution, even when its performer
+is detached. Cross-definition calls
+start a separate execution memory and do not inherit guest frames.
 Cancellation drains children and callbacks before frame data and borrowed
 parent storage. Handler traps abort the execution and identify the frame.
-Only descriptors reaching the outermost host handler participate in recording
+Only effects reaching the outermost host handler participate in recording
 and replay. Pure execution may install guest handlers; root-bound effects
 remain forbidden.

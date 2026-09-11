@@ -30,34 +30,14 @@ mod tests {
     }
 
     #[test]
-    fn named_arguments_encode_in_declaration_order_for_call_and_fork() {
-        let call = loom::call_desc(
-            super::ADD_DEF,
-            super::AddArgs {
-                right: 30,
-                left: 12,
-            },
-        )
-        .unwrap();
-        let fork = loom::fork_desc(
-            super::ADD_DEF,
-            super::AddArgs {
-                left: 12,
-                right: 30,
-            },
-        )
-        .unwrap();
-        assert_eq!(
-            call.args,
-            loom::serde_json::json!({"def":"$self","args":[12,30]})
-        );
-        assert_eq!(fork.op, "fork");
-        assert_eq!(call.args, fork.args);
-        let result =
-            super::__LoomDefinition::call(vec![], loom::encode(&call.args["args"]).unwrap())
-                .unwrap();
+    fn named_arguments_encode_in_declaration_order_for_call() {
+        let args = <super::AddInvocation as loom::Invocation>::arguments(super::AddArgs {
+            right: 30,
+            left: 12,
+        }).unwrap();
+        assert_eq!(args, vec![loom::serde_json::json!(12), loom::serde_json::json!(30)]);
+        let result = super::__LoomDefinition::call(vec![], loom::encode(&args).unwrap()).unwrap();
         assert_eq!(loom::decode::<i64>(&result).unwrap(), 42);
         let _call = loom::call::<super::AddInvocation>;
-        let _fork = loom::fork::<super::AddInvocation>;
     }
 }

@@ -1,4 +1,4 @@
-#[loom::actor(effects=["send"])]
+#[loom::actor(effects=["actor.send"])]
 pub struct Mailbox;
 impl loom::Actor for Mailbox {
     type State = u64;
@@ -16,7 +16,7 @@ impl loom::Actor for Mailbox {
             .as_u64()
             .expect("remaining must be a nonnegative integer");
         if remaining > 0 {
-            loom::abilities::send(
+            loom::actor::send(
                 actor,
                 loom::serde_json::json!({"actor":actor,"remaining":remaining-1}),
             )

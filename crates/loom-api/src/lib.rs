@@ -381,7 +381,7 @@ impl Service {
             )
         };
         let source = format!(
-            "{dependency_import} import {{perform,all,race,fork,join,call,send,spawn,exec,llm,fs,cas,sleep,now,random}} from \"loom\"; export function main(): unknown {{ return ({}); }}",
+            "{dependency_import} import {{perform,call,actor,exec,llm,fs,cas,sleep,now,random}} from \"loom\"; export function main(): unknown {{ return ({}); }}",
             request.source
         );
         let response = self

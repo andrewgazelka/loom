@@ -16,7 +16,8 @@ try {
   await check('MCP initialize and discovery', async () => {
     await client.connect();
     const tools = await rpc('tools/list', {});
-    assert(list(tools.tools).length === 4, 'expected four shared protocol tools');
+    const names = list(tools.tools).map(tool => String(tool.name)).sort();
+    assert(JSON.stringify(names) === JSON.stringify(['crate_add', 'loom_command', 'loom_define', 'loom_eval', 'loom_resolve', 'loom_upgrade']), `unexpected shared protocol tools: ${names.join(', ')}`);
   });
   await check('MCP TS reject retry accept execute', async () => {
     const rejected = await tool('loom_define', { name: 'mcp-ts', source: 'export function main(): unknown { return fetch("https://example.com"); }' });

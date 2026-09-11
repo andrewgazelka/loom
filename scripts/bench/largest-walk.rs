@@ -1,6 +1,6 @@
 #[loom::def(effects=["fs.walk"])]
 pub fn main(machine: String, path: String) -> loom::Value {
-    let entries = loom::abilities::fs::walk(&machine, &path, 256, 100_000)
+    let entries = loom::fs::walk(&machine, &path, 256, 100_000)
         .expect("tree walk failed");
     let mut best_path = String::new();
     let mut best_size: i64 = -1;

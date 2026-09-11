@@ -120,7 +120,7 @@ pub(super) fn link(linker: &mut wasmtime::Linker<Guest>) -> Result<()> {
 pub(super) fn dispatch<'a>(caller: &'a mut Caller<'_, Guest>, descriptor: &'a Value, occurrence: i64) -> futures::future::BoxFuture<'a, Result<Option<Vec<u8>>>> {
     Box::pin(async move {
     let execution = caller.data().execution.clone();
-    let label = descriptor.get("op").and_then(Value::as_str).context("descriptor op required")?;
+    let label = descriptor.get("op").and_then(Value::as_str).context("effect op required")?;
     let frames = caller.data().handlers.clone();
     for index in (0..frames.len()).rev() {
         let frame = frames[index].clone();
@@ -251,7 +251,7 @@ async fn invoke(caller: &mut Caller<'_, Guest>, frame: &HandlerFrame, id: u64, o
         HandlerInstance { running, stack, tls, tls_size, tls_align }
     };
     let running = &mut cached.running;
-    let op = encode(&json!({"label": descriptor.get("op"), "args": descriptor.get("args").unwrap_or(&Value::Null)}))?;
+    let op = encode(&json!({"name": descriptor.get("op"), "args": descriptor.get("args").unwrap_or(&Value::Null)}))?;
     let input = running.input_encoded(&op).await?;
     let function = running.instance.get_typed_func::<(i32, i32, i64, i32, i32), i64>(&mut running.store, "loom_handler_run").map_err(error)?;
     let packed = function.call_async(&mut running.store, (frame.function, frame.data, id as i64, input.pointer, input.length)).await.map_err(|cause| running.error_context(cause))? as u64;

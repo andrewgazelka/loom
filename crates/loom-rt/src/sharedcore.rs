@@ -14,7 +14,6 @@ use wasmtime::{
 
 mod cancellation;
 mod timing;
-mod bridge;
 mod handlers;
 use handlers::{HandlerFrame, ContinuationState, HandlerInstance};
 
@@ -34,6 +33,7 @@ pub(super) fn engine() -> Result<Engine> {
 struct Job {
     handlers: Vec<u64>,
     parent: String,
+    detached: bool,
     result: Mutex<Option<std::result::Result<(), String>>>,
     done: Notify,
 }
@@ -344,7 +344,7 @@ impl Execution {
                 .lock()
                 .unwrap()
                 .values()
-                .all(|job| job.result.lock().unwrap().is_some()),
+                .all(|job| job.detached || job.result.lock().unwrap().is_some()),
             "core returned with unfinished scoped jobs"
         );
         EffectOutput::value(output)
@@ -463,12 +463,7 @@ fn linker(
                         }
                         anyhow::ensure!(!execution.pure, "effects forbidden in pure core execution");
                         let scope = caller.data().scope.clone();
-                        let bridge = if !caller.data().handlers.is_empty()
-                            && matches!(descriptor.get("op").and_then(Value::as_str), Some("all" | "race")) {
-                            Some(bridge::Bridge::create(&mut caller).await?)
-                        } else { None };
-                        let mut effects = execution.effects.clone();
-                        if let Some(bridge) = &bridge { effects.root_dispatch = Some(Arc::new(bridge.clone())); }
+                        let effects = execution.effects.clone();
                         caller.data_mut().permit.take();
                         let output = execution
                             .runtime
@@ -479,7 +474,6 @@ fn linker(
                                 effects,
                             )
                             .await;
-                        if let Some(bridge) = bridge { bridge.close(&mut caller).await?; }
                         caller.data_mut().permit.take();
                         caller.data_mut().permit = Some(execution.permit().await?);
                         let bytes = match output {
@@ -508,9 +502,9 @@ fn linker(
     linker
         .func_wrap_async(
             "loom",
-            "fork",
-            |mut caller: Caller<'_, Guest>, (function, data): (i32, i32)| {
-                Box::new(async move { fork(&mut caller, function, data).await.map_err(host_error) })
+            "spawn",
+            |mut caller: Caller<'_, Guest>, (function, data, detached): (i32, i32, i32)| {
+                Box::new(async move { spawn(&mut caller, function, data, detached).await.map_err(host_error) })
             },
         )
         .map_err(error)?;
@@ -518,25 +512,46 @@ fn linker(
         let result: Result<i32> = async {
             let execution = caller.data().execution.clone();
             let job = execution.jobs.lock().unwrap().get(&(id as u64)).cloned().context("unknown shared job")?;
-            anyhow::ensure!(job.parent == caller.data().scope, "shared job belongs to another scope");
+            anyhow::ensure!(job.detached || job.parent == caller.data().scope, "shared job belongs to another scope");
             caller.data_mut().permit.take();
-            loop {
+            let status = loop {
                 let notification = job.done.notified();
                 let cancelled = execution.cancellation.notified();
                 execution.check()?;
                 let result = job.result.lock().unwrap().clone();
-                if let Some(result) = result { result.map_err(anyhow::Error::msg)?; break; }
+                if let Some(result) = result {
+                    match result {
+                        Ok(()) => break 0,
+                        Err(_) if job.detached => break 1,
+                        Err(message) => bail!("{message}"),
+                    }
+                }
                 tokio::select! { _ = notification => {}, _ = cancelled => bail!("shared execution cancelled"), _ = tokio::time::sleep_until(execution.deadline.into()) => bail!("shared execution deadline exceeded") }
-            }
+            };
             caller.data_mut().permit = Some(execution.permit().await?);
-            Ok(0)
+            Ok(status)
+        }.await;
+        result.map_err(host_error)
+    })).map_err(error)?;
+    linker.func_wrap_async("loom", "join_error", |mut caller: Caller<'_, Guest>, (id,): (i64,)| Box::new(async move {
+        let result: Result<i64> = async {
+            let job = caller.data().execution.jobs.lock().unwrap()
+                .get(&(id as u64)).cloned().context("unknown shared job")?;
+            anyhow::ensure!(job.detached, "join_error requires a detached job");
+            let message = match job.result.lock().unwrap().as_ref() {
+                Some(Err(message)) => message.clone(),
+                _ => bail!("shared job has no error"),
+            };
+            respond(&mut caller, message.into_bytes()).await
         }.await;
         result.map_err(host_error)
     })).map_err(error)?;
     handlers::link(&mut linker)?;
     Ok(linker)
 }
-async fn fork(caller: &mut Caller<'_, Guest>, function: i32, data: i32) -> Result<i64> {
+async fn spawn(caller: &mut Caller<'_, Guest>, function: i32, data: i32, detached: i32) -> Result<i64> {
+    anyhow::ensure!(matches!(detached, 0 | 1), "invalid shared job detached flag");
+    let detached = detached == 1;
     let execution = caller.data().execution.clone();
     execution.check()?;
     if execution
@@ -551,7 +566,7 @@ async fn fork(caller: &mut Caller<'_, Guest>, function: i32, data: i32) -> Resul
     let occurrence = caller.data().occurrence;
     caller.data_mut().occurrence += 1;
     let parent = caller.data().scope.clone();
-    let scope = format!("{parent}/fork:{occurrence}");
+    let scope = format!("{parent}/spawn:{occurrence}");
     let digest = blake3::hash(scope.as_bytes());
     let id = u64::from_le_bytes(digest.as_bytes()[..8].try_into().unwrap()) & i64::MAX as u64;
     {
@@ -581,10 +596,13 @@ async fn fork(caller: &mut Caller<'_, Guest>, function: i32, data: i32) -> Resul
         .context("invalid TLS alignment")? as u32;
     let tls_align = tls_alignment(tls_size, tls_align)?;
     let tls = if tls_size == 0 { 0 } else { allocate(caller, tls_size, tls_align).await? };
+    // Handler frames can borrow the spawning stack. handle_pop drains every
+    // inheriting job, including detached jobs, before freeing the frame data.
     let handlers = caller.data().handlers.clone();
     let job = Arc::new(Job {
         handlers: handlers.iter().map(|frame| frame.id).collect(),
         parent,
+        detached,
         result: Mutex::new(None),
         done: Notify::new(),
     });
@@ -613,7 +631,7 @@ async fn fork(caller: &mut Caller<'_, Guest>, function: i32, data: i32) -> Resul
             Ok(())
         }
         .await;
-        if result.is_err() {
+        if result.is_err() && !child_job.detached {
             child.cancel();
         }
         *child_job.result.lock().unwrap() =
@@ -786,6 +804,9 @@ impl Runtime {
             .unwrap_or_else(|_| Err(anyhow::anyhow!("shared root task ended without a result")));
         execution.cancel();
         execution.drain().await;
+        if let Some(trace) = &execution.effects.trace {
+            trace.finish_scope(scope);
+        }
         cleanup.execution.take();
         *self.inner.handler_round_trip_us.lock().unwrap() = HandlerMeasurements {
             scope: scope.to_owned(),
@@ -793,6 +814,9 @@ impl Runtime {
         };
         let result = result.map_err(|error| {
             let failure = execution.handler_failure.lock().unwrap().clone().or_else(|| execution.jobs.lock().unwrap().values().find_map(|job| {
+                // Detached failures belong to their join handles, not to an
+                // unrelated failure of the definition's entry.
+                if job.detached { return None; }
                 job.result
                     .lock()
                     .unwrap()

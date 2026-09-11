@@ -12,7 +12,7 @@ Ordinary fn. No async or .await. 🧵
 
 ## 2
 
-`sleep::desc` describes a timer. `loom::all` runs both timers concurrently and waits for both to finish.
+Calling `sleep` performs the delay. Two scoped children call it concurrently, and joining them waits for both timers.
 
 The waits overlap. The function returns once both complete.
 

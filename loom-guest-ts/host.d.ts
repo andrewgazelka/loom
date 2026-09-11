@@ -1,1 +1,1 @@
-declare module "loom:host/abilities" { export function perform(desc: Uint8Array): Uint8Array; }
+declare module "loom:host/effects" { export function perform(desc: Uint8Array): Uint8Array; }

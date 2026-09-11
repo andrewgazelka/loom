@@ -40,9 +40,9 @@ let passed=0;
 const failures:string[]=[];
 interface Gate {name:string;pass:boolean;detail:string}
 const gates:Gate[]=[];
-const variantNames=(process.env.LOOM_BENCH_VARIANTS??'all,fork').split(',');
+const variantNames=(process.env.LOOM_BENCH_VARIANTS??'scoped').split(',');
 assert(variantNames.length>0&&new Set(variantNames).size===variantNames.length
-  &&variantNames.every(name=>['all','fork','scoped'].includes(name)),'Invalid LOOM_BENCH_VARIANTS');
+  &&variantNames.every(name=>['scoped'].includes(name)),'Invalid LOOM_BENCH_VARIANTS');
 const totalChecks=2+5*variantNames.length;
 function gate(ok:boolean, name:string,detail='') {gates.push({name,pass:ok,detail});if(ok)passed++;else failures.push(name);}
 function counter(stats:Record<string,unknown>, key:string):number {const value=stats[key];return typeof value==='number' && Number.isFinite(value) && value>=0 ? value : Number.NaN;}

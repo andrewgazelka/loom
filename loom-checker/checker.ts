@@ -76,7 +76,7 @@ export class Checker {
     });
     const reject = (node: ts.Node, message: string) => {
       const loc = file.getLineAndCharacterOfPosition(node.getStart(file));
-      diagnostics.push({lang:'ts',file:'definition.ts',line:loc.line+1,col:loc.character+1,code:'LOOM_CLOSED',message,snippet:source.split('\n')[loc.line]??null,hint:'Use an ability from the loom module for effects.'});
+      diagnostics.push({lang:'ts',file:'definition.ts',line:loc.line+1,col:loc.character+1,code:'LOOM_CLOSED',message,snippet:source.split('\n')[loc.line]??null,hint:'Use an effect from the loom module for effects.'});
     };
     const forbidden = new Set(['fetch','Date','eval','Function','globalThis','setTimeout','setInterval','queueMicrotask','process','require','WebAssembly']);
     const visit = (node: ts.Node) => {
@@ -207,7 +207,7 @@ export class Checker {
       return undefined;
     };
     const summaries=new Map<ts.FunctionLikeDeclaration|ts.SourceFile,{labels:Set<string>;unknown:boolean;calls:Set<ts.FunctionLikeDeclaration>}>();
-    const knownAbilities=new Set(['exec','llm','now','random','sleep','fs.list','fs.stat','fs.read','fs.snapshot','cas.put','cas.get','send','join']);
+    const knownEffects=new Set(['exec','llm','now','random','sleep','fs.list','fs.stat','fs.read','fs.snapshot','cas.put','cas.get','actor.send']);
     const summarize=(node:ts.FunctionLikeDeclaration|ts.SourceFile) => {
       const existing=summaries.get(node);if(existing)return existing;
       const summary={labels:new Set<string>(),unknown:false,calls:new Set<ts.FunctionLikeDeclaration>()};summaries.set(node,summary);
@@ -219,44 +219,11 @@ export class Checker {
         if(!effects){summary.unknown=true;return;}
         effects.labels.forEach(label=>summary.labels.add(label));summary.unknown ||= effects.unknown;
       };
-      const dereference=(expression:ts.Expression,seen=new Set<ts.Symbol>()):ts.Expression => {
-        expression=unwrap(expression);
-        if(ts.isIdentifier(expression)) {
-          const symbol=checker.getSymbolAtLocation(expression);
-          if(symbol&&!seen.has(symbol))for(const declaration of symbol.declarations??[])if(ts.isVariableDeclaration(declaration)&&declaration.initializer&&(declaration.parent.flags&ts.NodeFlags.Const)){seen.add(symbol);return dereference(declaration.initializer,seen);}
-        }
-        return expression;
-      };
-      const descriptors=(expression:ts.Expression|undefined) => {
-        if(!expression){summary.unknown=true;return;}
-        expression=dereference(expression);
-        if(ts.isArrayLiteralExpression(expression))expression.elements.forEach(item=>descriptor(item));else summary.unknown=true;
-      };
-      const descriptor=(expression:ts.Expression|undefined) => {
-        if(!expression){summary.unknown=true;return;}
-        expression=dereference(expression);
-        if(ts.isCallExpression(expression)) {
-          const target=resolveTarget(expression.expression);
-          if(target?.kind==='loom'&&target.name.endsWith('.desc')&&knownAbilities.has(target.name.slice(0,-5))){summary.labels.add(target.name.slice(0,-5));return;}
-        }
-        if(ts.isObjectLiteralExpression(expression)) {
-          const properties=new Map<string,ts.Expression>();
-          for(const property of expression.properties) {
-            if(ts.isPropertyAssignment(property)&&(ts.isIdentifier(property.name)||ts.isStringLiteral(property.name)))properties.set(property.name.text,property.initializer);
-            else {summary.unknown=true;return;}
-          }
-          const op=properties.get('op');
-          if(op&&ts.isStringLiteral(dereference(op))) {
-            const name=(dereference(op) as ts.StringLiteral).text;
-            if(name==='all'||name==='race') {
-              summary.labels.add(name);
-              const args=properties.get('args');const value=args&&dereference(args);
-              if(value&&ts.isObjectLiteralExpression(value)){const descs=value.properties.find(p=>ts.isPropertyAssignment(p)&&p.name.getText(file)==='descs');descriptors(descs&&ts.isPropertyAssignment(descs)?descs.initializer:undefined);}else summary.unknown=true;
-            } else {summary.labels.add(name);if(['call','fork','spawn'].includes(name))summary.unknown=true;}
-            return;
-          }
-        }
-        summary.unknown=true;
+      const performedLabel=(expression:ts.Expression|undefined) => {
+        if(expression&&ts.isStringLiteral(expression)) {
+          summary.labels.add(expression.text);
+          if(['call','actor.spawn'].includes(expression.text))summary.unknown=true;
+        } else summary.unknown=true;
       };
       const walk=(child:ts.Node) => {
         if(child!==node&&ts.isFunctionLike(child))return;
@@ -272,11 +239,10 @@ export class Checker {
           const target=resolveTarget(child.expression);
           if(target?.kind==='local'){summary.calls.add(target.node);summarize(target.node);}
           else if(target?.kind==='loom') {
-            if(knownAbilities.has(target.name))summary.labels.add(target.name);
-            else if(target.name==='perform')descriptor(child.arguments?.[0]);
-            else if(target.name==='all'||target.name==='race'){summary.labels.add(target.name);descriptors(child.arguments?.[0]);}
-            else if(['call','fork','spawn'].includes(target.name)){summary.labels.add(target.name);dependency(child.arguments?.[0]);}
-            else if(!(target.name.endsWith('.desc')&&knownAbilities.has(target.name.slice(0,-5))))summary.unknown=true;
+            if(knownEffects.has(target.name))summary.labels.add(target.name);
+            else if(target.name==='perform')performedLabel(child.arguments?.[0]);
+            else if(['call','actor.spawn'].includes(target.name)){summary.labels.add(target.name);dependency(child.arguments?.[0]);}
+            else summary.unknown=true;
           } else summary.unknown=true;
         }
         ts.forEachChild(child,walk);

@@ -10,8 +10,8 @@ await writeFile(join(directory, 'entry.ts'), `import {handler} from ${JSON.strin
 const dependencySource = await readFile(join(directory,'dependencies.js'),'utf8');
 const bundle = await Bun.build({
   entrypoints: [join(directory,'entry.ts')], target:'browser', format:'esm',
-  external:['loom:host/abilities'],
-  plugins:[{name:'loom-abilities',setup(build){build.onResolve({filter:/^loom:defs$/},()=>({path:'loom:defs',namespace:'loom-defs'}));build.onLoad({filter:/.*/,namespace:'loom-defs'},()=>({contents:dependencySource,loader:'js'}));build.onResolve({filter:/^loom$/},()=>({path:join(root,'loom-guest-ts/index.ts')}));}}],
+  external:['loom:host/effects'],
+  plugins:[{name:'loom-effects',setup(build){build.onResolve({filter:/^loom:defs$/},()=>({path:'loom:defs',namespace:'loom-defs'}));build.onLoad({filter:/.*/,namespace:'loom-defs'},()=>({contents:dependencySource,loader:'js'}));build.onResolve({filter:/^loom$/},()=>({path:join(root,'loom-guest-ts/index.ts')}));}}],
 });
 if (!bundle.success || !bundle.outputs[0]) throw new Error(bundle.logs.map(String).join('\n'));
 const source = await bundle.outputs[0].text();

@@ -41,7 +41,7 @@ async fn main() -> Result<()> {
     let caller = register(
         &store,
         &component,
-        Some(vec!["call".into(), "fork".into(), "join".into()]),
+        Some(vec!["call".into()]),
     )?;
     let runtime = Runtime::new(store.clone())?;
     let leaf = json!({"op":"cas.put","args":{"secret":42}});
@@ -62,19 +62,6 @@ async fn main() -> Result<()> {
         result["ok"] == true && result["value"]["ok"] == false,
         "nested: {result}"
     );
-    let fork = json!({"op":"fork","args":{"def":open,"args":[leaf]}});
-    let joined = runtime
-        .call_def(
-            &caller,
-            json!([{"op":"fork_join","args":{"def":open,"args":[leaf]}}]),
-        )
-        .await?;
-    ensure!(
-        joined["ok"] == true && joined["value"][0]["ok"] == false,
-        "delegated fork: {joined}"
-    );
-    let result = runtime.call_def(&denied, json!([fork])).await?;
-    ensure!(result["ok"] == false, "fork admission: {result}");
     ensure!(
         store
             .definition(&open)?
@@ -90,7 +77,7 @@ async fn main() -> Result<()> {
             .is_empty()
     );
     println!(
-        "effects native 5/5: dynamic deny, cached deny, delegated call, delegated fork, fork admission"
+        "effects native 3/3: permitted CAS, cached denial, delegated call"
     );
     Ok(())
 }

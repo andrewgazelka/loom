@@ -35,28 +35,31 @@ pub struct ScopedJoinHandle<'scope, T> {
 
 /// Run tasks borrowing caller-owned data; every task is joined before returning.
 /// The scope stays on its owner; a child can create its own nested scope.
+/// Use `scope` for borrowed captures, or [`crate::spawn`] for fire-and-forget
+/// work and handles moved across tasks. Detached tasks still running when the
+/// definition entry returns are cancelled; scoped tasks must finish first.
 ///
 /// ```compile_fail
 /// let mut escaped = None;
 /// loom_guest_rs::scope(|scope| {
-///     escaped = Some(scope.fork(|| 1).unwrap());
-/// }).unwrap();
+///     escaped = Some(scope.spawn(|| 1).unwrap());
+/// });
 /// ```
 /// Non-Send captures and results are rejected independently.
 ///
 /// ```compile_fail
 /// let value = std::rc::Rc::new(1);
 /// loom_guest_rs::scope(|scope| {
-///     scope.fork(move || *value).unwrap();
-/// }).unwrap();
+///     scope.spawn(move || *value).unwrap();
+/// });
 /// ```
 ///
 /// ```compile_fail
 /// loom_guest_rs::scope(|scope| {
-///     scope.fork(|| std::rc::Rc::new(1)).unwrap();
-/// }).unwrap();
+///     scope.spawn(|| std::rc::Rc::new(1)).unwrap();
+/// });
 /// ```
-pub fn scope<'env, F, R>(body: F) -> Result<R, EffectError>
+pub fn scope<'env, F, R>(body: F) -> R
 where
     F: for<'scope> FnOnce(&'scope Scope<'scope, 'env>) -> R,
 {
@@ -68,11 +71,11 @@ where
     };
     let result = body(&scope);
     drop(registry);
-    Ok(result)
+    result
 }
 
 impl<'scope, 'env> Scope<'scope, 'env> {
-    pub fn fork<F, T>(&'scope self, closure: F) -> Result<ScopedJoinHandle<'scope, T>, EffectError>
+    pub fn spawn<F, T>(&'scope self, closure: F) -> Result<ScopedJoinHandle<'scope, T>, EffectError>
     where
         F: FnOnce() -> T + Send + 'scope,
         T: Send + 'scope,
@@ -92,7 +95,7 @@ impl<'scope, 'env> Scope<'scope, 'env> {
         self.registry.tasks.borrow_mut().push(TaskRecord { pointer: pointer.cast(), cleanup: cleanup::<F, T> });
         // SAFETY: the scope retains this allocation until join completes. Only
         // the single task consumes F and writes T; publication gates readers.
-        let id = unsafe { spawn(run::<F, T>, pointer.cast()) };
+        let id = unsafe { start_task(run::<F, T>, pointer.cast(), false) };
         if id == 0 {
             // SAFETY: a refused spawn guarantees the task never started.
             self.registry.tasks.borrow_mut().pop();
@@ -166,16 +169,16 @@ impl Drop for TaskRegistry {
 }
 
 #[cfg(all(loom_core, target_arch = "wasm32"))]
-unsafe fn spawn(run: unsafe fn(*mut ()), data: *mut ()) -> u64 {
-    unsafe { crate::core::host_fork(run as usize as u32, data as usize as u32) }
+pub(crate) unsafe fn start_task(run: unsafe fn(*mut ()), data: *mut (), detached: bool) -> u64 {
+    unsafe { crate::core::host_spawn(run as usize as u32, data as usize as u32, i32::from(detached)) }
 }
 #[cfg(all(loom_core, target_arch = "wasm32"))]
-fn join_task(id: u64) -> i32 {
+pub(crate) fn join_task(id: u64) -> i32 {
     unsafe { crate::core::host_join(id) }
 }
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod native_test {
-    use std::{cell::RefCell, collections::BTreeMap, sync::atomic::{AtomicU64, Ordering}, thread::JoinHandle};
+    use std::{collections::BTreeMap, sync::{Mutex, atomic::{AtomicU64, Ordering}}, thread::JoinHandle};
     struct NativeTask { run: unsafe fn(*mut ()), data: *mut () }
     // SAFETY: spawn's caller enforces F/T: Send and retains the allocation until
     // join; this wrapper transfers that exact pointer without losing provenance.
@@ -183,31 +186,31 @@ mod native_test {
     impl NativeTask {
         fn execute(self) { unsafe { (self.run)(self.data); } }
     }
-    thread_local! { static TASKS: RefCell<BTreeMap<u64, JoinHandle<()>>> = const { RefCell::new(BTreeMap::new()) }; }
+    static TASKS: Mutex<BTreeMap<u64, JoinHandle<()>>> = Mutex::new(BTreeMap::new());
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-    pub unsafe fn spawn(run: unsafe fn(*mut ()), data: *mut ()) -> u64 {
+    pub unsafe fn start_task(run: unsafe fn(*mut ()), data: *mut ()) -> u64 {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let task = NativeTask { run, data };
         let handle = std::thread::spawn(move || task.execute());
-        TASKS.with_borrow_mut(|tasks| tasks.insert(id, handle));
+        TASKS.lock().unwrap().insert(id, handle);
         id
     }
     pub fn join(id: u64) -> i32 {
-        let handle = TASKS.with_borrow_mut(|tasks| tasks.remove(&id)).expect("missing test task");
+        let handle = TASKS.lock().unwrap().remove(&id).expect("missing test task");
         if handle.join().is_ok() { 0 } else { 1 }
     }
 }
 #[cfg(all(test, not(target_arch = "wasm32")))]
-unsafe fn spawn(run: unsafe fn(*mut ()), data: *mut ()) -> u64 {
-    unsafe { native_test::spawn(run, data) }
+pub(crate) unsafe fn start_task(run: unsafe fn(*mut ()), data: *mut (), _detached: bool) -> u64 {
+    unsafe { native_test::start_task(run, data) }
 }
 #[cfg(all(test, not(target_arch = "wasm32")))]
-fn join_task(id: u64) -> i32 { native_test::join(id) }
+pub(crate) fn join_task(id: u64) -> i32 { native_test::join(id) }
 
 #[cfg(all(not(test), not(target_arch = "wasm32")))]
-unsafe fn spawn(_run: unsafe fn(*mut ()), _data: *mut ()) -> u64 { 0 }
+pub(crate) unsafe fn start_task(_run: unsafe fn(*mut ()), _data: *mut (), _detached: bool) -> u64 { 0 }
 #[cfg(all(not(test), not(target_arch = "wasm32")))]
-fn join_task(_id: u64) -> i32 { 1 }
+pub(crate) fn join_task(_id: u64) -> i32 { 1 }
 
 #[cfg(test)]
 mod tests {
@@ -220,8 +223,8 @@ mod tests {
         }
         let drops = std::sync::atomic::AtomicUsize::new(0);
         scope(|scope| {
-            std::mem::forget(scope.fork(|| ResultDrop { drops: &drops }).unwrap());
-        }).unwrap();
+            std::mem::forget(scope.spawn(|| ResultDrop { drops: &drops }).unwrap());
+        });
         assert_eq!(drops.load(Ordering::Relaxed), 1);
     }
 
@@ -230,7 +233,7 @@ mod tests {
         let mut value = 0;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _ = scope(|scope| {
-                std::mem::forget(scope.fork(|| { value = 9; }).unwrap());
+                std::mem::forget(scope.spawn(|| { value = 9; }).unwrap());
                 panic!("scope body control");
             });
         }));
@@ -242,12 +245,12 @@ mod tests {
     fn borrowed_capture_and_forgotten_handle_are_joined() {
         let mut values = [1, 2, 3];
         scope(|scope| {
-            let job = scope.fork(|| { values[1] = 8; &values[1] }).unwrap();
+            let job = scope.spawn(|| { values[1] = 8; &values[1] }).unwrap();
             assert_eq!(*job.join().unwrap(), 8);
-        }).unwrap();
+        });
         scope(|scope| {
-            std::mem::forget(scope.fork(|| { values[2] = 9; }).unwrap());
-        }).unwrap();
+            std::mem::forget(scope.spawn(|| { values[2] = 9; }).unwrap());
+        });
         assert_eq!(values, [1, 8, 9]);
     }
 }

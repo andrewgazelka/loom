@@ -1,4 +1,4 @@
-use loom::{abilities::fs, preview::{self, Preview}};
+use loom::{fs, preview::{self, Preview}};
 
 /// Both existing and new paths work. The file stays unchanged; the returned
 /// value contains CAS-backed before/after content for Loom's diff viewer.

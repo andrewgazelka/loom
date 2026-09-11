@@ -1,6 +1,6 @@
 #[loom::def(effects=["fs.list"])]
 pub fn largest(machine: String, path: String) -> loom::Value {
-    let listing = loom::abilities::fs::list(&machine, &path).expect("directory listing failed");
+    let listing = loom::fs::list(&machine, &path).expect("directory listing failed");
     let Some(entry) = listing.into_iter()
         .filter(|entry| entry.kind == loom::EntryKind::File)
         .max_by_key(|entry| entry.size)

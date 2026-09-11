@@ -4,11 +4,11 @@ use serde::{Serialize, Deserialize, de::DeserializeOwned};
 use std::{cell::UnsafeCell, sync::{Arc, atomic::{AtomicBool, AtomicU8, Ordering}}};
 
 #[derive(Debug, Deserialize)]
-pub struct Op {
-    pub label: String,
+pub struct Effect {
+    pub name: String,
     pub args: Value,
 }
-impl Op {
+impl Effect {
     pub fn arg<T: DeserializeOwned>(&self) -> Result<T, EffectError> {
         crate::decode_host(&crate::encode(&self.args)?)
     }
@@ -78,33 +78,33 @@ impl<H> Drop for Installed<H> {
     }
 }
 
-/// Install a deep handler for the body's dynamic extent. Operations performed
+/// Install a deep handler for the body's dynamic extent. Effects performed
 /// by the handler itself dispatch in the outer context, below this frame.
 /// Scoped children inherit the frame; calls of another definition do not.
 /// The frame is drained before borrowed handler captures can be released.
 ///
 /// ```compile_fail
 /// let state = std::rc::Rc::new(1);
-/// loom_guest_rs::handle(move |_, _| {
+/// loom_guest_rs::handle_any(move |_, _| {
 ///     let _value = *state;
 ///     loom_guest_rs::Reply::Forward
 /// }, || ()).unwrap();
 /// ```
-pub fn handle<H, F, R>(handler: H, body: F) -> Result<R, EffectError>
-where H: FnMut(Op, Continuation) -> Reply + Send, F: FnOnce() -> R {
+pub fn handle_any<H, F, R>(handler: H, body: F) -> Result<R, EffectError>
+where H: FnMut(Effect, Continuation) -> Reply + Send, F: FnOnce() -> R {
     install(handler, None, body)
 }
 
-/// Install a handler selecting a statically visible set of operation labels.
-/// An empty set selects no operations. This is also the effect-row checker's
-/// label-selection surface; `handle` selects every label dynamically.
-/// Selected labels must be handled: returning Forward traps the execution.
-pub fn handle_labels<'a, H, F, R>(labels: impl AsRef<[&'a str]>, handler: H, body: F) -> Result<R, EffectError>
-where H: FnMut(Op, Continuation) -> Reply + Send, F: FnOnce() -> R {
+/// Install a handler selecting a statically visible set of effect names.
+/// An empty set selects no effects. This is also the effect-row checker's
+/// effect selection API; `handle_any` selects every effect dynamically.
+/// Selected effects must be handled: returning Forward traps the execution.
+pub fn handle<'a, H, F, R>(labels: impl AsRef<[&'a str]>, handler: H, body: F) -> Result<R, EffectError>
+where H: FnMut(Effect, Continuation) -> Reply + Send, F: FnOnce() -> R {
     install(handler, Some(labels.as_ref()), body)
 }
 fn install<H, F, R>(handler: H, labels: Option<&[&str]>, body: F) -> Result<R, EffectError>
-where H: FnMut(Op, Continuation) -> Reply + Send, F: FnOnce() -> R {
+where H: FnMut(Effect, Continuation) -> Reply + Send, F: FnOnce() -> R {
     let labels = crate::encode(&labels)?;
     let mut handler = Box::new(Handler { callback: UnsafeCell::new(handler), entered: AtomicBool::new(false) });
     let frame = unsafe { host_push(run::<H>, (&mut *handler as *mut Handler<H>).cast(), &labels) };
@@ -115,7 +115,7 @@ where H: FnMut(Op, Continuation) -> Reply + Send, F: FnOnce() -> R {
     Ok(result)
 }
 
-unsafe fn run<H: FnMut(Op, Continuation) -> Reply>(data: *mut (), id: u64, op: Op) -> Reply {
+unsafe fn run<H: FnMut(Effect, Continuation) -> Reply>(data: *mut (), id: u64, op: Effect) -> Reply {
     // SAFETY: Installed owns the allocation until host pop drains callbacks.
     // Host holds the per-frame asynchronous permit while this callback runs.
     let handler = unsafe { &*data.cast::<Handler<H>>() };
@@ -125,14 +125,14 @@ unsafe fn run<H: FnMut(Op, Continuation) -> Reply>(data: *mut (), id: u64, op: O
     let state = Arc::new(ContinuationState { id, state: AtomicU8::new(CALLBACK) });
     let continuation = Continuation { state: state.clone() };
     let reply = unsafe { (&mut *handler.callback.get())(op, continuation) };
-    // The host rejects Forward from selected-label frames with a structured
+    // The host rejects Forward from selected-effect frames with a structured
     // error naming the frame. A guest panic would erase that diagnostic.
     finish_callback(&state, &reply);
     handler.entered.store(false, Ordering::Release);
     reply
 }
 
-pub(crate) type HandlerRun = unsafe fn(*mut (), u64, Op) -> Reply;
+pub(crate) type HandlerRun = unsafe fn(*mut (), u64, Effect) -> Reply;
 fn status(code: i32, error: &str) -> Result<(), EffectError> {
     if code == 0 { Ok(()) } else { Err(error.into()) }
 }
@@ -177,19 +177,19 @@ mod tests {
         let mut observed = Vec::new();
         let mut retained = None;
         {
-            let callback = |op: Op, continuation: Continuation| {
-                observed.push(op.label);
+            let callback = |op: Effect, continuation: Continuation| {
+                observed.push(op.name);
                 retained = Some(continuation);
                 Reply::Deferred
             };
             let mut handler = Box::new(Handler {
                 callback: UnsafeCell::new(callback), entered: AtomicBool::new(false),
             });
-            fn invoke<H: FnMut(Op, Continuation) -> Reply>(handler: &mut Handler<H>, id: u64) {
+            fn invoke<H: FnMut(Effect, Continuation) -> Reply>(handler: &mut Handler<H>, id: u64) {
                 let pointer = (handler as *mut Handler<H>).cast();
                 // SAFETY: the simulated host invokes one callback at a time,
                 // retains the allocation, and joins before freeing it.
-                let reply = unsafe { run::<H>(pointer, id, Op { label: "test.tick".into(), args: Value::Null }) };
+                let reply = unsafe { run::<H>(pointer, id, Effect { name: "test.tick".into(), args: Value::Null }) };
                 assert!(matches!(reply, Reply::Deferred));
             }
             invoke(&mut handler, 3);

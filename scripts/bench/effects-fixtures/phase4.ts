@@ -36,9 +36,9 @@ export async function phase4(api:Phase4Client):Promise<Phase4Gate[]> {
     const disk=await previewCall('disk');assert(disk.existing==='before'&&disk.new===null,'no-op preview mutated disk');
   });
   await gate(3,async()=>{
-    async function handler(value:number) {return api.define(`stored-${value}`,`#[loom::def(effects=[])] pub fn main()->u64 {0} pub fn handle(_:loom::Op,_:loom::Continuation)->loom::Reply {loom::Reply::Resume(loom::serde_json::json!(${value}))}`);}
+    async function handler(value:number) {return api.define(`stored-${value}`,`#[loom::def(effects=[])] pub fn main()->u64 {0} pub fn handle(_:loom::Effect,_:loom::Continuation)->loom::Reply {loom::Reply::Resume(loom::serde_json::json!(${value}))}`);}
     const first=await handler(17),second=await handler(29);assert(first!==second,'changed handler kept same content identity');
-    async function caller(hash:string) {return api.define(`stored-caller-${hash}`, `#[loom::def(effects=["sleep"])] pub fn main()->loom::Value {loom::handle_with("${hash}",||loom::abilities::sleep(2000).expect("sleep")).expect("stored handler")}`);}
+    async function caller(hash:string) {return api.define(`stored-caller-${hash}`, `#[loom::def(effects=["sleep"])] pub fn main()->loom::Value {loom::handle_with("${hash}",||loom::perform::<loom::Value>("sleep", loom::serde_json::json!({"ms": 2000})).expect("sleep")).expect("stored handler")}`);}
     const firstCall=await caller(first),secondCall=await caller(second);assert(firstCall!==secondCall,'changed handler pin kept caller identity');
     assert((await api.command('call',{hash:firstCall,args:[]})).result===17,'first exact pin failed');
     assert((await api.command('call',{hash:secondCall,args:[]})).result===29,'second exact pin failed');
@@ -57,7 +57,7 @@ export async function phase4(api:Phase4Client):Promise<Phase4Gate[]> {
     assert(!reply.ok&&/dependency definition missing|dependency signature not found|handler definition [0-9a-f]{64} is not stored/.test(JSON.stringify(reply)),JSON.stringify(reply));
   });
   await gate(5,async()=>{
-    const hash=await api.define('handler-replay',`#[loom::def(effects=["sleep","now"])] pub fn main()->Vec<loom::Value> {loom::handle_labels(["sleep"],|_,_|loom::Reply::Resume(loom::abilities::now().expect("outer now")),||loom::scope(|scope| {let a=scope.fork(||loom::abilities::sleep(1000).expect("a")).expect("fork");let b=scope.fork(||loom::abilities::sleep(1000).expect("b")).expect("fork");vec![a.join().expect("join"),b.join().expect("join")]}).expect("scope")).expect("handle")}`);
+    const hash=await api.define('handler-replay',`#[loom::def(effects=["sleep","now"])] pub fn main()->Vec<loom::Value> {loom::handle(["sleep"],|_,_|loom::Reply::Resume(loom::now().expect("outer now")),||loom::scope(|scope| {let a=scope.spawn(||loom::perform::<loom::Value>("sleep", loom::serde_json::json!({"ms": 1000})).expect("a")).expect("spawn child");let b=scope.spawn(||loom::perform::<loom::Value>("sleep", loom::serde_json::json!({"ms": 1000})).expect("b")).expect("spawn child");vec![a.join().expect("child result"),b.join().expect("child result")]})).expect("handle")}`);
     const before=await api.command('stats',{});const original=await api.command('call',{hash,args:[]});
     const events=(await api.command('events',{after:before.seq,limit:1000})).result;assert(Array.isArray(events),'missing events');
     const event=events.map(item=>object(object(item).event)).find(event=>event.type==='call_completed'&&event.definition_hash===hash);assert(event&&typeof event.scope==='string','missing replay scope');

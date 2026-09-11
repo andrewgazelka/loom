@@ -1,7 +1,7 @@
 //! A guest handler that previews UTF-8 writes. Other effects remain real.
 //! Reads and CAS writes made by this handler dispatch to the outer context;
-//! only those root operations are recorded. This is not an exec sandbox.
-use crate::{abilities::fs, Desc, EffectError, Reply, Value};
+//! only those root effects are recorded. This is not an exec sandbox.
+use crate::{fs, EffectError, Reply, Value};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -38,7 +38,7 @@ fn normalized_path(path: &str) -> Result<String, EffectError> {
     Ok(if parts.is_empty() { ".".into() } else { parts.join("/") })
 }
 fn capture(content: &str) -> Result<String, EffectError> {
-    let reference: Value = crate::perform(Desc::new("cas.put", Value::String(content.into())))?;
+    let reference: Value = crate::perform("cas.put", Value::String(content.into()))?;
     reference.get("$ref").and_then(Value::as_str).map(str::to_owned)
         .ok_or_else(|| "cas.put returned no content reference".into())
 }
@@ -65,7 +65,7 @@ fn dispatch(label: &str, mut args: FileArgs, pending: &mut Vec<Pending>) -> Resu
         }
         "fs.read" | "fs.read_optional" => {
             if let Some(index) = existing { return Ok(Value::String(pending[index].content.clone())); }
-            crate::perform(Desc::new(label, serde_json::json!({"machine":args.machine,"path":args.path})))
+            crate::perform(label, serde_json::json!({"machine":args.machine,"path":args.path}))
         }
         _ => unreachable!("label-selected preview handler"),
     }
@@ -73,13 +73,13 @@ fn dispatch(label: &str, mut args: FileArgs, pending: &mut Vec<Pending>) -> Resu
 /// Preview writes in `body`, including writes from inherited scoped children.
 /// Repeated writes collapse to one before/final-after diff; subsequent reads
 /// observe the previewed content. Calls into another definition do not inherit
-/// this handler, and effects other than these filesystem operations stay real.
+/// this handler, and effects other than these filesystem effects stay real.
 pub fn writes<F, R>(body: F) -> Result<Preview<R>, EffectError>
 where F: FnOnce() -> R {
     let mut pending = Vec::new();
-    let result = crate::handle_labels(["fs.write", "fs.read", "fs.read_optional"], |op, _continuation| {
+    let result = crate::handle(["fs.write", "fs.read", "fs.read_optional"], |op, _continuation| {
         let args = op.arg::<FileArgs>().expect("invalid preview filesystem arguments");
-        Reply::Resume(dispatch(&op.label, args, &mut pending).expect("filesystem preview failed"))
+        Reply::Resume(dispatch(&op.name, args, &mut pending).expect("filesystem preview failed"))
     }, body)?;
     Ok(Preview {
         result,

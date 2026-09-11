@@ -8,6 +8,6 @@ export default function dag(payload: Value, target: string): Value {
   const hash = payload["$ref"];
   if (typeof hash !== "string") throw new Error("payload must be a link");
   const value = cas.get({ hash });
-  const echo = perform({ op: "call", args: { def: target, args: [payload, ""] } });
+  const echo = perform("call", { def: target, args: [payload, ""] });
   return { reference: payload, value, echo };
 }

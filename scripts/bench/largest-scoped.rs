@@ -10,7 +10,7 @@ pub fn main(machine: String, path: String) -> Winner {
 }
 
 fn scan(machine: &str, path: &str) -> Winner {
-    let entries = loom::abilities::fs::list(machine, path)
+    let entries = loom::fs::list(machine, path)
         .expect("directory listing failed");
     loom::scope(|scope| {
         let mut best = Winner { path: String::new(), size: -1 };
@@ -20,13 +20,13 @@ fn scan(machine: &str, path: &str) -> Winner {
                 loom::EntryKind::Directory => {
                     let name = entry.name;
                     let full = format!("{path}/{name}");
-                    jobs.push(scope.fork(move || {
+                    jobs.push(scope.spawn(move || {
                         let mut child = scan(machine, &full);
                         if child.size >= 0 {
                             child.path = format!("{name}/{}", child.path);
                         }
                         child
-                    }).expect("fork failed"));
+                    }).expect("spawn failed"));
                 }
                 loom::EntryKind::File => merge(
                     &mut best,
@@ -43,7 +43,7 @@ fn scan(machine: &str, path: &str) -> Winner {
             }
         }
         best
-    }).expect("scope failed")
+    })
 }
 
 fn merge(best: &mut Winner, path: &str, size: i64) {

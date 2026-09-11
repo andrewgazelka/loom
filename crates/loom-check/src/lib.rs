@@ -156,7 +156,7 @@ fn diagnostic(lang: Lang, code: &str, message: &str) -> Diagnostic {
         code: code.into(),
         message: message.into(),
         snippet: None,
-        hint: Some("Use loom abilities for host I/O.".into()),
+        hint: Some("Use loom effects for host I/O.".into()),
     }
 }
 /// Internal normalized form after an API source-bundle reference is resolved.
@@ -587,7 +587,7 @@ fn check_rust_file(request: &DefineRequest, signatures: &BTreeMap<String, TypeSi
                 diagnostics.push(diagnostic(
                     Lang::Rust,
                     "LOOM_IO",
-                    &format!("{path} is unavailable; use loom abilities."),
+                    &format!("{path} is unavailable; use loom effects."),
                 ));
             }
             prettyplease::unparse(&file)

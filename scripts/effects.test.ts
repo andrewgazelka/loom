@@ -2,7 +2,7 @@ import {test,expect} from "bun:test";
 import {effectRows} from "../loom-ui/src/lib/effects";
 import type {LogEvent} from "../loom-ui/src/lib/api";
 const event=(seq:number,type:string,extra:Record<string,unknown>={}):LogEvent=>({seq,actor:"system",ts:0,event:{type,scope:"call/a",occurrence:1,desc_hash:"hash",...extra}});
-test("completion joins invocation, preserving pending and denied operations",()=>{
+test("completion joins invocation, preserving pending and denied effects",()=>{
  const rows=effectRows([event(1,"effect_invoked"),event(2,"effect_completed",{cached:true,result_hash:"result"}),event(3,"effect_invoked",{occurrence:2}),event(4,"effect_denied",{occurrence:3})]);
  expect(rows.map(row=>row.status)).toEqual(["Cached","Invoked","Denied"]);
  expect(rows[0]?.data.result_hash).toBe("result");
@@ -37,7 +37,7 @@ test("page-cut completion remains separate from subsequent same-key retry",()=>{
 
 import {appendTracePage,parseTraceEffectPage,traceEvents,type TraceEffectPage} from "../loom-ui/src/lib/trace-effects";
 const tracePage=(hash:string,entries:TraceEffectPage['entries'],next_offset:number|null=null):TraceEffectPage=>({trace_hash:hash,scope:'call/trace',definition_hash:'definition',entries,next_offset});
-const traceEntry=(occurrence:number,outcome:TraceEffectPage['entries'][number]['outcome']):TraceEffectPage['entries'][number]=>({key:{scope:'call/trace/fork:0',occurrence},descriptor_hash:`descriptor${occurrence}`,op:'fs.list',outcome});
+const traceEntry=(occurrence:number,outcome:TraceEffectPage['entries'][number]['outcome']):TraceEffectPage['entries'][number]=>({key:{scope:'call/trace/spawn:0',occurrence},descriptor_hash:`descriptor${occurrence}`,op:'fs.list',outcome});
 const traceEvent=(seq:number,hash:string,type='call_completed'):LogEvent=>event(seq,type,{scope:'call/trace',trace_hash:hash});
 test('all effects in one trace remain distinct despite sharing a log sequence',()=>{
  const page=tracePage('trace',[traceEntry(0,{status:'success',result_hash:'result'}),traceEntry(1,{status:'error',message:'permission denied'}),traceEntry(2,{status:'cancelled'})]);

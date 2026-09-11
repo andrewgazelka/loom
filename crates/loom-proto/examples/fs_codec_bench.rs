@@ -1,4 +1,4 @@
-//! Measure the exact directory payloads consumed by all/fork scans of a fixture.
+//! Measure the exact directory payloads consumed by scoped scans of a fixture.
 use loom_proto::{DirEntry, EntryKind, decode, decode_host, encode, encode_host};
 use std::{collections::VecDeque, fs, hint::black_box, io, path::PathBuf, time::Instant};
 

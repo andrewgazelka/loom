@@ -29,7 +29,7 @@ async fn main() -> Result<()> {
         "self-send state mismatch"
     );
     let descriptor =
-        json!({"op":"send","args":{"actor":actor.id,"msg":{"actor":actor.id,"remaining":0}}});
+        json!({"op":"actor.send","args":{"actor":actor.id,"msg":{"actor":actor.id,"remaining":0}}});
     runtime.perform(descriptor.clone(), "replay", 0).await?;
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         while runtime.state(&actor.id).await? != json!(5) {
@@ -42,18 +42,18 @@ async fn main() -> Result<()> {
     tokio::time::sleep(std::time::Duration::from_millis(30)).await;
     ensure!(
         runtime.state(&actor.id).await? == json!(5),
-        "replayed send duplicated delivery"
+        "replayed actor.send duplicated delivery"
     );
     let count = store.actors()?.len();
-    let descriptor = json!({"op":"spawn","args":{"def":hash,"state":0}});
+    let descriptor = json!({"op":"actor.spawn","args":{"def":hash,"state":0}});
     let first = runtime
-        .perform(descriptor.clone(), "spawn-replay", 0)
+        .perform(descriptor.clone(), "actor.spawn-replay", 0)
         .await?;
-    let repeated = runtime.perform(descriptor, "spawn-replay", 0).await?;
-    ensure!(first == repeated, "spawn receipt changed on replay");
+    let repeated = runtime.perform(descriptor, "actor.spawn-replay", 0).await?;
+    ensure!(first == repeated, "actor.spawn receipt changed on replay");
     ensure!(
         store.actors()?.len() == count + 1,
-        "spawn replay created another actor"
+        "actor.spawn replay created another actor"
     );
     println!("mailbox self-send and idempotent completed-delivery replay pass");
     Ok(())

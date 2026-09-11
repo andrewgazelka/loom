@@ -223,10 +223,10 @@ fn mixed_sync_and_queued_results_during_commits_never_poison_the_writer() -> Res
                 let result = (|| -> Result<()> {
                     for occurrence in 0..200 {
                         let outcome = if worker == 0 {
-                            store.effect_put("race", "scope", occurrence, &json!(worker % 2))
+                            store.effect_put("contention", "scope", occurrence, &json!(worker % 2))
                         } else {
                             store
-                                .enqueue_effect("race", "scope", occurrence, &json!(worker % 2))
+                                .enqueue_effect("contention", "scope", occurrence, &json!(worker % 2))
                                 .map(|_| ())
                         };
                         if let Err(error) = outcome {
@@ -255,7 +255,7 @@ fn mixed_sync_and_queued_results_during_commits_never_poison_the_writer() -> Res
     store.flush()?;
     assert!(store.events(None, 0, 1000)?.len() >= 200);
     for occurrence in 0..200 {
-        let result = store.effect_get("race", "scope", occurrence)?.unwrap();
+        let result = store.effect_get("contention", "scope", occurrence)?.unwrap();
         assert!(result == json!(0) || result == json!(1));
     }
     Ok(())

@@ -1,5 +1,5 @@
 //! Actual SDK cancellation witness. The fixture reports its borrowed AtomicU32
-//! through a real root descriptor before continuously updating it in a handler.
+//! through a real root effect before continuously updating it in a handler.
 use super::*;
 use std::sync::atomic::AtomicU32;
 

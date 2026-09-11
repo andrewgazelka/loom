@@ -1,4 +1,4 @@
-use loom::abilities::fs;
+use loom::fs;
 
 // Literal search of UTF-8 files. Paths are relative to the machine root.
 #[loom::def(effects=["fs.list", "fs.read"])]
@@ -23,8 +23,8 @@ fn search(machine: &str, path: &str, needle: &str) -> Vec<String> {
 
     loom::scope(|scope| {
         let jobs = directories.into_iter().map(|path| {
-            scope.fork(move || search(machine, &path, needle))
-                .expect("fork failed")
+            scope.spawn(move || search(machine, &path, needle))
+                .expect("spawn failed")
         }).collect::<Vec<_>>();
 
         let mut matches = files.into_iter().filter(|path| {
@@ -34,5 +34,5 @@ fn search(machine: &str, path: &str, needle: &str) -> Vec<String> {
         matches.extend(jobs.into_iter()
             .flat_map(|job| job.join().expect("join failed")));
         matches
-    }).expect("scope failed")
+    })
 }

@@ -28,15 +28,15 @@ impl<'a> Next<'a> {
         match self.handlers.split_first() {
             Some((handler, rest)) => handler.handle(request, Next { handlers: rest }),
             None => {
-                Box::pin(async move { bail!("unsupported ability: {}", operation(&request.desc)?) })
+                Box::pin(async move { bail!("unsupported effect: {}", effect_name(&request.desc)?) })
             }
         }
     }
 }
-fn operation(desc: &Value) -> Result<&str> {
+fn effect_name(desc: &Value) -> Result<&str> {
     desc.get("op")
         .and_then(Value::as_str)
-        .context("descriptor op required")
+        .context("effect op required")
 }
 
 static RECORDING: Recording = Recording;
@@ -75,8 +75,8 @@ impl RootHandler for Recording {
                 occurrence,
                 effects,
             } = request;
-            let op = operation(&desc)?;
-            let scheduler = matches!(op, "fork" | "join" | "all" | "race" | "call");
+            let op = effect_name(&desc)?;
+            let scheduler = op == "call";
             let execution = effects
                 .trace
                 .clone()
@@ -89,9 +89,9 @@ impl RootHandler for Recording {
             {
                 execution.observe(definition_hash, op)?;
             }
-            let tracked = !scheduler || op == "race" || !effects.permits(op);
+            let tracked = !scheduler || !effects.permits(op);
             let guard = if tracked {
-                match execution.begin(scope, occurrence, &desc, op == "race")? {
+                match execution.begin(scope, occurrence, &desc)? {
                     trace::StartedEffect::Replayed(output) => {
                         anyhow::ensure!(effects.permits(op), "effect {op} is not allowed");
                         return Ok(output);
@@ -134,50 +134,14 @@ impl RootHandler for Scheduling {
             let scope = request.scope;
             let occurrence = request.occurrence;
             let effects = &request.effects;
-            let op = operation(&request.desc)?;
+            let op = effect_name(&request.desc)?;
             let args = request.desc.get("args").cloned().unwrap_or(Value::Null);
-            let hash = if matches!(op, "send" | "spawn") {
+            let hash = if matches!(op, "actor.send" | "actor.spawn") {
                 blake3::hash(&encode(&request.desc)?).to_hex().to_string()
             } else {
                 String::new()
             };
             match op {
-                "all" | "race" => {
-                    let mut args = args;
-                    let descs = match args.get_mut("descs").map(Value::take) {
-                        Some(Value::Array(descs)) => descs,
-                        _ => bail!("descs required"),
-                    };
-                    let child_scope = format!("{scope}/{op}:{occurrence}");
-                    let futures = descs
-                        .into_iter()
-                        .enumerate()
-                        .map(|(index, desc)| match &effects.root_dispatch {
-                            Some(dispatch) => {
-                                dispatch.dispatch(desc, &child_scope, index as i64, effects.clone())
-                            }
-                            None => runtime.dispatch_root(
-                                desc,
-                                &child_scope,
-                                index as i64,
-                                effects.clone(),
-                            ),
-                        })
-                        .collect::<Vec<_>>();
-                    if op == "all" {
-                        let results = futures::future::try_join_all(futures).await?;
-                        return Ok(EffectOutput {
-                            bytes: loom_proto::encode_host_array(
-                                results.iter().map(|result| result.bytes.as_slice()),
-                            )
-                            .map_err(anyhow::Error::msg)?,
-                        });
-                    }
-                    if futures.is_empty() {
-                        bail!("race requires at least one descriptor");
-                    }
-                    return futures::future::select_all(futures).await.0;
-                }
                 "call" => {
                     return runtime
                         .call_scoped(
@@ -188,47 +152,7 @@ impl RootHandler for Scheduling {
                         )
                         .await;
                 }
-                "fork" => {
-                    let hash = required_str(&args, "def")?.to_owned();
-                    let args = args.get("args").cloned().unwrap_or(Value::Null);
-                    let child_runtime = runtime.clone();
-                    let child_scope = format!("{scope}/fork:{occurrence}");
-                    let id = child_scope.clone();
-                    let child_effects = effects.clone();
-                    let task = tokio::spawn(async move {
-                        child_runtime
-                            .call_scoped(&hash, args, &child_scope, child_effects)
-                            .await
-                    });
-                    runtime.inner.fibers.lock().unwrap().insert(
-                        id.clone(),
-                        FiberTask {
-                            scope: scope.into(),
-                            task,
-                        },
-                    );
-                    return EffectOutput::value(&json!(id));
-                }
-                "join" => {
-                    let mut out = Vec::new();
-                    for id in args
-                        .get("fibers")
-                        .and_then(Value::as_array)
-                        .context("fibers required")?
-                    {
-                        let mut task = runtime
-                            .take_fiber(id.as_str().context("fiber id must be string")?, scope)?;
-                        out.push((&mut task.task).await??);
-                    }
-                    return Ok(EffectOutput {
-                        bytes: loom_proto::encode_host_array(
-                            out.iter()
-                                .map(|result: &EffectOutput| result.bytes.as_slice()),
-                        )
-                        .map_err(anyhow::Error::msg)?,
-                    });
-                }
-                "send" => {
+                "actor.send" => {
                     let key = format!("{scope}:{occurrence}:{hash}");
                     let message = runtime.inner.store.enqueue_once(
                         required_str(&args, "actor")?,
@@ -239,7 +163,7 @@ impl RootHandler for Scheduling {
                         .schedule_message(message)
                         .and_then(|result| EffectOutput::value(&result));
                 }
-                "spawn" => {
+                "actor.spawn" => {
                     let key = format!("spawn:{scope}:{occurrence}:{hash}");
                     let actor_id = blake3::hash(key.as_bytes()).to_hex().to_string();
                     let actor = runtime
@@ -263,7 +187,7 @@ impl RootHandler for Memo {
     fn handle<'a>(&'a self, request: Request<'a>, next: Next<'a>) -> HandlerFuture<'a> {
         Box::pin(async move {
             let runtime = request.runtime;
-            let op = operation(&request.desc)?;
+            let op = effect_name(&request.desc)?;
             let args = request.desc.get("args").cloned().unwrap_or(Value::Null);
             let hash = if matches!(op, "cas.get" | "cas.put" | "exec") {
                 blake3::hash(&encode(&request.desc)?).to_hex().to_string()
@@ -305,7 +229,7 @@ impl RootHandler for Builtins {
     fn handle<'a>(&'a self, request: Request<'a>, next: Next<'a>) -> HandlerFuture<'a> {
         Box::pin(async move {
             let runtime = request.runtime;
-            let op = operation(&request.desc)?;
+            let op = effect_name(&request.desc)?;
             let args = request.desc.get("args").cloned().unwrap_or(Value::Null);
             let result = match op {
                 "llm" => serde_json::to_value(
@@ -449,53 +373,33 @@ mod tests {
         Ok(())
     }
 
-    struct GuestDispatch {
-        calls: AtomicU64,
-    }
-    impl RootDispatch for GuestDispatch {
-        fn dispatch<'a>(
-            &'a self,
-            _desc: Value,
-            scope: &'a str,
-            occurrence: i64,
-            _effects: EffectContext,
-        ) -> HandlerFuture<'a> {
-            Box::pin(async move {
-                assert_eq!(scope, "root/all:0");
-                assert_eq!(occurrence, 0);
-                self.calls.fetch_add(1, Ordering::Relaxed);
-                EffectOutput::value(&json!(42))
-            })
-        }
-    }
-
     #[tokio::test]
-    async fn scheduler_children_reenter_guest_context_but_definition_delegation_drops_it()
-    -> Result<()> {
+    async fn recording_skips_permitted_call_but_records_denied_call() -> Result<()> {
         let runtime = Runtime::new(Store::memory()?)?;
-        let dispatch = Arc::new(GuestDispatch {
-            calls: AtomicU64::new(0),
-        });
-        let effects = EffectContext {
-            root_dispatch: Some(dispatch.clone()),
-            ..Default::default()
-        };
-        assert!(
-            effects
-                .delegated("another-definition", None)
-                .root_dispatch
-                .is_none()
-        );
-        let output = runtime
-            .dispatch_root(
-                json!({"op":"all","args":{"descs":[{"op":"custom"}]}}),
-                "root",
-                0,
-                effects,
-            )
-            .await?;
-        assert_eq!(output.decode()?, json!([42]));
-        assert_eq!(dispatch.calls.load(Ordering::Relaxed), 1);
+        let answer = Answer { calls: AtomicU64::new(0) };
+        let handlers: [&dyn RootHandler; 2] = [&RECORDING, &answer];
+        for permitted in [true, false] {
+            let execution = trace::ExecutionTrace::fresh("root");
+            let labels = if permitted { vec!["call".into()] } else { vec![] };
+            let outcome = Next { handlers: &handlers }.run(Request {
+                runtime: &runtime,
+                desc: json!({"op":"call","args":{"def":"child","args":[]}}),
+                scope: "root",
+                occurrence: 0,
+                effects: EffectContext {
+                    trace: Some(execution.clone()),
+                    ..EffectContext::default().delegated("parent", Some(&labels))
+                },
+            }).await;
+            assert_eq!(outcome.is_ok(), permitted);
+            let bundle = execution.snapshot(Some(&outcome), true)?;
+            assert_eq!(bundle.trace.entries.len(), if permitted { 0 } else { 1 });
+            assert!(bundle.observations.is_empty());
+            if !permitted {
+                assert!(outcome.unwrap_err().to_string().contains("not allowed"));
+            }
+        }
+        assert_eq!(answer.calls.load(Ordering::Relaxed), 1);
         Ok(())
     }
 
@@ -507,5 +411,18 @@ mod tests {
         assert!(effects.permits("sleep"));
         assert!(!effects.permits("fs.read"));
         assert!(!effects.permits("exec"));
+    }
+
+    #[tokio::test]
+    async fn removed_scheduling_combinators_are_unsupported_effects_at_root() -> Result<()> {
+        for op in ["all", "race", "fork", "join", "spawn", "send"] {
+            let runtime = Runtime::new(Store::memory()?)?;
+            let error = runtime
+                .perform(json!({"op": op, "args": {}}), "root", 0)
+                .await
+                .unwrap_err();
+            assert_eq!(error.to_string(), format!("unsupported effect: {op}"));
+        }
+        Ok(())
     }
 }

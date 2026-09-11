@@ -39,7 +39,7 @@ async fn main() -> Result<()> {
             .to_string();
     ensure!(
         store.get_value::<Value>(&descriptor_hash)? == Some(descriptor),
-        "effect descriptor was not persisted as canonical DAG-CBOR"
+        "effect was not persisted as canonical DAG-CBOR"
     );
     for direction in [
         Direction {

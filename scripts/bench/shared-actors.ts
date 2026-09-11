@@ -32,12 +32,12 @@ impl loom::Actor for Counter {
     fn fold(state:i64,event:&i64)->i64 {state+event}
     fn handle(state:&i64,msg:i64)->Vec<i64> {
         loom::scope(|scope| {
-            let job=scope.fork(|| {
-                loom::abilities::sleep(1).expect("sleep");
+            let job=scope.spawn(|| {
+                loom::sleep(1).expect("sleep");
                 msg + *state
-            }).expect("fork");
-            vec![job.join().expect("join")]
-        }).expect("scope")
+            }).expect("spawn child");
+            vec![job.join().expect("child result")]
+        })
     }
 }`;
 try {
@@ -58,7 +58,7 @@ try {
   assert(await command('actor.upgrade',{actor,hash:upgraded})===12,'upgrade fold mismatch');
   passed++;
   step='deny effects during pure fold';
-  const impure=await define('shared-actor-gate-impure',source.replace('state+event','{loom::abilities::sleep(1).expect("pure fold must reject effects"); state+event}'));
+  const impure=await define('shared-actor-gate-impure',source.replace('state+event','{loom::sleep(1).expect("pure fold must reject effects"); state+event}'));
   const deniedActor=object(await command('spawn',{hash:impure,initial:0})).id;
   assert(typeof deniedActor==='string','denial actor missing');
   const denied=await client.callTool('loom_command',{command:'send',args:{actor:deniedActor,msg:1}});

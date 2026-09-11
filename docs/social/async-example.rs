@@ -1,9 +1,9 @@
-use loom::abilities::sleep;
+use loom::{scope, sleep};
 
-#[loom::def(effects=["all", "sleep"])]
+#[loom::def(effects = ["sleep"])]
 pub fn main() {
-    loom::all([
-        sleep::desc(100),
-        sleep::desc(200),
-    ]).expect("sleep failed");
+    scope(|s| {
+        s.spawn(|| sleep(100)).unwrap();
+        s.spawn(|| sleep(200)).unwrap();
+    });
 }

@@ -8,7 +8,7 @@ interface Reply {ok:boolean;result:unknown;diagnostics:Diagnostic[]}
 interface Definition {def:{hash:string};build:{ms:number;size:number}}
 interface SpawnedActor {id:string}
 let passed=0;
-const total=4;
+const total=3;
 function assert(condition:unknown,message:string):asserts condition {if(!condition)throw new Error(message);}
 async function operation<T>(name:string,body:unknown):Promise<T>{
   const response=await fetch(`${endpoint}/v1/${name}`,{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify(body)});
@@ -35,14 +35,9 @@ async function statesAfterDelivery(tsActor:string,rustActor:string,expected:numb
 }
 async function check(name:string,test:()=>Promise<void>){await test();passed++;console.log(`PASS ${name}`);}
 try {
-  await check('TS forks and joins a Rust definition',async()=>{
-    const rust=await define('m6-add','rust',await readFile(new URL('../examples/rust-add/src/lib.rs',import.meta.url),'utf8'));
-    const ts=await define('m6-fork','ts',await readFile(new URL('../examples/ts/rust-fork.ts',import.meta.url),'utf8'),{rustAdd:rust.def.hash});
-    const result=await call<number[]>(ts.def.hash,[20,22]);assert(JSON.stringify(result)==='[42,42]',JSON.stringify(result));
-  });
   await check('TS and Rust actors exchange messages in both directions',async()=>{
-    const tsSource='import {send} from "loom";type Message=number|{actor:string;value:number};export function run(_state:number,msg:Message):number[]{if(typeof msg==="number")return [msg];send(msg.actor,msg.value);return [msg.value];}export function fold(state:number,event:number):number{return state+event;}';
-    const rustSource=`#[loom::actor(effects=["send"])]
+    const tsSource='import {actor} from "loom";type Message=number|{actor:string;value:number};export function run(_state:number,msg:Message):number[]{if(typeof msg==="number")return [msg];actor.send(msg.actor,msg.value);return [msg.value];}export function fold(state:number,event:number):number{return state+event;}';
+    const rustSource=`#[loom::actor(effects=["actor.send"])]
 pub struct Messenger;
 impl loom::Actor for Messenger {
  type State=i64;type Event=i64;type Msg=serde_json::Value;
@@ -52,7 +47,7 @@ impl loom::Actor for Messenger {
   if let Some(value)=message.as_i64(){return vec![value];}
   let actor=message["actor"].as_str().expect("actor");
   let value=message["value"].as_i64().expect("value");
-  loom::abilities::send(actor,serde_json::json!(value)).expect("send");
+  loom::actor::send(actor,serde_json::json!(value)).expect("actor.send");
   vec![value]
  }
 }`;
@@ -63,9 +58,9 @@ impl loom::Actor for Messenger {
     await send(rust.id,{actor:ts.id,value:11});
     await statesAfterDelivery(ts.id,rust.id,18);
   });
-  await check('Rust recursively forks itself',async()=>{
+  await check('Rust recurses through synchronous definition calls',async()=>{
     const definition=await define('m6-recursive','rust',await readFile(new URL('../examples/rust-recursive/src/lib.rs',import.meta.url),'utf8'));
-    assert(await call<number>(definition.def.hash,[4])===4,'recursive fork/join failed');
+    assert(await call<number>(definition.def.hash,[4])===4,'recursive definition call failed');
   });
   await check('new Rust source builds in under five seconds with warm dependencies',async()=>{
     const nonce=Date.now();

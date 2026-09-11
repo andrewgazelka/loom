@@ -4,7 +4,7 @@ use super::*;
 
 impl Runtime {
     /// Time a checked fixture whose no-argument main installs one handler,
-    /// performs exactly one operation, and returns 1. Module compilation, root
+    /// performs exactly one effect, and returns 1. Module compilation, root
     /// setup and host result inspection are outside the measured interval.
     /// Each sample includes handler installation/removal and guest entry codec,
     /// so this is an upper bound on a single complete effect round trip.
@@ -56,7 +56,7 @@ impl Runtime {
                     free.call_async(&mut running.store, (packed as u32 as i32, (packed >> 32) as i32, 1)).await.map_err(error)?;
                     if index >= 100 { samples.push(elapsed); }
                 }
-                anyhow::ensure!(child.handler_round_trip_us.lock().unwrap().len() == 10_000, "benchmark fixture must perform exactly one handled operation per sample");
+                anyhow::ensure!(child.handler_round_trip_us.lock().unwrap().len() == 10_000, "benchmark fixture must perform exactly one handled effect per sample");
                 anyhow::ensure!(child.jobs.lock().unwrap().is_empty(), "benchmark fixture must not spawn jobs");
                 anyhow::ensure!(child.handler_instance_reuses.load(Ordering::Relaxed) >= 10_000, "handler cache did not serve the measured workload");
                 free.call_async(&mut running.store, (input.pointer, input.length, 1)).await.map_err(error)?;

@@ -7,8 +7,8 @@ const gates:Gate[]=[];
 const fixture=process.argv[2];
 const native=process.argv[3];
 const scanNames=[
-  'native correctness','all correctness','fork correctness','changing winners',
-  ...['all','fork'].flatMap(name=>[
+  'native correctness','scoped correctness','changing winners',
+  ...['scoped'].flatMap(name=>[
     `${name}: median <15ms`,
     `${name}: identical-scan database growth <32768 bytes`,
     `${name}: wire bytes <200000`,

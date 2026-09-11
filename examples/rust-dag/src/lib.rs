@@ -7,17 +7,14 @@ pub fn dag(payload: loom::Value, target: String) -> loom::Value {
     let Some(hash) = payload["$ref"].as_str() else {
         return loom::serde_json::json!({"stage":"input","error":"payload must be a link"});
     };
-    let value: loom::Value = match loom::perform(loom::Desc::new(
-        "cas.get",
-        loom::serde_json::json!({"hash": hash}),
-    )) {
+    let value: loom::Value = match loom::cas::get(hash) {
         Ok(value) => value,
         Err(error) => return loom::serde_json::json!({"stage":"cas.get","error":error}),
     };
-    let echo: loom::Value = match loom::perform(loom::Desc::new(
+    let echo: loom::Value = match loom::perform(
         "call",
         loom::serde_json::json!({"def": target, "args": [payload, ""]}),
-    )) {
+    ) {
         Ok(value) => value,
         Err(error) => return loom::serde_json::json!({"stage":"cross-language call","error":error}),
     };

@@ -53,30 +53,36 @@ test('effect inference resolves aliases and shadows and propagates recursive hel
   expect(result.sig.exports.find(item=>item.name==='worker')?.effects).toEqual({labels:['exec'],unknown:false});
   expect(result.sig.exports.find(item=>item.name==='pure')?.effects).toEqual({labels:[],unknown:false});
 });
-test('descriptors are inert until performed and unknown calls stay dynamic',()=>{
-  const result=checker.check('import {exec,perform,all,now} from "loom";export function inert(){return exec.desc(null);}export function effects(){all([exec.desc(null),now.desc()]);return perform({op:"fs.read",args:null});}export function unknown(f:()=>number){return f();}');
+test('plain effect calls and literal perform labels contribute effects',()=>{
+  const result=checker.check('import {exec,perform,now} from "loom";export function effects(){exec(null);now();return perform("fs.read",null);}export function unknown(f:()=>number){return f();}');
   expect(result.diagnostics).toEqual([]);
-  expect(result.sig.exports.find(item=>item.name==='inert')?.effects).toEqual({labels:[],unknown:false});
-  expect(result.sig.exports.find(item=>item.name==='effects')?.effects).toEqual({labels:['all','exec','fs.read','now'],unknown:false});
+  expect(result.sig.exports.find(item=>item.name==='effects')?.effects).toEqual({labels:['exec','fs.read','now'],unknown:false});
   expect(result.sig.exports.find(item=>item.name==='unknown')?.effects).toEqual({labels:[],unknown:true});
 });
-test('export aliases retain effect inference and dynamic descriptors',()=>{
-  const result=checker.check('import {perform} from "loom";const worker=(op:string)=>perform({op,args:null});export {worker as default};');
+test('export aliases retain effect inference and dynamic labels',()=>{
+  const result=checker.check('import {perform} from "loom";const worker=(op:string)=>perform(op,null);export {worker as default};');
   expect(result.diagnostics).toEqual([]);
   expect(result.sig.exports[0]?.effects).toEqual({labels:[],unknown:true});
 });
 
-test('cross language dependency effects include scheduling operations',()=>{
+test('cross language dependency effects propagate through call and actor.spawn',()=>{
   const signatures={worker:{exports:[{name:'default',params:[],returns:{type:'number' as const},effects:{labels:['exec'],unknown:false}}],effects:{labels:['exec'],unknown:false}}};
-  const result=checker.check('import {fork,join,call} from "loom";import {worker as dependency} from "loom:defs";export default function f(){join([fork(dependency,[])]);return call(dependency,[]);}',signatures);
-  expect(result.diagnostics).toEqual([]);
-  expect(result.sig.exports[0]?.effects).toEqual({labels:['call','exec','fork','join'],unknown:false});
+  for(const op of ['call','actor.spawn']) {
+    const result=checker.check(`import {call,actor} from "loom";import {worker as dependency} from "loom:defs";export default function f(){return ${op}(dependency,[]);}`,signatures);
+    expect(result.diagnostics).toEqual([]);
+    expect(result.sig.exports[0]?.effects).toEqual({labels:[op,'exec'],unknown:false});
+  }
 });
-test('module initialization and getters are visible; mutable descriptors stay unknown',()=>{
+test('actor.send aliases retain the namespaced effect label',()=>{
+  const result=checker.check('import {actor as actors} from "loom";const deliver=actors.send;export default function f(){return deliver("actor-id",null);}');
+  expect(result.diagnostics).toEqual([]);
+  expect(result.sig.effects).toEqual({labels:['actor.send'],unknown:false});
+});
+test('module initialization and getters are visible; mutable labels stay unknown',()=>{
   const initialized=checker.check('import {now,random} from "loom";const time=now();const object={get value(){return random();}};export default function f(){return time+object.value;}');
   expect(initialized.diagnostics).toEqual([]);
   expect(initialized.sig.exports[0]?.effects).toEqual({labels:['now','random'],unknown:false});
-  const mutated=checker.check('import {perform} from "loom";export default function f(){const desc={op:"now",args:null};desc.op="random";return perform(desc);}');
+  const mutated=checker.check('import {perform} from "loom";export default function f(){let op="now";op="random";return perform(op,null);}');
   expect(mutated.sig.exports[0]?.effects.unknown).toBe(true);
 });
 
@@ -108,4 +114,12 @@ test('implicit getter and iterator dispatch never reports a pure signature',()=>
   const spread=checker.check('export default function main(xs:number[]){return [...xs];}');
   expect(spread.diagnostics).toEqual([]);
   expect(spread.sig.effects.unknown).toBe(true);
+});
+
+test('raw call and actor.spawn require unknown dependency effects',()=>{
+  for(const op of ['call','actor.spawn']) {
+    const result=checker.check(`import {perform} from "loom";export default function f(){return perform("${op}",null);}`);
+    expect(result.diagnostics).toEqual([]);
+    expect(result.sig.effects).toEqual({labels:[op],unknown:true});
+  }
 });

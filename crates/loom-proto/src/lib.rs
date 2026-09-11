@@ -193,7 +193,7 @@ pub struct NameRevision {
     pub since_seq: i64,
 }
 
-/// The language-neutral wire description of a host operation.
+/// The language-neutral wire description of a host effect.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "codegen", derive(TS))]
 #[cfg_attr(feature = "codegen", ts(concrete(T = Value)))]

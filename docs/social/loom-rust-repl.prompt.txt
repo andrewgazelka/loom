@@ -1,23 +1,22 @@
 Use case: ads-marketing / infographic-diagram
 Asset: a polished simple landscape social graphic for X, roughly 1600x1000, for the open-source project Loom. Make a finished readable typography-led graphic, not a photo of a screen.
 Style: confident editorial developer-tool design. Warm near-white background, near-black text, a restrained burnt-orange accent referencing Rust. Flat crisp typography, generous margins, very subtle pale code panel. No gradients, 3D, mascots, invented logos, browser chrome, stock icons, fake terminal output or decorative clutter.
-Composition: small LOOM wordmark at top left. Large headline across upper area. Under headline a short subtitle. Middle-left a large readable monospace code block; middle-right a small very simple fork from one line into two parallel lines labeled src and tests, then rejoin, captioned "Two directory listings, concurrently". Lower strip presents benchmark separately from code example: large "10,000 files" and "10.46 ms", label "Recursive scan benchmark". Small but legible qualification below. No bar chart or native comparison.
+Composition: small LOOM wordmark at top left. Large headline across upper area. Under headline a short subtitle. Middle-left a large readable monospace code block; middle-right a small simple branch from one line into two parallel lines labeled src and tests, then rejoin, captioned "Two directory listings, concurrently". Lower strip presents benchmark separately from code example: large "10,000 files" and "10.46 ms", label "Historical scan benchmark, removed API". Small but legible qualification below. No bar chart or native comparison.
 Render exact text and code, every character accurate:
 Wordmark: "LOOM"
 Headline: "Rust without function coloring."
 Subtitle: "Concurrent effects. Ordinary functions."
 Code block:
-#[loom::def]
-pub fn main(machine: String)
-    -> Vec<Vec<loom::DirEntry>>
-{
-    loom::all([
-        loom::abilities::fs::list::desc(&machine, "src"),
-        loom::abilities::fs::list::desc(&machine, "tests"),
-    ]).expect("directory listing failed")
+#[loom::def(effects=["fs.list"])]
+pub fn main(machine: String) -> Vec<Vec<loom::DirEntry>> {
+    loom::scope(|s| {
+        let src = s.spawn(|| loom::fs::list(&machine, "src").expect("src listing")).expect("spawn src");
+        let tests = s.spawn(|| loom::fs::list(&machine, "tests").expect("tests listing")).expect("spawn tests");
+        vec![src.join().expect("src result"), tests.join().expect("tests result")]
+    })
 }
 Benchmark big text: "10,000 files" and "10.46 ms"
-Benchmark label: "Recursive scan benchmark"
+Benchmark label: "Historical scan benchmark, removed API"
 Benchmark qualification: "Warm median of 7 runs · Apple Silicon Mac"
 Second qualification: "Includes MCP transport + recording · Metadata scan, not file contents"
 Footer small: "Isolated WebAssembly · Recorded effects"

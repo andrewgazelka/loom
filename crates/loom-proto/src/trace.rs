@@ -75,7 +75,7 @@ pub struct TraceMemo {
     pub result_hash: String,
 }
 
-/// Deduplicated operation metadata attributed to its executing definition.
+/// Deduplicated effect metadata attributed to its executing definition.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct TraceObservation {
     pub definition_hash: String,

@@ -1,26 +1,10 @@
-# Largest-file scan: `all`, recursive forks, native Rust
+# Largest-file scan with scoped children
 
-The benchmark calls real Rust guest definitions through streamable HTTP MCP.
-[`largest-all.rs`](largest-all.rs) lists directories concurrently at each tree level.
-[`largest-fork.rs`](largest-fork.rs) forks one worker per child directory.
-Both find the largest regular file, skip symlinks, and break size ties by relative path.
+The benchmark calls [`largest-scoped.rs`](largest-scoped.rs) through streamable HTTP MCP and compares it with [`largest-native.rs`](largest-native.rs). Scoped children borrow the traversal state and perform directory listings concurrently. Both scans find the largest regular file, skip symlinks, and break size ties by relative path.
 
-Historical isolated-backend medians on an Apple Silicon Mac, September 9, 2026. See the [project README](../../README.md#performance) for newer shared-backend Linux measurements:
+The fixture begins with 10,000 files and 256 directories. Timed rounds add a directory and change its winning file, for 10,001 files and 257 directories. Every scan must find each new winner. Compilation and first-call initialization are excluded; filesystem caches and compiled definitions are warm. Loom timings include MCP and recording, while native timing excludes process launch. The algorithms differ, so this comparison does not isolate WebAssembly overhead.
 
-| Path | Median of 7 warm scans |
-| --- | ---: |
-| Loom Rust `all`, including MCP and recording | **10.46 ms** |
-| Loom Rust recursive `fork` / `join`, including MCP and recording | **12.00 ms** |
-| Native Rust, sequential scan only | **35.20 ms** |
-| Native Rust, including process launch | **37.81 ms** |
-
-The fixture begins with 10,000 files and 256 directories. During timed rounds, one added directory contains a changing winning file, for 10,001 files and 257 directories. Every implementation must find each new winner. The scan reads metadata, not file contents. Compilation and first-call initialization are excluded; filesystem caches and compiled definitions are warm. The run reported load averages of 26.16, 40.95 and 46.06.
-
-The native reference uses sequential traversal and individual non-following metadata reads. Loom uses parallel, batched metadata operations. These are different algorithms; the comparison does not isolate Wasm overhead or establish an advantage over equally optimized native code. The recursive example has no worker bound and is a fixture workload, not a general scanner for arbitrarily large trees.
-
-**10/12 gates pass.** Correctness, scan latency, retained database growth and wire-size gates pass. Reply storage wait medians are 1.50 / 1.59 ms for all/fork, above the 1 ms target. Identical scans add about 22.3 / 24 KiB of database pages and transfer 167,656 / 186,932 effect bytes. Each call records one queued transaction. The standalone single-effect [`largest-walk.rs`](largest-walk.rs) measured 17.22 ms in a separate run; its target remains unmet.
-
-The initial implementation measured 161.5 ms for `all` and 314.0 ms for fork/join. Those earlier runs had different load and storage histories; use the [staged measurements](../../docs/plan-unified-memory.md#scan-contract-change-2026-09-09) for the change history, rather than treating historical ratios as controlled experiments.
+The scoped variant measured 28.63 ms on Linux on September 10, 2026, before the effect API change. The current gate has not been rerun. See the [historical measurements](../../docs/plan-unified-memory.md#scan-contract-change-2026-09-09) for removed variants.
 
 ## Reproduce
 
@@ -41,10 +25,10 @@ LOOM_URL=http://127.0.0.1:18894 LOOM_TOKEN_FILE="$bench_dir/state/token" \
   bun scripts/bench/largest.ts "$bench_dir/tree" "$bench_dir/native"
 ```
 
-Set `LOOM_BENCH_VARIANTS=all,fork,scoped` to include borrowed scoped jobs. This selects 17 checks; the default `all,fork` selects 12.
+The runner uses `scoped`, its only supported variant, and checks seven gates.
 
 The runner reports build time, first-call time, every warm sample, medians,
-ratios, load averages, and `N/12 scan benchmark checks pass`. Four gates check correctness. Each guest variant also has gates for median latency below 15 ms, average retained database growth below 32 KiB per identical scan, fewer than 200,000 effect bytes transferred, and median reply storage wait below 1 ms. Missing metrics fail. Transaction and checkpoint durations are reported separately to diagnose storage waits. Repeating the runner reuses builds
+ratios, load averages, and `N/7 scan benchmark checks pass`. Three gates check correctness. Each guest variant also has gates for median latency below 15 ms, average retained database growth below 32 KiB per identical scan, fewer than 200,000 effect bytes transferred, and median reply storage wait below 1 ms. Missing metrics fail. Transaction and checkpoint durations are reported separately to diagnose storage waits. Repeating the runner reuses builds
 and filesystem caches. It removes its temporary winner directory on exit;
 the fixture and isolated database remain available for inspection.
 
@@ -57,14 +41,12 @@ LOOM_URL=http://127.0.0.1:18894 LOOM_TOKEN_FILE="$bench_dir/state/token" \
   bun scripts/bench/unified-memory.ts "$bench_dir/tree" "$bench_dir/native"
 ```
 
-The command reports `N/15 unified-memory gates pass` and the first failed step.
-This historical command covers the isolated-instance benchmark. The shared-memory tier is now implemented; see the [shared execution checks](../../docs/plan-shared-execution.md).
-The gate executes isolated `all`/`fork` definitions, checks every changing winner,
-and includes all twelve scan gates plus three compiler checks. Recording transaction counts remain diagnostic. The stats counter is sampled outside scan timing; absent counters
+The command reports `N/10 unified-memory gates pass` and the first failed step.
+The gate executes the scoped definition, checks every changing winner, and includes the seven scan gates plus three compiler checks. Recording transaction counts remain diagnostic. The stats counter is sampled outside scan timing; absent counters
 fail admission rather than defaulting to zero. Missing build-control execution
 witnesses count as failures. It never starts a daemon or substitutes saved results.
 
-The [implementation plan](../../docs/plan-unified-memory.md#scan-contract-change-2026-09-09) records the staged trace, codec and filesystem measurements. The earlier 7 ms estimate referred to Linux and was not a measured Mac result. `largest-walk.rs` exercises a single bounded host traversal; its performance is measured separately from the guest-driven `all` and fork/join workloads.
+The [implementation plan](../../docs/plan-unified-memory.md#scan-contract-change-2026-09-09) records the staged trace, codec and filesystem measurements. The earlier 7 ms estimate referred to Linux and was not a measured Mac result. `largest-walk.rs` exercises a single bounded host traversal; its performance is measured separately from the guest-driven scoped workload.
 
 The five-crate delta gate uses `heck`, `strsim`, `adler2`, `version_check`, and
 `cfg-if`, exercising each dependency in the resulting definition. The compiler's

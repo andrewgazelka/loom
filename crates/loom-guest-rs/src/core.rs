@@ -17,10 +17,12 @@ unsafe extern "C" {
     pub(crate) fn host_continuation_drop(k: u64) -> i32;
     #[link_name = "perform"]
     fn host_perform(pointer: u32, length: u32) -> u64;
-    #[link_name = "fork"]
-    pub(crate) fn host_fork(function: u32, data: u32) -> u64;
+    #[link_name = "spawn"]
+    pub(crate) fn host_spawn(function: u32, data: u32, detached: i32) -> u64;
     #[link_name = "join"]
     pub(crate) fn host_join(id: u64) -> i32;
+    #[link_name = "join_error"]
+    pub(crate) fn host_join_error(id: u64) -> u64;
 }
 
 pub fn perform<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, EffectError> {
@@ -239,7 +241,7 @@ macro_rules! export_core {
 /// which frees them with loom_dealloc(pointer, length, 1).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn loom_handler_run(function: u32, data: u32, k: u64, op_ptr: u32, op_len: u32) -> u64 {
-    let op = crate::decode_host(unsafe { input(op_ptr, op_len) }).expect("invalid handler operation");
+    let op = crate::decode_host(unsafe { input(op_ptr, op_len) }).expect("invalid handler effect");
     let run: crate::handlers::HandlerRun = unsafe { std::mem::transmute(function as usize) };
     let reply = unsafe { run(data as *mut (), k, op) };
     #[derive(Serialize)]
@@ -257,8 +259,8 @@ pub unsafe extern "C" fn loom_handler_run(function: u32, data: u32, k: u64, op_p
 }
 
 /// Enter ordinary effect dispatch from a host-scheduled child instance. This
-/// bridge deliberately preserves the descriptor and response bytes: compound
-/// operations use exactly the same handler stack and canonical admission as a
+/// bridge deliberately preserves the effect and response bytes: compound
+/// effects use exactly the same handler stack and canonical admission as a
 /// direct guest perform, without a second codec round trip.
 ///
 /// # Safety

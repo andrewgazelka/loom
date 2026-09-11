@@ -24,6 +24,6 @@ impl loom::Actor for Crash {
     }
 }
 fn execute(args: loom::Value) {
-    let result = loom::abilities::exec(args).expect("exec transport failed");
+    let result = loom::exec(args).expect("exec transport failed");
     assert_eq!(result["code"], 0, "exec failed: {result}");
 }

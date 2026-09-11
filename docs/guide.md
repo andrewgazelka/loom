@@ -56,7 +56,7 @@ The returned definition hash identifies the callable. Invoke `POST /v1/command` 
 pub fn add(a: i64, b: i64) -> i64 { a + b }
 ```
 
-Actors export `run` and `fold` in TS or implement `loom::Actor` under `#[loom::actor]` in Rust. `examples/` contains executable fixtures. Actor commands include `spawn`, `send`, `state`, `fork`, and `actor.upgrade`. Cross-language calls use the same DAG-CBOR values and host effect dispatcher.
+Actors export `run` and `fold` in TS or implement `loom::Actor` under `#[loom::actor]` in Rust. `examples/` contains executable fixtures. Guest actor effects use `loom::actor::send(actor, msg)` and `loom::actor::spawn(DEF, state)` in Rust, or `actor.send(actorId, msg)` and `actor.spawn(def, state)` from the TS `actor` object. Their effect labels are `actor.send` and `actor.spawn`. Actor commands include `spawn`, `send`, `state`, `fork`, and `actor.upgrade`. Cross-language calls use the same DAG-CBOR values and host effect dispatcher.
 
 Client responses contain `ok`, `seq`, `result`, and `diagnostics`. Results above 8 KB become CAS references. Use the `resolve` command to retrieve a reference. WebSocket clients connect to `/v1/stream` and send `{ "token": "...", "after": 0 }` as their first message; the server streams durable events after that cursor.
 
@@ -70,7 +70,7 @@ Filesystem results have typed Rust SDK values. `DirEntry` has named `name`, `siz
 
 Compiled components carry an effect-protocol version. Components built against the earlier map-shaped filesystem results must be rebuilt before execution; their historical source and CAS records remain readable. This prevents an old guest decoder from silently interpreting the new result shape.
 
-Opening an older database performs a transactional migration of structured values and links and invalidates compiled guests that used the old codec. The migration preserves event sequence numbers and verifies references before committing. Older databases with recorded effects whose descriptors were never stored, or pending handlers, require explicit recovery before migration: opening fails without changing the database rather than risking duplicate external effects. Back up the database before upgrading.
+Opening an older database performs a transactional migration of structured values and links and invalidates compiled guests that used the old codec. The migration preserves event sequence numbers and verifies references before committing. Older databases with recorded effects whose requests were never stored, or pending handlers, require explicit recovery before migration: opening fails without changing the database rather than risking duplicate external effects. Back up the database before upgrading.
 
 ## Crate ownership
 
@@ -88,7 +88,7 @@ Opening an older database performs a transactional migration of structured value
 | `loom-mcp` | MCP tools, prompts and resources |
 | `loom-cli`, `loomd` | Terminal client and server entrypoint |
 
-Rust definitions use the [shared-core ABI](shared-core-abi.md), with `loom.perform` dispatching through guest handlers to the outermost host handler. Component definitions use `loom-wit/handler.wit` and `loom:host/abilities.perform`; ambient WASI imports trap. Folds can handle operations locally, but an operation reaching the host is refused.
+Rust definitions built through `loom_define` use the [shared-core ABI](shared-core-abi.md), with `loom.perform` dispatching through guest handlers to the outermost host handler. Component definitions use `loom-wit/handler.wit` and `loom:host/effects.perform`; ambient WASI imports trap. Folds can handle effects locally, but an effect reaching the host is refused.
 
 ## Verify
 
@@ -139,15 +139,17 @@ The runner creates a separate 10,000-file fixture, starts Codex with only Loom c
 
 ## Effects and file changes
 
-Definition signatures distinguish inferred effects, the host-enforced `allowed_effects` policy, and effects observed during execution. Inference is conservative: dynamic calls, getters, iterators, and unexpanded Rust code can leave the set unknown. Omitting `allowed_effects` permits all host operations; `[]` permits none. Explicit policies are part of definition identity. Calls and forks inherit the intersection of caller and callee permissions, including on cache hits.
+Calling an effect performs it: `loom::sleep(100)` suspends until its timer finishes, and `loom::perform::<T>(label, args)` performs a custom effect. Concurrent Rust work on the shared-core path uses `loom::scope`, `scope.spawn(|| ...)`, and `child.join()`. Use `loom::spawn(|| ...)` with `'static` captures for fire-and-forget work or a `JoinHandle` moved into another task. Dropping that handle leaves its task running; the host cancels unfinished detached tasks when the definition entry returns, without an implicit wait. Joining a trapped detached task returns its error; an unjoined detached failure is discarded. A synchronous `loom::call(DEF, args)` can run inside a scoped child. TypeScript uses `perform<T>(op, args)` and plain effect functions. Rust examples built as WIT components and TypeScript definitions have no concurrency API; both execute effect calls sequentially.
+
+Definition signatures distinguish inferred effects, the host-enforced `allowed_effects` policy, and effects observed during execution. Inference is conservative: dynamic calls, getters, iterators, and unexpanded Rust code can leave the set unknown. Omitting `allowed_effects` permits all host effects; `[]` permits none. Explicit policies are part of definition identity. Cross-definition calls inherit the intersection of caller and callee permissions, including on cache hits. Scoped children inherit the caller's permissions.
 
 The Effects view shows individual invocations and their outcomes. To capture file content changes from a process, pass `capture_paths: ["note.txt"]` to `exec` or `process.start`. Paths are resolved within the process root; the capture records actual before/after bytes in CAS and displays created, modified, and deleted files as diffs. Capture is limited to 64 explicitly selected regular files, at most 1 MiB each. Symlinks, unsupported files, and unavailable reads are reported explicitly.
 
-A completed call records one content-addressed trace and a `call_completed` event. Each trace occurrence identifies its job scope, descriptor and outcome; result blobs deduplicate across calls. Actors retain recovery checkpoints. The Effects view expands trace pages and keeps historical per-effect events readable. Opening an older store migrates recoverable effect records transactionally and refuses ambiguous records without partially applying the migration.
+A completed call records one content-addressed trace and a `call_completed` event. Each trace occurrence identifies its job scope, effect and outcome; result blobs deduplicate across calls. Actors retain recovery checkpoints. The Effects view expands trace pages and keeps historical per-effect events readable. Opening an older store migrates recoverable effect records transactionally and refuses ambiguous records without partially applying the migration.
 
 Use `call.replay` with the original definition `hash`, `args`, and recorded call `scope` to replay a completed successful or failed call. Replay checks the definition and argument identity, consumes the recorded occurrences, and verifies the final outcome, including recorded errors. Cancelled calls cannot be resumed through `call.replay`; actor recovery uses its saved checkpoint. A fresh call executes its external effects again unless an effect has a valid global memoization key.
 
-Machine filesystem operations resolve from a pinned root directory handle. Parent traversal and symlinks cannot redirect resolution outside that root. `fs.list` supports guest-driven traversal; `fs.walk` performs a bounded traversal in the host. Both return the same typed entry values. Persisted root identity prevents a restart from silently accepting a replacement directory.
+Machine filesystem effects resolve from a pinned root directory handle. Parent traversal and symlinks cannot redirect resolution outside that root. `fs.list` supports guest-driven traversal; `fs.walk` performs a bounded traversal in the host. Both return the same typed entry values. Persisted root identity prevents a restart from silently accepting a replacement directory.
 
 These snapshots observe selected files across the process interval. They do not enumerate every write, track metadata-only changes, or distinguish concurrent writers. Historical effects without snapshots remain browsable, with no invented diff.
 
@@ -162,31 +164,31 @@ Updating a definition name leaves existing dependency hashes intact. Run `loom -
 
 ## Guest-defined effect handlers
 
-`loom::handle(handler, body)` installs a deep handler around an ordinary Rust
-closure. The handler receives an `Op` and a one-shot `Continuation`, then returns
+`loom::handle_any(handler, body)` installs a deep handler around an ordinary Rust
+closure. The handler receives an `Effect` and a one-shot `Continuation`, then returns
 `Reply::Resume(value)`, `Reply::Forward`, or `Reply::Deferred`.
 
 ```rust
-use loom::{Continuation, Op, Reply, Value};
+use loom::{Continuation, Effect, Reply, Value};
 
 #[loom::def(effects = [])]
-pub fn main() -> Value {
-    loom::handle_labels(["sleep"], |_op: Op, _k: Continuation| {
-        Reply::Resume(Value::String("no waiting".into()))
-    }, || loom::abilities::sleep(200).expect("sleep failed"))
-    .expect("handler failed")
+pub fn main() {
+    loom::handle(["sleep"], |_effect: Effect, _k: Continuation| {
+        Reply::Resume(Value::Null)
+    }, || loom::sleep(200).expect("sleep failed"))
+    .expect("handler failed");
 }
 ```
 
-`handle_labels` promises to handle its selected labels. Returning `Forward`
-for one of those labels aborts the execution. Use `handle` for a handler that
-examines arbitrary labels and may forward. Forwarding continues at the next
-outer frame. Operations made inside a handler callback also start below that
+`handle` promises to handle its selected effects. Returning `Forward`
+for one of those effects aborts the execution. Use `handle_any` for a handler that
+examines arbitrary effects and may forward. Forwarding continues at the next
+outer frame. Effects made inside a handler callback also start below that
 frame, so a logging handler can perform its own I/O without calling itself.
 The suspended body's continuation retains the installed handler: this is the
 meaning of a deep handler.
 
-A scoped child inherits the forker's handler stack. A call or fork into another
+A scoped child inherits the parent's handler stack. A call into another
 stored definition has a separate execution memory and does not inherit guest
 handlers. Handler closures may borrow values, but must be `Send`. The runtime
 serializes calls to each mutable handler, and drains inherited children before
@@ -201,22 +203,22 @@ more than once. Retaining one forever prevents progress and is bounded by the
 execution deadline. A handler must return before it can be invoked again; do
 not wait inside a mutable callback for another invocation of the same frame.
 
-Recording observes only the outermost host handler. A guest-handled operation
+Recording observes only the outermost host handler. A guest-handled effect
 is guest computation and creates no root-effect record. If that handler reads
 a real file, the read reaches the host and is recorded. Replay reruns the guest
 handlers and supplies their recorded root-effect results. Root recording and
 replay are implemented by the same host handler chain used for execution.
-Pure actor folds may install handlers, but any operation reaching the root
+Pure actor folds may install handlers, but any effect reaching the root
 still fails.
 
 For content-addressed reuse, see [stored handler definitions](content-addressed-handlers.md).
 
 ### Residual effect declarations
 
-`#[loom::def(effects = ["sleep"])]` declares the effect labels that the host must
-supply. `loom-check` rejects known residual labels outside that set. A total
-`handle_labels` removes its selected labels from the body's inferred row;
-operations performed by the handler itself remain in the outer row. Unknown
+`#[loom::def(effects = ["sleep"])]` declares the effect names that the host must
+supply. `loom-check` rejects known residual effects outside that set. A total
+`handle` removes its selected effects from the body's inferred row;
+effects performed by the handler itself remain in the outer row. Unknown
 dispatch requires an explicit declaration, which the runtime enforces at the
 root. Actor definitions use `#[loom::actor(effects = [...])]`.
 
@@ -235,7 +237,7 @@ unchanged content produces no change. The returned `Preview` includes the
 body's result and content-addressed before/after values, rendered by the REPL's
 filesystem changes view. See [the complete preview example](../examples/rust-preview/src/lib.rs).
 
-Only those filesystem operations are intercepted. Reads used to capture the
-original file and CAS writes remain real root effects. Other operations and
+Only those filesystem effects are intercepted. Reads used to capture the
+original file and CAS writes remain real root effects. Other effects and
 calls into separate definitions are not automatically previewed. Restrict the
-root effect row when the body must not execute other external operations.
+root effect row when the body must not execute other external effects.

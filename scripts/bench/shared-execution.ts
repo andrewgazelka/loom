@@ -38,24 +38,24 @@ static COUNT:AtomicU32=AtomicU32::new(0);
 pub fn main()->Vec<u32> {
     let values=vec![1_u32,2,3,4];
     loom::scope(|s| {
-        let sum=s.fork(|| {
+        let sum=s.spawn(|| {
             COUNT.fetch_add(1,Ordering::SeqCst);
             while COUNT.load(Ordering::SeqCst)<2 {std::hint::spin_loop();}
             values.iter().sum::<u32>()
-        }).expect("fork");
-        let product=s.fork(|| {COUNT.fetch_add(1,Ordering::SeqCst); values.iter().product::<u32>()}).expect("fork");
-        vec![sum.join().expect("join"),product.join().expect("join"),COUNT.load(Ordering::SeqCst)]
-    }).expect("scope")
+        }).expect("spawn child");
+        let product=s.spawn(|| {COUNT.fetch_add(1,Ordering::SeqCst); values.iter().product::<u32>()}).expect("spawn child");
+        vec![sum.join().expect("child result"),product.join().expect("child result"),COUNT.load(Ordering::SeqCst)]
+    })
 }`;
 const effects=`
 #[loom::def(effects=["sleep"])]
 pub fn main()->Vec<String> {
     let label=String::from("borrowed");
     loom::scope(|s| {
-        let a=s.fork(|| {loom::abilities::sleep(1).expect("sleep"); label.clone()}).expect("fork");
-        let b=s.fork(|| {loom::abilities::sleep(2).expect("sleep"); label.clone()}).expect("fork");
-        vec![a.join().expect("join"),b.join().expect("join")]
-    }).expect("scope")
+        let a=s.spawn(|| {loom::sleep(1).expect("sleep"); label.clone()}).expect("spawn child");
+        let b=s.spawn(|| {loom::sleep(2).expect("sleep"); label.clone()}).expect("spawn child");
+        vec![a.join().expect("child result"),b.join().expect("child result")]
+    })
 }`;
 let capturesHash='';
 let effectsHash='';
@@ -93,8 +93,8 @@ try {
   });
   const refusals=[
     {name:names[3]!,source:'#[loom::def(effects=[])] pub fn main()->u32 { unsafe { std::ptr::read_volatile(&1) } }',reason:/unsafe/i},
-    {name:names[4]!,source:'#[loom::def(effects=[])] pub fn main()->u32 { let value=std::rc::Rc::new(1); loom::scope(|s| s.fork(move || *value).expect("fork").join().expect("join")).expect("scope") }',reason:/Send|sent between threads/},
-    {name:names[5]!,source:'#[loom::def(effects=[])] pub fn main()->String { loom::scope(|s| { let job=s.fork(|| { let value=String::from("local"); value.as_str() }).expect("fork"); job.join().expect("join").to_owned() }).expect("scope") }',reason:/E0515|cannot return.*(?:local|owned)|borrowed|does not live long enough/},
+    {name:names[4]!,source:'#[loom::def(effects=[])] pub fn main()->u32 { let value=std::rc::Rc::new(1); loom::scope(|s| s.spawn(move || *value).expect("spawn child").join().expect("child result")) }',reason:/Send|sent between threads/},
+    {name:names[5]!,source:'#[loom::def(effects=[])] pub fn main()->String { loom::scope(|s| { let job=s.spawn(|| { let value=String::from("local"); value.as_str() }).expect("spawn child"); job.join().expect("child result").to_owned() }) }',reason:/E0515|cannot return.*(?:local|owned)|borrowed|does not live long enough/},
   ];
   for(const control of refusals) await gate(control.name,async()=>{
     const reply=await client!.callTool('loom_define',{lang:'rust',name:'shared-gate-refusal',source:control.source});

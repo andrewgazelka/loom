@@ -6,7 +6,7 @@ import {Database} from 'bun:sqlite';
 import {LoomMcpClient, object, type LoomResponse} from '../mcp-client';
 import {phase4,type Phase4Gate} from './effects-fixtures/phase4';
 interface Gate {name:string;pass:boolean;detail:string}
-const names=['fake clock','forward to host','nested shadow, forwarding, pop and total-label refusal','handler outer context','scoped child inheritance and fork-time snapshot','cross-definition call and fork isolation','handler trap frame diagnostic','pure fold handling and root refusal','root-only effect ledger','guest all with deferred continuations','dropped continuation errors without hanging','abandon drains children and preserves limits','residual effect row admission'];
+const names=['fake clock','forward to host','nested shadow, forwarding, pop and total-effect refusal','handler outer context','scoped child inheritance and spawn-time snapshot','cross-definition calls from parent and scoped child','handler trap frame diagnostic','pure fold handling and root refusal','root-only effect ledger','scoped children with deferred continuations','dropped continuation errors without hanging','abandon drains children and preserves limits','residual effect row admission'];
 const gates:Gate[]=[];
 // A broken transport must not leave this goal alive after per-gate timeouts.
 const watchdog=setTimeout(()=>{console.error('effects goal exceeded 20 minutes; incomplete controls fail');process.exit(1);},1_200_000);
@@ -48,7 +48,7 @@ async function traceEntries(hash:string,args:unknown[]) {
   const page=object((await command('trace.effects',{hash:completed[0]!.trace_hash,limit:256})).result);
   assert(Array.isArray(page.entries)&&page.next_offset===null,'trace page incomplete');return page.entries.map(entry=>object(entry));
 }
-function actorSource(handled:boolean) {return `#[loom::actor(effects=["sleep"])] pub struct Counter; impl loom::Actor for Counter {type State=i64;type Event=i64;type Msg=i64;fn init()->i64{0}fn handle(_: &i64,msg:i64)->Vec<i64>{vec![msg]}fn fold(state:i64,event:&i64)->i64 {${handled?'loom::handle_labels(["sleep"],|_,_|loom::Reply::Resume(loom::Value::Null),||loom::abilities::sleep(2000)).expect("handle").expect("sleep");':'loom::abilities::sleep(1).expect("root sleep");'}state+event}}`;}
+function actorSource(handled:boolean) {return `#[loom::actor(effects=["sleep"])] pub struct Counter; impl loom::Actor for Counter {type State=i64;type Event=i64;type Msg=i64;fn init()->i64{0}fn handle(_: &i64,msg:i64)->Vec<i64>{vec![msg]}fn fold(state:i64,event:&i64)->i64 {${handled?'loom::handle(["sleep"],|_,_|loom::Reply::Resume(loom::Value::Null),||loom::sleep(2000)).expect("handle").expect("sleep");':'loom::sleep(1).expect("root sleep");'}state+event}}`;}
 async function nativeControl(mode:'timing'|'cancellation'):Promise<Record<string,unknown>> {
   const executable=process.env.LOOM_HANDLER_BENCH,dbPath=process.env.LOOM_BENCH_DB;
   assert(executable&&dbPath,'LOOM_HANDLER_BENCH and LOOM_BENCH_DB required for actual native full-roundtrip timing');
@@ -96,14 +96,14 @@ try {
   await gate(3,async()=>{
     const root=process.env.LOOM_EFFECTS_FIXTURE_ROOT;assert(root,'Set LOOM_EFFECTS_FIXTURE_ROOT to server-side effects-fixtures directory');
     const machine=object((await command('machine.create',{root})).result);assert(typeof machine.id==='string','machine id missing');
-    const hash=await define('outer',`#[loom::def(effects=["sleep","fs.read"])] pub fn main(machine:String)->loom::Value {let mut depth=0_u32;let text=loom::handle(|_,_|{depth+=1;loom::Reply::Resume(loom::serde_json::json!(loom::abilities::fs::read(&machine,"outer-context.txt").expect("outer read")))},||loom::abilities::sleep(2000).expect("perform")).expect("handle");loom::serde_json::json!({"text":text,"depth":depth})}`);
+    const hash=await define('outer',`#[loom::def(effects=["sleep","fs.read"])] pub fn main(machine:String)->loom::Value {let mut depth=0_u32;let text=loom::handle_any(|_,_|{depth+=1;loom::Reply::Resume(loom::serde_json::json!(loom::fs::read(&machine,"outer-context.txt").expect("outer read")))},||loom::perform::<loom::Value>("sleep",loom::serde_json::json!({"ms":2000})).expect("perform")).expect("handle");loom::serde_json::json!({"text":text,"depth":depth})}`);
     const result=object((await command('call',{hash,args:[machine.id]})).result);assert(result.depth===1&&result.text==='outer handler fixture\n',JSON.stringify(result));
   });
-  await gate(4,async()=>{assert((await call('inherit')).result===91,'child did not inherit handler');assert(JSON.stringify((await call('snapshot')).result)==='[31,47]','children did not inherit fork-time handler snapshots');});
+  await gate(4,async()=>{assert((await call('inherit')).result===91,'child did not inherit handler');assert(JSON.stringify((await call('snapshot')).result)==='[31,47]','children did not inherit spawn-time handler snapshots');});
   await gate(5,async()=>{
-    const child=await define('cross-child','#[loom::def(effects=["sleep"])] pub fn main(ms:u64)->loom::Value {loom::abilities::sleep(ms).expect("real child sleep")}');
-    const parent=await define('cross-parent',`#[loom::def(effects=["fork","join","call","sleep"])] pub fn main(direct:bool)->Vec<loom::Value>{loom::handle_labels(["sleep"],|_,_|loom::Reply::Resume(loom::serde_json::json!(99)),||{if direct {vec![loom::call(loom::Def::<fn(u64)->loom::Value>::new("${child}"),200).expect("call")]} else {let child=loom::fork(loom::Def::<fn(u64)->loom::Value>::new("${child}"),200).expect("fork");loom::join(vec![child]).expect("join")}}).expect("handle")}`);
-    for(const direct of [false,true]) {const start=performance.now();const reply=await command('call',{hash:parent,args:[direct]});assert(JSON.stringify(reply.result)==='[null]'&&performance.now()-start>=180,`cross-definition ${direct?'call':'fork'} inherited handler: ${JSON.stringify(reply)}`);}
+    const child=await define('cross-child','#[loom::def(effects=["sleep"])] pub fn main(ms:u64)->loom::Value {loom::perform::<loom::Value>("sleep",loom::serde_json::json!({"ms":ms})).expect("real child sleep")}');
+    const parent=await define('cross-parent',`#[loom::def(effects=["call","sleep"])] pub fn main(direct:bool)->Vec<loom::Value>{loom::handle(["sleep"],|_,_|loom::Reply::Resume(loom::serde_json::json!(99)),||{if direct {vec![loom::call(loom::Def::<fn(u64)->loom::Value>::new("${child}"),200).expect("call")]} else {loom::scope(|s| {let child=s.spawn(||loom::call(loom::Def::<fn(u64)->loom::Value>::new("${child}"),200).expect("call")).expect("spawn child");vec![child.join().expect("child result")]})}}).expect("handle")}`);
+    for(const direct of [false,true]) {const start=performance.now();const reply=await command('call',{hash:parent,args:[direct]});assert(JSON.stringify(reply.result)==='[null]'&&performance.now()-start>=180,`cross-definition ${direct?'direct call':'scoped child call'} inherited handler: ${JSON.stringify(reply)}`);}
   });
   await gate(6,async()=>{
     const before=await command('stats',{});
@@ -138,10 +138,10 @@ try {
     try {const result=await Promise.all([new Response(child.stdout).text(),new Response(child.stderr).text(),child.exited]);const output=result[0];const diagnostics=result[1];const code=result[2];assert(code===0&&/^6\/6 shared limit controls pass$/m.test(output),`shared limits exit ${code}\n${output}\n${diagnostics}`);}finally{clearTimeout(timer);}
   });
   await gate(12,async()=>{
-    const body='loom::abilities::fs::read("local","fixture").expect("read")';
-    const denied=await bounded(client!.callTool('loom_define',{lang:'rust',name:'effects-gate-row-denied',source:`#[loom::def(effects=["sleep"])] pub fn main()->String {loom::abilities::sleep(0).expect("sleep");${body}}`}),600_000,'define residual refusal');
+    const body='loom::fs::read("local","fixture").expect("read")';
+    const denied=await bounded(client!.callTool('loom_define',{lang:'rust',name:'effects-gate-row-denied',source:`#[loom::def(effects=["sleep"])] pub fn main()->String {loom::sleep(0).expect("sleep");${body}}`}),600_000,'define residual refusal');
     assert(!denied.ok&&/residual/i.test(JSON.stringify(denied))&&/fs\.read/.test(JSON.stringify(denied)),JSON.stringify(denied));
-    const hash=await define('row-handled',`#[loom::def(effects=["sleep"])] pub fn main()->String {loom::abilities::sleep(0).expect("sleep");loom::handle_labels(["fs.read"],|_,_|loom::Reply::Resume(loom::serde_json::json!("fixture")),||${body}).expect("handle")}`);
+    const hash=await define('row-handled',`#[loom::def(effects=["sleep"])] pub fn main()->String {loom::sleep(0).expect("sleep");loom::handle(["fs.read"],|_,_|loom::Reply::Resume(loom::serde_json::json!("fixture")),||${body}).expect("handle")}`);
     assert((await command('call',{hash,args:[]})).result==='fixture','handled residual did not run');
   });
   phase4Gates=await phase4({define,command,refuse:(name,source)=>bounded(client!.callTool('loom_define',{lang:'rust',name:`effects-gate-${name}`,source}),600_000,`define ${name}`)});

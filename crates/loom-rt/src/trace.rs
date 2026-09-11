@@ -12,7 +12,6 @@ use std::{
 pub(super) struct ExecutionTrace {
     state: Mutex<TraceState>,
     publication: Mutex<()>,
-    changed: tokio::sync::Notify,
 }
 struct TraceState {
     scope: String,
@@ -24,8 +23,6 @@ struct TraceState {
     consumed: BTreeSet<TraceKey>,
     recovery_required: BTreeSet<TraceKey>,
     replay: bool,
-    loaded: bool,
-    draining: BTreeSet<String>,
     expected: Option<TraceOutcome>,
     memos: Vec<TraceMemo>,
     observations: BTreeSet<TraceObservation>,
@@ -59,13 +56,9 @@ pub(super) struct EffectGuard {
     finished: bool,
 }
 impl ExecutionTrace {
-    pub fn is_root(&self, scope: &str) -> bool {
-        self.state.lock().unwrap().scope == scope
-    }
     pub fn fresh(scope: &str) -> Arc<Self> {
         Arc::new(Self {
             publication: Mutex::new(()),
-            changed: tokio::sync::Notify::new(),
             state: Mutex::new(TraceState {
                 scope: scope.into(),
                 definition_hash: None,
@@ -76,8 +69,6 @@ impl ExecutionTrace {
                 consumed: BTreeSet::new(),
                 recovery_required: BTreeSet::new(),
                 replay: false,
-                loaded: false,
-                draining: BTreeSet::new(),
                 expected: None,
                 memos: Vec::new(),
                 observations: BTreeSet::new(),
@@ -106,7 +97,6 @@ impl ExecutionTrace {
             let mut state = trace.state.lock().unwrap();
             state.limits = limits;
             state.replay = bundle.trace.outcome.is_some();
-            state.loaded = true;
             if let Some(TraceOutcome::Error { message }) = &bundle.trace.outcome {
                 ensure!(
                     message.len() <= loom_proto::TRACE_MAX_ERROR_BYTES,
@@ -207,7 +197,6 @@ impl ExecutionTrace {
         scope: &str,
         occurrence: i64,
         descriptor: &Value,
-        subtree: bool,
     ) -> Result<StartedEffect> {
         ensure!(
             scope.len() <= loom_proto::TRACE_MAX_SCOPE_BYTES,
@@ -224,25 +213,12 @@ impl ExecutionTrace {
         if let Some(entry) = state.entries.get(&key).cloned() {
             ensure!(
                 entry.descriptor_hash == descriptor_hash,
-                "replay descriptor divergence at {scope}:{occurrence}"
+                "replay effect divergence at {scope}:{occurrence}"
             );
             ensure!(
                 state.consumed.insert(key.clone()),
                 "duplicate effect occurrence at {scope}:{occurrence}"
             );
-            if subtree && !matches!(entry.outcome, TraceOutcome::Cancelled) {
-                let prefix = format!("{scope}/race:{occurrence}");
-                let descendants: Vec<_> = state
-                    .entries
-                    .keys()
-                    .filter(|key| {
-                        key.scope == prefix || key.scope.starts_with(&format!("{prefix}/"))
-                    })
-                    .cloned()
-                    .collect();
-                state.consumed.extend(descendants);
-            }
-            self.changed.notify_waiters();
             return match entry.outcome {
                 TraceOutcome::Success { result_hash } => {
                     let bytes = state
@@ -260,7 +236,7 @@ impl ExecutionTrace {
                         state.metadata_bytes.saturating_sub(key.scope.len() + 256);
                     state.consumed.remove(&key);
                     drop(state);
-                    self.begin(scope, occurrence, descriptor, subtree)
+                    self.begin(scope, occurrence, descriptor)
                 }
                 TraceOutcome::Cancelled => {
                     bail!("replayed cancelled effect at {scope}:{occurrence}")
@@ -270,13 +246,6 @@ impl ExecutionTrace {
         ensure!(
             !state.replay,
             "replay missing effect at {scope}:{occurrence}"
-        );
-        ensure!(
-            !state
-                .draining
-                .iter()
-                .any(|scope| in_scope(&key.scope, scope)),
-            "recovery cannot start an unrecorded effect after its scope returned"
         );
         reserve_entry(&mut state, &key)?;
         reserve_blob(&mut state, &descriptor_hash, descriptor_bytes.len())?;
@@ -304,51 +273,19 @@ impl ExecutionTrace {
             finished: false,
         }))
     }
-    pub fn start_draining(&self, scope: &str) -> bool {
+    /// After all workers in an execution have drained, cancelled occurrences
+    /// need no replay result. Successful and failed occurrences must be consumed.
+    pub fn finish_scope(&self, scope: &str) {
         let mut state = self.state.lock().unwrap();
-        if !state.loaded {
-            return false;
-        }
-        if (state.scope == scope || state.entries.keys().any(|key| in_scope(&key.scope, scope)))
-            && !state.draining.iter().any(|parent| in_scope(scope, parent))
-        {
-            state.draining.retain(|child| !in_scope(child, scope));
-            state.draining.insert(scope.into());
-        }
-        true
-    }
-    pub fn requires_replay(&self, scope: &str) -> bool {
-        let state = self.state.lock().unwrap();
-        state
-            .recovery_required
-            .iter()
-            .any(|key| in_scope(&key.scope, scope) && !state.consumed.contains(key))
-    }
-    pub async fn wait_replayed(&self, scope: &str) {
-        loop {
-            let notified = self.changed.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            if !self.requires_replay(scope) {
-                return;
-            }
-            notified.await;
-        }
-    }
-    pub fn finish_draining(&self, scope: &str) {
-        let mut state = self.state.lock().unwrap();
-        let cancelled: Vec<_> = state
-            .entries
-            .values()
+        let prefix = format!("{scope}/");
+        let cancelled: Vec<_> = state.entries.values()
             .filter(|entry| {
-                in_scope(&entry.key.scope, scope)
+                (entry.key.scope == scope || entry.key.scope.starts_with(&prefix))
                     && matches!(entry.outcome, TraceOutcome::Cancelled)
             })
             .map(|entry| entry.key.clone())
             .collect();
         state.consumed.extend(cancelled);
-        // Keep the admission barrier until the execution is sealed: aborted
-        // descendants may still be dropping on another executor thread.
     }
     pub fn checkpoint(&self, store: &loom_store::Store) -> Result<()> {
         let _publication = self.publication.lock().unwrap();
@@ -397,12 +334,6 @@ impl ExecutionTrace {
             observations: state.observations.iter().cloned().collect(),
         })
     }
-}
-fn in_scope(candidate: &str, scope: &str) -> bool {
-    candidate == scope
-        || candidate
-            .strip_prefix(scope)
-            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 fn add_observation(state: &mut TraceState, observation: TraceObservation) -> Result<()> {
     if state.observations.contains(&observation) {
@@ -626,7 +557,7 @@ mod tests {
         desc: &Value,
         result: &Result<EffectOutput>,
     ) -> Result<()> {
-        match trace.begin(scope, occurrence, desc, false)? {
+        match trace.begin(scope, occurrence, desc)? {
             StartedEffect::Recorded(guard) => guard.finish(result)?,
             StartedEffect::Replayed(_) => bail!("unexpected replay"),
         }
@@ -660,7 +591,7 @@ mod tests {
             metadata_bytes: loom_proto::TRACE_MAX_METADATA_BYTES,
         };
         record(&trace, "root", 0, &desc, &EffectOutput::value(&Value::Null))?;
-        let StartedEffect::Recorded(second) = trace.begin("root", 1, &desc, false)? else {
+        let StartedEffect::Recorded(second) = trace.begin("root", 1, &desc)? else {
             bail!("expected fresh effect")
         };
         assert!(
@@ -668,7 +599,7 @@ mod tests {
                 .finish(&EffectOutput::value(&json!([1, 2, 3])))
                 .is_err()
         );
-        assert!(trace.begin("root", 2, &desc, false).is_err());
+        assert!(trace.begin("root", 2, &desc).is_err());
         let bundle = trace.snapshot(Some(&Err(anyhow::anyhow!("trace limit reached"))), true)?;
         assert_eq!(
             bundle
@@ -694,8 +625,8 @@ mod tests {
         assert!(ExecutionTrace::loaded_with_limits(bundle, limits).is_err());
         let cancelled = ExecutionTrace::fresh("root");
         cancelled.state.lock().unwrap().limits.entries = 1;
-        drop(cancelled.begin("root", 0, &desc, false)?);
-        assert!(cancelled.begin("root", 1, &desc, false).is_err());
+        drop(cancelled.begin("root", 0, &desc)?);
+        assert!(cancelled.begin("root", 1, &desc).is_err());
         assert!(matches!(
             cancelled.snapshot(None, true)?.trace.entries[0].outcome,
             TraceOutcome::Cancelled
@@ -712,11 +643,10 @@ mod tests {
                     &"x".repeat(loom_proto::TRACE_MAX_SCOPE_BYTES + 1),
                     0,
                     &desc,
-                    false
                 )
                 .is_err()
         );
-        let StartedEffect::Recorded(guard) = trace.begin("root", 0, &desc, false)? else {
+        let StartedEffect::Recorded(guard) = trace.begin("root", 0, &desc)? else {
             bail!("fresh")
         };
         assert!(
@@ -752,19 +682,19 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn replay_distinguishes_occurrences_and_checks_descriptor_and_final_result() -> Result<()> {
+    fn replay_distinguishes_occurrences_and_checks_effect_and_final_result() -> Result<()> {
         let trace = ExecutionTrace::fresh("root");
         let desc = json!({"op":"random"});
         record(
             &trace,
-            "root/all:0",
+            "root/spawn:0",
             0,
             &desc,
             &EffectOutput::value(&json!(1)),
         )?;
         record(
             &trace,
-            "root/all:0",
+            "root/spawn:0",
             1,
             &desc,
             &EffectOutput::value(&json!(2)),
@@ -773,7 +703,7 @@ mod tests {
         let bundle = trace.snapshot(Some(&final_result), true)?;
         let replay = ExecutionTrace::loaded(bundle.clone())?;
         for occurrence in [1, 0] {
-            match replay.begin("root/all:0", occurrence, &desc, false)? {
+            match replay.begin("root/spawn:0", occurrence, &desc)? {
                 StartedEffect::Replayed(output) => {
                     assert_eq!(output.decode()?, json!(occurrence + 1))
                 }
@@ -789,10 +719,10 @@ mod tests {
         let changed = ExecutionTrace::loaded(bundle)?;
         assert!(
             changed
-                .begin("root/all:0", 0, &json!({"op":"now"}), false)
+                .begin("root/spawn:0", 0, &json!({"op":"now"}))
                 .is_err()
         );
-        assert!(changed.begin("root/all:0", 2, &desc, false).is_err());
+        assert!(changed.begin("root/spawn:0", 2, &desc).is_err());
         assert!(changed.snapshot(Some(&final_result), true).is_err());
         Ok(())
     }
@@ -802,7 +732,7 @@ mod tests {
         let fail = json!({"op":"unsupported"});
         let error = Err(anyhow::anyhow!("specific failure"));
         record(&trace, "actor:1", 0, &fail, &error)?;
-        let waiting = trace.begin("actor:1", 1, &json!({"op":"sleep"}), false)?;
+        let waiting = trace.begin("actor:1", 1, &json!({"op":"sleep"}))?;
         drop(waiting);
         let partial = trace.snapshot(None, false)?;
         assert!(matches!(
@@ -811,40 +741,30 @@ mod tests {
         ));
         let recovered = ExecutionTrace::loaded(partial)?;
         let error = recovered
-            .begin("actor:1", 0, &fail, false)
+            .begin("actor:1", 0, &fail)
             .err()
             .context("recorded error missing")?;
         assert_eq!(error.to_string(), "specific failure");
         assert!(matches!(
-            recovered.begin("actor:1", 1, &json!({"op":"sleep"}), false)?,
+            recovered.begin("actor:1", 1, &json!({"op":"sleep"}))?,
             StartedEffect::Recorded(_)
         ));
         Ok(())
     }
     #[test]
-    fn incomplete_race_recovery_replays_its_completed_child_once() -> Result<()> {
-        let trace = ExecutionTrace::fresh("actor:1");
-        let race = json!({"op":"race","args":{"descs":[{"op":"random"},{"op":"sleep"}]}});
-        let parent = trace.begin("actor:1", 0, &race, true)?;
-        let child_desc = json!({"op":"random"});
-        let result = EffectOutput::value(&json!(7));
-        record(&trace, "actor:1/race:0", 0, &child_desc, &result)?;
-        let checkpoint = trace.snapshot(None, false)?;
-        drop(parent);
-        let recovered = ExecutionTrace::loaded(checkpoint)?;
-        let StartedEffect::Recorded(parent) = recovered.begin("actor:1", 0, &race, true)? else {
-            bail!("cancelled race must resume")
-        };
-        let StartedEffect::Replayed(child) =
-            recovered.begin("actor:1/race:0", 0, &child_desc, false)?
-        else {
-            bail!("child executed twice")
-        };
-        assert_eq!(child.decode()?, json!(7));
-        parent.finish(&result)?;
-        recovered.snapshot(Some(&result), true)?;
+    fn cancelled_scoped_child_does_not_block_replay_completion() -> Result<()> {
+        let original = ExecutionTrace::fresh("root");
+        drop(original.begin("root/spawn:0", 0, &json!({"op":"sleep"}))?);
+        let result = EffectOutput::value(&json!(1));
+        let replay = ExecutionTrace::loaded(original.snapshot(Some(&result), true)?)?;
+        assert!(replay.snapshot(Some(&result), true).is_err());
+        replay.finish_scope("another-execution");
+        assert!(replay.snapshot(Some(&result), true).is_err());
+        replay.finish_scope("root");
+        replay.snapshot(Some(&result), true)?;
         Ok(())
     }
+
     #[test]
     fn partial_recovery_cannot_complete_with_unconsumed_success_or_error() -> Result<()> {
         for failed in [false, true] {
@@ -863,7 +783,7 @@ mod tests {
                 recovered.snapshot(None, false).is_ok(),
                 "incomplete checkpoint remains legal"
             );
-            let replayed = recovered.begin("actor:1", 0, &descriptor, false);
+            let replayed = recovered.begin("actor:1", 0, &descriptor);
             if failed {
                 assert_eq!(
                     replayed.err().context("error missing")?.to_string(),
@@ -874,32 +794,6 @@ mod tests {
             }
             recovered.snapshot(Some(&final_result), true)?;
         }
-        Ok(())
-    }
-    #[test]
-    fn race_replay_consumes_cancelled_descendants_without_executing_them() -> Result<()> {
-        let trace = ExecutionTrace::fresh("root");
-        let race = json!({"op":"race","args":{"descs":[{"op":"sleep"},{"op":"random"}]}});
-        let StartedEffect::Recorded(parent) = trace.begin("root", 0, &race, true)? else {
-            bail!("not fresh")
-        };
-        let pending = trace.begin("root/race:0", 0, &json!({"op":"sleep"}), false)?;
-        record(
-            &trace,
-            "root/race:0",
-            1,
-            &json!({"op":"random"}),
-            &EffectOutput::value(&json!(4)),
-        )?;
-        drop(pending);
-        let result = EffectOutput::value(&json!(4));
-        parent.finish(&result)?;
-        let replay = ExecutionTrace::loaded(trace.snapshot(Some(&result), true)?)?;
-        assert!(matches!(
-            replay.begin("root", 0, &race, true)?,
-            StartedEffect::Replayed(_)
-        ));
-        replay.snapshot(Some(&result), true)?;
         Ok(())
     }
 }

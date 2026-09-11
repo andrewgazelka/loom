@@ -6,7 +6,11 @@ use std::{collections::BTreeMap, path::Path};
 /// Register a prebuilt test component using the same identity contract as checked
 /// source. Include its content hash so distinct compiled fixtures stay distinct.
 pub fn register(store: &Store, lang: Lang, path: impl AsRef<Path>, label: &str) -> Result<String> {
-    let component_hash = store.put("component", &std::fs::read(path)?)?;
+    // Cargo-built fixtures carry no protocol marker; stamp them exactly as the
+    // build path stamps checked source, so admission sees the same contract.
+    let mut component = std::fs::read(path)?;
+    loom_proto::component_protocol::stamp(&mut component);
+    let component_hash = store.put("component", &component)?;
     let source = format!("{label}: {component_hash}");
     let deps = BTreeMap::new();
     let hash = blake3::hash(&definition_identity(lang, &source, &deps, None)?)

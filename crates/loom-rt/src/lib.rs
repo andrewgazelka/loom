@@ -44,7 +44,6 @@ struct Inner {
     component_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     actor_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     effect_locks: Mutex<HashMap<String, Weak<AsyncMutex<()>>>>,
-    fibers: Mutex<HashMap<String, FiberTask>>,
     handler_round_trip_us: Mutex<HandlerMeasurements>,
     effect_wire_bytes: AtomicU64,
     trace_locks: Mutex<HashMap<String, Weak<AsyncMutex<()>>>>,
@@ -52,30 +51,12 @@ struct Inner {
 }
 #[derive(Default)]
 struct HandlerMeasurements { scope: String, samples: Vec<f64> }
-struct ScopedTask {
-    scope: String,
-    task: FiberTask,
-}
-struct FiberTask {
-    scope: String,
-    task: tokio::task::JoinHandle<Result<EffectOutput>>,
-}
-impl Drop for FiberTask {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
-trait RootDispatch: Send + Sync {
-    fn dispatch<'a>(&'a self, desc: Value, scope: &'a str, occurrence: i64,
-        effects: EffectContext) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<EffectOutput>> + Send + 'a>>;
-}
 #[derive(Clone, Default)]
 struct EffectContext {
     def_hash: Option<String>,
     actor_id: Option<String>,
     allowed: Option<BTreeSet<String>>,
     trace: Option<Arc<trace::ExecutionTrace>>,
-    root_dispatch: Option<Arc<dyn RootDispatch>>,
 }
 impl EffectContext {
     fn delegated(&self, def_hash: &str, allowed: Option<&[String]>) -> Self {
@@ -90,8 +71,6 @@ impl EffectContext {
             actor_id: self.actor_id.clone(),
             allowed,
             trace: self.trace.clone(),
-            // Guest handler frames belong to the caller's linear memory.
-            root_dispatch: None,
         }
     }
     fn with_declared(mut self, declared: Option<&[String]>) -> Self {
@@ -119,42 +98,14 @@ struct ContextData {
     pure: bool,
     effects: EffectContext,
 }
-impl Drop for ContextData {
-    fn drop(&mut self) {
-        let mut has_children = false;
-        if let Ok(fibers) = self.runtime.inner.fibers.lock() {
-            let prefix = format!("{}/", self.scope);
-            for fiber in fibers
-                .values()
-                .filter(|fiber| fiber.scope == self.scope || fiber.scope.starts_with(&prefix))
-            {
-                has_children = true;
-                fiber.task.abort();
-            }
-        }
-        if has_children
-            && self
-                .effects
-                .trace
-                .as_ref()
-                .is_some_and(|trace| trace.is_root(&self.scope))
-        {
-            let runtime = self.runtime.clone();
-            let scope = self.scope.clone();
-            tokio::spawn(async move {
-                runtime.cancel_fibers(&scope).await;
-            });
-        }
-    }
-}
-impl loom::host::abilities::Host for ContextData {
+impl loom::host::effects::Host for ContextData {
     async fn perform(&mut self, desc: Vec<u8>) -> std::result::Result<Vec<u8>, String> {
         let result = async {
             if self.pure {
                 return Err("fold cannot perform effects".into());
             }
             if desc.len() > loom_proto::TRACE_MAX_BLOB_BYTES {
-                return Err("effect descriptor exceeds trace byte limit".into());
+                return Err("effect exceeds trace byte limit".into());
             }
             let mut desc = loom_proto::decode::<Value>(&desc)?;
             resolve_self(&mut desc, &self.def_hash);
@@ -259,105 +210,9 @@ impl Runtime {
         locks.insert(scope.into(), Arc::downgrade(&lock));
         lock
     }
-    fn take_fiber(&self, id: &str, scope: &str) -> Result<FiberTask> {
-        let mut fibers = self.inner.fibers.lock().unwrap();
-        let task = fibers.get(id).context("unknown or already joined fiber")?;
-        anyhow::ensure!(
-            task.scope == scope || task.scope.starts_with(&format!("{scope}/")),
-            "cannot join a fiber from another scope"
-        );
-        Ok(fibers.remove(id).expect("validated fiber"))
-    }
-    async fn drain_recorded_fibers(
-        &self,
-        scope: &str,
-        trace: Option<&Arc<trace::ExecutionTrace>>,
-    ) -> Result<()> {
-        self.drain_recorded_fibers_until(
-            scope,
-            trace,
-            tokio::time::Instant::now() + Duration::from_secs(10),
-        )
-        .await
-    }
-    async fn drain_recorded_fibers_until(
-        &self,
-        scope: &str,
-        trace: Option<&Arc<trace::ExecutionTrace>>,
-        deadline: tokio::time::Instant,
-    ) -> Result<()> {
-        let Some(trace) = trace else {
-            return Ok(());
-        };
-        if !trace.start_draining(scope) {
-            return Ok(());
-        }
-        enum Drained {
-            Outcomes,
-            Task,
-        }
-        loop {
-            let child = {
-                let mut fibers = self.inner.fibers.lock().unwrap();
-                let id = fibers
-                    .iter()
-                    .find(|(id, task)| task.scope == scope && trace.requires_replay(id))
-                    .map(|(id, _)| id.clone());
-                id.map(|id| ScopedTask {
-                    scope: id.clone(),
-                    task: fibers.remove(&id).expect("selected fiber"),
-                })
-            };
-            let Some(mut child) = child else {
-                break;
-            };
-            let drained = tokio::time::timeout_at(deadline, async {
-                tokio::select! {
-                    _ = trace.wait_replayed(&child.scope) => Drained::Outcomes,
-                    _ = &mut child.task.task => Drained::Task,
-                }
-            })
-            .await;
-            if !matches!(drained, Ok(Drained::Task)) {
-                child.task.task.abort();
-                let _ = (&mut child.task.task).await;
-            }
-            anyhow::ensure!(
-                drained.is_ok(),
-                "replay child drain deadline exceeded at {}",
-                child.scope
-            );
-        }
-        Ok(())
-    }
-    async fn cancel_fibers(&self, scope: &str) {
-        loop {
-            let tasks = {
-                let mut fibers = self.inner.fibers.lock().unwrap();
-                let prefix = format!("{scope}/");
-                let ids: Vec<_> = fibers
-                    .iter()
-                    .filter(|(_, fiber)| fiber.scope == scope || fiber.scope.starts_with(&prefix))
-                    .map(|(id, _)| id.clone())
-                    .collect();
-                ids.into_iter()
-                    .filter_map(|id| fibers.remove(&id))
-                    .collect::<Vec<_>>()
-            };
-            if tasks.is_empty() {
-                break;
-            }
-            for task in &tasks {
-                task.task.abort();
-            }
-            for mut task in tasks {
-                let _ = (&mut task.task).await;
-            }
-        }
-    }
     /// Host-observed handler samples from the latest completed core execution.
     /// Includes request copy/decode, guest handler execution and response copy;
-    /// excludes the performer's descriptor encoding and final response decoding.
+    /// excludes the performer's effect encoding and final response decoding.
     pub fn handler_round_trip_us(&self) -> Value {
         let measurements = self.inner.handler_round_trip_us.lock().unwrap();
         let mut samples = measurements.samples.clone();
@@ -400,7 +255,6 @@ impl Runtime {
                 component_locks: Mutex::new(HashMap::new()),
                 actor_locks: Mutex::new(HashMap::new()),
                 effect_locks: Mutex::new(HashMap::new()),
-                fibers: Mutex::new(HashMap::new()),
                 handler_round_trip_us: Mutex::new(HandlerMeasurements::default()),
                 effect_wire_bytes: AtomicU64::new(0),
                 trace_locks: Mutex::new(HashMap::new()),
@@ -628,10 +482,6 @@ impl Runtime {
     ) -> Result<EncodedCall> {
         let core = self.core_call(hash, &args, scope, &effects).await;
         if !matches!(core, Ok(None)) {
-            let drained = self.drain_recorded_fibers(scope, effects.trace.as_ref()).await;
-            self.cancel_fibers(scope).await;
-            if let Some(trace) = &effects.trace { trace.finish_draining(scope); }
-            drained?;
             return core?.context("core dispatch lost its result");
         }
         let call_start = Instant::now();
@@ -643,14 +493,6 @@ impl Runtime {
             .bindings
             .call_call(&mut instance.store, &encode(&json!(hash))?, &encode(&args)?)
             .await;
-        let drained = self
-            .drain_recorded_fibers(scope, effects.trace.as_ref())
-            .await;
-        self.cancel_fibers(scope).await;
-        if let Some(trace) = &effects.trace {
-            trace.finish_draining(scope);
-        }
-        drained?;
         let result = result?.map_err(anyhow::Error::msg)?;
         let output = EffectOutput::from_guest(result)?;
         instance.timing.run_ms = elapsed_ms(run_start);
@@ -670,11 +512,11 @@ impl Runtime {
         }
         // Instantiate before publishing an actor so missing imports/components fail immediately.
         if self
-            .core_execute(hash, "spawn", &EffectContext::default(), true, sharedcore::Entry::Validate)
+            .core_execute(hash, "actor.spawn", &EffectContext::default(), true, sharedcore::Entry::Validate)
             .await?
             .is_none()
         {
-            self.instance(hash, "spawn", true).await?;
+            self.instance(hash, "actor.spawn", true).await?;
         }
         let def = self
             .inner
@@ -836,14 +678,6 @@ impl Runtime {
             }
             Err(error) => Err(error),
         };
-        let drained = self
-            .drain_recorded_fibers(&scope, effects.trace.as_ref())
-            .await;
-        self.cancel_fibers(&scope).await;
-        if let Some(trace) = &effects.trace {
-            trace.finish_draining(&scope);
-        }
-        drained?;
         let bytes = bytes?;
         let events = decode(&bytes)?
             .as_array()
@@ -1004,19 +838,9 @@ fn required_str<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
 
 fn resolve_self(value: &mut Value, hash: &str) {
     match value.get("op").and_then(Value::as_str) {
-        Some("call" | "fork" | "spawn") => {
+        Some("call" | "actor.spawn") => {
             if value.pointer("/args/def").and_then(Value::as_str) == Some("$self") {
                 value["args"]["def"] = json!(hash);
-            }
-        }
-        Some("all" | "race") => {
-            if let Some(descs) = value
-                .pointer_mut("/args/descs")
-                .and_then(Value::as_array_mut)
-            {
-                for desc in descs {
-                    resolve_self(desc, hash);
-                }
             }
         }
         _ => {}
@@ -1096,6 +920,23 @@ mod tests {
     }
 
     #[test]
+    fn resolve_self_rewrites_actor_spawn_but_leaves_actor_send_and_other_defs_alone() {
+        let hash = "definition-hash";
+        let mut spawn = json!({"op":"actor.spawn","args":{"def":"$self","state":0}});
+        resolve_self(&mut spawn, hash);
+        assert_eq!(spawn["args"]["def"], json!(hash));
+        let mut spawn_other = json!({"op":"actor.spawn","args":{"def":"other-hash","state":0}});
+        resolve_self(&mut spawn_other, hash);
+        assert_eq!(spawn_other["args"]["def"], json!("other-hash"));
+        let mut send = json!({"op":"actor.send","args":{"def":"$self"}});
+        resolve_self(&mut send, hash);
+        assert_eq!(
+            send["args"]["def"],
+            json!("$self"),
+            "actor.send must not resolve $self"
+        );
+    }
+    #[test]
     fn guest_results_require_strict_admission() -> Result<()> {
         let reference = loom_proto::reference(&"00".repeat(32), loom_proto::DAG_CBOR_CODEC)
             .map_err(anyhow::Error::msg)?;
@@ -1107,7 +948,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn guest_descriptors_are_validated_before_effect_occurrence() -> Result<()> {
+    async fn guest_effects_are_validated_before_effect_occurrence() -> Result<()> {
         let runtime = Runtime::new(Store::memory()?)?;
         let mut context = ContextData {
             runtime,
@@ -1127,59 +968,42 @@ mod tests {
         trailing.push(0);
         for invalid in [padded, trailing] {
             assert!(
-                loom::host::abilities::Host::perform(&mut context, invalid)
+                loom::host::effects::Host::perform(&mut context, invalid)
                     .await
                     .is_err()
             );
             assert_eq!(context.occurrence, 0);
         }
-        loom::host::abilities::Host::perform(&mut context, canonical)
+        loom::host::effects::Host::perform(&mut context, canonical)
             .await
             .map_err(anyhow::Error::msg)?;
         assert_eq!(context.occurrence, 1);
         Ok(())
     }
     #[tokio::test]
-    async fn scheduling_records_only_leaf_effects() -> Result<()> {
-        let store = Store::memory()?;
-        let runtime = Runtime::new(store.clone())?;
-        let result = runtime
-            .perform(
-                json!({"op":"all","args":{"descs":[
-                    {"op":"sleep","args":{"ms":0}},
-                    {"op":"sleep","args":{"ms":1}}
-                ]}}),
-                "scheduler-control",
-                0,
-            )
-            .await?;
-        assert_eq!(result.as_array().map(Vec::len), Some(2));
-        store.flush()?;
-        let events = store.events(None, 0, 100)?;
-        assert_eq!(
-            events
-                .iter()
-                .filter(|event| event.event["type"] == "call_completed")
-                .count(),
-            1
-        );
-        assert!(
-            events
-                .iter()
-                .all(|event| event.event["type"] != "effect_invoked"
-                    && event.event["type"] != "effect_completed")
-        );
-        let bundle = store
-            .load_call_trace("scheduler-control")?
-            .context("trace")?;
+    async fn scoped_children_record_independently_and_replay_in_reverse_order() -> Result<()> {
+        let runtime = Runtime::new(Store::memory()?)?;
+        let execution = trace::ExecutionTrace::fresh("root");
+        let effects = EffectContext { trace: Some(execution.clone()), ..Default::default() };
+        let descriptor = json!({"op":"random"});
+        let first = runtime.dispatch_root(descriptor.clone(), "root/spawn:0", 0, effects.clone());
+        let second = runtime.dispatch_root(descriptor.clone(), "root/spawn:1", 0, effects);
+        let outputs = futures::future::try_join_all([first, second]).await?;
+        let values = outputs.iter().map(EffectOutput::decode).collect::<Result<Vec<_>>>()?;
+        let result = EffectOutput::value(&json!(values));
+        let bundle = execution.snapshot(Some(&result), true)?;
         assert_eq!(bundle.trace.entries.len(), 2);
-        assert!(
-            bundle
-                .trace
-                .entries
-                .iter()
-                .all(|entry| entry.key.scope == "scheduler-control/all:0")
-        );
+        assert_eq!(bundle.trace.entries[0].key.scope, "root/spawn:0");
+        assert_eq!(bundle.trace.entries[1].key.scope, "root/spawn:1");
+        let replay = trace::ExecutionTrace::loaded(bundle)?;
+        for index in [1, 0] {
+            let output = runtime.dispatch_root(
+                descriptor.clone(), &format!("root/spawn:{index}"), 0,
+                EffectContext { trace: Some(replay.clone()), ..Default::default() },
+            ).await?;
+            assert_eq!(output.decode()?, values[index]);
+        }
+        replay.snapshot(Some(&result), true)?;
         Ok(())
     }
     #[tokio::test]
@@ -1208,15 +1032,6 @@ mod tests {
         Ok(())
     }
     #[tokio::test]
-    async fn all_records_independent_occurrences() -> Result<()> {
-        let runtime = Runtime::new(Store::memory()?)?;
-        let descriptor = json!({"op":"all","args":{"descs":[{"op":"random"},{"op":"random"}]}});
-        let first = runtime.perform(descriptor.clone(), "a", 0).await?;
-        assert_ne!(first[0], first[1]);
-        assert_eq!(first, runtime.perform(descriptor, "a", 0).await?);
-        Ok(())
-    }
-    #[tokio::test]
     async fn keyed_exec_runs_once_across_actors() -> Result<()> {
         let root = tempfile::tempdir()?;
         let path = root.path().join("count");
@@ -1230,36 +1045,6 @@ mod tests {
         assert_eq!(results[0]["code"], json!(0));
         assert_eq!(results[0], results[1]);
         assert_eq!(std::fs::read_to_string(path)?, "x");
-        Ok(())
-    }
-    #[tokio::test]
-    async fn race_returns_first_failure_and_cancels_sleeper() -> Result<()> {
-        let runtime = Runtime::new(Store::memory()?)?;
-        let result=tokio::time::timeout(Duration::from_millis(500),runtime.perform(json!({"op":"race","args":{"descs":[{"op":"unsupported"},{"op":"sleep","args":{"ms":5000}}]}}),"race",0)).await?;
-        assert!(result.is_err());
-        Ok(())
-    }
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn race_cancellation_terminates_process_descendants() -> Result<()> {
-        let root = tempfile::tempdir()?;
-        let ready = root.path().join("ready");
-        let orphan = root.path().join("orphan");
-        let runtime = Runtime::new(Store::memory()?)?;
-        let desc = json!({"op":"race","args":{"descs":[
-            {"op":"exec","args":{"program":"sh","args":["-c","(sleep 1; printf orphan > \"$2\") & printf ready > \"$1\"; wait","loom",ready,orphan]}},
-            {"op":"exec","args":{"program":"sh","args":["-c","while [ ! -f \"$1\" ]; do sleep .01; done","loom",ready]}}
-        ]}});
-        let result =
-            tokio::time::timeout(Duration::from_secs(5), runtime.perform(desc, "cancel", 0))
-                .await??;
-        assert_eq!(result["code"], 0);
-        assert!(
-            ready.exists(),
-            "process never started; cancellation control invalid"
-        );
-        tokio::time::sleep(Duration::from_millis(1100)).await;
-        assert!(!orphan.exists(), "descendant survived canceled effect");
         Ok(())
     }
     #[tokio::test]
@@ -1293,7 +1078,7 @@ mod tests {
         Ok(())
     }
     #[tokio::test]
-    async fn policy_denies_dynamic_and_cached_requests_and_nested_combinators() -> Result<()> {
+    async fn policy_denies_dynamic_cached_and_delegated_requests() -> Result<()> {
         let runtime = Runtime::new(Store::memory()?)?;
         let desc = json!({"op":"cas.put","args":{"secret":42}});
         runtime.perform(desc.clone(), "warm", 0).await?;
@@ -1304,19 +1089,18 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("not allowed"));
         let parent =
-            EffectContext::default().delegated("parent", Some(&["all".into(), "call".into()]));
-        let child = parent.delegated("child", Some(&["all".into(), "cas.put".into()]));
+            EffectContext::default().delegated("parent", Some(&["sleep".into(), "call".into()]));
+        let child = parent.delegated("child", Some(&["sleep".into(), "cas.put".into()]));
         assert!(!child.permits("cas.put"));
-        assert!(child.permits("all"));
+        assert!(child.permits("sleep"));
         assert!(
             !parent
                 .delegated("unrestricted-child", None)
                 .permits("cas.put")
         );
-        let nested = json!({"op":"all","args":{"descs":[desc]}});
         assert!(
             runtime
-                .dispatch_root(nested, "nested", 0, child)
+                .dispatch_root(desc, "delegated", 0, child)
                 .await
                 .is_err()
         );
@@ -1350,180 +1134,6 @@ mod tests {
             bundle.trace.entries[0].outcome,
             loom_proto::TraceOutcome::Cancelled
         ));
-        Ok(())
-    }
-    #[tokio::test]
-    async fn unjoined_replay_drains_saved_success_and_error_before_cancellation() -> Result<()> {
-        let runtime = Runtime::new(Store::memory()?)?;
-        for completed in [false, true] {
-            for failed in [false, true] {
-                let original = trace::ExecutionTrace::fresh("root");
-                let descriptor = json!({"op":"random"});
-                let trace::StartedEffect::Recorded(guard) =
-                    original.begin("root/fork:0", 0, &descriptor, false)?
-                else {
-                    bail!("fresh trace")
-                };
-                let child_result = if failed {
-                    Err(anyhow::anyhow!("child failure"))
-                } else {
-                    EffectOutput::value(&json!(17))
-                };
-                guard.finish(&child_result)?;
-                let root_result = EffectOutput::value(&json!(3));
-                let checkpoint =
-                    original.snapshot(if completed { Some(&root_result) } else { None }, true)?;
-                let replay = trace::ExecutionTrace::loaded(checkpoint)?;
-                let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let child_observed = observed.clone();
-                let child_trace = replay.clone();
-                let task = tokio::spawn(async move {
-                    tokio::task::yield_now().await;
-                    let output = child_trace.begin("root/fork:0", 0, &descriptor, false);
-                    if failed {
-                        anyhow::ensure!(
-                            output
-                                .err()
-                                .context("missing recorded failure")?
-                                .to_string()
-                                == "child failure"
-                        );
-                    } else {
-                        anyhow::ensure!(
-                            matches!(output?, trace::StartedEffect::Replayed(_)),
-                            "executed recorded effect"
-                        );
-                    }
-                    anyhow::ensure!(
-                        child_trace
-                            .begin("root/fork:0", 1, &json!({"op":"now"}), false)
-                            .is_err(),
-                        "drain started a new external effect"
-                    );
-                    child_observed.store(true, Ordering::Release);
-                    std::future::pending::<()>().await;
-                    EffectOutput::value(&Value::Null)
-                });
-                runtime.inner.fibers.lock().unwrap().insert(
-                    "root/fork:0".into(),
-                    FiberTask {
-                        scope: "root".into(),
-                        task,
-                    },
-                );
-                runtime.drain_recorded_fibers("root", Some(&replay)).await?;
-                runtime.cancel_fibers("root").await;
-                replay.finish_draining("root");
-                assert!(
-                    observed.load(Ordering::Acquire),
-                    "cancelled child before replaying its recorded outcome"
-                );
-                replay.snapshot(Some(&root_result), true)?;
-            }
-        }
-        Ok(())
-    }
-    #[tokio::test]
-    async fn replay_drain_deadline_aborts_child_without_accepting_missing_outcomes() -> Result<()> {
-        let runtime = Runtime::new(Store::memory()?)?;
-        let original = trace::ExecutionTrace::fresh("root");
-        let trace::StartedEffect::Recorded(guard) =
-            original.begin("root/fork:0", 0, &json!({"op":"random"}), false)?
-        else {
-            bail!("fresh")
-        };
-        let result = EffectOutput::value(&json!(1));
-        guard.finish(&result)?;
-        let replay = trace::ExecutionTrace::loaded(original.snapshot(Some(&result), true)?)?;
-        let task = tokio::spawn(async {
-            std::future::pending::<()>().await;
-            EffectOutput::value(&Value::Null)
-        });
-        runtime.inner.fibers.lock().unwrap().insert(
-            "root/fork:0".into(),
-            FiberTask {
-                scope: "root".into(),
-                task,
-            },
-        );
-        let error = runtime
-            .drain_recorded_fibers_until(
-                "root",
-                Some(&replay),
-                tokio::time::Instant::now() + Duration::from_millis(20),
-            )
-            .await
-            .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("deadline exceeded at root/fork:0")
-        );
-        assert!(runtime.inner.fibers.lock().unwrap().is_empty());
-        assert!(replay.snapshot(Some(&result), true).is_err());
-        Ok(())
-    }
-    #[tokio::test]
-    async fn caller_cancellation_does_not_wait_for_replay_drain_budget() -> Result<()> {
-        struct ChildDrop {
-            done: Option<tokio::sync::oneshot::Sender<()>>,
-        }
-        impl Drop for ChildDrop {
-            fn drop(&mut self) {
-                if let Some(done) = self.done.take() {
-                    let _ = done.send(());
-                }
-            }
-        }
-        let runtime = Runtime::new(Store::memory()?)?;
-        let original = trace::ExecutionTrace::fresh("root");
-        let trace::StartedEffect::Recorded(guard) =
-            original.begin("root/fork:0", 0, &json!({"op":"random"}), false)?
-        else {
-            bail!("fresh")
-        };
-        let result = EffectOutput::value(&json!(1));
-        guard.finish(&result)?;
-        let replay = trace::ExecutionTrace::loaded(original.snapshot(Some(&result), true)?)?;
-        let (done, dropped) = tokio::sync::oneshot::channel();
-        let (ready, started) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn(async move {
-            let _drop = ChildDrop { done: Some(done) };
-            let _ = ready.send(());
-            std::future::pending::<()>().await;
-            EffectOutput::value(&Value::Null)
-        });
-        runtime.inner.fibers.lock().unwrap().insert(
-            "root/fork:0".into(),
-            FiberTask {
-                scope: "root".into(),
-                task,
-            },
-        );
-        started.await?;
-        assert!(
-            tokio::time::timeout(
-                Duration::from_millis(20),
-                runtime.drain_recorded_fibers("root", Some(&replay))
-            )
-            .await
-            .is_err()
-        );
-        tokio::time::timeout(Duration::from_millis(200), dropped).await??;
-        assert!(runtime.inner.fibers.lock().unwrap().is_empty());
-        Ok(())
-    }
-    #[tokio::test]
-    async fn unstarted_cancelled_child_does_not_block_replay_completion() -> Result<()> {
-        let runtime = Runtime::new(Store::memory()?)?;
-        let original = trace::ExecutionTrace::fresh("root");
-        drop(original.begin("root/fork:0", 0, &json!({"op":"sleep"}), false)?);
-        let result = EffectOutput::value(&json!(1));
-        let replay = trace::ExecutionTrace::loaded(original.snapshot(Some(&result), true)?)?;
-        runtime.drain_recorded_fibers("root", Some(&replay)).await?;
-        runtime.cancel_fibers("root").await;
-        replay.finish_draining("root");
-        replay.snapshot(Some(&result), true)?;
         Ok(())
     }
     #[tokio::test]
@@ -1596,55 +1206,6 @@ mod tests {
                 .count(),
             1
         );
-        Ok(())
-    }
-    #[tokio::test]
-    async fn joining_another_scope_does_not_remove_its_fiber() -> Result<()> {
-        let runtime = Runtime::new(Store::memory()?)?;
-        let task = tokio::spawn(async { EffectOutput::value(&json!(1)) });
-        runtime.inner.fibers.lock().unwrap().insert(
-            "owner/fork:0".into(),
-            FiberTask {
-                scope: "owner".into(),
-                task,
-            },
-        );
-        assert!(runtime.take_fiber("owner/fork:0", "other").is_err());
-        let mut task = runtime.take_fiber("owner/fork:0", "owner")?;
-        assert_eq!((&mut task.task).await??.decode()?, json!(1));
-        Ok(())
-    }
-    #[tokio::test]
-    async fn scoped_cancellation_waits_for_child_destruction() -> Result<()> {
-        struct Dropped {
-            flag: Arc<std::sync::atomic::AtomicBool>,
-        }
-        impl Drop for Dropped {
-            fn drop(&mut self) {
-                self.flag.store(true, Ordering::Release);
-            }
-        }
-        let runtime = Runtime::new(Store::memory()?)?;
-        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let flag = dropped.clone();
-        let (ready, started) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn(async move {
-            let _drop = Dropped { flag };
-            let _ = ready.send(());
-            std::future::pending::<()>().await;
-            EffectOutput::value(&Value::Null)
-        });
-        runtime.inner.fibers.lock().unwrap().insert(
-            "root/fork:0".into(),
-            FiberTask {
-                scope: "root".into(),
-                task,
-            },
-        );
-        started.await?;
-        runtime.cancel_fibers("root").await;
-        assert!(dropped.load(Ordering::Acquire));
-        assert!(runtime.inner.fibers.lock().unwrap().is_empty());
         Ok(())
     }
     #[tokio::test]

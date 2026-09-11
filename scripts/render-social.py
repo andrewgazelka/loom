@@ -80,7 +80,7 @@ def main() -> None:
         assert cursor <= WIDTH - 80, f"Text overflow: {text}"
         return cursor
 
-    tokens = re.compile(r'("[^"\n]*"|\b(?:use|fn|pub|let|mut|for|in|if|move)\b|\b(?:all|desc|sleep|fork|join|read|walk|filter|map|collect|main|scope|unwrap|contains)(?=\())')
+    tokens = re.compile(r'("[^"\n]*"|\b(?:use|fn|pub|let|mut|for|in|if|move)\b|\b(?:all|desc|sleep|spawn|join|read|walk|filter|map|collect|main|scope|unwrap|expect|contains)(?=\())')
     for index, line in enumerate(excerpt.splitlines()):
         x = 96.0
         for token in tokens.split(line):
@@ -89,7 +89,7 @@ def main() -> None:
             color = FOREGROUND
             if token.startswith('"'):
                 color = "#9cab9f"
-            elif token in {"all", "desc", "sleep", "fork", "join", "read", "main", "scope", "walk", "filter", "map", "collect", "contains"}:
+            elif token in {"sleep", "spawn", "join", "read", "main", "scope", "walk", "filter", "map", "collect", "expect", "contains"}:
                 color = ACCENT
             elif token in {"use", "fn", "pub", "let", "mut", "for", "in", "if", "move"}:
                 color = "#b7a5d8"

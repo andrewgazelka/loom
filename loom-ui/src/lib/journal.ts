@@ -61,7 +61,7 @@ export function eventRow(event: LogEvent): JournalRow {
     result.title = `Actor created · ${String(actor.id || "").slice(0, 12)}`;
     result.language = String(actor.lang || "");
   } else if (type === "effect") {
-    result.title = String(record(data.desc).ability || "Effect");
+    result.title = String(record(data.desc).op || "Effect");
     result.value = data.result;
   }
   return result;

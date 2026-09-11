@@ -169,7 +169,7 @@ impl LoomMcp {
         .unwrap()
     }
     #[tool(
-        description = "Run a command with its JSON args object: machine.create {root:string} returns actor with id; call {hash:string,args:Value[]} invokes a definition; resolve {hash:string} accepts name/hash/CID; defs {} and actors {} list definitions/actors; state {actor:string}, spawn {hash:string,initial:Value}, send {actor:string,msg:Value}, events {actor?:string,after?:number,limit?:number}, deps {hash:string}; cas.list {limit?,after?,kind?,q?}, cas.inspect {hash:string}. For machine filesystem work define guest code using fs.list, then call it with machine id. Read loom_intro_ts or loom_intro_rust for ability signatures."
+        description = "Run a command with its JSON args object: machine.create {root:string} returns actor with id; call {hash:string,args:Value[]} invokes a definition; resolve {hash:string} accepts name/hash/CID; defs {} and actors {} list definitions/actors; state {actor:string}, spawn {hash:string,initial:Value}, send {actor:string,msg:Value}, events {actor?:string,after?:number,limit?:number}, deps {hash:string}; cas.list {limit?,after?,kind?,q?}, cas.inspect {hash:string}. For machine filesystem work define guest code using fs.list, then call it with machine id. Read loom_intro_ts or loom_intro_rust for effect signatures."
     )]
     async fn loom_command(
         &self,
@@ -215,7 +215,7 @@ impl LoomMcp {
 #[tool_handler]
 impl ServerHandler for LoomMcp {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo{instructions:Some("Loom runs pure TS and Rust WASM guests. All I/O goes through loom abilities. Define checks and builds; call/spawn use definition hashes.".into()),capabilities:ServerCapabilities::builder().enable_tools().enable_resources().enable_prompts().build(),..Default::default()}
+        ServerInfo{instructions:Some("Loom runs pure TS and Rust WASM guests. All I/O goes through loom effects. Define checks and builds; call/spawn use definition hashes.".into()),capabilities:ServerCapabilities::builder().enable_tools().enable_resources().enable_prompts().build(),..Default::default()}
     }
     async fn list_prompts(
         &self,
@@ -226,12 +226,12 @@ impl ServerHandler for LoomMcp {
             prompts: vec![
                 Prompt::new(
                     "loom_intro_ts",
-                    Some("TypeScript guest abilities and checking"),
+                    Some("TypeScript guest effects and checking"),
                     None,
                 ),
                 Prompt::new(
                     "loom_intro_rust",
-                    Some("Rust guest abilities and compilation"),
+                    Some("Rust guest effects and compilation"),
                     None,
                 ),
             ],
@@ -245,10 +245,10 @@ impl ServerHandler for LoomMcp {
     ) -> Result<GetPromptResult, rmcp::ErrorData> {
         let text = match request.name.as_str() {
             "loom_intro_ts" => {
-                "Write synchronous pure TypeScript. Import abilities from 'loom' and named definition identities from 'loom:defs'; supply deps as an alias-to-hash map to define or eval. Abilities: perform(desc), all(descs), fork(def,args), join(fibers), sleep(ms), now(), random(), exec(args), fs. fs.list({machine,path}) returns sorted entries {name,size,is_dir,is_file,is_symlink}; machine is an actor ID and path is relative to its root. Recursively list entries with is_dir=true and select regular files using is_file=true; symlinks have both false. Skip symlinks when traversing and implement recursion in the guest. No fetch, Date, Math.random, timers, eval or Function. Define returns strict diagnostics; correct source and retry. Functions export main; actors export run(state,msg) returning events and fold(state,event) returning state. New components must compile before execution; build.ms reports elapsed time."
+                "Write synchronous pure TypeScript. Import effects from 'loom' and named definition identities from 'loom:defs'; supply deps as an alias-to-hash map to define or eval. Effects: perform(name, args), sleep(ms), now(), random(), exec(args), fs. fs.list({machine,path}) returns sorted entries as [name, size, kind] tuples with kind one of 'file', 'dir', 'symlink', 'other'; machine is an actor ID and path is relative to its root. Recursively list entries with kind 'dir' and select regular files with kind 'file'. Skip symlinks when traversing and implement recursion in the guest. No fetch, Date, Math.random, timers, eval or Function. Define returns strict diagnostics; correct source and retry. Functions export main; actors export run(state,msg) returning events and fold(state,event) returning state. New components must compile before execution; build.ms reports elapsed time."
             }
             "loom_intro_rust" => {
-                "Write ordinary Rust using the loom SDK. Export free functions with #[loom::def(effects=[...])] or implement Actor with #[loom::actor(effects=[...])]. Declare residual host effects when dispatch is unknown; the runtime enforces that row. perform(desc) suspends the guest; all(descs) runs effects concurrently. handle/handle_labels install deep guest handlers; callbacks perform in the outer context. scope.fork and job.join run borrowed closures; fork(def,args)/join(fibers) call separate definitions without inheriting handlers. abilities::fs::list(machine,path) returns typed DirEntry values with name, size, and kind: EntryKind::File, Directory, Symlink, Other. machine is an actor ID; path is relative to its pinned root. fs::walk adds bounded recursion. fs::read returns String, fs::read_optional returns Option<String>, fs::write writes UTF-8 content. preview::writes runs under a guest handler that returns filesystem diff previews without writing those files. No std::fs/net/time/env/process; use Loom abilities. Cargo diagnostics include file,line,col,code and hint; build.ms is actual elapsed time. Guest effect values cross typed DAG-CBOR; MCP envelopes use JSON."
+                "Write ordinary Rust using the loom SDK. Export free functions with #[loom::def(effects=[...])] or implement Actor with #[loom::actor(effects=[...])]. Declare residual host effects when dispatch is unknown; the runtime enforces that row. perform(name, args) suspends the guest. handle/handle_any install deep guest handlers; callbacks perform in the outer context. scope.spawn and job.join run borrowed closures; call(def,args) calls another definition without inheriting handlers. fs::list(machine,path) returns typed DirEntry values with name, size, and kind: EntryKind::File, Directory, Symlink, Other. machine is an actor ID; path is relative to its pinned root. fs::walk adds bounded recursion. fs::read returns String, fs::read_optional returns Option<String>, fs::write writes UTF-8 content. preview::writes runs under a guest handler that returns filesystem diff previews without writing those files. No std::fs/net/time/env/process; use Loom effects. Cargo diagnostics include file,line,col,code and hint; build.ms is actual elapsed time. Guest effect values cross typed DAG-CBOR; MCP envelopes use JSON."
             }
             _ => return Err(rmcp::ErrorData::invalid_params("unknown prompt", None)),
         };

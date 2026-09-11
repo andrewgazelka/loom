@@ -1,4 +1,4 @@
-use loom::abilities::fs;
+use loom::fs;
 #[loom::def(effects=["fs.read","fs.read_optional","fs.write","cas.put","cas.get"])]
 pub fn main(machine:String, existing:String, new_path:String, mode:String)->loom::Value {
     if mode=="seed" {
@@ -16,8 +16,8 @@ pub fn main(machine:String, existing:String, new_path:String, mode:String)->loom
         fs::read(&machine,&existing).expect("overlay read")
     }).expect("preview");
     let decoded:Vec<loom::Value>=preview.filesystem_changes.iter().map(|change| {
-        let before=change.before.as_ref().map(|hash|loom::perform::<String>(loom::Desc::new("cas.get",loom::serde_json::json!({"hash":hash}))).expect("before CAS"));
-        let after=change.after.as_ref().map(|hash|loom::perform::<String>(loom::Desc::new("cas.get",loom::serde_json::json!({"hash":hash}))).expect("after CAS"));
+        let before=change.before.as_ref().map(|hash|loom::perform::<String>("cas.get",loom::serde_json::json!({"hash":hash})).expect("before CAS"));
+        let after=change.after.as_ref().map(|hash|loom::perform::<String>("cas.get",loom::serde_json::json!({"hash":hash})).expect("after CAS"));
         loom::serde_json::json!({"path":change.path,"before":before,"after":after})
     }).collect();
     loom::serde_json::json!({"preview":preview,"decoded":decoded})

@@ -18,7 +18,7 @@ pub(crate) fn validate(definition: &CheckedDef, dependencies: &BTreeMap<String, 
         } else { target.source.clone() };
         let file = syn::parse_file(&source).map_err(|error| BuildError::Rejected(error.to_string()))?;
         if !file.items.iter().any(|item| matches!(item, syn::Item::Fn(function) if function.sig.ident == "handle" && matches!(function.vis, syn::Visibility::Public(_)))) {
-            return Err(BuildError::Rejected(format!("handler {hash} must export pub fn handle(Op, Continuation) -> Reply; rustc checks its complete type")));
+            return Err(BuildError::Rejected(format!("handler {hash} must export pub fn handle(Effect, Continuation) -> Reply; rustc checks its complete type")));
         }
     }
     Ok(())
@@ -39,7 +39,7 @@ mod tests {
         let mut dependencies = BTreeMap::new();
         dependencies.insert(hash.clone(), definition(&hash, "fn handle() {}"));
         assert!(validate(&caller, &dependencies).unwrap_err().to_string().contains("pub fn handle"));
-        dependencies.insert(hash.clone(), definition(&hash, "pub fn handle(op: loom::Op, k: loom::Continuation) -> loom::Reply { loom::Reply::Forward }"));
+        dependencies.insert(hash.clone(), definition(&hash, "pub fn handle(op: loom::Effect, k: loom::Continuation) -> loom::Reply { loom::Reply::Forward }"));
         assert!(validate(&caller, &dependencies).is_ok());
     }
     #[test]
@@ -48,7 +48,7 @@ mod tests {
         let new_hash = "b".repeat(64);
         let mut caller = definition(&"c".repeat(64), "fn main() {}");
         caller.deps.insert(format!("loom_handler_{old_hash}"), new_hash.clone());
-        let target = definition(&new_hash, "pub fn handle(op: loom::Op, k: loom::Continuation) -> loom::Reply { loom::Reply::Forward }");
+        let target = definition(&new_hash, "pub fn handle(op: loom::Effect, k: loom::Continuation) -> loom::Reply { loom::Reply::Forward }");
         let dependencies = BTreeMap::from([(new_hash, target)]);
         assert!(validate(&caller, &dependencies).is_ok());
     }
