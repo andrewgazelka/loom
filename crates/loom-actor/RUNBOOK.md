@@ -1,0 +1,168 @@
+# loom-actor
+
+From the repository root:
+
+```sh
+cargo fmt -p loom-actor
+cargo check -p loom-actor
+cargo test -p loom-actor --no-fail-fast
+cargo clippy -p loom-actor --all-targets -- -D warnings
+```
+
+One integration target contains exactly 21 `#[tokio::test]` functions: 9 original properties, 4 Addendum A properties, 5 Addendum B properties, and 3 review regressions. The user lifted the write-only restriction for this gate. Local execution on 2026-09-11 produced:
+
+```text
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.52s
+clippy exit code: 0
+```
+
+`cargo check` and `cargo fmt` exited 0. The workspace emits a Cargo configuration warning about `build.analysis` requiring `-Zbuild-analysis`; no workspace configuration was changed. No commits were made.
+
+## Specification choices and deviations
+
+- `code_changes.seq` is a monotonic revision starting at 0; `meta.code_at:<message_seq>` records the committed revision, preserving multiple promotions before any message succeeds without changing the specified tables.
+- A cursor-0 snapshot supplements periodic snapshots so `fork(id, 0)` and validation windows preceding the first periodic snapshot are supported.
+- `Ctx::sql` returns buffered `Rows { columns, rows }`, because Turso executes while polling and dropping an unconsumed write result must not silently omit the write.
+- Verdict table entries are named `TableHash` and `TableDifference` structs instead of anonymous tuples, as required by the supplied AGENTS.md; a missing table's hash is the explicit string `absent`.
+- `meta.skipped:<seq>` records supervision/manual skips so historical replay preserves skipped messages; forks also retain dead-letter audit rows through the requested sequence.
+- `meta.replay_source` preserves deterministic random/child identity during replay and prevents a stopped fork from delivering; `promote` preserves fork status, and `stop` is its terminal transition.
+- Runtime notifications append after existing outbox positions so lifecycle signals follow earlier sends; hook effects use a separate negative sequence namespace.
+- Child derivation encodes seq and idx as fixed-width little-endian i64 values; the `a0` prefix precedes the 26-character ULID or truncated child hash, and reset generations use the incarnation namespace described below.
+- Effect divergence `expected`/`got` bytes encode JSON `{kind,request}` signatures; an absent call is an empty byte vector, and replay detects both added and omitted effects.
+- The default handler additionally implements `now` as little-endian i64 Unix milliseconds; `alarm` accepts a JSON u64 delay in milliseconds, sleeps, then echoes those request bytes.
+- Management errors use seq -1 when no inbox message is selected; message execution and delivery errors include the actual actor id and sequence in their error chain.
+- Receiver assertions in tests 3 and 4 exclude the mandatory root-init mailbox baseline instead of deleting append-only inbox rows; test 3 separately asserts no message from A exists.
+
+Schemas run once per behavior hash per file, including during replay; promoting an earlier hash appends lineage without rerunning its original schema. Native behaviors are trusted to mutate domain tables only and to leave transaction control and runtime tables to the runtime. `Actor::sql` is the host inspection/administration interface.
+
+Creation and fork publication use staged databases and `VACUUM INTO` before rename, so a published actor does not depend on a staging WAL. Snapshot registration follows publication and is retried at the current cursor before another message runs. Forks share immutable snapshot paths with their source. A Node owns its directory's connection cache; do not operate separate live Nodes on the same directory concurrently.
+
+Long-effect handlers receive the same durable key on redelivery. Delivery errors return from `run_until_idle` with the row still pending; calling it again retries delivery. They cannot roll back an already committed handler transaction. Custom handlers must implement every external short-effect kind their behaviors use, including `now` when used; the runtime owns the recorded child-inspection effect and has no fallback for other kinds.
+
+The specification leaves SQL assertions to the caller. Callers can use `fork`, `promote`, and `Actor::sql` for inspection and assertions; `validate` implements the specified four verdicts and does not execute an implicit assertion list.
+
+## Turso 0.7.2 source observations
+
+- `Statement::query` binds parameters and returns without stepping; fully drain every query, including pragmas and writes issued through `Ctx::sql`.
+- `Statement::execute` rejects a row-producing statement with `Misuse("unexpected row during execution")`; all SELECTs and pragmas use `query` and drain.
+- The usable transaction is `turso::transaction::Transaction<'conn>`, returned by `Connection::transaction()`; the top-level `turso::Transaction` is an empty placeholder.
+- Dropping the usable transaction schedules rollback on the original connection's next operation; the handler-error path explicitly awaits `rollback`, while propagation of other transaction errors uses that documented deferred rollback.
+- `execute_batch` internally executes each statement rather than draining query rows; behavior schemas must consist of non-row-producing DDL.
+- `Rows` and `Row` expose column counts, and `Row::get_value` supports explicit typed hashing; rows are drained before another statement or commit.
+- `Builder::experimental_vacuum(true)` is enabled for every file connection, including staging and replay databases.
+- The public transaction source contains an old comment about missing savepoints, but `turso_core-0.7.2/translate/rollback.rs` implements SQL SAVEPOINT, RELEASE, and ROLLBACK TO; termination hooks use those SQL operations inside the final transaction. The successful terminate-hook path is exercised by `kill_terminate_and_shutdown_timeout`.
+
+## Exact test names
+
+1. `three_messages_three_rows`
+2. `crash_before_commit_reruns_once`
+3. `trap_rolls_back_send`
+4. `send_delivers_exactly_once`
+5. `short_effect_keyed_and_recorded`
+6. `long_effect_result_arrives_as_message`
+7. `fork_matched`
+8. `fork_diverged`
+9. `promote_then_rollback_lineage`
+10. `monitor_delivers_down_once`
+11. `link_cascades_stop`
+12. `one_for_one_reset_then_intensity`
+13. `rest_for_one_order`
+14. `pair_fifo_and_down_after_messages`
+15. `defer_is_selective_receive`
+16. `call_reply_timeout_and_death`
+17. `kill_terminate_and_shutdown_timeout`
+18. `dynamic_supervisor_and_registry`
+19. `validate_differs_and_multi_promotion`
+20. `resume_keeps_tree_intact`
+21. `shutdown_wait_does_not_stall_node`
+
+
+## Addendum A integration choices and deviations
+
+- `Ctx::spawn(&ChildSpec)` replaces the original two-argument API; the constructor and JSON defaults select permanent restart, brutal shutdown, and `link=true` because Rust has no default arguments.
+- `Node::stop(id, reason)` replaces the reasonless API; stopped live actors now leave through explicit `restart`, while replay forks remain ineligible for live restart.
+- Spawn rows use a tagged `child` or `restart` payload, keeping all creation and resume/skip/reset operations on the specified `spawn` target instead of introducing parallel restart targets.
+- Runtime delivery adds `down:<watcher>` and `exit:<peer>` targets so monitor retirement and automatic exit propagation are durable pump operations, not nontransactional post-stop callbacks.
+- Lifecycle messages include generation, event identity, and optional initiator; shared event identity deduplicates poison/down/exit, and initiator distinguishes intentional group shutdowns from new failures.
+- `EffectKey` includes `generation`; generation zero retains the original delivery/child namespace, while later incarnations use `<id>@<generation>` so reset cannot deduplicate new work as an old call.
+- Fresh-state reset archives a WAL-complete `VACUUM INTO` copy instead of literally renaming a potentially incomplete main database; a fully built replacement is published with a recoverable marker, preserving the same actor ID and shared connection slot.
+- Reset reapplies each distinct historical schema before retaining the original code-change head and lineage, because an upgraded behavior's ALTER schema alone cannot create its base tables.
+- Applied-control receipts survive reset with active links and monitors, preventing redelivery of old stops, monitor actions, or reset commands from affecting the new incarnation; consumed monitors retain a receipt and fire only once.
+- Reset generations get separate snapshot paths; generation zero retains `<id>.snap.<seq>.db`, so archived snapshots are not overwritten by later incarnations.
+- `Supervisor` is registered by default under `supervisor-v1`; its initial JSON message is `{"type":"configure",...}`, with omitted fields retaining one_for_one and 3 restarts in 5 seconds.
+- Supervisor configuration fields are `strategy`, `max_restarts`, and `max_seconds`; restart intensity counts one strategy round per initiating child, not one entry for every sibling in that round.
+- Child inspection goes through `Ctx::inspect` as a recorded runtime effect backed by `node.open`, preserving deterministic supervisor replay instead of giving the behavior an unrecorded Node reference.
+- The newer-code test compares the current code revision to the revision saved when poison occurred, rather than comparing incomparable code revisions and inbox sequence numbers.
+- Supervisor children are monitored as well as optionally linked, and monitors are rearmed after reset so normal exits still apply permanent/transient/temporary policy.
+- Selected temporary siblings stop without restarting, honoring the explicit `temporary: never` rule when a group strategy selects them.
+- `Shutdown::TimeoutMs(n)` serializes as `{"timeout_ms":n}`; graceful shutdown delivers a trappable exit and persists a kill deadline. `Infinity` has no deadline, and `Brutal` bypasses termination hooks.
+- Native handlers must yield for Tokio cancellation to take effect; v1 does not run native code in a separately killable process.
+- `tree` returns named `TreeEntry` records in breadth-first order, with siblings in spawn order; names are persisted in `_node.db`, and registering an occupied name fails clearly.
+- History and reset logic moved into `history.rs` and `reset.rs`, and lifecycle operations into `supervision.rs`, keeping every Rust source file below 400 lines while `supervisor.rs` remains the normal behavior implementation.
+
+The supervision tests also cover both trap-exit modes, duplicate stop delivery, name removal on stop/reset, and ordered tree inspection. The final gate above supersedes the earlier write-only source review.
+
+
+## Addendum B integration choices and deviations
+
+- `Node::new` is async because initialization now creates or reopens the durable root Supervisor; `root()` returns its ID. The root marker is actor metadata, not a fourth node-level table.
+- `spawn_root` registers linked temporary children under the node root: the external spawn API supplies no restart policy, so an explicit supervisor child spec selects automatic restart behavior.
+- Inbox rows gain `state`, `defer_epoch`, and `defer_count`; metadata tracks committed execution order and contiguous historical boundaries. Two deferrals without an intervening commit trap.
+- Forking at a sequence which never represented a complete contiguous mailbox boundary fails explicitly; historical execution order is retained for selective-receive replay. A candidate which defers a historically committed message returns `Trapped` rather than inventing a new replay schedule.
+- `timers` persists target, payload, deadline, kind, arming state, and initiator; timer alarm rows arm the node scheduler without sleeping inside delivery. Timer scanning runs independently of actor turns; cached shutdown deadlines can cancel a yielding but unfinished handler.
+- Calls persist first-winner receipts in metadata after removing their active rows, so redelivered replies, DOWNs, and timeouts cannot produce a second outcome.
+- `shutdown:<id>` is the pump operation for child-spec graceful shutdown; `stop:<id>` remains the explicit stop primitive. Native code must yield for Tokio task cancellation to take effect.
+- Lifecycle hooks use negative logical sequence numbers for recorded effects and dead letters, leaving inbox sequence numbers unchanged; deferring from a hook is a Trap because it has no current inbox message.
+- Outbox positions are monotonic in execution order: after selective receive or runtime notifications, a physical outbox position may differ from the logical inbox/effect position; `request` returns the physical result key. This preserves FIFO without changing effect identities.
+- Stopping an actor cancels its owned timers, preventing timer sends after its final lifecycle signals.
+- Only the node root uses a ULID; `spawn_root` actors are now children and use the same derived IDs and durable spawn path as behavior-created children.
+- `ChildType` is serialized as the spec field `type`; an omitted shutdown selects infinity for supervisor children and brutal for workers.
+- `promote_where` synchronizes the derived `who_runs` index before selecting actors and applies independent actor transactions, stopping on the first error.
+- Runtime scheduling, lifecycle hooks, mailbox selection, and node-directory operations have separate modules to keep every source file below 400 lines.
+- `meta.ready` gates newly created children until the spawn row has installed links and monitors, including recovery after interrupted publication.
+- Group restart delivery waits while any owned child has a pending graceful shutdown, ensuring the selected children stop before fresh generations start.
+- `memory_max` and `fuel` are initialized metadata only; enforcement belongs to the future wasm lane, as specified.
+
+## Executed gate integration fixes
+
+- `directory.rs` now names `anyhow::Error` and collection result types explicitly where Rust could not infer them.
+- Test 3 asserts that the application send rolls back while the required poison notification reaches the new root supervisor; it no longer assumes a parentless actor with an entirely empty outbox.
+- `autotests=false` and `tests/integration.rs` combine the three property modules into one 21-test target, preserving every named test and producing the requested single result line.
+- `types.rs` and `supervisor_store.rs` hold public data types and child-spec persistence; crate-root API reexports remain unchanged.
+- Crate-local `rustfmt.toml` uses a 140-column width and maximum small-item heuristics; all Rust files remain below 400 lines after `cargo fmt`.
+- Clippy findings were fixed with derived defaults, explicit eager defaults, let chains, and iterator enumeration; no lint suppressions were added.
+
+
+## Review fixer regressions
+
+- `EffectHandler::call` returns `EffectError::Environmental` or `EffectError::Deterministic`; deterministic errors immediately trap, including when a behavior ignores the returned error. Environmental errors retain bounded retries.
+- Poison parks the actor and notifies its parent; monitor DOWN is emitted only on an actual stop. This supersedes Addendum A's poison-as-DOWN rule to satisfy `resume_keeps_tree_intact`.
+- Resume preserves links and monitors and does not consume restart intensity; Reset alone shuts down a selected child before restarting it.
+- `shutdowns(child,request)` in each parent's file records pending child shutdowns explicitly; a busy connection alone is not evidence of shutdown.
+- `validate_differs_and_multi_promotion` reconstructs both sides of the schema promotion boundary and verifies domain-table differences with identical effects.
+
+Mutation control actually executed for test 19:
+
+```sh
+cargo test -p loom-actor validate_differs_and_multi_promotion -- --nocapture
+```
+
+The comparison `original.get(name) != replayed.get(name)` was temporarily disabled using `false && ...`. The mutation was then restored; no mutation remains in the source.
+
+```text
+original: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.17s
+mutated: test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.17s
+mutation Cargo exit code: 101
+restored: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.16s
+```
+
+The mutation failed at the assertion expecting `Differs`, with an incorrect `Matched` verdict, rather than at compilation or setup.
+
+- The node-wide delivery guard is replaced by per-sender pump guards and per-actor lifecycle/relationship guards; choosing a guard never retains the map lock while awaiting actor I/O or timers.
+- Actor turns and timer scans are independent scheduler tasks. Wakeups during an idle check mark that actor for another turn, preventing a later idle result from hiding newly arrived messages.
+- `terminate_child` emits shutdown without first inspecting a busy child; restart/delete retain their state checks.
+- `shutdown_wait_does_not_stall_node` waits for a real durable shutdown request against a child holding its transaction, then asserts Y commits and advances its cursor within 50 ms and before X's 300 ms kill.
+- Restart publication receipts preserve `ready=false` across interruption until monitor installation finishes, without a node-wide publication lock.
+- Lifecycle scheduling moved into `scheduler.rs` and `lifecycle.rs` to retain the 400-line limit after formatting.
+
+- Shutdown deadline cache insertion/removal is serialized with the actor connection and lifecycle transition; callbacks check the cache before aborting, so a stale deadline cannot cancel a replacement generation.
