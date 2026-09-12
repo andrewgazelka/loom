@@ -20,8 +20,11 @@ cargo test -p loom-actor     # 22 tests: the actor engine, standalone
 opens it in your browser (the token rides the URL fragment, so it never
 reaches the server or its logs). The package installs two programs: `loomd`,
 the daemon, and `loom`, the CLI; `nix shell .` puts both on `PATH`, and
-`nix build .` leaves them in `result/bin`. See [docs/guide.md](docs/guide.md)
-for running without Nix and for the HTTP API.
+`nix build .` leaves them in `result/bin`. It also brings the compiler the
+daemon builds definitions with (`nightly-2026-08-24`) and the content-hashing
+rustc driver, already built, so `loom add` needs no rustup and compiles no
+tooling on first use. See [docs/guide.md](docs/guide.md) for running without
+Nix and for the HTTP API.
 
 ## Effects
 
@@ -151,6 +154,8 @@ bun scripts/configure-codex-mcp.ts --token-file /path/to/loom/token
 
 Loom can identify Rust definitions by resolved HIR content with `tools/hash-rustc`.
 The driver uses the pinned `nightly-2026-08-24` compiler and its normal pipeline.
+The Nix package ships it prebuilt against that compiler and points the daemon at
+both through `LOOM_HASH_RUSTC` and `RUSTC`.
 Set `LOOM_ITEM_HASHES` and `LOOM_ITEM_PREIMAGES` for JSON identities and checkable bytes.
 Formatting, local renaming, and item reordering leave ordinary entry hashes unchanged.
 Changing a reachable helper changes the entry; changing an unrelated helper does not.
