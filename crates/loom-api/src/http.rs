@@ -212,7 +212,6 @@ struct CasBlock {
 
 #[derive(Deserialize)]
 struct EventQuery {
-    actor: Option<String>,
     #[serde(default)]
     after: i64,
     limit: Option<usize>,
@@ -222,11 +221,7 @@ async fn events(State(s): State<ApiState>, Query(q): Query<EventQuery>) -> Json<
         s.service.response(
             s.service
                 .store
-                .events(
-                    q.actor.as_deref(),
-                    q.after,
-                    q.limit.unwrap_or(1000).min(1000),
-                )
+                .definition_events(q.after, q.limit.unwrap_or(1000).min(1000))
                 .and_then(|v| Ok(serde_json::to_value(v)?)),
         ),
     )
@@ -263,7 +258,6 @@ struct Subscription {
     token: String,
     #[serde(default)]
     after: i64,
-    actor: Option<String>,
 }
 async fn stream_events(s: ApiState, mut socket: WebSocket) {
     let request = tokio::time::timeout(Duration::from_secs(5), socket.recv()).await;
@@ -288,6 +282,6 @@ async fn stream_events(s: ApiState, mut socket: WebSocket) {
     }
     let mut interval = tokio::time::interval(Duration::from_millis(100));
     loop {
-        tokio::select! {_ = interval.tick()=>{let Ok(events)=s.service.store.events(subscription.actor.as_deref(),subscription.after,1000) else{return};if s.service.store.flush().is_err(){return};for event in events{subscription.after=event.seq;let Ok(text)=serde_json::to_string(&event)else{return};if socket.send(Message::Text(text.into())).await.is_err(){return}}},message=socket.recv()=>match message{Some(Ok(Message::Ping(bytes)))=>{if socket.send(Message::Pong(bytes)).await.is_err(){return}},Some(Ok(Message::Close(_)))|None|Some(Err(_))=>return,_=>{}}}
+        tokio::select! {_ = interval.tick()=>{let Ok(events)=s.service.store.definition_events(subscription.after,1000) else{return};if s.service.store.flush().is_err(){return};for event in events{subscription.after=event.seq;let Ok(text)=serde_json::to_string(&event)else{return};if socket.send(Message::Text(text.into())).await.is_err(){return}}},message=socket.recv()=>match message{Some(Ok(Message::Ping(bytes)))=>{if socket.send(Message::Pong(bytes)).await.is_err(){return}},Some(Ok(Message::Close(_)))|None|Some(Err(_))=>return,_=>{}}}
     }
 }

@@ -1,1 +1,1 @@
-export type WorkspaceView = "Session" | "Definitions" | "Actors" | "CAS" | "Effects";
+export type WorkspaceView = "Session" | "Definitions" | "CAS" | "Effects";

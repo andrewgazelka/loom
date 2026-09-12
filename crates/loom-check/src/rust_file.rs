@@ -21,7 +21,7 @@ pub(super) fn check_rust_file(
                         .path()
                         .segments
                         .last()
-                        .is_some_and(|segment| segment.ident == "def" || segment.ident == "actor")
+                        .is_some_and(|segment| segment.ident == "def")
                     {
                         self.count += 1;
                     }
@@ -31,7 +31,7 @@ pub(super) fn check_rust_file(
             let mut entries = EntryVisitor { count: 0 };
             syn::visit::Visit::visit_file(&mut entries, &file);
             if entries.count > 1 {
-                diagnostics.push(diagnostic(Lang::Rust,"LOOM_ENTRYPOINT","A definition crate must have one #[loom::def] or #[loom::actor] entrypoint; place reusable functions in separate hashed definitions."));
+                diagnostics.push(diagnostic(Lang::Rust,"LOOM_ENTRYPOINT","A definition crate must have one #[loom::def] entrypoint; place reusable functions in separate hashed definitions."));
             }
             diagnostics.extend(rust_effects::unsafe_source_diagnostics(&file));
             diagnostics.extend(rust_effects::unsupported_mode_diagnostics(&file));
@@ -82,10 +82,6 @@ pub(super) fn check_rust_file(
                 }
             }
             aggregate_effects = rust_effects::aggregate(&file, signatures, &effects, &exports);
-            diagnostics.extend(rust_effects::actor_declaration_diagnostics(
-                &file,
-                &aggregate_effects,
-            ));
             fn ambient_macro(tokens: proc_macro2::TokenStream) -> bool {
                 tokens.into_iter().any(|token| match token {
                     proc_macro2::TokenTree::Ident(name) => [

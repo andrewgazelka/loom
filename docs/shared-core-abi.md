@@ -15,8 +15,8 @@ validated before scheduling, identity, or recording.
 
 The `spawn` and `join` core imports implement scoped and detached closures;
 they are not root effects. Scoped jobs must finish before entry returns.
-Detached jobs still running when `loom_call`, `loom_run`, or `loom_fold`
-returns are cancelled without an implicit join.
+Detached jobs still running when `loom_call` returns are cancelled without
+an implicit join.
 
 Imports from `loom`:
 
@@ -40,9 +40,7 @@ Exports:
 - `loom_alloc(size:i32,align:i32)->i32`, zero on allocation failure;
   `loom_dealloc(ptr:i32,size:i32,align:i32)` with the original layout.
 - `loom_call(args_ptr:i32,args_len:i32)->i64`.
-- `loom_init()->i64`.
-- `loom_run(state_ptr:i32,state_len:i32,msg_ptr:i32,msg_len:i32)->i64`.
-- `loom_fold(state_ptr:i32,state_len:i32,event_ptr:i32,event_len:i32)->i64`.
+- Optional `loom_schema()->i64`, returning the behavior schema SQL.
 - `loom_task_run(fn:i32,data:i32)` invokes the SDK task trampoline.
 - Mutable `__stack_pointer`, `__wasm_init_tls`, `__tls_size`, `__tls_align`.
 

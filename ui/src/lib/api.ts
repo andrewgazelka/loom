@@ -26,16 +26,8 @@ export interface Definition {
   component_hash?: string | null;
   component_size?: number | null;
 }
-export interface Actor {
-  id: string;
-  behavior_hash: string;
-  lang: "rust";
-  last_seq?: number;
-  spawn_ms?: number;
-}
 export interface LogEvent {
   seq: number;
-  actor: string;
   event_hash?: string;
   event?: unknown;
   ts?: number;

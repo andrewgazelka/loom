@@ -3,7 +3,7 @@ use crate::{Runtime, required_str};
 use anyhow::{Context, Result, bail, ensure};
 #[cfg(test)]
 use loom_proto::DirEntry;
-use loom_proto::{Actor, EntryKind, Lang, Tree, TreeEntry, Value};
+use loom_proto::{EntryKind, Tree, TreeEntry, Value};
 use serde_json::json;
 use std::{
     path::{Path, PathBuf},
@@ -11,27 +11,24 @@ use std::{
 };
 
 impl Runtime {
-    pub fn create_machine(&self, path: &Path) -> Result<Actor> {
+    pub fn create_machine(&self, path: &Path) -> Result<loom_store::MachineRoot> {
         let root = Arc::new(PinnedRoot::open(path)?);
-        let actor = Actor {
+        let machine = loom_store::MachineRoot {
             id: uuid::Uuid::new_v4().to_string(),
-            behavior_hash: "loom:machine".into(),
-            lang: Lang::Rust,
-            component_hash: None,
-            last_seq: 0,
-            created_seq: 0,
-            parent: None,
+            root: root
+                .path
+                .to_str()
+                .context("machine root is not UTF-8")?
+                .into(),
+            identity: serde_json::to_value(root.identity)?,
         };
-        let actor = self.inner.store.create_initialized_actor(
-            &actor,
-            &json!({"root":root.path,"identity":root.identity}),
-        )?;
+        self.inner.store.register_machine_root(&machine)?;
         self.inner
             .machine_roots
             .lock()
             .map_err(|_| anyhow::anyhow!("machine root cache poisoned"))?
-            .insert(actor.id.clone(), root);
-        Ok(actor)
+            .insert(machine.id.clone(), root);
+        Ok(machine)
     }
     fn machine_handle(&self, id: &str) -> Result<Arc<PinnedRoot>> {
         let mut roots = self
@@ -42,33 +39,17 @@ impl Runtime {
         if let Some(root) = roots.get(id) {
             return Ok(root.clone());
         }
-        let actor = self
+        let machine = self
             .inner
             .store
-            .actor(id)?
-            .context("machine actor not found")?;
+            .machine_root(id)?
+            .context("machine root not found")?;
+        let root = Arc::new(PinnedRoot::open(Path::new(&machine.root))?);
+        let expected: RootIdentity = serde_json::from_value(machine.identity)?;
         ensure!(
-            actor.behavior_hash == "loom:machine",
-            "actor is not a machine"
+            root.identity == expected,
+            "machine root identity changed; register the replacement as a new machine"
         );
-        let mut state = self
-            .inner
-            .store
-            .latest_snapshot(id, "loom:machine")?
-            .context("machine state missing")?
-            .state;
-        let root = Arc::new(PinnedRoot::open(Path::new(required_str(&state, "root")?))?);
-        if let Some(identity) = state.get("identity") {
-            let expected: RootIdentity = serde_json::from_value(identity.clone())?;
-            ensure!(
-                root.identity == expected,
-                "machine root identity changed; register the replacement as a new machine"
-            );
-        } else {
-            // Path-only legacy machines are pinned once and persisted before use.
-            state["identity"] = serde_json::to_value(root.identity)?;
-            self.inner.store.pin_machine_root(id, &state)?;
-        }
         roots.insert(id.into(), root.clone());
         Ok(root)
     }
@@ -607,38 +588,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn legacy_machine_pin_is_migrated_and_rebuilt() -> Result<()> {
-        let root = tempfile::tempdir()?;
-        let store = loom_store::Store::memory()?;
-        let actor = Actor {
-            id: uuid::Uuid::new_v4().to_string(),
-            behavior_hash: "loom:machine".into(),
-            lang: Lang::Rust,
-            component_hash: None,
-            last_seq: 0,
-            created_seq: 0,
-            parent: None,
-        };
-        store.create_initialized_actor(&actor, &json!({"root":root.path()}))?;
-        let runtime = Runtime::new(store.clone())?;
-        assert_eq!(
-            runtime.machine_root(&actor.id)?,
-            root.path().canonicalize()?
-        );
-        store.rebuild_views()?;
-        let snapshot = store
-            .latest_snapshot(&actor.id, "loom:machine")?
-            .context("snapshot")?;
-        assert!(snapshot.state.get("identity").is_some());
-        let reopened = Runtime::new(store)?;
-        assert_eq!(
-            reopened.machine_root(&actor.id)?,
-            root.path().canonicalize()?
-        );
-        Ok(())
-    }
-
     #[tokio::test]
     async fn snapshots_are_content_keyed_and_observations_are_scoped() -> Result<()> {
         let root = tempfile::tempdir()?;
@@ -692,7 +641,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     #[ignore = "requires Linux bubblewrap and LOOM_STATIC_BUSYBOX; run in the native Linux integration lane"]
-    async fn hermetic_exec_uses_snapshot_and_caches_across_actors() -> Result<()> {
+    async fn hermetic_exec_uses_snapshot_and_caches_across_calls() -> Result<()> {
         let executable = std::env::var("LOOM_STATIC_BUSYBOX")
             .context("LOOM_STATIC_BUSYBOX must name a static busybox binary")?;
         let root = tempfile::tempdir()?;
@@ -706,10 +655,10 @@ mod tests {
             .await?;
         std::fs::write(root.path().join("input"), "mutated-host-data")?;
         let descriptor = json!({"op":"exec","args":{"tree":tree["$ref"],"program":"/bin/busybox","args":["cat","/input"]}});
-        let result = runtime.perform(descriptor.clone(), "actor-one", 0).await?;
+        let result = runtime.perform(descriptor.clone(), "call-one", 0).await?;
         assert_eq!(result["code"], json!(0), "{result}");
         assert_eq!(result["stdout"], json!("snapshot-data"));
-        assert_eq!(result, runtime.perform(descriptor, "actor-two", 0).await?);
+        assert_eq!(result, runtime.perform(descriptor, "call-two", 0).await?);
         Ok(())
     }
 }

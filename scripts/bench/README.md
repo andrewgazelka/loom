@@ -9,7 +9,7 @@ The scoped variant measured 28.63 ms on Linux on September 10, 2026, before the 
 ## Reproduce
 
 Run from the repository root with Rust and Bun installed. Use a dedicated
-daemon and state directory; the script creates definitions and a machine actor.
+daemon and state directory; the script creates definitions and a machine filesystem root.
 
 ```sh
 bench_dir=$(mktemp -d)

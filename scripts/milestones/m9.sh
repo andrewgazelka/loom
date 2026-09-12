@@ -10,7 +10,7 @@ cargo run --locked --release -p loom-rt --example machine_smoke -- "$scratch/lar
 cargo test --locked -p loom-rt snapshots_are_content_keyed_and_observations_are_scoped
 if [[ $(uname -s) == Linux ]]; then
   : "${LOOM_STATIC_BUSYBOX:?Set LOOM_STATIC_BUSYBOX to a statically linked busybox executable}"
-  cargo test --locked -p loom-rt machine::tests::hermetic_exec_uses_snapshot_and_caches_across_actors -- --ignored --exact
+  cargo test --locked -p loom-rt machine::tests::hermetic_exec_uses_snapshot_and_caches_across_calls -- --ignored --exact
 else
   echo "M9 hermetic execution requires the native Linux acceptance lane with LOOM_STATIC_BUSYBOX" >&2
   exit 1

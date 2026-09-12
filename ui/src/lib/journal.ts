@@ -56,10 +56,6 @@ export function eventRow(event: LogEvent): JournalRow {
     result.source = typeof data.source === "string" ? data.source : undefined;
     result.language = "rust";
     result.value = data.result;
-  } else if (type === "actor_created") {
-    const actor = record(data.actor);
-    result.title = `Actor created · ${String(actor.id || "").slice(0, 12)}`;
-    result.language = String(actor.lang || "");
   } else if (type === "effect") {
     result.title = String(record(data.desc).op || "Effect");
     result.value = data.result;

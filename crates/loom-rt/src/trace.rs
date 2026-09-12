@@ -289,11 +289,6 @@ impl ExecutionTrace {
             .collect();
         state.consumed.extend(cancelled);
     }
-    pub fn checkpoint(&self, store: &loom_store::Store) -> Result<()> {
-        let _publication = self.publication.lock().unwrap();
-        store.persist_call_trace(&self.snapshot(None, false)?)?;
-        store.flush()
-    }
     pub fn snapshot(
         &self,
         outcome: Option<&Result<EffectOutput>>,
@@ -498,7 +493,6 @@ pub(super) struct TraceSession {
     store: loom_store::Store,
     execution: Arc<ExecutionTrace>,
     finished: bool,
-    recoverable: bool,
 }
 impl TraceSession {
     pub fn new(store: loom_store::Store, execution: Arc<ExecutionTrace>) -> Self {
@@ -506,12 +500,7 @@ impl TraceSession {
             store,
             execution,
             finished: false,
-            recoverable: false,
         }
-    }
-    pub fn recoverable(mut self) -> Self {
-        self.recoverable = true;
-        self
     }
     pub fn finish(mut self, outcome: &Result<EffectOutput>) -> Result<()> {
         let _publication = self.execution.publication.lock().unwrap();
@@ -536,9 +525,7 @@ impl Drop for TraceSession {
         if !self.finished {
             let _publication = self.execution.publication.lock().unwrap();
             if let Ok(mut bundle) = self.execution.snapshot(None, true) {
-                if !self.recoverable {
-                    bundle.trace.outcome = Some(TraceOutcome::Cancelled);
-                }
+                bundle.trace.outcome = Some(TraceOutcome::Cancelled);
                 if let Err(error) = self.store.persist_call_trace(&bundle) {
                     eprintln!("persist cancelled execution trace: {error:#}");
                 }
@@ -726,11 +713,11 @@ mod tests {
     }
     #[test]
     fn replay_retains_failure_and_recovery_retries_cancelled_effects() -> Result<()> {
-        let trace = ExecutionTrace::fresh("actor:1");
+        let trace = ExecutionTrace::fresh("call:1");
         let fail = json!({"op":"unsupported"});
         let error = Err(anyhow::anyhow!("specific failure"));
-        record(&trace, "actor:1", 0, &fail, &error)?;
-        let waiting = trace.begin("actor:1", 1, &json!({"op":"sleep"}))?;
+        record(&trace, "call:1", 0, &fail, &error)?;
+        let waiting = trace.begin("call:1", 1, &json!({"op":"sleep"}))?;
         drop(waiting);
         let partial = trace.snapshot(None, false)?;
         assert!(matches!(
@@ -739,12 +726,12 @@ mod tests {
         ));
         let recovered = ExecutionTrace::loaded(partial)?;
         let error = recovered
-            .begin("actor:1", 0, &fail)
+            .begin("call:1", 0, &fail)
             .err()
             .context("recorded error missing")?;
         assert_eq!(error.to_string(), "specific failure");
         assert!(matches!(
-            recovered.begin("actor:1", 1, &json!({"op":"sleep"}))?,
+            recovered.begin("call:1", 1, &json!({"op":"sleep"}))?,
             StartedEffect::Recorded(_)
         ));
         Ok(())
@@ -766,14 +753,14 @@ mod tests {
     #[test]
     fn partial_recovery_cannot_complete_with_unconsumed_success_or_error() -> Result<()> {
         for failed in [false, true] {
-            let trace = ExecutionTrace::fresh("actor:1");
+            let trace = ExecutionTrace::fresh("call:1");
             let descriptor = json!({"op":"random"});
             let result = if failed {
                 Err(anyhow::anyhow!("saved failure"))
             } else {
                 EffectOutput::value(&json!(5))
             };
-            record(&trace, "actor:1", 0, &descriptor, &result)?;
+            record(&trace, "call:1", 0, &descriptor, &result)?;
             let recovered = ExecutionTrace::loaded(trace.snapshot(None, false)?)?;
             let final_result = EffectOutput::value(&Value::Null);
             assert!(recovered.snapshot(Some(&final_result), true).is_err());
@@ -781,7 +768,7 @@ mod tests {
                 recovered.snapshot(None, false).is_ok(),
                 "incomplete checkpoint remains legal"
             );
-            let replayed = recovered.begin("actor:1", 0, &descriptor);
+            let replayed = recovered.begin("call:1", 0, &descriptor);
             if failed {
                 assert_eq!(
                     replayed.err().context("error missing")?.to_string(),

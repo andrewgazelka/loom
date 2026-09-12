@@ -36,23 +36,7 @@ impl Store {
         {
             return Ok(Some(bytes));
         }
-        let archive:Option<Vec<u8>>=c.query_row("SELECT c.bytes FROM archive_entries e JOIN cas c ON c.hash=e.archive_hash WHERE e.event_hash=?",[hash],|r|r.get(0)).optional()?;
-        let Some(archive) = archive else {
-            return Ok(None);
-        };
-        ensure!(
-            address.as_ref().is_none_or(|a| a.codec == 113),
-            "archived event requires DAG-CBOR CID"
-        );
-        let decoded = zstd::stream::decode_all(archive.as_slice())?;
-        let records: Vec<Event> = decode(&decoded)?;
-        for record in records {
-            let bytes = encode(&record.event)?;
-            if blake3::hash(&bytes).to_hex().as_str() == hash {
-                return Ok(Some(bytes));
-            }
-        }
-        anyhow::bail!("archive index refers to missing event {hash}")
+        Ok(None)
     }
     pub fn put_value<T: serde::Serialize>(&self, kind: &str, value: &T) -> Result<String> {
         self.recording.barrier(false)?;
@@ -98,12 +82,20 @@ impl Store {
         };
         let hash = address.as_ref().map_or(hash, |a| a.hash.as_str());
         let c = self.lock()?;
-        let codec: Option<u64> = c.query_row("SELECT codec FROM cas WHERE hash=? UNION ALL SELECT 113 FROM archive_entries WHERE event_hash=? LIMIT 1", params![hash,hash], |r| r.get(0)).optional()?;
+        let codec: Option<u64> = c
+            .query_row("SELECT codec FROM cas WHERE hash=?", params![hash], |r| {
+                r.get(0)
+            })
+            .optional()?;
         if let Some(address) = &address {
             if codec.is_none() {
                 return Ok(None);
             }
-            let registered: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM cas_codecs WHERE hash=? AND codec=? UNION ALL SELECT 1 FROM archive_entries WHERE event_hash=? AND ?=113)",params![hash,address.codec,hash,address.codec],|r|r.get(0))?;
+            let registered: bool = c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM cas_codecs WHERE hash=? AND codec=?)",
+                params![hash, address.codec],
+                |r| r.get(0),
+            )?;
             ensure!(registered, "CID codec is not registered for stored object");
             return Ok(Some(address.codec));
         }

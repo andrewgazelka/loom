@@ -10,7 +10,7 @@ async fn response_refuses_success_when_recording_cannot_commit() -> Result<()> {
         vec![Lang::Rust],
     )?;
     store.with_connection(|connection| {
-            connection.execute_batch("CREATE TRIGGER refuse_recording BEFORE INSERT ON log BEGIN SELECT RAISE(ABORT, 'recording control'); END;")?;
+            connection.execute_batch("CREATE TRIGGER refuse_recording BEFORE INSERT ON definition_records BEGIN SELECT RAISE(ABORT, 'recording control'); END;")?;
             Ok(())
         })?;
     store.enqueue_recording(&json!({"type":"effect_invoked","op":"sleep"}))?;

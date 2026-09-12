@@ -12,4 +12,4 @@ The development server proxies HTTP and WebSocket requests to `127.0.0.1:8787`. 
 
 `bun run build` writes static assets to `build/`. Configure the static server to serve `index.html` for app routes and forward `/v1` to loomd.
 
-The session prompt supports TypeScript evaluation, TypeScript/Rust definitions with dependency hashes, and JSON commands. Definitions, actor state, component build logs, and dependency graphs read the same protocol. Large result references resolve through CAS. Graph navigation uses trackpad scrolling and pointer-centered pinch zoom; keyboard navigation is documented in the app's help.
+The session prompt supports TypeScript evaluation, TypeScript/Rust definitions with dependency hashes, and JSON commands. Definitions, component build logs, and dependency graphs read the same protocol. Large result references resolve through CAS. Graph navigation uses trackpad scrolling and pointer-centered pinch zoom; keyboard navigation is documented in the app's help.

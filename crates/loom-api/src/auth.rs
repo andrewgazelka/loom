@@ -91,10 +91,11 @@ impl Authorizer {
 pub fn command_scope(command: &str) -> Scope {
     match command {
         "crate.add" | "upgrade" => Scope::Define,
-        "cas.list" | "cas.inspect" | "trace.effects" | "defs" | "actors" | "events" | "state"
-        | "resolve" | "deps" | "build" | "stats" | "process.list" | "process.status"
-        | "model.state" | "model.list" => Scope::Read,
-        "backup" | "compact" | "gc" | "cache_evict" | "machine.create" => Scope::Admin,
+        "cas.list" | "cas.inspect" | "trace.effects" | "defs" | "events" | "resolve" | "deps"
+        | "build" | "stats" | "process.list" | "process.status" | "model.state" | "model.list" => {
+            Scope::Read
+        }
+        "backup" | "gc" | "cache_evict" | "machine.create" => Scope::Admin,
         _ => Scope::Execute,
     }
 }

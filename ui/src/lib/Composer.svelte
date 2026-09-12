@@ -9,7 +9,7 @@
     busy = false;
   export let submit: () => Promise<void>;
   function changeMode() {
-    if (mode === "command") source = '{"command":"actors","args":{}}';
+    if (mode === "command") source = '{"command":"defs","args":{}}';
     else if (mode === "define")
       source = "#[loom::def]\nfn main(value: i64) -> i64 {\n    value * 2\n}";
     else source = "";

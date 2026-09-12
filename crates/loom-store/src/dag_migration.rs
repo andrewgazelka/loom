@@ -1,6 +1,6 @@
 //! Transactional conversion of the legacy JSON CAS. No legacy codec remains live.
 use anyhow::{Context, Result, ensure};
-use loom_proto::{Event, Value};
+use loom_proto::Value;
 use rusqlite::{Connection, params};
 use std::collections::{BTreeMap, BTreeSet};
 struct Target {
@@ -55,71 +55,18 @@ pub(super) fn run(c: &mut Connection) -> Result<()> {
             );
         }
     }
-    let pending: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='inbox')",
-        [],
-        |r| r.get(0),
-    )?;
-    if pending {
-        let count: i64 = tx.query_row("SELECT count(*) FROM inbox", [], |r| r.get(0))?;
+    for object in objects.values().filter(|object| object.kind == "event") {
+        let event: Value = serde_json::from_slice(&object.bytes)?;
         ensure!(
-            count == 0,
-            "DAG-CBOR migration refused: pending legacy inbox messages may resume effects with changed descriptor identities; drain messages with the legacy daemon before migration"
+            event["type"] != "effect_recorded",
+            "DAG-CBOR migration refused: legacy effect descriptor preimages were not persisted"
         );
     }
-    let mut archived = Vec::new();
-    for object in objects.values() {
-        if object.kind == "event_archive" {
-            let bytes = zstd::stream::decode_all(object.bytes.as_slice())?;
-            archived.extend(serde_json::from_slice::<Vec<Event>>(&bytes)?);
-        }
-        if object.kind == "event" {
-            let event: Value = serde_json::from_slice(&object.bytes)?;
-            ensure!(
-                event["type"] != "effect_recorded",
-                "DAG-CBOR migration refused: legacy effect descriptor preimages were not persisted; retain the original database and export/reconcile effects before migration"
-            );
-        }
-    }
-    ensure!(
-        !archived
-            .iter()
-            .any(|e| e.event["type"] == "effect_recorded"),
-        "DAG-CBOR migration refused: archived legacy effects lack descriptor preimages; retain original database and reconcile effects"
-    );
     let effects: i64 = tx.query_row("SELECT count(*) FROM effect_results", [], |r| r.get(0))?;
     ensure!(
         effects == 0,
         "DAG-CBOR migration refused: legacy effect descriptor preimages unavailable; retain original database and reconcile effects"
     );
-    // Expand old archive segments before converting. Subsequent compaction uses DAG-CBOR.
-    for event in archived {
-        let bytes = serde_json::to_vec(&event.event)?;
-        let hash = blake3::hash(&bytes).to_hex().to_string();
-        objects.entry(hash.clone()).or_insert(Object {
-            kind: "event".into(),
-            bytes: bytes.clone(),
-            created: event.ts,
-        });
-        tx.execute(
-            "INSERT OR IGNORE INTO cas VALUES (?,?,?,?)",
-            params![hash, "event", bytes, event.ts],
-        )?;
-        tx.execute(
-            "UPDATE log SET actor=?,event_hash=?,handler_seq=?,ts=? WHERE seq=?",
-            params![event.actor, hash, event.handler_seq, event.ts, event.seq],
-        )?;
-    }
-    for table in ["archive_entries", "archive_segments"] {
-        let exists: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name=?)",
-            [table],
-            |r| r.get(0),
-        )?;
-        if exists {
-            tx.execute(&format!("DELETE FROM {table}"), [])?;
-        }
-    }
     let mut converted = BTreeMap::new();
     for hash in objects.keys() {
         convert(hash, &objects, &mut converted, &mut BTreeSet::new())?;
@@ -137,7 +84,7 @@ pub(super) fn run(c: &mut Connection) -> Result<()> {
     for (old, new) in &converted {
         for target in [
             Target {
-                table: "log",
+                table: "definition_records",
                 column: "event_hash",
             },
             Target {
@@ -145,16 +92,8 @@ pub(super) fn run(c: &mut Connection) -> Result<()> {
                 column: "source_hash",
             },
             Target {
-                table: "snapshots",
-                column: "state_hash",
-            },
-            Target {
                 table: "effect_results",
                 column: "result_hash",
-            },
-            Target {
-                table: "message_keys",
-                column: "msg_hash",
             },
         ] {
             let table = target.table;
@@ -177,16 +116,12 @@ pub(super) fn run(c: &mut Connection) -> Result<()> {
             tx.execute("DELETE FROM cas WHERE hash=?", [old])?;
         }
     }
-    tx.execute_batch(
-        "UPDATE defs SET component_hash=NULL; UPDATE actors SET component_hash=NULL;",
-    )?;
+    tx.execute_batch("UPDATE defs SET component_hash=NULL;")?;
     register_codecs(&tx)?;
     // Durable replay instruction: old components implement the former wire codec.
-    super::append(
+    super::record_definition_event(
         &tx,
-        "system",
         &serde_json::json!({"type":"dag_cbor_migrated","version":1}),
-        0,
     )?;
     let violations: i64 =
         tx.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
@@ -219,12 +154,7 @@ fn convert(
         object.kind.as_str(),
         "event" | "result" | "state" | "message" | "tree" | "desc"
     );
-    let bytes = if object.kind == "event_archive" {
-        let bytes = zstd::stream::decode_all(object.bytes.as_slice())?;
-        let mut value: Value = serde_json::from_slice(&bytes)?;
-        rewrite(&mut value, objects, output, visiting)?;
-        zstd::stream::encode_all(super::encode(&value)?.as_slice(), 3)?
-    } else if structured {
+    let bytes = if structured {
         let mut value: Value = serde_json::from_slice(&object.bytes)
             .with_context(|| format!("invalid legacy {} {hash}", object.kind))?;
         if object.kind == "tree" {

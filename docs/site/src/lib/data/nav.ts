@@ -13,7 +13,8 @@ const labels: Record<string, string> = {
   'plan-effects': 'Guest-defined effects',
   'content-addressed-handlers': 'Stored handlers',
   'content-addressed-code': 'Content-addressed code',
-  'plan-unified-memory': 'Memory design history'
+  'plan-unified-memory': 'Memory design history',
+  future: 'Future work: index'
 };
 
 export function getNav(docs: DocPage[]): NavSection[] {
@@ -32,6 +33,7 @@ export function getNav(docs: DocPage[]): NavSection[] {
     { title: 'Actors', items: pages(['actors-turso']) },
     { title: 'Effects and handlers', items: pages(['plan-effects', 'content-addressed-handlers']) },
     { title: 'Content-addressed code', items: pages(['content-addressed-code']) },
+    { title: 'Future work', items: [...pages(['future']), ...docs.filter((doc) => doc.slug.startsWith('future-')).sort((a, b) => a.title.localeCompare(b.title)).map((doc) => { assigned.add(doc.slug); return { title: doc.title, href: `/docs/${doc.slug}/` }; })] },
     { title: 'MCP', items: [{ title: 'Tool reference', href: '/mcp/' }] },
     { title: 'Crates', items: [{ title: 'Crate catalog', href: '/crates/' }] },
     { title: 'Reference', items: [{ title: 'Search documentation', href: '/search/' }, ...docs.filter((doc) => !assigned.has(doc.slug)).map((doc) => ({ title: doc.title, href: `/docs/${doc.slug}/` }))] }

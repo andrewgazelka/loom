@@ -18,7 +18,7 @@ pub struct Fixtures {
     pub handler: String,
     pub promoted: String,
     pub no_schema: String,
-    log_rows: i64,
+    definition_record_rows: i64,
     _directory: tempfile::TempDir,
 }
 
@@ -81,15 +81,19 @@ async fn build() -> Result<Fixtures> {
         );
     }
     let store = Store::open(database)?;
-    let log_rows = store.with_connection(|connection| {
-        Ok(connection.query_row("SELECT count(*) FROM log", [], |row| row.get(0))?)
+    let definition_record_rows = store.with_connection(|connection| {
+        Ok(
+            connection.query_row("SELECT count(*) FROM definition_records", [], |row| {
+                row.get(0)
+            })?,
+        )
     })?;
     Ok(Fixtures {
         store,
         handler: hashes.handler,
         promoted: hashes.promoted,
         no_schema: hashes.no_schema,
-        log_rows,
+        definition_record_rows,
         _directory: directory,
     })
 }
@@ -122,17 +126,32 @@ impl Fixtures {
     pub fn assert_no_legacy_execution(&self) {
         self.store
             .with_connection(|connection| {
-                for table in ["actors", "inbox"] {
+                for table in [
+                    "actors",
+                    "inbox",
+                    concat!("inbox", "_queue"),
+                    "log",
+                    "snapshots",
+                    "message_keys",
+                    "sessions",
+                    "archive_segments",
+                    "archive_entries",
+                ] {
                     let count: i64 = connection.query_row(
-                        &format!("SELECT count(*) FROM {table}"),
-                        [],
+                        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?",
+                        [table],
                         |row| row.get(0),
                     )?;
-                    assert_eq!(count, 0, "legacy {table} was used");
+                    assert_eq!(count, 0, "retired table {table} exists");
                 }
                 let count: i64 =
-                    connection.query_row("SELECT count(*) FROM log", [], |row| row.get(0))?;
-                assert_eq!(count, self.log_rows, "execution appended to the legacy log");
+                    connection.query_row("SELECT count(*) FROM definition_records", [], |row| {
+                        row.get(0)
+                    })?;
+                assert_eq!(
+                    count, self.definition_record_rows,
+                    "actor execution appended to definition recording"
+                );
                 Ok(())
             })
             .unwrap();

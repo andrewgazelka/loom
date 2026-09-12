@@ -6,7 +6,7 @@ import {Database} from 'bun:sqlite';
 import {LoomMcpClient, object, type LoomResponse} from '../mcp-client';
 import {phase4,type Phase4Gate} from './effects-fixtures/phase4';
 interface Gate {name:string;pass:boolean;detail:string}
-const names=['fake clock','forward to host','nested shadow, forwarding, pop and total-effect refusal','handler outer context','scoped child inheritance and spawn-time snapshot','cross-definition calls from parent and scoped child','handler trap frame diagnostic','pure fold handling and root refusal','root-only effect ledger','scoped children with deferred continuations','dropped continuation errors without hanging','abandon drains children and preserves limits','residual effect row admission'];
+const names=['fake clock','forward to host','nested shadow, forwarding, pop and total-effect refusal','handler outer context','scoped child inheritance and spawn-time snapshot','cross-definition calls from parent and scoped child','handler trap frame diagnostic','root-only effect ledger','scoped children with deferred continuations','dropped continuation errors without hanging','abandon drains children and preserves limits','residual effect row admission'];
 const gates:Gate[]=[];
 // A broken transport must not leave this goal alive after per-gate timeouts.
 const watchdog=setTimeout(()=>{console.error('effects goal exceeded 20 minutes; incomplete controls fail');process.exit(1);},1_200_000);
@@ -48,7 +48,6 @@ async function traceEntries(hash:string,args:unknown[]) {
   const page=object((await command('trace.effects',{hash:completed[0]!.trace_hash,limit:256})).result);
   assert(Array.isArray(page.entries)&&page.next_offset===null,'trace page incomplete');return page.entries.map(entry=>object(entry));
 }
-function actorSource(handled:boolean) {return `#[loom::actor(effects=["sleep"])] pub struct Counter; impl loom::Actor for Counter {type State=i64;type Event=i64;type Msg=i64;fn init()->i64{0}fn handle(_: &i64,msg:i64)->Vec<i64>{vec![msg]}fn fold(state:i64,event:&i64)->i64 {${handled?'loom::handle(["sleep"],|_,_|loom::Reply::Resume(loom::Value::Null),||loom::sleep(2000)).expect("handle").expect("sleep");':'loom::sleep(1).expect("root sleep");'}state+event}}`;}
 async function nativeControl(mode:'timing'|'cancellation'):Promise<Record<string,unknown>> {
   const executable=process.env.LOOM_HANDLER_BENCH,dbPath=process.env.LOOM_BENCH_DB;
   assert(executable&&dbPath,'LOOM_HANDLER_BENCH and LOOM_BENCH_DB required for actual native full-roundtrip timing');
@@ -119,16 +118,13 @@ try {
     assert(page.entries.length===1&&object(page.entries[0]).op==='now'&&object(object(page.entries[0]).outcome).status==='success','handler did not reach callback before trapping: '+JSON.stringify(page));
   });
   await gate(7,async()=>{
-    for(const handled of [true,false]) {const hash=await define(`fold-${handled}`,actorSource(handled));const actor=object((await command('spawn',{hash,initial:0})).result).id;assert(typeof actor==='string','actor id missing');const reply=await raw('send',{actor,msg:7});assert(handled?reply.ok&&reply.result===7:!reply.ok&&/effects forbidden in pure core execution|fold cannot perform effects/.test(JSON.stringify(reply)),JSON.stringify(reply));}
-  });
-  await gate(8,async()=>{
     const fake=await traceEntries(controls,['fake']);assert(fake.length===0,`guest effect recorded: ${JSON.stringify(fake)}`);
     const root=await traceEntries(controls,['forward']);assert(root.length===1&&root[0]!.op==='now',`positive ledger control: ${JSON.stringify(root)}`);
     const again=await traceEntries(controls,['fake']);assert(again.length===0,'second guest-handled call recorded effects');
   });
-  await gate(9,async()=>{const result=object((await call('deferred')).result);assert(JSON.stringify(result.actual)==='[null,null]'&&JSON.stringify(result.actual)===JSON.stringify(result.expected),JSON.stringify(result));});
-  await gate(10,async()=>{assert((await call('catch-drop')).result==='continuation dropped','dropped continuation did not return catchable exact error');await expectError('drop',/continuation dropped/);});
-  await gate(11,async()=>{
+  await gate(8,async()=>{const result=object((await call('deferred')).result);assert(JSON.stringify(result.actual)==='[null,null]'&&JSON.stringify(result.actual)===JSON.stringify(result.expected),JSON.stringify(result));});
+  await gate(9,async()=>{assert((await call('catch-drop')).result==='continuation dropped','dropped continuation did not return catchable exact error');await expectError('drop',/continuation dropped/);});
+  await gate(10,async()=>{
     await expectError('abandon',/abandon|cancel/i);
     const cancellation=await nativeControl('cancellation');
     console.log(JSON.stringify({stage:'borrowed-handler-cancellation',...cancellation}));
@@ -137,7 +133,7 @@ try {
     const timer=setTimeout(()=>child.kill(),600_000);
     try {const result=await Promise.all([new Response(child.stdout).text(),new Response(child.stderr).text(),child.exited]);const output=result[0];const diagnostics=result[1];const code=result[2];assert(code===0&&/^6\/6 shared limit controls pass$/m.test(output),`shared limits exit ${code}\n${output}\n${diagnostics}`);}finally{clearTimeout(timer);}
   });
-  await gate(12,async()=>{
+  await gate(11,async()=>{
     const body='loom::fs::read("local","fixture").expect("read")';
     const denied=await bounded(client!.callTool('loom_define',{lang:'rust',name:'effects-gate-row-denied',source:`#[loom::def(effects=["sleep"])] pub fn main()->String {loom::sleep(0).expect("sleep");${body}}`}),600_000,'define residual refusal');
     assert(!denied.ok&&/residual/i.test(JSON.stringify(denied))&&/fs\.read/.test(JSON.stringify(denied)),JSON.stringify(denied));
@@ -158,12 +154,12 @@ finally {
   try{await bounded(client?.close()??Promise.resolve(),5000,'close');}catch(error){console.error(String(error));}
   clearTimeout(watchdog);
   const passed=gates.filter(g=>g.pass).length;
-  console.log(JSON.stringify({stage:'effects-handlers',passed,total:13,first_failure:gates.find(g=>!g.pass)?.name??null,gates,phase4:{passed:phase4Gates.filter(g=>g.pass).length,total:6,gates:phase4Gates},performance:performanceResult,host_dispatch:hostPerformance}));
-  console.log(`${passed}/13 effects handler checks pass`);
+  console.log(JSON.stringify({stage:'effects-handlers',passed,total:names.length,first_failure:gates.find(g=>!g.pass)?.name??null,gates,phase4:{passed:phase4Gates.filter(g=>g.pass).length,total:6,gates:phase4Gates},performance:performanceResult,host_dispatch:hostPerformance}));
+  console.log(`${passed}/${names.length} effects handler checks pass`);
   console.log(`${phase4Gates.filter(g=>g.pass).length}/6 phase4 checks pass`);
   console.log(`first failing step: ${gates.find(g=>!g.pass)?.name??'none'}`);
   console.log(`handler round trip: ${JSON.stringify(performanceResult)}`);
   // Functional and performance verdicts stay separate, but both are required for exit zero.
-  if(passed!==13||phase4Gates.filter(g=>g.pass).length!==6||performanceResult.pass!==true)process.exitCode=1;
+  if(passed!==names.length||phase4Gates.filter(g=>g.pass).length!==6||performanceResult.pass!==true)process.exitCode=1;
   if(timedOut)process.exit(1);
 }

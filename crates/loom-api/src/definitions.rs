@@ -73,7 +73,7 @@ impl Service {
         };
         self.store
             .define(&def, Some(&request.name), &checked.source, &checked.deps)?;
-        self.store.append("system",&json!({"type":"component_built","component_hash":component_hash,"logs_ref":logs_ref,"ms":built.ms,"size":built.component.len(),"rustc_invocations":built.rustc_invocations}),0)?;
+        self.store.record_definition_event(&json!({"type":"component_built","component_hash":component_hash,"logs_ref":logs_ref,"ms":built.ms,"size":built.component.len(),"rustc_invocations":built.rustc_invocations}))?;
         Ok(self.response(Ok(json!({"def":def,"build":{"ms":built.ms,"component_hash":component_hash,"size":built.component.len(),"logs_ref":logs_ref,"rustc_invocations":built.rustc_invocations}}))))
     }
     pub(super) async fn check_definition(
@@ -217,13 +217,6 @@ impl Service {
                 .rehashed
                 .push(json!({"name":request.name,"previous":hash,"def":def}));
         }
-        updates.stale_actors = self
-            .store
-            .actors()?
-            .into_iter()
-            .filter(|actor| replacements.contains_key(&actor.behavior_hash))
-            .map(|actor| actor.id)
-            .collect();
         Ok(updates)
     }
 }

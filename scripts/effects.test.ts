@@ -1,7 +1,7 @@
 import {test,expect} from "bun:test";
 import {effectRows} from "../ui/src/lib/effects";
 import type {LogEvent} from "../ui/src/lib/api";
-const event=(seq:number,type:string,extra:Record<string,unknown>={}):LogEvent=>({seq,actor:"system",ts:0,event:{type,scope:"call/a",occurrence:1,desc_hash:"hash",...extra}});
+const event=(seq:number,type:string,extra:Record<string,unknown>={}):LogEvent=>({seq,ts:0,event:{type,scope:"call/a",occurrence:1,desc_hash:"hash",...extra}});
 test("completion joins invocation, preserving pending and denied effects",()=>{
  const rows=effectRows([event(1,"effect_invoked"),event(2,"effect_completed",{cached:true,result_hash:"result"}),event(3,"effect_invoked",{occurrence:2}),event(4,"effect_denied",{occurrence:3})]);
  expect(rows.map(row=>row.status)).toEqual(["Cached","Invoked","Denied"]);

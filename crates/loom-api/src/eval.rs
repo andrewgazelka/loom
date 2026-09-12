@@ -36,54 +36,8 @@ impl Service {
         let hash = response.result["def"]["hash"]
             .as_str()
             .context("definition hash missing")?;
-        let actor = match self.store.session(&session)? {
-            Some(actor) => actor,
-            None => {
-                let definition = self
-                    .define_authorized(DefineRequest {
-                        allowed_effects: Some(Vec::new()),
-                        lang: Lang::Rust,
-                        name: "loom/session".into(),
-                        source: SESSION_SOURCE.into(),
-                        deps: BTreeMap::new(),
-                    })
-                    .await;
-                if !definition.ok {
-                    return Ok(definition);
-                }
-                let actor = self
-                    .runtime
-                    .spawn(
-                        definition.result["def"]["hash"]
-                            .as_str()
-                            .context("session behavior hash missing")?,
-                        Value::Null,
-                    )
-                    .await?;
-                self.store.create_session(&session, &actor.id, "owner")?;
-                actor.id
-            }
-        };
         let result = self.runtime.call_def(hash, json!([])).await?;
-        self.runtime
-            .send(
-                &actor,
-                json!({"type":"evaluated","source":request.source,"def":hash,"result":result}),
-            )
-            .await?;
-        Ok(self.response(Ok(json!({"session":session,"actor":actor,"value":result}))))
+        self.store.record_definition_event(&json!({"type":"evaluated","session":session,"source":request.source,"def":hash,"result":result}))?;
+        Ok(self.response(Ok(json!({"session":session,"value":result}))))
     }
 }
-
-const SESSION_SOURCE: &str = r#"
-#[loom::actor(effects=[])]
-pub struct Session;
-impl loom::Actor for Session {
-    type State = loom::Value;
-    type Event = loom::Value;
-    type Msg = loom::Value;
-    fn init() -> Self::State { loom::Value::Null }
-    fn handle(_: &Self::State, msg: Self::Msg) -> Vec<Self::Event> { vec![msg] }
-    fn fold(_: Self::State, event: &Self::Event) -> Self::State { event.clone() }
-}
-"#;

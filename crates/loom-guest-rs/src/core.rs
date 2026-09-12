@@ -188,12 +188,7 @@ mod allocator {
 }
 
 pub trait Guest {
-    fn init() -> Result<Vec<u8>, String> {
-        Err("free definition has no actor initializer".into())
-    }
     fn call(definition: Vec<u8>, args: Vec<u8>) -> Result<Vec<u8>, String>;
-    fn run(state: Vec<u8>, message: Vec<u8>) -> Result<Vec<u8>, String>;
-    fn fold(state: Vec<u8>, event: Vec<u8>) -> Vec<u8>;
 }
 
 pub fn encoded_response(result: Result<Vec<u8>, String>) -> u64 {
@@ -226,32 +221,6 @@ macro_rules! export_core {
         pub unsafe extern "C" fn loom_call(pointer: u32, length: u32) -> u64 {
             let args = unsafe { $crate::core::input(pointer, length) }.to_vec();
             $crate::core::encoded_response(<$guest as $crate::core::Guest>::call(Vec::new(), args))
-        }
-        #[unsafe(no_mangle)]
-        pub extern "C" fn loom_init() -> u64 {
-            $crate::core::encoded_response(<$guest as $crate::core::Guest>::init())
-        }
-        #[unsafe(no_mangle)]
-        pub unsafe extern "C" fn loom_run(
-            state: u32,
-            state_len: u32,
-            msg: u32,
-            msg_len: u32,
-        ) -> u64 {
-            let state = unsafe { $crate::core::input(state, state_len) }.to_vec();
-            let msg = unsafe { $crate::core::input(msg, msg_len) }.to_vec();
-            $crate::core::encoded_response(<$guest as $crate::core::Guest>::run(state, msg))
-        }
-        #[unsafe(no_mangle)]
-        pub unsafe extern "C" fn loom_fold(
-            state: u32,
-            state_len: u32,
-            event: u32,
-            event_len: u32,
-        ) -> u64 {
-            let state = unsafe { $crate::core::input(state, state_len) }.to_vec();
-            let event = unsafe { $crate::core::input(event, event_len) }.to_vec();
-            $crate::core::encoded_response(Ok(<$guest as $crate::core::Guest>::fold(state, event)))
         }
     };
 }

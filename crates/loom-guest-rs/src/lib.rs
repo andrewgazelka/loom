@@ -8,7 +8,7 @@ pub use scoped::{Scope, ScopedJoinHandle, scope};
 mod handlers;
 pub mod preview;
 pub use handlers::{Continuation, Effect, Reply, handle, handle_any};
-pub use loom_guest_macros::{actor, def, schema};
+pub use loom_guest_macros::{def, schema};
 pub use serde;
 use serde::{Serialize, de::DeserializeOwned};
 pub use serde_json;
@@ -58,15 +58,6 @@ pub fn call<F: Invocation>(def: Def<F>, args: F::Args) -> Result<F::Output, Effe
         "call",
         serde_json::json!({"def":def.hash,"args":F::arguments(args)?}),
     )
-}
-
-pub trait Actor {
-    type State: Serialize + DeserializeOwned;
-    type Event: Serialize + DeserializeOwned;
-    type Msg: Serialize + DeserializeOwned;
-    fn init() -> Self::State;
-    fn fold(state: Self::State, event: &Self::Event) -> Self::State;
-    fn handle(state: &Self::State, msg: Self::Msg) -> Vec<Self::Event>;
 }
 
 pub fn now() -> Result<Value, EffectError> {

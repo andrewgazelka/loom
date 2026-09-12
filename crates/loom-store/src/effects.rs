@@ -75,11 +75,9 @@ impl Store {
             existing.as_ref().is_none_or(|h| h == &hash),
             "effect cache result conflict"
         );
-        append(
+        record_definition_event(
             &tx,
-            "system",
             &serde_json::json!({"type":"effect_recorded","desc_hash":desc_hash,"scope":scope,"occurrence":occurrence,"result_hash":hash}),
-            0,
         )?;
         tx.execute(
             "INSERT OR IGNORE INTO effect_results VALUES (?,?,?,?)",

@@ -178,9 +178,7 @@ impl Execution {
         invocation: Invocation,
     ) -> Result<EffectOutput> {
         let mut running = self.instantiate(scope, None, Vec::new()).await?;
-        let is_run = matches!(invocation, Invocation::Run { .. });
         let packed = match invocation {
-            Invocation::Validate => return EffectOutput::value(&Value::Null),
             Invocation::Schema => {
                 if running
                     .instance
@@ -204,25 +202,6 @@ impl Execution {
                     .get_typed_func::<(i32, i32), i64>(&mut running.store, "loom_call")
                     .map_err(|cause| running.error_context(cause))?
                     .call_async(&mut running.store, (buffer.pointer, buffer.length))
-                    .await
-                    .map_err(|cause| running.error_context(cause))? as u64
-            }
-            Invocation::Run { state, message }
-            | Invocation::Fold {
-                state,
-                event: message,
-            } => {
-                let name = if is_run { "loom_run" } else { "loom_fold" };
-                let state = running.input_encoded(&state).await?;
-                let message = running.input_encoded(&message).await?;
-                running
-                    .instance
-                    .get_typed_func::<(i32, i32, i32, i32), i64>(&mut running.store, name)
-                    .map_err(|cause| running.error_context(cause))?
-                    .call_async(
-                        &mut running.store,
-                        (state.pointer, state.length, message.pointer, message.length),
-                    )
                     .await
                     .map_err(|cause| running.error_context(cause))? as u64
             }

@@ -20,7 +20,7 @@ pub(super) fn migrate(connection: &mut Connection) -> Result<()> {
         "INSERT INTO effect_results(desc_hash,scope,occurrence,result_hash)
          SELECT json_extract(bytes,'$.desc_hash'),json_extract(bytes,'$.scope'),
                 json_extract(bytes,'$.occurrence'),json_extract(bytes,'$.result_hash')
-         FROM events WHERE json_extract(bytes,'$.type')='effect_recorded' ORDER BY seq
+         FROM definition_events WHERE json_extract(bytes,'$.type')='effect_recorded' ORDER BY seq
          ON CONFLICT(desc_hash,scope,occurrence) DO NOTHING",
         [],
     )?;

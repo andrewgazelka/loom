@@ -30,7 +30,7 @@ fn commit(
                     crate::trace::persist(&transaction, bundle, hash, bytes)?;
                 }
                 Record::Event { event } => {
-                    append(&transaction, "system", event, 0)?;
+                    record_definition_event(&transaction, event)?;
                 }
                 Record::Value { kind, bytes, hash } => {
                     transaction.execute("INSERT OR IGNORE INTO cas(hash,kind,bytes,created_at,codec) VALUES (?,?,?,unixepoch(),113)", params![hash,kind,bytes])?;
@@ -47,11 +47,9 @@ fn commit(
                         "effect cache result conflict"
                     );
                     if existing.is_none() {
-                        append(
+                        record_definition_event(
                             &transaction,
-                            "system",
                             &serde_json::json!({"type":"effect_recorded", "desc_hash":key.desc_hash, "scope":key.scope, "occurrence":key.occurrence, "result_hash":hash}),
-                            0,
                         )?;
                         transaction.execute(
                             "INSERT INTO effect_results VALUES (?,?,?,?)",
