@@ -44,7 +44,12 @@ pub(super) fn build_fingerprint(root: &Path) -> Result<String, BuildError> {
         Ok(())
     }
     let mut files = Vec::new();
-    for directory in ["crates/loom-guest-rs", "crates/loom-proto", "rustc"] {
+    for directory in [
+        "crates/loom-guest-rs",
+        "crates/loom-guest-macros",
+        "crates/loom-proto",
+        "rustc",
+    ] {
         collect(&root.join(directory), &mut files)?;
     }
     files.push(root.join("Cargo.lock"));

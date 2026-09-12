@@ -111,7 +111,8 @@ impl Lock {
     }
 }
 fn sdk_package(key: &PackageKey) -> bool {
-    key.source.is_none() && ["loom-guest-rs", "loom-proto"].contains(&key.name.as_str())
+    key.source.is_none()
+        && ["loom-guest-rs", "loom-guest-macros", "loom-proto"].contains(&key.name.as_str())
 }
 fn sdk_roots(lock: &Lock) -> BTreeSet<PackageKey> {
     lock.packages

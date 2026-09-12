@@ -8,7 +8,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-const SDK: [&str; 2] = ["loom-guest-rs", "loom-proto"];
+const SDK: [&str; 3] = ["loom-guest-rs", "loom-guest-macros", "loom-proto"];
 
 #[derive(Deserialize)]
 struct Lock {
