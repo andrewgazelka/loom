@@ -191,8 +191,7 @@ impl Runtime {
         Self::create(store, Some(resolver))
     }
     fn create(store: Store, resolver: Option<Arc<dyn ComponentResolver>>) -> Result<Self> {
-        let compilation_cache = Arc::new(LoomCompilationCache::new(store.clone())?);
-        let core_engine = sharedcore::engine(compilation_cache.clone())?;
+        let (core_engine, compilation_cache) = sharedcore::engine(store.clone())?;
         let runtime = Self {
             inner: Arc::new(Inner {
                 model: loom_model::Model::from_env(store.clone())?,

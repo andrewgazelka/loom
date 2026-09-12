@@ -10,13 +10,18 @@ transaction, OTP-parity supervision trees.
 ## Try it
 
 ```sh
-nix run .                 # starts loomd, prints the token file path
-nix run . -- --stdio      # same daemon, MCP over stdio for a coding agent
-cargo test -p loom-actor  # 22 tests: the actor engine, standalone
+nix run .#repl               # starts loomd, prints the token URL, opens the browser
+nix run . -- --stdio         # same daemon, MCP over stdio for a coding agent
+nix shell . -c loom --help   # the loom CLI, talking to a running daemon
+cargo test -p loom-actor     # 22 tests: the actor engine, standalone
 ```
 
-Open `http://127.0.0.1:8787` and paste the printed token for the browser REPL.
-See [docs/guide.md](docs/guide.md) for running without Nix and for the HTTP API.
+`nix run .#repl` prints `Loom REPL: http://127.0.0.1:8787/#token=<token>` and
+opens it in your browser (the token rides the URL fragment, so it never
+reaches the server or its logs). The package installs two programs: `loomd`,
+the daemon, and `loom`, the CLI; `nix shell .` puts both on `PATH`, and
+`nix build .` leaves them in `result/bin`. See [docs/guide.md](docs/guide.md)
+for running without Nix and for the HTTP API.
 
 ## Effects
 
