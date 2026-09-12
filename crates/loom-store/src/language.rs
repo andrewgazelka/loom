@@ -3,7 +3,7 @@ use rusqlite::{Connection, OptionalExtension};
 
 /// Reject unsupported persisted languages before any migration changes the store.
 pub(super) fn validate(connection: &Connection) -> Result<()> {
-    for table in ["defs", "actors"] {
+    for (table, id_column) in [("defs", "hash"), ("actors", "id")] {
         let exists: bool = connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)",
             [table],
@@ -12,16 +12,16 @@ pub(super) fn validate(connection: &Connection) -> Result<()> {
         if !exists {
             continue;
         }
-        let language: Option<String> = connection
+        let row: Option<(String, String)> = connection
             .query_row(
-                &format!("SELECT lang FROM {table} WHERE lang != 'rust' LIMIT 1"),
+                &format!("SELECT {id_column},lang FROM {table} WHERE lang != 'rust' LIMIT 1"),
                 [],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        if let Some(language) = language {
+        if let Some((id, language)) = row {
             bail!(
-                "unsupported guest language {language:?} in store table {table}; only rust is supported; open a new Rust-only store"
+                "unsupported guest language {language:?} in store table {table} row {id_column}={id:?}; only rust is supported; open a new Rust-only store"
             );
         }
     }

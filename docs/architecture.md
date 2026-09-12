@@ -49,7 +49,7 @@ graph TD
     end
     subgraph "Build and identity"
         HashRustc["hash-rustc (round 3)"]
-        Build[loom-build: component/rustc sidecars]
+        Build[loom-build: rustc sidecars]
         CAS[Content-addressed store]
         Names[Names and defs]
     end
@@ -139,7 +139,7 @@ Lineage is `SELECT * FROM code_changes ORDER BY seq` on the actor's own file: it
 |---|---|---|
 | `loom-proto` | shared | `crates/loom-proto/src/lib.rs` — values, signatures, protocol, DAG-CBOR |
 | `loom-check` | execution / identity | `crates/loom-check/src/lib.rs` — language checking, `CheckedDef`, effect-row analysis (`rust_effects.rs`), safety admission (`safety.rs`) |
-| `loom-build` | build and identity | `crates/loom-build/src/lib.rs` — component/rustc build sidecars, build cache, crate registry (`registry.rs`) |
+| `loom-build` | build and identity | `crates/loom-build/src/lib.rs` — rustc build sidecars, build cache, crate registry (`registry.rs`) |
 | `loom-guest-rs`, `loom-guest-macros` | execution | `crates/loom-guest-rs/src/lib.rs` — synchronous Rust guest API, `scope`/`spawn`, `handle`/`handle_any` |
 | `loom-rt` | execution | `crates/loom-rt/src/lib.rs` — Wasmtime fibers, shared-memory executions (`sharedcore.rs`), root handler (`root_handler.rs`), machines (`machine.rs`) |
 | `loom-store` | storage / identity | `crates/loom-store/src/lib.rs` — CAS, SQLite event history, definitions, names; still holds the legacy event-fold actor tables (round 4 removes them) |

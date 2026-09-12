@@ -77,7 +77,7 @@ Opening an older database performs a transactional migration of structured value
 | `loom-proto` | Shared values, signatures, protocol and DAG-CBOR |
 | `loom-store` | CAS, SQLite event history, projections, names, snapshots, effects |
 | `loom-check` | Language checking and definition identity |
-| `loom-build` | Component compiler sidecars and build cache |
+| `loom-build` | Rust compiler sidecars and build cache |
 | `loom-guest-rs`, `loom-guest-macros` | Synchronous Rust guest API and exports |
 | `loom-rt` | Wasmtime fibers, actors, effects, machines |
 | `loom-maintenance` | Backups, bounded index and build-cache maintenance |
@@ -118,9 +118,9 @@ export LOOM_TOKEN='replace-with-your-token'
 podman compose -f deploy/compose.yaml up --build
 ```
 
-The image includes the compiler sidecars and static UI. Data and build cache live under `/data`. The compose file binds the service to host loopback. Use the backup command for a consistent SQLite snapshot while the server is running. A plain copy of an active SQLite file may omit WAL data.
+The image includes the Rust compiler sidecars and static UI. Data and build cache live under `/data`. The compose file binds the service to host loopback. Use the backup command for a consistent SQLite snapshot while the server is running. A plain copy of an active SQLite file may omit WAL data.
 
-`scripts/container-smoke.sh` builds the image and checks both guest languages over HTTP and MCP, a vendored Rust crate, build sandbox isolation, and clean SIGTERM shutdown. The Compose configuration unmasks the outer container's `/proc` paths so nested build namespaces can mount private procfs; builds retain their isolated network, filesystem, and cleared environment. `scripts/remote-check.sh acceptance` runs the milestone suite on the configured Linux development node within an 8-core, 24-GB systemd user unit.
+`scripts/container-smoke.sh` builds the image and checks Rust guest definitions over HTTP and MCP, a vendored Rust crate, build sandbox isolation, and clean SIGTERM shutdown. The Compose configuration unmasks the outer container's `/proc` paths so nested build namespaces can mount private procfs; builds retain their isolated network, filesystem, and cleared environment. `scripts/remote-check.sh acceptance` runs the milestone suite on the configured Linux development node within an 8-core, 24-GB systemd user unit.
 
 ### Codex over MCP
 
