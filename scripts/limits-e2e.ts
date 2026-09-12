@@ -96,7 +96,7 @@ try {
   const initialized = await rpc("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "loom-limits", version: "1" } });
   protocolVersion = initialized.protocolVersion;
   await rpc("notifications/initialized", {}, true);
-  const denied = await rpc("tools/call", { name: "loom_add", arguments: { name: "forbidden_mcp", source: "pub fn main() -> i64 { 1 }" } });
+  const denied = await rpc("tools/call", { name: "add", arguments: { name: "forbidden_mcp", source: "pub fn main() -> i64 { 1 }" } });
   const denial = JSON.parse(denied.content.find((item: any) => item.type === "text").text);
   check(denial.ok === false && denial.result?.code === "forbidden", "MCP read token allowed definition");
   console.log(`${checks}/${checks} HTTP/MCP auth, scopes, limits controls pass`);

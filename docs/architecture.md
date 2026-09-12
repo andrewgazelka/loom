@@ -147,7 +147,7 @@ Lineage is `SELECT * FROM code_changes ORDER BY seq` on the actor's own file: it
 | `loom-maintenance` | storage | `crates/loom-maintenance/src/lib.rs` — backups, bounded index and build-cache maintenance |
 | `loom-process`, `loom-model` | execution support | `crates/loom-process/src/lib.rs`, `crates/loom-model/src/lib.rs` — supervised process execution, model provider boundary |
 | `loom-api` | control surface | `crates/loom-api/src/lib.rs` — HTTP/WebSocket transport, auth (`auth.rs`), shared `Service` |
-| `loom-mcp` | control surface | `crates/loom-mcp/src/lib.rs` — MCP tools (`loom_add`, `loom_view`, `loom_update`, `loom_history`, `loom_diff`, `loom_run`, `loom_find`, `loom_dependents`, `loom_command`) and `crates/loom-mcp/src/actors.rs` (`actor_*` tools and `actor://` resources) |
+| `loom-mcp` | control surface | `crates/loom-mcp/src/lib.rs` — MCP tools (`add`, `view`, `update`, `history`, `diff`, `run`, `find`, `dependents`, `command`) and `crates/loom-mcp/src/actors.rs` (actor tools and `actor://` resources) |
 | `loom-cli`, `loomd` | control surface | `crates/loom-cli/src/main.rs`, `crates/loomd/src/main.rs` — terminal client, server entrypoint |
 
 ## 8. What is deliberately not here

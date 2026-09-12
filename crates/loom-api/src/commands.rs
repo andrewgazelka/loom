@@ -1,8 +1,13 @@
 use super::*;
 
 impl Service {
-    pub async fn command(&self, request: CommandRequest) -> Response {
+    pub async fn command(&self, mut request: CommandRequest) -> Response {
         if let Err(error) = loom_proto::encode(&request.args) {
+            return self.response(Err(anyhow::Error::msg(error)));
+        }
+        if let Some(verb) = loom_proto::verbs::lookup(&request.command)
+            && let Err(error) = verb.normalize(&mut request.args)
+        {
             return self.response(Err(anyhow::Error::msg(error)));
         }
         if let Err(error) = self.access.require(auth::command_scope(&request.command)) {
@@ -11,12 +16,34 @@ impl Service {
         self.response(self.command_inner(request).await)
     }
     async fn command_inner(&self, request: CommandRequest) -> Result<Value> {
+        let request = if request.command == "command" {
+            let command = field(&request.args, "command")?.to_owned();
+            ensure!(command != "command", "nested command is not allowed");
+            let mut args = request.args["args"].clone();
+            if let Some(verb) = loom_proto::verbs::lookup(&command) {
+                verb.normalize(&mut args).map_err(anyhow::Error::msg)?;
+            }
+            self.access.require(auth::command_scope(&command))?;
+            CommandRequest {
+                command,
+                args,
+                ..request
+            }
+        } else {
+            request
+        };
         let args = &request.args;
         match request.command.as_str() {
-            "add" | "view" | "update" | "history" | "diff" | "run" | "find" | "dependents" => {
+            command
+                if loom_proto::verbs::lookup(command)
+                    .is_some_and(|verb| verb.family == loom_proto::verbs::Family::Definition) =>
+            {
                 self.unison(&request.command, args).await
             }
-            command if command.starts_with("actor_") => {
+            command
+                if loom_proto::verbs::lookup(command)
+                    .is_some_and(|verb| verb.family == loom_proto::verbs::Family::Actor) =>
+            {
                 self.actor_command(command, args.clone()).await
             }
             "cas.list" => {

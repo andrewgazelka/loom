@@ -27,14 +27,14 @@ impl Service {
             let bundle = self
                 .store
                 .get(reference)?
-                .context("Rust source bundle not found")?;
+                .with_context(|| format!("Rust source bundle {reference} not found"))?;
             request.source = decode_source_bundle(&bundle)?;
         }
         for hash in request.deps.values_mut() {
             *hash = self
                 .store
                 .resolve(hash)?
-                .context("dependency not found")?
+                .with_context(|| format!("dependency {hash} not found"))?
                 .hash;
         }
         let checked = self.check_definition(&request).await?;
@@ -65,10 +65,14 @@ impl Service {
         );
         let component_hash = self.store.put("component", &built.component)?;
         let logs_ref = self.store.put("blob", built.logs.as_bytes())?;
+        let identity = built
+            .identity
+            .as_ref()
+            .context("builder returned no item identity")?;
         let def = Def {
             allowed_effects: request.allowed_effects.clone(),
             observed_effects: Vec::new(),
-            hash: checked.hash,
+            hash: identity.behavior_hash.clone(),
             lang: checked.lang,
             component_hash: Some(component_hash.clone()),
             sig: checked.sig,
@@ -78,12 +82,7 @@ impl Service {
             Some(&request.name),
             &checked.source,
             &checked.deps,
-            Some(
-                built
-                    .identity
-                    .as_ref()
-                    .context("builder returned no item identity")?,
-            ),
+            Some(identity),
         )?;
         self.store.record_definition_event(&json!({"type":"component_built","component_hash":component_hash,"logs_ref":logs_ref,"ms":built.ms,"size":built.component.len(),"rustc_invocations":built.rustc_invocations}))?;
         Ok(self.response(Ok(json!({"def":def,"build":{"ms":built.ms,"component_hash":component_hash,"size":built.component.len(),"logs_ref":logs_ref,"rustc_invocations":built.rustc_invocations}}))))

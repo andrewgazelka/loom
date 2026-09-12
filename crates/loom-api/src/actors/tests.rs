@@ -21,10 +21,7 @@ async fn dynamic_actor_unknown_name_is_named() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let service = service(directory.path()).await?;
     let error = service
-        .actor_command(
-            "actor_spawn",
-            json!({"behavior_hash":"missing-actor","init":null}),
-        )
+        .actor_command("spawn", json!({"def":"missing-actor","init":null}))
         .await
         .unwrap_err();
     assert!(format!("{error:#}").contains("missing-actor"), "{error:#}");
@@ -52,10 +49,7 @@ pub fn handle(_message: Vec<u8>) {
         .await;
     assert!(added.ok, "{added:?}");
     let spawned = service
-        .actor_command(
-            "actor_spawn",
-            json!({"behavior_hash":"new-actor","init":{}}),
-        )
+        .actor_command("spawn", json!({"def":"new-actor","init":{}}))
         .await?;
     let id = spawned["id"].as_str().unwrap();
     let node = &service.actors.as_ref().unwrap().node;

@@ -1,3 +1,4 @@
+import {commandNames} from './verbs';
 /** Explicit local setup; preserves all non-Loom configuration verbatim. */
 import {readFile,writeFile,rename,stat,mkdir} from 'node:fs/promises';
 import {dirname,join} from 'node:path';
@@ -21,7 +22,7 @@ const retained=previous.split('\n').filter(line=>{
   if(section)skipping=/^mcp_servers\.(?:loom|"loom")\s*(?:\.|$)/.test(section[1]!);
   return !skipping;
 }).join('\n').trimEnd();
-const tools=['loom_add', 'loom_view', 'loom_update', 'loom_history', 'loom_diff', 'loom_run', 'loom_find', 'loom_dependents', 'loom_command', 'actor_list', 'actor_tree', 'actor_info', 'actor_send', 'actor_spawn', 'actor_stop', 'actor_restart', 'actor_promote', 'actor_promote_where', 'actor_lineage', 'actor_dead_letters', 'actor_fork', 'actor_validate', 'actor_sql', 'actor_whereis', 'actor_register', 'actor_members', 'actor_behaviors', 'actor_run'];
+const tools=await commandNames();
 const table=['[mcp_servers.loom]','tool_timeout_sec = 180',`url = ${JSON.stringify(url.href)}`,'[mcp_servers.loom.http_headers]',`Authorization = ${JSON.stringify(`Bearer ${token}`)}`,...tools.flatMap(tool=>[`[mcp_servers.loom.tools.${tool}]`,'approval_mode = "approve"'])].join('\n');
 const updated=`${retained}\n\n${table}\n`;
 const parsed=Bun.TOML.parse(updated) as {mcp_servers?:{loom?:{url?:string;tools?:Record<string,{approval_mode?:string}>}}};

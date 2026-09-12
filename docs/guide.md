@@ -45,14 +45,14 @@ The CLI, HTTP commands, and MCP tools use the same definition operations. The CL
 
 | CLI | MCP tool | Result |
 | --- | --- | --- |
-| `add <file.rs> [--name n]` | `loom_add` | Name, definition hash, entry item hash, Wasm hash, and item table |
-| `view <name-or-hash>` | `loom_view` | Stored source and item table |
-| `update <name> <file.rs>` | `loom_update` | New definition and name binding; old hash remains runnable |
-| `history <name>` | `loom_history` | Hash chain, timestamps, and changed items between entries |
-| `diff <old-hash> <new-hash>` | `loom_diff` | Added, removed, and changed items, with their hashes |
-| `run <name-or-hash> [args-json]` | `loom_run` | Output and recorded effects |
-| `find <text>` | `loom_find` | Matching names and item names |
-| `dependents <hash>` | `loom_dependents` | Definitions with a dependency pinned to the hash |
+| `add <file.rs> [--name n]` | `add` | Name, definition hash, entry item hash, Wasm hash, and item table |
+| `view <name-or-hash>` | `view` | Stored source and item table |
+| `update <name> <file.rs>` | `update` | New definition and name binding; old hash remains runnable |
+| `history <name>` | `history` | Hash chain, timestamps, and changed items between entries |
+| `diff <old-hash> <new-hash>` | `diff` | Added, removed, and changed items, with their hashes |
+| `run <name-or-hash> [args-json]` | `run` | Output and recorded effects |
+| `find <text>` | `find` | Matching names and item names |
+| `dependents <hash>` | `dependents` | Definitions with a dependency pinned to the hash |
 
 ```sh
 loom --token "$LOOM_TOKEN" add sum.rs --name sum
@@ -70,29 +70,39 @@ pub fn sum(a: i64, b: i64) -> i64 { a + b }
 
 HTTP clients post `{ "command": "run", "args": { "target": "sum", "args": [20,22] } }` to `/v1/command` with the bearer token. `add` takes `source` and an optional `name`; `update` takes `name` and `source`. The remaining definition arguments are `target` for `view`, `name` for `history`, `old` and `new` for `diff`, `text` for `find`, and `hash` for `dependents`.
 
-Item hashes describe compiler-resolved definitions. Renaming a local variable or reformatting source leaves them unchanged. A changed helper can change its callers' hashes too. The definition hash preserves the source identity, while the Wasm and toolchain hashes identify its executable build. Builds require the `hash-rustc` driver and reject missing identity outputs. Stores without `defs.behavior_hash` are rejected by column name.
+Item hashes describe compiler-resolved definitions. Renaming a local variable or reformatting source leaves them unchanged. A changed helper can change its callers' hashes too. The definition hash is the driver’s resolved-HIR entry hash. Alpha-renaming a local leaves both the definition hash and history unchanged; changing a constant changes the hash. Source revisions have their own BLAKE3 hashes. A published definition pins its executable and schema; a conflicting publication is rejected. The Wasm and toolchain hashes identify its executable build. Builds require the `hash-rustc` driver and reject missing identity outputs. Stores without `defs.behavior_hash` are rejected by column name.
 
-Actor commands call the same service operations as the existing MCP actor tools:
+Actor commands use the same names, argument schemas, admission checks, and response envelope on CLI, HTTP, and MCP:
 
 | CLI | MCP tool |
 | --- | --- |
-| `spawn <def> [init]` | `actor_spawn` |
-| `send <id> <msg>` | `actor_send` |
-| `tree` | `actor_tree` |
-| `info <id>` | `actor_info` |
-| `lineage <id>` | `actor_lineage` |
-| `validate <id> <candidate> <k>` | `actor_validate` |
-| `promote <id> <hash> --rationale <text>` | `actor_promote` |
-| `fork <id> <seq>` | `actor_fork` |
-| `actors` | `actor_list` |
+| `spawn <def> [init]` | `spawn` |
+| `send <id> <msg>` | `send` |
+| `tree` | `tree` |
+| `info <id>` | `info` |
+| `lineage <id>` | `lineage` |
+| `validate <id> <candidate> <k>` | `validate` |
+| `promote <id> <hash> --author <name> --rationale <text>` | `promote` |
+| `fork <id> <seq>` | `fork` |
+| `actors` | `actors` |
+| `stop <id> <reason>` | `stop` |
+| `restart <id> <verb>` | `restart` |
+| `dead_letters <id>` | `dead_letters` |
+| `sql <id> <query> [--params <json>]` | `sql` |
+| `whereis <name>` | `whereis` |
+| `register <name> <id>` | `register` |
+| `members <group>` | `members` |
+| `behaviors` | `behaviors` |
+| `promote_where <old> <new> --author <name> --rationale <text>` | `promote_where` |
+| `drain` | `drain` |
 
 Actor behaviors resolve from stored definitions when `spawn` runs; a running node can spawn a newly added definition by name or hash. Actor entries accept one `Vec<u8>` message, with optional `LOOM_SCHEMA` SQL. Each actor pins its resolved definition hash. Each actor owns its domain tables, inbox, effects, and outbox in one Turso file. See [Actors on Turso](actors-turso.md) for transactions, supervision, and behavior changes.
 
-Client responses contain `ok`, `seq`, `result`, and `diagnostics`. WebSocket clients connect to `/v1/stream` and send `{ "token": "...", "after": 0 }` as their first message; the server streams durable events after that cursor.
+All responses, including MCP actor responses and failures, use `{ok, seq, result, diagnostics}`. `spawn` defaults omitted `init` to `null` everywhere. Promotions require `author` and `rationale`; validation uses an unsigned 32-bit `k`. `send` returns a cursor on success; a trapped message returns `ok: false` with its actor id, message sequence, and cause. WebSocket clients connect to `/v1/stream` and send `{ "token": "...", "after": 0 }` as their first message; the server streams durable events after that cursor.
 
 ## DAG-CBOR and links
 
-Rust guests use deterministic DAG-CBOR at the core wasm effect boundary. Structured CAS values use the same codec; core wasm binaries, source bundles, and other raw bytes retain the raw codec. JSON clients represent a link as exactly `{ "$ref": "<CID>" }`. In DAG-CBOR this becomes tag 42 containing the zero-prefixed binary CID. Local links use CIDv1 with a BLAKE3-256 digest and distinguish DAG-CBOR (`0x71`) from raw bytes (`0x55`). Definition identities remain source hashes.
+Rust guests use deterministic DAG-CBOR at the core wasm effect boundary. Structured CAS values use the same codec; core wasm binaries, source bundles, and other raw bytes retain the raw codec. JSON clients represent a link as exactly `{ "$ref": "<CID>" }`. In DAG-CBOR this becomes tag 42 containing the zero-prefixed binary CID. Local links use CIDv1 with a BLAKE3-256 digest and distinguish DAG-CBOR (`0x71`) from raw bytes (`0x55`). Definition identities are resolved-HIR entry hashes; source revisions use separate source hashes.
 
 Maps have string keys ordered by encoded length and then bytes. Decoders reject duplicate keys, nonminimal or indefinite encodings, other tags, malformed CIDs, undefined, nonfinite floats, and trailing bytes. Floats use 64 bits. The shared JSON value model encodes safe integral numbers as integers; Rust integers outside JavaScript's safe range are rejected instead of losing precision across languages.
 
@@ -119,7 +129,7 @@ Stores containing retired actor tables are rejected at open with an error naming
 | `loom-mcp` | MCP tools, prompts and resources |
 | `loom-cli`, `loomd` | Terminal client and server entrypoint |
 
-Rust definitions built through `loom_add` use the [shared-core ABI](shared-core-abi.md), with `loom.perform` dispatching through guest handlers to the outermost host handler.
+Rust definitions built through `add` use the [shared-core ABI](shared-core-abi.md), with `loom.perform` dispatching through guest handlers to the outermost host handler.
 
 ## Verify
 
@@ -191,7 +201,7 @@ Machine filesystem effects resolve from a pinned root directory handle. Parent t
 
 These snapshots observe selected files across the process interval. They do not enumerate every write, track metadata-only changes, or distinguish concurrent writers. Historical effects without snapshots remain browsable, with no invented diff.
 
-Dependencies remain pinned when a definition name moves. `update` retains its existing dependency pins and effect policy unless replacements are supplied. Use `--deps '{"alias":"<hash>"}'` to replace pins and `--allowed-effects '[]'` to deny effects; explicit `null` clears the effect policy. Use `dependents <hash>` to find callers and update each caller explicitly. Actor behavior changes use `promote` or MCP `actor_promote`.
+Dependencies remain pinned when a definition name moves. `update` retains its existing dependency pins and effect policy unless replacements are supplied. Use `--deps '{"alias":"<hash>"}'` to replace pins and `--allowed_effects '[]'` to deny effects; explicit `null` clears the effect policy. Use `dependents <hash>` to find callers and update each caller explicitly. Actor behavior changes use `promote` or MCP `promote`.
 
 ## Guest-defined effect handlers
 

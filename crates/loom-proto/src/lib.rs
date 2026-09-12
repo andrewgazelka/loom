@@ -1,5 +1,6 @@
 mod cas;
 pub mod core_protocol;
+pub mod verbs;
 pub use cas::*;
 use serde::{Deserialize, Serialize};
 pub use serde_json::Value;
@@ -256,7 +257,8 @@ pub struct LlmResult {
     pub usage: Option<Value>,
 }
 
-/// Canonical v1 identity shared by checking, persistence and migration.
+/// Canonical compilation inputs used by the checker and build cache.
+/// This is not a definition identity: published definitions use the driver entry hash.
 pub fn definition_identity(
     lang: Lang,
     source: &str,

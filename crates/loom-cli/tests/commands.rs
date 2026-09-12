@@ -90,36 +90,6 @@ impl Drop for Server {
 }
 
 #[tokio::test]
-async fn definition_commands_reach_shared_service() {
-    let server = Server::start().await;
-    let file = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(file.path(), "not valid Rust").unwrap();
-    let path = file.path().to_str().unwrap();
-    let cases = [
-        vec!["add", path, "--name", "counter"],
-        vec!["view", "missing"],
-        vec!["update", "missing", path],
-        vec!["history", "missing"],
-        vec!["diff", "missing", "other"],
-        vec!["run", "missing", "{\"value\":1}"],
-        vec!["dependents", "missing"],
-    ];
-    for arguments in cases {
-        let response = server.invoke(&arguments).await;
-        let error = response.result["error"].as_str().unwrap_or("");
-        assert!(
-            !error.contains("unknown command"),
-            "{arguments:?}: {response:?}"
-        );
-        assert!(
-            !error.contains("missing string argument"),
-            "{arguments:?}: {response:?}"
-        );
-    }
-    assert!(server.invoke(&["find", "absent"]).await.ok);
-}
-
-#[tokio::test]
 async fn actor_commands_reach_shared_service() {
     let server = Server::start().await;
     let spawned = server.invoke(&["spawn", "counter-v1"]).await;
@@ -139,6 +109,17 @@ async fn actor_commands_reach_shared_service() {
         let response = server.invoke(&arguments).await;
         assert!(response.ok, "{arguments:?}: {response:?}");
     }
+    for arguments in [
+        vec!["dead_letters", id],
+        vec!["sql", id, "SELECT 1 AS value"],
+        vec!["register", "transport-counter", id],
+        vec!["whereis", "transport-counter"],
+        vec!["members", "absent-group"],
+        vec!["behaviors"],
+    ] {
+        let response = server.invoke(&arguments).await;
+        assert!(response.ok, "{arguments:?}: {response:?}");
+    }
     let validated = server.invoke(&["validate", id, "counter-v1", "1"]).await;
     assert!(validated.ok, "{validated:?}");
     assert!(
@@ -146,11 +127,21 @@ async fn actor_commands_reach_shared_service() {
         "{validated:?}"
     );
     let promoted = server
-        .invoke(&["promote", id, "counter-v1", "--rationale", "verified"])
+        .invoke(&[
+            "promote",
+            id,
+            "counter-v1",
+            "--rationale",
+            "verified",
+            "--author",
+            "transport-test",
+        ])
         .await;
     assert!(promoted.ok, "{promoted:?}");
     let forked = server.invoke(&["fork", id, "0"]).await;
     assert!(forked.ok, "{forked:?}");
+    assert!(server.invoke(&["stop", id, "transport-test"]).await.ok);
+    assert!(server.invoke(&["restart", id, "resume"]).await.ok);
 }
 
 #[tokio::test]
@@ -194,13 +185,64 @@ fn retired_vocabulary_is_rejected() {
             .output()
             .unwrap();
         assert!(!output.status.success());
-        assert!(String::from_utf8_lossy(&output.stderr).contains("error:"));
+        let response: loom_proto::Response = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(!response.ok);
+        assert!(
+            response.result["error"]
+                .as_str()
+                .unwrap()
+                .contains("error:")
+        );
     }
 }
 
-#[tokio::test]
-#[ignore = "requires Rust guest toolchain and LOOM_COMPILER_CACHE_OWNER"]
-async fn real_guest_definition_commands() {
+#[test]
+fn real_guest_definition_commands() {
+    const CHILD: &str = "LOOM_CLI_GUEST_TEST_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(definition_commands_reach_shared_service());
+        return;
+    }
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let pin_path = root.join("tools/hash-rustc/rust-toolchain.toml");
+    let pin = std::fs::read_to_string(&pin_path).unwrap();
+    let channel = pin
+        .lines()
+        .find_map(|line| {
+            let (key, value) = line.split_once('=')?;
+            (key.trim() == "channel").then(|| value.trim().trim_matches('"'))
+        })
+        .expect("driver toolchain pin must name channel");
+    let rustc = std::process::Command::new("rustup")
+        .args(["which", "--toolchain", channel, "rustc"])
+        .output()
+        .expect("resolve pinned guest rustc using rustup");
+    assert!(
+        rustc.status.success(),
+        "{}: {}",
+        pin_path.display(),
+        String::from_utf8_lossy(&rustc.stderr)
+    );
+    let rustc_path = String::from_utf8(rustc.stdout).unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "real_guest_definition_commands", "--nocapture"])
+        .env(CHILD, "1")
+        .env("RUSTUP_TOOLCHAIN", channel)
+        .env("RUSTC", rustc_path.trim())
+        .env("LOOM_COMPILER_CACHE_OWNER", env!("CARGO_BIN_EXE_loom"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "guest workflow failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+async fn definition_commands_reach_shared_service() {
     let server = Server::with_registry(true).await;
     let file = tempfile::NamedTempFile::new().unwrap();
     let path = file.path().to_str().unwrap();

@@ -36,6 +36,11 @@ async fn add_then_view_by_hash() {
     let added = add(&service, FIRST).await;
     let viewed = command(&service, "view", json!({"target":added["hash"]})).await;
     assert_eq!(viewed["hash"], added["hash"]);
+    assert_eq!(added["hash"], added["behavior_hash"]);
+    assert_eq!(
+        command(&service, "run", json!({"target":added["hash"]})).await["output"],
+        41
+    );
     assert_eq!(
         added["entries"]["main"]["effects"],
         json!({"labels":[],"unknown":false})
@@ -93,7 +98,17 @@ async fn history_lists_changed_items() {
 async fn diff_reports_item_level_changes() {
     let service = service();
     let old = add(&service, FIRST).await;
-    let renamed = add(&service, &FIRST.replace("value", "renamed")).await;
+    let renamed = command(
+        &service,
+        "update",
+        json!({"name":"answer","source":FIRST.replace("value", "renamed")}),
+    )
+    .await;
+    assert_eq!(old["hash"], renamed["hash"]);
+    let history = command(&service, "history", json!({"name":"answer"})).await;
+    assert_eq!(history.as_array().unwrap().len(), 1);
+    let viewed = command(&service, "view", json!({"target":renamed["hash"]})).await;
+    assert!(viewed["source"].as_str().unwrap().contains("renamed"));
     let diff = command(
         &service,
         "diff",
@@ -103,13 +118,8 @@ async fn diff_reports_item_level_changes() {
     for key in ["added", "removed", "changed"] {
         assert!(diff[key].as_array().unwrap().is_empty(), "{diff}");
     }
-    let constant = format!("pub const UNUSED: i32 = 41;\n{FIRST}");
-    let old = add(&service, &constant).await;
-    let new = add(
-        &service,
-        &constant.replacen("UNUSED: i32 = 41", "UNUSED: i32 = 42", 1),
-    )
-    .await;
+    let new = add(&service, SECOND).await;
+    assert_ne!(old["hash"], new["hash"]);
     let diff = command(
         &service,
         "diff",

@@ -70,11 +70,11 @@ impl Service {
         let old = self
             .store
             .resolve(old)?
-            .context("old definition not found")?;
+            .with_context(|| format!("definition {old:?} not found"))?;
         let new = self
             .store
             .resolve(new)?
-            .context("new definition not found")?;
+            .with_context(|| format!("definition {new:?} not found"))?;
         let before = self.items(&old.hash)?;
         let after = self.items(&new.hash)?;
         let mut added = Vec::new();
@@ -155,6 +155,11 @@ impl Service {
             "view" => self.view_definition(field(args, "target")?),
             "diff" => self.diff_items(field(args, "old")?, field(args, "new")?),
             "history" => {
+                let name = field(args, "name")?;
+                ensure!(
+                    self.store.current_names()?.contains_key(name),
+                    "definition name {name:?} not found"
+                );
                 let mut history = Vec::new();
                 let mut previous: Option<String> = None;
                 for revision in self.store.name_history(field(args, "name")?)? {
@@ -168,10 +173,11 @@ impl Service {
                 Ok(json!(history))
             }
             "run" => {
+                let target = field(args, "target")?;
                 let def = self
                     .store
-                    .resolve(field(args, "target")?)?
-                    .context("definition not found")?;
+                    .resolve(target)?
+                    .with_context(|| format!("definition {target:?} not found"))?;
                 let call = self
                     .runtime
                     .call_def_timed(
@@ -205,10 +211,14 @@ impl Service {
                 }
                 Ok(json!(matches))
             }
-            "dependents" => Ok(json!(
-                self.store
-                    .dependents(field(args, "hash")?.trim_start_matches('#'))?
-            )),
+            "dependents" => {
+                let target = field(args, "hash")?;
+                let definition = self
+                    .store
+                    .resolve(target)?
+                    .with_context(|| format!("definition {target:?} not found"))?;
+                Ok(json!(self.store.dependents(&definition.hash)?))
+            }
             _ => bail!("unknown definition operation {operation}"),
         }
     }

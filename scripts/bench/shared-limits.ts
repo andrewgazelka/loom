@@ -7,14 +7,14 @@ const names=['nested jobs exceed active worker count','lifetime job admission bo
 let client:LoomMcpClient|undefined;
 function assert(value:unknown,message:string):asserts value {if(!value)throw new Error(message);}
 async function define(name:string,source:string) {
-  const reply=await client!.callTool('loom_add',{name:`shared-limits-${name}`,source});
+  const reply=await client!.callTool('add',{name:`shared-limits-${name}`,source});
   assert(reply.ok,JSON.stringify(reply));
   const hash=object(object(reply.result).def).hash;
   assert(typeof hash==='string','missing definition hash');
   return hash;
 }
 async function call(hash:string,args:unknown[]=[]) {
-  const reply=await client!.callTool('loom_run',{target:hash,args});
+  const reply=await client!.callTool('run',{target:hash,args});
   return reply.ok ? {...reply,result:object(reply.result).output} : reply;
 }
 async function gate(name:string,body:()=>Promise<void>) {

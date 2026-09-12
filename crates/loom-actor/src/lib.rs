@@ -29,6 +29,8 @@ mod pump;
 mod remote_store;
 mod reset;
 mod scheduler;
+mod send_outcome;
+pub use send_outcome::SendOutcome;
 mod schema;
 mod shipping_history;
 mod supervision;

@@ -2,6 +2,7 @@ pub mod actors;
 mod commands;
 mod definitions;
 mod http;
+mod message_failure;
 mod source;
 #[cfg(test)]
 mod tests;
@@ -57,7 +58,6 @@ impl Service {
         let builder = Arc::new(loom_build::Builder::new(root, store.clone()));
         let resolver = Arc::new(BuildResolver {
             store: store.clone(),
-            builder: builder.clone(),
             gate: tokio::sync::Mutex::new(()),
         });
         Ok(Self {
@@ -120,6 +120,17 @@ impl Service {
                 result,
                 diagnostics: vec![],
             },
+            Err(error) if error.is::<message_failure::ActorMessageFailure>() => {
+                let failure = error
+                    .downcast_ref::<message_failure::ActorMessageFailure>()
+                    .expect("checked error type");
+                Response {
+                    ok: false,
+                    seq,
+                    result: json!({"code":"actor_message_failed","error":failure.to_string(),"id":failure.id,"seq":failure.seq,"cause":failure.cause}),
+                    diagnostics: vec![],
+                }
+            }
             Err(error) => Response {
                 ok: false,
                 seq,

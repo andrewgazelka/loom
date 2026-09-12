@@ -1,46 +1,51 @@
 mod operation;
 
 use anyhow::Context;
-use clap::Parser;
-use operation::Operation;
+use operation::Command;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
-#[derive(Parser)]
-#[command(about = "Content-addressed Rust definitions and actors")]
-struct Args {
-    #[command(subcommand)]
-    operation: Option<Operation>,
-    #[arg(long, default_value = "http://127.0.0.1:8787", global = true)]
-    url: String,
-    #[arg(long, env = "LOOM_TOKEN", global = true)]
-    token: Option<String>,
-    #[arg(long, global = true)]
-    session: Option<String>,
-}
-#[derive(Parser)]
-struct ReplLine {
-    #[command(subcommand)]
-    operation: Operation,
+fn main() -> anyhow::Result<std::process::ExitCode> {
+    if let Some(status) = loom_build::compiler_cache_entry()? {
+        return Ok(status);
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(application())?;
+    Ok(std::process::ExitCode::SUCCESS)
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
+async fn application() -> anyhow::Result<()> {
+    if let Err(error) = run().await {
+        print_failure(&error);
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+async fn run() -> anyhow::Result<()> {
+    let args = match operation::parser().try_get_matches() {
+        Ok(args) => args,
+        Err(error) if display_request(&error) => {
+            error.print()?;
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let url = args.get_one::<String>("url").context("missing URL")?;
+    let session = args.get_one::<String>("session").map(String::as_str);
     let token = args
-        .token
-        .as_deref()
+        .get_one::<String>("token")
+        .map(String::as_str)
         .filter(|token| !token.is_empty())
         .context("provide --token or set LOOM_TOKEN")?;
     let client = reqwest::Client::new();
-    if let Some(operation) = args.operation {
-        return execute(
-            &client,
-            &args.url,
-            token,
-            args.session.as_deref(),
-            operation,
-        )
-        .await;
+    if let Some(operation) = operation::from_matches(&args)? {
+        let accepted = execute(&client, url, token, session, operation).await?;
+        if !accepted {
+            std::process::exit(1);
+        }
+        return Ok(());
     }
     let mut input = tokio::io::BufReader::new(tokio::io::stdin()).lines();
     let mut output = tokio::io::stdout();
@@ -60,29 +65,34 @@ async fn main() -> anyhow::Result<()> {
             vec!["--help".to_owned()]
         } else {
             let Some(words) = shlex::split(&line) else {
-                eprintln!("unclosed quote in command");
+                print_failure(&anyhow::anyhow!("unclosed quote in command"));
                 continue;
             };
             words
         };
-        let command =
-            match ReplLine::try_parse_from(std::iter::once("loom".to_owned()).chain(words)) {
-                Ok(command) => command,
-                Err(error) => {
-                    error.print()?;
-                    continue;
-                }
-            };
-        if let Err(error) = execute(
-            &client,
-            &args.url,
-            token,
-            args.session.as_deref(),
-            command.operation,
-        )
-        .await
+        let command = match operation::parser()
+            .try_get_matches_from(std::iter::once("loom".to_owned()).chain(words))
         {
-            eprintln!("{error:#}");
+            Ok(command) => command,
+            Err(error) => {
+                if display_request(&error) {
+                    error.print()?;
+                } else {
+                    print_failure(&error.into());
+                }
+                continue;
+            }
+        };
+        let command = match operation::from_matches(&command) {
+            Ok(Some(command)) => command,
+            Ok(None) => continue,
+            Err(error) => {
+                print_failure(&error);
+                continue;
+            }
+        };
+        if let Err(error) = execute(&client, url, token, session, command).await {
+            print_failure(&error);
         }
     }
     Ok(())
@@ -93,9 +103,8 @@ async fn execute(
     url: &str,
     token: &str,
     session: Option<&str>,
-    operation: Operation,
-) -> anyhow::Result<()> {
-    let command = operation.command()?;
+    command: Command,
+) -> anyhow::Result<bool> {
     let response = client
         .post(format!("{}/v1/command", url.trim_end_matches('/')))
         .bearer_auth(token)
@@ -111,6 +120,19 @@ async fn execute(
         )
     })?;
     println!("{}", serde_json::to_string_pretty(&response)?);
-    anyhow::ensure!(status.is_success() && response.ok, "operation rejected");
-    Ok(())
+    Ok(status.is_success() && response.ok)
+}
+
+fn print_failure(error: &anyhow::Error) {
+    println!(
+        "{}",
+        serde_json::json!({"ok":false,"seq":0,"result":{"error":format!("{error:#}")},"diagnostics":[]})
+    );
+}
+
+fn display_request(error: &clap::Error) -> bool {
+    matches!(
+        error.kind(),
+        clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+    )
 }

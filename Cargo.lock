@@ -2406,6 +2406,7 @@ dependencies = [
  "loom-actor",
  "loom-api",
  "loom-behavior",
+ "loom-build",
  "loom-proto",
  "loom-store",
  "reqwest 0.12.28",

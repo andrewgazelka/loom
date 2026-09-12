@@ -24,16 +24,24 @@ impl Fixture {
             "toolchain": "test compiler", "items": {"main": {"hash": hash, "refs": [], "cycle": null}}, "entry": {"main": hash}
         })).unwrap();
         std::fs::write(directory.join("items.json"), bytes).unwrap();
-        let definition = loom_check::Checker::new()
-            .check(&loom_proto::DefineRequest {
-                lang: loom_proto::Lang::Rust,
-                name: "fixture".into(),
-                source: "pub fn main() -> i32 { 42 }".into(),
-                deps: Default::default(),
-                allowed_effects: None,
-            })
-            .await
-            .unwrap();
+        // This test owns the ingestion boundary, not Rust entry discovery.
+        let definition = loom_check::CheckedDef {
+            hash: "compilation-input-key".into(),
+            lang: loom_proto::Lang::Rust,
+            name: "fixture".into(),
+            source: "pub fn main() -> i32 { 42 }".into(),
+            deps: Default::default(),
+            sig: loom_proto::TypeSig {
+                exports: vec![loom_proto::ExportSig {
+                    name: "main".into(),
+                    params: Vec::new(),
+                    returns: loom_proto::ValueShape::Number,
+                    effects: Default::default(),
+                }],
+                effects: Default::default(),
+            },
+            diagnostics: Vec::new(),
+        };
         Self {
             directory,
             store: loom_store::Store::memory().unwrap(),

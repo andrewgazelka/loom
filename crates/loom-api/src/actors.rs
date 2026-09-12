@@ -72,7 +72,7 @@ impl ActorService {
         Ok(cap)
     }
     async fn tree(&self, root: &str) -> anyhow::Result<Value> {
-        self.authority(root, Rights::INSPECT, "actor_tree")
+        self.authority(root, Rights::INSPECT, "tree")
             .await
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         let entries = self.node.tree(root).await?;
@@ -125,87 +125,82 @@ impl ActorService {
     }
 }
 impl ActorService {
-    pub async fn command(
-        &self,
-        access: &Access,
-        command: &str,
-        args: Value,
-    ) -> anyhow::Result<Value> {
+    async fn command(&self, access: &Access, command: &str, args: Value) -> anyhow::Result<Value> {
         match command {
-            "actor_list" => {
+            "actors" => {
                 access.require(Scope::Read)?;
                 self.actor_list().await
             }
-            "actor_tree" => {
+            "tree" => {
                 access.require(Scope::Read)?;
                 self.actor_tree(serde_json::from_value(args)?).await
             }
-            "actor_info" => {
+            "info" => {
                 access.require(Scope::Read)?;
                 self.actor_info(serde_json::from_value(args)?).await
             }
-            "actor_send" => {
+            "send" => {
                 access.require(Scope::Execute)?;
                 self.actor_send(serde_json::from_value(args)?).await
             }
-            "actor_spawn" => {
+            "spawn" => {
                 access.require(Scope::Execute)?;
                 self.actor_spawn(serde_json::from_value(args)?).await
             }
-            "actor_stop" => {
+            "stop" => {
                 access.require(Scope::Execute)?;
                 self.actor_stop(serde_json::from_value(args)?).await
             }
-            "actor_restart" => {
+            "restart" => {
                 access.require(Scope::Execute)?;
                 self.actor_restart(serde_json::from_value(args)?).await
             }
-            "actor_promote" => {
+            "promote" => {
                 access.require(Scope::Define)?;
                 self.actor_promote(serde_json::from_value(args)?).await
             }
-            "actor_promote_where" => {
+            "promote_where" => {
                 access.require(Scope::Define)?;
                 self.actor_promote_where(serde_json::from_value(args)?)
                     .await
             }
-            "actor_lineage" => {
+            "lineage" => {
                 access.require(Scope::Read)?;
                 self.actor_lineage(serde_json::from_value(args)?).await
             }
-            "actor_dead_letters" => {
+            "dead_letters" => {
                 access.require(Scope::Read)?;
                 self.actor_dead_letters(serde_json::from_value(args)?).await
             }
-            "actor_fork" => {
+            "fork" => {
                 access.require(Scope::Execute)?;
                 self.actor_fork(serde_json::from_value(args)?).await
             }
-            "actor_validate" => {
+            "validate" => {
                 access.require(Scope::Execute)?;
                 self.actor_validate(serde_json::from_value(args)?).await
             }
-            "actor_sql" => {
+            "sql" => {
                 access.require(Scope::Read)?;
                 self.actor_sql(serde_json::from_value(args)?).await
             }
-            "actor_whereis" => {
+            "whereis" => {
                 access.require(Scope::Read)?;
                 self.actor_whereis(serde_json::from_value(args)?).await
             }
-            "actor_register" => {
+            "register" => {
                 access.require(Scope::Execute)?;
                 self.actor_register(serde_json::from_value(args)?).await
             }
-            "actor_members" => {
+            "members" => {
                 access.require(Scope::Read)?;
                 self.actor_members(serde_json::from_value(args)?).await
             }
-            "actor_behaviors" => {
+            "behaviors" => {
                 access.require(Scope::Read)?;
                 self.actor_behaviors().await
             }
-            "actor_run" => {
+            "drain" => {
                 access.require(Scope::Execute)?;
                 self.actor_run().await
             }
@@ -216,7 +211,11 @@ impl ActorService {
 
 impl crate::Service {
     /// Resolve definition references once for every actor transport.
-    pub async fn actor_command(&self, command: &str, mut args: Value) -> anyhow::Result<Value> {
+    pub(super) async fn actor_command(
+        &self,
+        command: &str,
+        mut args: Value,
+    ) -> anyhow::Result<Value> {
         use anyhow::Context;
         self.access.require(crate::auth::command_scope(command))?;
         let actors = self
@@ -224,9 +223,10 @@ impl crate::Service {
             .as_ref()
             .context("actor node is not configured")?;
         let references: &[&str] = match command {
-            "actor_spawn" | "actor_promote" => &["behavior_hash"],
-            "actor_validate" => &["candidate_hash"],
-            "actor_promote_where" => &["old_hash", "new_hash"],
+            "spawn" => &["def"],
+            "promote" => &["hash"],
+            "validate" => &["candidate"],
+            "promote_where" => &["old", "new"],
             _ => &[],
         };
         for field in references {

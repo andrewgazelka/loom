@@ -30,7 +30,7 @@ function same(actual:unknown, expected:Winner) {
   assert(result.path===expected.path&&result.size===expected.size,`Winner mismatch: ${JSON.stringify({actual,expected})}`);
 }
 async function command(command:string,args:unknown) {
-  const reply=command==='run' ? await client.callTool('loom_run',{target:object(args).hash,args:object(args).args}) : await client.callTool('loom_command',{command,args});
+  const reply=command==='run' ? await client.callTool('run',{target:object(args).hash,args:object(args).args}) : await client.callTool('command',{command,args});
   assert(reply.ok,JSON.stringify(reply));return command==='run' ? object(reply.result).output : reply.result;
 }
 const variants:Variant[]=[];
@@ -59,7 +59,7 @@ try {
     if(hash===undefined) {
     const source=await readFile(new URL(`largest-${name}.rs`,import.meta.url),'utf8');
     const start=performance.now();
-    const reply=await client.callTool('loom_add',{name:`benchmark-largest-${name}`,source});
+    const reply=await client.callTool('add',{name:`benchmark-largest-${name}`,source});
     assert(reply.ok,JSON.stringify(reply));
     const result=object(reply.result),def=object(result.def);
     assert(typeof def.hash==='string','Missing definition hash');

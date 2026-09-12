@@ -14,7 +14,7 @@ impl ActorService {
     pub(super) async fn actor_fork(&self, args: ForkArgs) -> anyhow::Result<Value> {
         self.authority(&args.id, Rights::INSPECT, "actor_fork")
             .await?;
-        json_value(json!({"id":self.node.fork(&args.id,args.at_seq).await.map_err(error)?}))
+        json_value(json!({"id":self.node.fork(&args.id,args.seq).await.map_err(error)?}))
     }
     pub(super) async fn actor_validate(&self, args: ValidateArgs) -> anyhow::Result<Value> {
         self.authority(&args.id, Rights::INSPECT, "actor_validate")
@@ -23,8 +23,8 @@ impl ActorService {
             self.node
                 .validate_assertions(
                     &args.id,
-                    &args.candidate_hash,
-                    args.k,
+                    &args.candidate,
+                    i64::from(args.k),
                     &args.assertions.unwrap_or_default(),
                 )
                 .await

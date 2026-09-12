@@ -27,6 +27,7 @@ pub struct Node {
     gates: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     pub(crate) admission: Arc<tokio::sync::RwLock<()>>,
     pub(crate) run_gate: Arc<Mutex<()>>,
+    pub(crate) send_outcomes: crate::send_outcome::Outcomes,
     pub(crate) tasks: Arc<Mutex<HashMap<ActorId, Arc<tokio::sync::Notify>>>>,
     pub(crate) names: Arc<Mutex<Option<Connection>>>,
 }
@@ -100,6 +101,7 @@ impl Node {
             connections: Arc::new(Mutex::new(HashMap::new())),
             gates: Arc::new(Mutex::new(HashMap::new())),
             run_gate: Arc::new(Mutex::new(())),
+            send_outcomes: Default::default(),
             admission: Arc::new(tokio::sync::RwLock::new(())),
             names: Arc::new(Mutex::new(names)),
             tasks: Arc::new(Mutex::new(HashMap::new())),

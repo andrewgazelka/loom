@@ -50,5 +50,20 @@ pub(super) fn validate(connection: &Connection) -> Result<()> {
             bail!("unsupported store schema: table defs missing column {column}; open a new store");
         }
     }
+    struct InvalidIdentity {
+        hash: String,
+        behavior_hash: String,
+    }
+    let invalid = connection.query_row(
+        "SELECT hash,behavior_hash FROM defs WHERE behavior_hash IS NOT NULL AND hash != behavior_hash LIMIT 1",
+        [], |row| Ok(InvalidIdentity { hash: row.get(0)?, behavior_hash: row.get(1)? }),
+    ).optional()?;
+    if let Some(invalid) = invalid {
+        bail!(
+            "unsupported definition identity in store table defs: row hash={} differs from driver entry hash={}; open a new store",
+            invalid.hash,
+            invalid.behavior_hash
+        );
+    }
     Ok(())
 }

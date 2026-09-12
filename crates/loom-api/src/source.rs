@@ -58,7 +58,6 @@ pub(super) fn decode_source_bundle(bytes: &[u8]) -> Result<String> {
 
 pub(super) struct BuildResolver {
     pub(super) store: Store,
-    pub(super) builder: Arc<loom_build::Builder>,
     pub(super) gate: tokio::sync::Mutex<()>,
 }
 impl loom_rt::ComponentResolver for BuildResolver {
@@ -68,52 +67,20 @@ impl loom_rt::ComponentResolver for BuildResolver {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async move {
             let _guard = self.gate.lock().await;
-            let mut def = self
+            let def = self
                 .store
                 .definition(hash)?
-                .context("definition not found")?;
-            if let Some(component_hash) = &def.component_hash {
-                let component = self
-                    .store
-                    .get(component_hash)?
-                    .context("component missing from CAS")?;
-                ensure!(
-                    loom_proto::core_protocol::is_current(&component),
-                    "executable uses an obsolete or unsupported Loom ABI; update its SDK and redefine it before execution"
-                );
-                return Ok(());
-            }
-            let checked = stored_definition(&self.store, hash)?;
-            let dependencies = dependency_closure(&self.store, &checked.deps)?;
-            let built = self
-                .builder
-                .build_with_dependencies(&checked, &dependencies)
-                .await?;
+                .with_context(|| format!("definition {hash} not found"))?;
+            let component_hash = def.component_hash.as_ref().with_context(|| {
+                format!("definition {hash} has no pinned executable; publish a compiled definition")
+            })?;
+            let component = self.store.get(component_hash)?.with_context(|| {
+                format!("definition {hash}: component {component_hash} missing from CAS")
+            })?;
             ensure!(
-                built.diagnostics.is_empty(),
-                "component build diagnostics: {}",
-                serde_json::to_string(&built.diagnostics)?
+                loom_proto::core_protocol::is_current(&component),
+                "definition {hash}: executable {component_hash} uses an unsupported Loom ABI"
             );
-            ensure!(
-                !built.component.is_empty(),
-                "builder returned empty component"
-            );
-            let component_hash = self.store.put("component", &built.component)?;
-            let logs_ref = self.store.put("blob", built.logs.as_bytes())?;
-            def.component_hash = Some(component_hash.clone());
-            self.store.define_with_identity(
-                &def,
-                None,
-                &checked.source,
-                &checked.deps,
-                Some(
-                    built
-                        .identity
-                        .as_ref()
-                        .context("builder returned no item identity")?,
-                ),
-            )?;
-            self.store.record_definition_event(&json!({"type":"component_built","component_hash":component_hash,"logs_ref":logs_ref,"ms":built.ms,"size":built.component.len(),"rustc_invocations":built.rustc_invocations}))?;
             Ok(())
         })
     }
@@ -121,12 +88,14 @@ impl loom_rt::ComponentResolver for BuildResolver {
 pub(super) fn stored_definition(store: &Store, hash: &str) -> Result<loom_check::CheckedDef> {
     let def = store
         .definition(hash)?
-        .context("dependency definition missing")?;
+        .with_context(|| format!("dependency definition {hash} missing"))?;
     Ok(loom_check::CheckedDef {
         hash: def.hash,
         lang: def.lang,
         name: store.definition_name(hash)?.unwrap_or_else(|| hash.into()),
-        source: store.source(hash)?.context("definition source missing")?,
+        source: store
+            .source(hash)?
+            .with_context(|| format!("definition {hash}: source missing"))?,
         deps: store.definition_deps(hash)?,
         sig: def.sig,
         diagnostics: vec![],
@@ -163,7 +132,7 @@ pub(super) fn dependency_signatures(
             entry.0.clone(),
             store
                 .definition(entry.1)?
-                .context("dependency signature not found")?
+                .with_context(|| format!("dependency {}: signature not found", entry.1))?
                 .sig,
         );
     }

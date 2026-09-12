@@ -89,13 +89,18 @@ impl Authorizer {
     }
 }
 pub fn command_scope(command: &str) -> Scope {
+    if let Some(verb) = loom_proto::verbs::lookup(command) {
+        return match verb.permission {
+            loom_proto::verbs::Permission::Read => Scope::Read,
+            loom_proto::verbs::Permission::Execute => Scope::Execute,
+            loom_proto::verbs::Permission::Define => Scope::Define,
+        };
+    }
     match command {
-        "actor_promote" | "actor_promote_where" | "add" | "update" => Scope::Define,
-        "actor_list" | "actor_tree" | "actor_info" | "actor_lineage" | "actor_dead_letters"
-        | "actor_sql" | "actor_whereis" | "actor_members" | "actor_behaviors" | "view"
-        | "history" | "diff" | "find" | "dependents" | "cas.list" | "cas.inspect"
-        | "trace.effects" | "defs" | "events" | "resolve" | "deps" | "build" | "stats"
-        | "process.list" | "process.status" | "model.state" | "model.list" => Scope::Read,
+        "cas.list" | "cas.inspect" | "trace.effects" | "defs" | "events" | "resolve" | "deps"
+        | "build" | "stats" | "process.list" | "process.status" | "model.state" | "model.list" => {
+            Scope::Read
+        }
         "backup" | "gc" | "cache_evict" | "machine.create" => Scope::Admin,
         _ => Scope::Execute,
     }

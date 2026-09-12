@@ -26,17 +26,21 @@ impl ActorService {
         let key = args
             .key
             .unwrap_or_else(|| format!("mcp:{}", uuid::Uuid::new_v4()));
-        self.node
-            .send(
-                &args.id,
-                &key,
-                &serde_json::to_vec(&args.msg).map_err(error)?,
-            )
-            .await
-            .map_err(error)?;
-        self.node.run_until_idle().await.map_err(error)?;
-        json_value(json!({"cursor":self.node.info(&args.id).await.map_err(error)?.cursor}))
+        match self
+            .node
+            .send_with_outcome(&args.id, &key, &serde_json::to_vec(&args.msg)?)
+            .await?
+        {
+            loom_actor::SendOutcome::Complete { id, seq, cursor } => {
+                Ok(json!({"id":id,"seq":seq,"cursor":cursor}))
+            }
+            loom_actor::SendOutcome::Failed { id, seq, cause, .. }
+            | loom_actor::SendOutcome::Pending { id, seq, cause, .. } => {
+                Err(crate::message_failure::ActorMessageFailure { id, seq, cause }.into())
+            }
+        }
     }
+
     pub(super) async fn actor_spawn(&self, args: SpawnArgs) -> anyhow::Result<Value> {
         let parent = args.parent.unwrap_or_else(|| self.node.root());
         self.authority(&parent, Rights::SPAWN, "actor_spawn")
@@ -47,10 +51,10 @@ impl ActorService {
             serde_json::to_vec(&args.init).map_err(error)?
         };
         let mut spec = serde_json::to_value(ChildSpec::new(
-            &args.behavior_hash,
+            &args.r#def,
             &init,
             self.node
-                .behavior(&args.behavior_hash)
+                .behavior(&args.r#def)
                 .await
                 .map_err(error)?
                 .child_type(),
@@ -106,7 +110,7 @@ impl ActorService {
         self.authority(&args.id, Rights::PROMOTE, "actor_promote")
             .await?;
         self.node
-            .promote(&args.id, &args.behavior_hash, &args.author, &args.rationale)
+            .promote(&args.id, &args.hash, &args.author, &args.rationale)
             .await
             .map_err(error)?;
         let rows = self
@@ -123,22 +127,17 @@ impl ActorService {
         &self,
         args: PromoteWhereArgs,
     ) -> anyhow::Result<Value> {
-        self.node.behavior(&args.new_hash).await.map_err(error)?;
+        self.node.behavior(&args.new).await.map_err(error)?;
         for id in self.node.actor_ids().map_err(error)? {
             let info = self.node.info(&id).await.map_err(error)?;
-            if info.behavior_hash == args.old_hash && info.status != loom_actor::Status::Stopped {
+            if info.behavior_hash == args.old && info.status != loom_actor::Status::Stopped {
                 self.authority(&id, Rights::PROMOTE, "actor_promote_where")
                     .await?;
             }
         }
         json_value(
             self.node
-                .promote_where(
-                    &args.old_hash,
-                    &args.new_hash,
-                    &args.author,
-                    &args.rationale,
-                )
+                .promote_where(&args.old, &args.new, &args.author, &args.rationale)
                 .await
                 .map_err(error)?,
         )

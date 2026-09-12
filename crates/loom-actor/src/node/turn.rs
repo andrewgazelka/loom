@@ -44,6 +44,13 @@ impl Node {
                 Ok(false) => return Ok(false),
                 Ok(true) => {
                     let cursor = actor::cursor(&conn).await?;
+                    let state = actor::query(&conn, "SELECT state FROM inbox WHERE seq=?", [message.seq]).await?;
+                    if state.rows.first().map(|row| row.get::<String>(0)).transpose()?.as_deref() == Some("done") {
+                        self.record_send_outcome(
+                            crate::send_outcome::MessageIdentity { id: id.into(), generation, seq: message.seq },
+                            crate::SendOutcome::Complete { id: id.into(), seq: message.seq, cursor },
+                        )?;
+                    }
                     if self.config.io != crate::Io::Memory
                         && cursor > 0
                         && cursor % self.config.snapshot_every == 0
@@ -75,6 +82,15 @@ impl Node {
                         self,
                     )
                     .await?;
+                    self.record_send_outcome(
+                        crate::send_outcome::MessageIdentity { id: id.into(), generation, seq: message.seq },
+                        crate::SendOutcome::Failed {
+                            id: id.into(),
+                            seq: message.seq,
+                            cursor: actor::cursor(&conn).await?,
+                            cause: error.message,
+                        },
+                    )?;
                     return Ok(true);
                 }
             }

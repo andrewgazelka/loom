@@ -161,7 +161,7 @@ async fn missing_source_archive_reports_missing_reference() {
         response.result["error"]
             .as_str()
             .unwrap()
-            .contains("Rust source bundle not found")
+            .contains(&format!("Rust source bundle {} not found", "a".repeat(64)))
     );
     let source = "pub fn main() { std::fs::read(\"secret\").unwrap(); }";
     let checked = service

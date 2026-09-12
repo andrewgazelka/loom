@@ -16,7 +16,7 @@ pub struct SendArgs {
 }
 #[derive(Deserialize)]
 pub struct SpawnArgs {
-    pub(super) behavior_hash: String,
+    pub(super) r#def: String,
     /// JSON initialization message; null creates an empty inbox.
     pub(super) init: Value,
     pub(super) parent: Option<String>,
@@ -37,27 +37,27 @@ pub struct RestartArgs {
 #[derive(Deserialize)]
 pub struct PromoteArgs {
     pub(super) id: String,
-    pub(super) behavior_hash: String,
+    pub(super) hash: String,
     pub(super) author: String,
     pub(super) rationale: String,
 }
 #[derive(Deserialize)]
 pub struct PromoteWhereArgs {
-    pub(super) old_hash: String,
-    pub(super) new_hash: String,
+    pub(super) old: String,
+    pub(super) new: String,
     pub(super) author: String,
     pub(super) rationale: String,
 }
 #[derive(Deserialize)]
 pub struct ForkArgs {
     pub(super) id: String,
-    pub(super) at_seq: i64,
+    pub(super) seq: i64,
 }
 #[derive(Deserialize)]
 pub struct ValidateArgs {
     pub(super) id: String,
-    pub(super) candidate_hash: String,
-    pub(super) k: i64,
+    pub(super) candidate: String,
+    pub(super) k: loom_proto::verbs::ValidationCount,
     /// Read-only SQL evaluated on the candidate; one nonzero numeric scalar passes.
     pub(super) assertions: Option<Vec<String>>,
 }

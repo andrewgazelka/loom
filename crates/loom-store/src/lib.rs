@@ -11,6 +11,7 @@ mod machine;
 mod migration;
 mod objects;
 mod projections;
+mod publication;
 mod recording;
 #[cfg(test)]
 mod tests;
