@@ -39,24 +39,21 @@ try {
   check((await post("command", { command: "stats", args: {} }, "wrong")).status === 401, "invalid bearer accepted");
   const stats = await post("command", { command: "stats", args: {} }, "reader");
   check(stats.ok && (await stats.json()).ok === true, "read token cannot read stats");
-  for (const request of [
-    { operation: "command", body: { command: "gc", args: { limit: 1 } } },
-    { operation: "define", body: { name: "forbidden", source: "#[loom::def(effects=[])] pub fn f() -> i64 { 1 }" } },
-    { operation: "eval", body: { source: "1" } },
+  for (const body of [
+    { command: "gc", args: { limit: 1 } },
+    { command: "add", args: { name: "forbidden", source: "pub fn f() -> i64 { 1 }" } },
+    { command: "run", args: { target: "forbidden" } },
   ]) {
-    const response = await post(request.operation, request.body, "reader");
-    check(response.status === 403, `read token allowed ${request.operation}: ${response.status}`);
+    const response = await post("command", body, "reader");
+    check(response.status === 403, `read token allowed ${body.command}: ${response.status}`);
   }
   const megabyte = 1024 * 1024;
-  check((await post("command", { command: "stats", args: { padding: "x".repeat(megabyte) } })).status === 413, "command body exceeds 1 MiB without 413");
-  check((await post("eval", { source: "x".repeat(megabyte) })).status === 413, "eval body exceeds 1 MiB without 413");
-  check((await post("define", { name: "large", lang: "rust", source: "x".repeat(megabyte) })).status === 413, "Rust define body exceeds 1 MiB without 413");
-  check((await post("define", { name: "large", lang: "rust", source: "x".repeat(16 * megabyte) })).status === 413, "Rust define body exceeds 16 MiB without 413");
-  // >1 MiB Rust input must reach the language pipeline; deterministic invalid
-  // source gives diagnostics without triggering a successful expensive build.
-  const rust = await post("define", { name: "rust_limit_control", lang: "rust", source: `//${"x".repeat(megabyte)}\nnot valid rust` });
+  check((await post("command", { command: "stats", args: { padding: "x".repeat(16 * megabyte) } })).status === 413, "command body exceeds 16 MiB without 413");
+  check((await post("command", { command: "add", args: { name: "large", source: "x".repeat(16 * megabyte) } })).status === 413, "Rust add body exceeds 16 MiB without 413");
+  // Invalid source reaches the checker without an expensive successful build.
+  const rust = await post("command", { command: "add", args: { name: "rust_limit_control", source: `//${"x".repeat(megabyte)}\nnot valid rust` } });
   const rustBody = await rust.json();
-  check(rust.status === 200 && rustBody.ok === false && rustBody.diagnostics?.length > 0, "Rust >1 MiB was not admitted for structured language checking");
+  check(rust.status === 200 && rustBody.ok === false && typeof rustBody.result?.error === "string", "Rust >1 MiB was not admitted for language checking");
   const gc = await post("command", { command: "gc", args: { limit: 1001 } });
   check((await gc.json()).ok === false, "unbounded effect collection accepted");
   const backup = await post("command", { command: "backup", args: { name: "../escape" } });
@@ -99,7 +96,7 @@ try {
   const initialized = await rpc("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "loom-limits", version: "1" } });
   protocolVersion = initialized.protocolVersion;
   await rpc("notifications/initialized", {}, true);
-  const denied = await rpc("tools/call", { name: "loom_define", arguments: { name: "forbidden_mcp", source: "#[loom::def(effects=[])] pub fn main() -> i64 { 1 }" } });
+  const denied = await rpc("tools/call", { name: "loom_add", arguments: { name: "forbidden_mcp", source: "pub fn main() -> i64 { 1 }" } });
   const denial = JSON.parse(denied.content.find((item: any) => item.type === "text").text);
   check(denial.ok === false && denial.result?.code === "forbidden", "MCP read token allowed definition");
   console.log(`${checks}/${checks} HTTP/MCP auth, scopes, limits controls pass`);

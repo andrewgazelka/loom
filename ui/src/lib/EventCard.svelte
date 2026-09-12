@@ -3,7 +3,6 @@
     AlignLeft,
     Play,
     Circle,
-    ArrowUp,
     Check,
     AlertCircle,
     ChevronRight,
@@ -64,8 +63,6 @@
         size={17}
       />{:else if evaluated}<Play
         size={16}
-      />{:else if row.kind.includes("upgrade")}<ArrowUp
-        size={17}
       />{:else}<Circle size={14} />{/if}
   </div>
   <div class="event-body">

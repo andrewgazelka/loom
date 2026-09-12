@@ -30,8 +30,8 @@ function same(actual:unknown, expected:Winner) {
   assert(result.path===expected.path&&result.size===expected.size,`Winner mismatch: ${JSON.stringify({actual,expected})}`);
 }
 async function command(command:string,args:unknown) {
-  const reply=await client.callTool('loom_command',{command,args});
-  assert(reply.ok,JSON.stringify(reply));return reply.result;
+  const reply=command==='run' ? await client.callTool('loom_run',{target:object(args).hash,args:object(args).args}) : await client.callTool('loom_command',{command,args});
+  assert(reply.ok,JSON.stringify(reply));return command==='run' ? object(reply.result).output : reply.result;
 }
 const variants:Variant[]=[];
 const mutation=join(fixture,'nested/middle/deep/benchmark-child');
@@ -59,7 +59,7 @@ try {
     if(hash===undefined) {
     const source=await readFile(new URL(`largest-${name}.rs`,import.meta.url),'utf8');
     const start=performance.now();
-    const reply=await client.callTool('loom_define',{lang:'rust',name:`benchmark-largest-${name}`,source});
+    const reply=await client.callTool('loom_add',{name:`benchmark-largest-${name}`,source});
     assert(reply.ok,JSON.stringify(reply));
     const result=object(reply.result),def=object(result.def);
     assert(typeof def.hash==='string','Missing definition hash');
@@ -71,7 +71,7 @@ try {
     assert(typeof hash==='string'&&/^[0-9a-f]{64}$/.test(hash),'Invalid definition hash');
     variants.push({name,hash,samples:[],recordingCommits:[],growthBytes:[],usedGrowthBytes:[],wireBytes:[],storageMs:[],transactionMs:[],checkpointMs:[]});
     const callStart=performance.now();
-    same(await command('call',{hash,args:[machine.id,'.']}),baseline);
+    same(await command('run',{hash,args:[machine.id,'.']}),baseline);
     console.log(JSON.stringify({stage:'first-call',name,ms:performance.now()-callStart}));
     gate(true,`${name} correctness`,'first result matches native');
   }
@@ -92,7 +92,7 @@ try {
         const beforeStats=object(await command('stats',{}));
         const before=beforeStats.recording_commits;
         const start=performance.now();
-        same(await command('call',{hash:variant.hash,args:[machine.id,'.']}),expected);
+        same(await command('run',{hash:variant.hash,args:[machine.id,'.']}),expected);
         variant.samples.push(performance.now()-start);
         const afterStats=object(await command('stats',{}));
         const after=afterStats.recording_commits;
@@ -111,7 +111,7 @@ try {
   for(const variant of variants) {
     const before=object(await command('stats',{}));
     for(let round=0;round<7;round++) {
-      same(await command('call',{hash:variant.hash,args:[machine.id,'.']}),{path:'nested/middle/deep/benchmark-child/winner.dat',size:16393});
+      same(await command('run',{hash:variant.hash,args:[machine.id,'.']}),{path:'nested/middle/deep/benchmark-child/winner.dat',size:16393});
     }
     const after=object(await command('stats',{}));
     variant.growthBytes.push((counter(after,'database_bytes')-counter(before,'database_bytes'))/7);

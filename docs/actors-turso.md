@@ -358,7 +358,7 @@ optional in v1 except where marked "later" with its leaver.
 | GenServer `reply(from, msg)` | `cx.reply(from, ref, msg)` = a send with the ref | yes |
 | GenServer `cast`, `handle_info` | `cx.send`; every message is `handle` | yes |
 | GenServer `terminate(reason, state)` | `Behavior::terminate(&self, cx, reason) -> Result<()>`, default no-op; runs in a final transaction before status becomes `stopped`; not run for `kill`; a `Trap` inside it is recorded in `dead_letters` and ignored | yes |
-| `code_change(old_vsn, state, extra)` | `code_changes` row + the new behavior's `schema()`; `Behavior::upgrade(&self, cx, from_hash) -> Result<()>` runs in the promote transaction for data moves; a `Trap` there rolls the promote back | yes |
+| `code_change(old_vsn, state, extra)` | `code_changes` row + the new behavior's `schema()`; the behavior’s data migration hook runs in the promote transaction for data moves; a `Trap` there rolls the promote back | yes |
 | module hot load affects every process | `node.promote_where(old_hash, new_hash, author, rationale)`: one promote per actor currently on `old_hash` (`_node.db` `who_runs(id, behavior_hash)` maintained by the pump); each is its own transaction; a failure stops the sweep and reports the actor id | yes |
 | Supervisor `one_for_one`, `one_for_all`, `rest_for_one` | Addendum A | yes |
 | `simple_one_for_one` / `DynamicSupervisor` | strategy `dynamic`: one child spec template, `start_child(init)` spawns a new child from it, `terminate_child(id)`; intensity as usual | yes |
@@ -544,7 +544,7 @@ primary keys; values have SQL type tags and byte lengths. Outbox hashes cover
 
 The current replay engine needs more inputs than the proposed five-field key.
 Snapshots can precede `N-k`, deferred messages use recorded commit order, and
-upgrade hooks consume effects at negative sequences. This implementation also
+data migration hooks consume effects at negative sequences. This implementation also
 keys source metadata, code changes, the complete inbox/effect logs, and original
 domain table hashes used to calculate the verdict. It hashes the latest snapshot
 at or before `N-k`, not a synthesized snapshot exactly there. This conservative

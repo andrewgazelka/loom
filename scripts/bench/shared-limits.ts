@@ -7,14 +7,15 @@ const names=['nested jobs exceed active worker count','lifetime job admission bo
 let client:LoomMcpClient|undefined;
 function assert(value:unknown,message:string):asserts value {if(!value)throw new Error(message);}
 async function define(name:string,source:string) {
-  const reply=await client!.callTool('loom_define',{lang:'rust',name:`shared-limits-${name}`,source});
+  const reply=await client!.callTool('loom_add',{name:`shared-limits-${name}`,source});
   assert(reply.ok,JSON.stringify(reply));
   const hash=object(object(reply.result).def).hash;
   assert(typeof hash==='string','missing definition hash');
   return hash;
 }
 async function call(hash:string,args:unknown[]=[]) {
-  return client!.callTool('loom_command',{command:'call',args:{hash,args}});
+  const reply=await client!.callTool('loom_run',{target:hash,args});
+  return reply.ok ? {...reply,result:object(reply.result).output} : reply;
 }
 async function gate(name:string,body:()=>Promise<void>) {
   try {await body();gates.push({name,pass:true,detail:'native control passed'});}
@@ -27,18 +28,18 @@ try {
   client=new LoomMcpClient({endpoint,token:(await readFile(tokenFile,'utf8')).trim()});
   await client.connect();
   await gate(names[0]!,async()=>{
-    positive=await define('nested',`fn nested(depth:u32)->u32 {if depth==0 {1} else {loom::scope(|s|s.spawn(||nested(depth-1)).expect("spawn child").join().expect("child result")+1)}} #[loom::def(effects=[])] pub fn main()->u32 {nested(16)}`);
+    positive=await define('nested',`fn nested(depth:u32)->u32 {if depth==0 {1} else {loom::scope(|s|s.spawn(||nested(depth-1)).expect("spawn child").join().expect("child result")+1)}} pub fn main()->u32 {nested(16)}`);
     const reply=await call(positive);
     assert(reply.ok&&reply.result===17,JSON.stringify(reply));
   });
   assert(gates[0]?.pass,'positive native nesting control failed');
   await gate(names[1]!,async()=>{
-    const hash=await define('jobs',`#[loom::def(effects=[])] pub fn main()->u32 {loom::scope(|s| {let mut count=0; for _ in 0..513 {match s.spawn(||1_u32) {Ok(job)=>{count+=job.join().expect("child result");},Err(_)=>return count}} count})}`);
+    const hash=await define('jobs',`pub fn main()->u32 {loom::scope(|s| {let mut count=0; for _ in 0..513 {match s.spawn(||1_u32) {Ok(job)=>{count+=job.join().expect("child result");},Err(_)=>return count}} count})}`);
     const reply=await call(hash);
     assert(reply.ok&&reply.result===512,'expected exactly512 admitted lifetime jobs: '+JSON.stringify(reply));
   });
   await gate(names[2]!,async()=>{
-    const hash=await define('stack',`#[inline(never)] fn small()->u8 {let bytes=std::hint::black_box([7_u8;1024]);std::hint::black_box(&bytes)[0]} #[inline(never)] fn large()->u8 {let bytes=std::hint::black_box([7_u8;524288]);std::hint::black_box(&bytes)[0]} #[loom::def(effects=[])] pub fn main(big:bool)->u8 {loom::scope(|s|s.spawn(||if big {large()} else {small()}).expect("spawn child").join().expect("child result"))}`);
+    const hash=await define('stack',`#[inline(never)] fn small()->u8 {let bytes=std::hint::black_box([7_u8;1024]);std::hint::black_box(&bytes)[0]} #[inline(never)] fn large()->u8 {let bytes=std::hint::black_box([7_u8;524288]);std::hint::black_box(&bytes)[0]} pub fn main(big:bool)->u8 {loom::scope(|s|s.spawn(||if big {large()} else {small()}).expect("spawn child").join().expect("child result"))}`);
     const small=await call(hash,[false]);
     assert(small.ok&&small.result===7,'small stack positive failed: '+JSON.stringify(small));
     const large=await call(hash,[true]);
@@ -47,12 +48,12 @@ try {
     assert(repeated.ok&&repeated.result===7,'post-trap fresh execution failed');
   });
   await gate(names[3]!,async()=>{
-    const hash=await define('memory',`#[loom::def(effects=[])] pub fn main()->bool {let mut bytes=Vec::<u8>::new();bytes.try_reserve_exact(300*1024*1024).is_err()}`);
+    const hash=await define('memory',`pub fn main()->bool {let mut bytes=Vec::<u8>::new();bytes.try_reserve_exact(300*1024*1024).is_err()}`);
     const reply=await call(hash);
     assert(reply.ok&&reply.result===true,'oversized allocation not refused: '+JSON.stringify(reply));
   });
   await gate(names[4]!,async()=>{
-    const hash=await define('panic',`use std::sync::atomic::{AtomicU32,Ordering}; #[loom::def(effects=[])] pub fn main()->u32 {let borrowed=AtomicU32::new(0);loom::scope(|s| {let spin=s.spawn(||loop {borrowed.fetch_add(1,Ordering::Relaxed);std::hint::spin_loop();}).expect("spawn child");let fail=s.spawn(||panic!("child trap control")).expect("spawn child");let _:()=fail.join().expect("child result");let _:()=spin.join().expect("child result");0})}`);
+    const hash=await define('panic',`use std::sync::atomic::{AtomicU32,Ordering}; pub fn main()->u32 {let borrowed=AtomicU32::new(0);loom::scope(|s| {let spin=s.spawn(||loop {borrowed.fetch_add(1,Ordering::Relaxed);std::hint::spin_loop();}).expect("spawn child");let fail=s.spawn(||std::panic::panic_any("child trap control")).expect("spawn child");let _:()=fail.join().expect("child result");let _:()=spin.join().expect("child result");0})}`);
     const start=performance.now();
     const reply=await call(hash);
     assert(!reply.ok,'panicking scoped child unexpectedly returned');
@@ -61,7 +62,7 @@ try {
     assert(recovery.ok&&recovery.result===17,'daemon/fresh execution did not recover after child trap');
   });
   await gate(names[5]!,async()=>{
-    const hash=await define('recursive-scope',`fn nested(depth:u32)->u32 {if depth==0 {1} else {loom::scope(|s|s.spawn(||nested(depth-1)).expect("spawn child").join().expect("child result")+1)}} #[loom::def(effects=[])] pub fn main(depth:u32)->u32 {nested(depth)}`);
+    const hash=await define('recursive-scope',`fn nested(depth:u32)->u32 {if depth==0 {1} else {loom::scope(|s|s.spawn(||nested(depth-1)).expect("spawn child").join().expect("child result")+1)}} pub fn main(depth:u32)->u32 {nested(depth)}`);
     const reply=await call(hash,[2]);
     assert(reply.ok&&reply.result===3,'scoped recursion failed: '+JSON.stringify(reply));
   });

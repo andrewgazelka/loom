@@ -15,12 +15,12 @@ test('negotiates protocol, decodes chunked SSE, preserves diagnostics, closes se
     return new Response(new ReadableStream({start(controller) { for (let i=0;i<bytes.length;i+=3) controller.enqueue(bytes.slice(i,i+3)); controller.close(); }}),{headers:{'content-type':'text/event-stream'}});
   }});
   const client = new LoomMcpClient({endpoint:server.url.origin,token:'test'});
-  try { await client.connect(); const reply=await client.callTool('loom_define',{}); expect(reply.ok).toBe(false); expect(reply.diagnostics).toHaveLength(1); await client.close(); expect(closed).toBe(true); }
+  try { await client.connect(); const reply=await client.callTool('loom_add',{}); expect(reply.ok).toBe(false); expect(reply.diagnostics).toHaveLength(1); await client.close(); expect(closed).toBe(true); }
   finally { server.stop(true); }
 });
 
 test('tool errors remain transport errors', async () => {
   const server=Bun.serve({port:0,async fetch(request) { const call=await request.json() as {id:number}; return Response.json({jsonrpc:'2.0',id:call.id,result:{isError:true,content:[{type:'text',text:'failed'}]}}); }});
-  try { const client=new LoomMcpClient({endpoint:server.url.origin,token:'test'}); await expect(client.callTool('loom_define',{})).rejects.toBeInstanceOf(McpTransportError); }
+  try { const client=new LoomMcpClient({endpoint:server.url.origin,token:'test'}); await expect(client.callTool('loom_add',{})).rejects.toBeInstanceOf(McpTransportError); }
   finally { server.stop(true); }
 });

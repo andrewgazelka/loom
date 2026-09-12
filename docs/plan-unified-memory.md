@@ -58,22 +58,18 @@ a hash; a compiled artifact is a pure function of hashes. No sccache: the
 CAS is the artifact cache.
 
 ### 1a. Ingest
-`loom crate add serde@1.0.210` (MCP tool `crate_add`) runs in the existing
-network-only vendor phase (`loom-build/src/lib.rs`, `is_vendored`): fetch the
-crates.io tarball, verify the registry checksum, unpack, store the source
-tree in the CAS as a `tree` (same `Tree { entries }` as `machine.rs:290`).
-Result: `{ name, version, hash, features_available }`. Names and versions are
-metadata rows pointing at the hash; two people adding the same crate get the
-same hash.
+Dependency intake belongs to the build's network-only vendor phase: fetch
+crates.io sources, verify registry checksums, and store source trees in the
+CAS. `loom add` accepts a Rust definition; there is no separate crate-intake
+command.
 
 ### 1b. Depend
-A definition's manifest (`[loom.deps]` today, `loom-check/src/lib.rs:272`)
-grows a `[loom.crates]` table: `serde = { hash = "<64 hex>", features =
-["derive"] }`. Aliases are the Cargo names the source uses. The definition
-hash covers the manifest, so a crate upgrade is a new definition hash, and
-dependents keep the old hash until upgraded. `loom upgrade <old> <new>`
-rewrites every definition that names `<old>` and reports the new hashes
-(Unison's `upgrade`).
+A definition pins dependencies by content hash. Its manifest participates in
+its identity, so changing a dependency creates a new definition hash.
+`loom update <name> <file.rs> --deps <pins-json>` moves that name with explicit
+pins. Existing dependents retain their pins until individually updated;
+`loom dependents <hash>` identifies them and `loom diff <old> <new>` compares
+item identities.
 
 ### 1c. Build
 Stop driving Cargo for the definition crate; drive `rustc` directly. Cargo
