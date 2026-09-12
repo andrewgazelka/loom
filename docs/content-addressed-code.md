@@ -453,7 +453,7 @@ object-cache real measurement: crate=loom_guest_rs opt_level=2 trials=5 cgus=16 
 object-cache real measurement: crate=loom_example_preview opt_level=2 trials=5 cgus=10 hits=6 misses=4 bytes_reused=194192 median_with_cache_ms=6804.953 median_without_cache_ms=8033.357 hashing_ms=220.238 llvm_ms=11981.402 lookup_ms=10.405 object_copy_ms=613.174
 ```
 
-Every second build reused six CGUs: 6/16 for the SDK and 6/10 for preview. The SDK's cached median was higher; preview's was lower. Concurrent workloads were active on this Mac and trial times varied substantially, so these results establish successful reuse and the observed medians, not a general speedup or an isolated encoder performance comparison. No test or build from this lane ran concurrently with the timing samples. The admission gate and opt-in default remain unchanged.
+Every second build reused six CGUs: 6/16 for the SDK and 6/10 for preview. The SDK's cached median was higher; preview's was lower. Concurrent workloads were active on this Mac and trial times varied substantially, so these results establish successful reuse and the observed medians, not a general speedup or an isolated encoder performance comparison. The timing samples ran without concurrent tests or builds from this worktree. The admission gate and opt-in default remain unchanged.
 
 
 ## Effect rows
@@ -462,7 +462,7 @@ The compiler driver emits residual host effects from the resolved call graph. A 
 
 The driver recognizes one effect primitive by its resolved definition path, `loom_guest_rs::perform`. The package name is `loom-guest-rs`; rustc uses the crate name `loom_guest_rs`. Wrappers such as `sleep`, `now`, and `fs::list` are ordinary functions: their rows come from the literal or evaluated constant passed to `perform` in their bodies. Import aliases preserve the resolved definition identity. Handler functions retain their special subtraction semantics.
 
-The driver enables `-Zalways-encode-mir` on every crate it compiles so callers can analyze external non-generic function bodies. Dependencies compiled with stock rustc must also enable this flag, for example through the build lane's `RUSTFLAGS`. Missing MIR for a user dependency is an explicit compiler error; it cannot establish an empty effect row.
+The driver enables `-Zalways-encode-mir` on every crate it compiles so callers can analyze external non-generic function bodies. Dependencies compiled with stock rustc must also enable this flag, for example through the build's `RUSTFLAGS`. Missing MIR for a user dependency is an explicit compiler error; it cannot establish an empty effect row.
 
 The driver's JSON adds `effects` and `schema` without changing the existing identity keys. The effect contract is:
 
@@ -495,7 +495,7 @@ A total `handle([labels], handler, body)` subtracts those labels from the body's
 
 `labels` and `unknown` are the stored handler's residual row. Optional `handled` labels describe its total-handling contract; omission subtracts nothing from the body's row. The driver includes the stored residual row and subtracts `handled` from the callback row. Missing metadata for a referenced hash is a compiler error. Source lowering records the pinned dependency and emits the internal `handle_pinned("<hash>", dependency::handle, body)` helper to preserve the hash through resolution.
 
-`loom-check` has one effect-analysis path. Source checking discovers root public functions and leaves effect rows pending with `unknown = true`. It does not infer rows or evaluate constants from Rust syntax. The build integration must pass the complete driver JSON to `CheckedDef::apply_driver_effects_json` before admitting executable code. The method requires an entry row for every export and rejects missing or ambiguous rows. It accepts an exact entry name or a unique qualified name ending in that export's name. Driver invocation belongs to the build lane and remains a required integration step.
+`loom-check` has one effect-analysis path. Source checking discovers root public functions and leaves effect rows pending with `unknown = true`. It does not infer rows or evaluate constants from Rust syntax. The build integration must pass the complete driver JSON to `CheckedDef::apply_driver_effects_json` before admitting executable code. The method requires an entry row for every export and rejects missing or ambiguous rows. It accepts an exact entry name or a unique qualified name ending in that export's name. The build must invoke the driver and finalize these rows before admitting executable code.
 
 Each entry hash includes a tagged reference to the exported `LOOM_SCHEMA` constant when present. Changing the schema changes the entry identity; unrelated constants remain outside that identity.
 
@@ -504,6 +504,6 @@ Finalization installs exactly the inferred row. A dynamic call site produces `ef
 
 ### Behavior schema constant
 
-A crate-root `pub const LOOM_SCHEMA: &str = "...";` declares the behavior schema. Rustc evaluates the constant and the driver emits its string value in the new top-level `schema` field. The field is `null` when no schema constant is present. The build lane generates the existing `loom_schema` ABI wrapper from that value, and behavior loading reads the wrapper. A Rust constant alone does not create a Wasm export.
+A crate-root `pub const LOOM_SCHEMA: &str = "...";` declares the behavior schema. Rustc evaluates the constant and the driver emits its string value in the new top-level `schema` field. The field is `null` when no schema constant is present. The build must generate the existing `loom_schema` ABI wrapper from that value; behavior loading reads the wrapper. A Rust constant alone does not create a Wasm export.
 
-The build lane must remove the deleted `loom-guest-macros` package from its SDK fingerprint and trusted-source lists (`artifact.rs`, `direct/compile.rs`, `direct/trusted_sources.rs`, and `sdk.rs`). It must generate the entry ABI from root public functions and the existing `loom_schema` ABI from the evaluated `schema` field. `loom-behavior` reads that generated export; guest constants require no attributes or macro expansion.
+The build must generate the entry ABI from root public functions and the existing `loom_schema` ABI from the evaluated `schema` field. `loom-behavior` reads that generated export; guest constants require no attributes or macro expansion.
