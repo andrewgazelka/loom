@@ -26,6 +26,7 @@ struct MonoReport {
     refused_unique_items: usize,
     refused_placements: usize,
     items: BTreeMap<String, String>,
+    hashes: BTreeMap<String, String>,
 }
 
 pub fn write(tcx: TyCtxt<'_>, path: &Path) {
@@ -42,17 +43,27 @@ pub fn write(tcx: TyCtxt<'_>, path: &Path) {
         items: BTreeMap::new(),
         mono: MonoReport::default(),
     };
+    let implementations = crate::graph::implementations(tcx);
     for id in ids {
-        let result = Encoder::new(tcx, id).audit().and_then(|parts| {
-            for part in parts {
-                if let Part::Reference(mut referenced) = part {
-                    while referenced.is_local() && !included.contains(&referenced) {
-                        let kind = tcx.def_kind(referenced);
-                        if !matches!(kind, DefKind::Ctor(..) | DefKind::Variant | DefKind::Field) {
-                            return Err(format!("reference to unsupported {kind:?}"));
-                        }
-                        referenced = tcx.parent(referenced);
+        let result = Encoder::new(
+            tcx,
+            id,
+            implementations
+                .get(&id.to_def_id())
+                .into_iter()
+                .flatten()
+                .copied()
+                .collect(),
+        )
+        .audit()
+        .and_then(|parts| {
+            for mut referenced in parts.iter().flat_map(Part::references) {
+                while referenced.is_local() && !included.contains(&referenced) {
+                    let kind = tcx.def_kind(referenced);
+                    if !matches!(kind, DefKind::Ctor(..) | DefKind::Variant | DefKind::Field) {
+                        return Err(format!("reference to unsupported {kind:?}"));
                     }
+                    referenced = tcx.parent(referenced);
                 }
             }
             Ok(())
@@ -62,22 +73,31 @@ pub fn write(tcx: TyCtxt<'_>, path: &Path) {
             Err(reason) => {
                 report.refused += 1;
                 *report.reasons.entry(reason.clone()).or_default() += 1;
-                report.items.insert(tcx.def_path_str(id), reason);
+                report
+                    .items
+                    .insert(crate::graph::item_path(tcx, id.to_def_id()), reason);
             }
         }
     }
+    let document = (report.refused == 0).then(|| crate::graph::collect(tcx));
     let partitions = tcx.collect_and_partition_mono_items(());
     report.mono.cgus = partitions.codegen_units.len();
     let mut unique = HashSet::new();
     for cgu in partitions.codegen_units {
         for item in cgu.items().keys() {
             report.mono.placements += 1;
-            let result = crate::object_cache::audit_item(tcx, *item);
+            let result = crate::mono::identity(tcx, *item, document.as_ref());
             if result.is_err() {
                 report.mono.refused_placements += 1;
             }
             if unique.insert(*item) {
                 report.mono.unique_items += 1;
+                if let Ok(identity) = &result {
+                    report.mono.hashes.insert(
+                        format!("{item:?}"),
+                        blake3::hash(&identity.bytes).to_hex().to_string(),
+                    );
+                }
                 if let Err(reason) = result {
                     report.mono.refused_unique_items += 1;
                     report.mono.items.insert(format!("{item:?}"), reason);

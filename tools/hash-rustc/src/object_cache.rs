@@ -15,7 +15,7 @@ use rustc_span::Symbol;
 use crate::cache_metrics::{self, Phase, Timer};
 use crate::object_store::{Entry, Store};
 
-const FORMAT: &str = "loom-object-v1-macho-scalar";
+const FORMAT: &str = "loom-object-v2-macho-mono";
 static STATE: OnceLock<State> = OnceLock::new();
 static CGUS: AtomicUsize = AtomicUsize::new(0);
 static HITS: AtomicUsize = AtomicUsize::new(0);
@@ -55,15 +55,6 @@ struct ItemIdentity {
 struct FunctionIdentity {
     bytes: Vec<u8>,
     references: Vec<ItemIdentity>,
-}
-
-pub(crate) fn audit_item<'tcx>(tcx: TyCtxt<'tcx>, item: MonoItem<'tcx>) -> Result<(), String> {
-    match item {
-        MonoItem::Fn(instance) => {
-            function_identity(tcx, instance, None, &mut Vec::new()).map(|_| ())
-        }
-        _ => Err("static or global assembly requires a relocation identity".into()),
-    }
 }
 
 pub fn prepare(tcx: TyCtxt<'_>) -> bool {
@@ -235,26 +226,54 @@ fn encode_function<'tcx>(
     document: Option<&crate::graph::Document>,
     active: &mut Vec<Instance<'tcx>>,
 ) -> Result<FunctionIdentity, String> {
-    if !instance.def_id().is_local() || !matches!(instance.def, ty::InstanceKind::Item(_)) {
-        return Err("external monomorphization or compiler shim".into());
+    let identity = crate::mono::identity(tcx, MonoItem::Fn(instance), document);
+    // External code with wholly external substituted identities is fixed by
+    // dependency crate hashes. Local substitutions can select local impls and
+    // require a codegen dependency graph before they can be admitted.
+    if !instance.def_id().is_local() {
+        let identity = identity?;
+        if !identity.local {
+            let mut bytes = identity.bytes;
+            // Generic symbols referenced by this object can name the local
+            // instantiating crate. Until those relocations are mapped, keep
+            // reuse within that symbol namespace, including -Cmetadata.
+            frame(&mut bytes, b"instantiating-crate");
+            frame(
+                &mut bytes,
+                &tcx.stable_crate_id(rustc_hir::def_id::LOCAL_CRATE)
+                    .as_u64()
+                    .to_le_bytes(),
+            );
+            return Ok(FunctionIdentity {
+                bytes,
+                references: Vec::new(),
+            });
+        }
+        return Err(
+            "external instance with local substitutions requires codegen dependency identity"
+                .into(),
+        );
+    }
+    if !matches!(instance.def, ty::InstanceKind::Item(_)) {
+        return Err("local compiler shim requires codegen dependency identity".into());
     }
     let path = tcx.def_path_str(instance.def_id());
-    let mut bytes = Vec::new();
+    let mut bytes = if document.is_some() {
+        identity?.bytes
+    } else {
+        Vec::new()
+    };
     let mut references = Vec::new();
-    if let Some(document) = document {
-        let hash = document
-            .hash_for(&path)
-            .ok_or_else(|| format!("no HIR identity for {path}"))?;
-        frame(&mut bytes, hash.as_bytes());
-    }
+    // Local codegen admission retains scalar arguments and MIR. Actual key
+    // construction uses the canonical mono encoder and complete HIR document.
     for argument in instance.args {
         match argument.kind() {
             GenericArgKind::Type(ty) => {
-                frame(&mut bytes, blake3::hash(&scalar_type(ty)?).as_bytes())
+                scalar_type(ty)?;
             }
-            GenericArgKind::Lifetime(_) => frame(&mut bytes, b"erased-region"),
+            GenericArgKind::Lifetime(_) => {}
             GenericArgKind::Const(_) => {
-                return Err("const generic requires a canonical value identity".into());
+                return Err("local const generic requires lowered-code admission".into());
             }
         }
     }
