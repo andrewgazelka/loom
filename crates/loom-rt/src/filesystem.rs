@@ -82,8 +82,13 @@ impl PinnedRoot {
         let target = self.file_target(path)?;
         match open_at(&target.parent, &target.name, false) {
             Ok(file) => Ok(Some(read_regular(file)?)),
-            Err(error) if error.downcast_ref::<std::io::Error>()
-                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) => Ok(None),
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                Ok(None)
+            }
             Err(error) => Err(error),
         }
     }
@@ -92,18 +97,36 @@ impl PinnedRoot {
         let relative = relative_path(path)?;
         ensure!(relative != ".", "file operation requires a file path");
         let name = relative.rsplit('/').next().context("file name missing")?;
-        let parent = relative.strip_suffix(name).unwrap_or("").trim_end_matches('/');
-        let parent = open_at(&self.directory, if parent.is_empty() { "." } else { parent }, true)?;
-        Ok(FileTarget { parent, name: name.to_owned() })
+        let parent = relative
+            .strip_suffix(name)
+            .unwrap_or("")
+            .trim_end_matches('/');
+        let parent = open_at(
+            &self.directory,
+            if parent.is_empty() { "." } else { parent },
+            true,
+        )?;
+        Ok(FileTarget {
+            parent,
+            name: name.to_owned(),
+        })
     }
 
     pub fn write(&self, path: &str, content: &[u8]) -> Result<()> {
-        ensure!(content.len() as u64 <= READ_LIMIT, "file exceeds 64 MiB write limit");
+        ensure!(
+            content.len() as u64 <= READ_LIMIT,
+            "file exceeds 64 MiB write limit"
+        );
         let target = self.file_target(path)?;
         match stat_child(&target.parent, &target.name) {
-            Ok(entry) => ensure!(entry.kind == EntryKind::File, "write requires a regular file"),
-            Err(error) if error.downcast_ref::<std::io::Error>()
-                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) => {},
+            Ok(entry) => ensure!(
+                entry.kind == EntryKind::File,
+                "write requires a regular file"
+            ),
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) => {}
             Err(error) => return Err(error),
         }
         // Never truncate an existing inode: it could be a hardlink outside the
@@ -114,21 +137,35 @@ impl PinnedRoot {
         // SAFETY: parent owns a live directory fd, names are NUL terminated;
         // O_EXCL ensures the newly owned fd cannot refer to a substituted link.
         let mut file = owned(unsafe {
-            libc::openat(target.parent.as_raw_fd(), temporary.as_ptr(),
+            libc::openat(
+                target.parent.as_raw_fd(),
+                temporary.as_ptr(),
                 libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-                0o600 as libc::mode_t)
+                // openat's mode is a C vararg; mode_t is u16 on macOS, so pass c_uint as the vararg ABI expects.
+                0o600 as libc::c_uint,
+            )
         })?;
         let result = (|| -> Result<()> {
             file.write_all(content)?;
             // SAFETY: both names and the pinned parent remain live for renameat.
-            let result = unsafe { libc::renameat(target.parent.as_raw_fd(), temporary.as_ptr(),
-                target.parent.as_raw_fd(), destination.as_ptr()) };
-            if result < 0 { return Err(std::io::Error::last_os_error().into()); }
+            let result = unsafe {
+                libc::renameat(
+                    target.parent.as_raw_fd(),
+                    temporary.as_ptr(),
+                    target.parent.as_raw_fd(),
+                    destination.as_ptr(),
+                )
+            };
+            if result < 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
             Ok(())
         })();
         if result.is_err() {
             // SAFETY: remove only our freshly created temporary directory entry.
-            unsafe { libc::unlinkat(target.parent.as_raw_fd(), temporary.as_ptr(), 0); }
+            unsafe {
+                libc::unlinkat(target.parent.as_raw_fd(), temporary.as_ptr(), 0);
+            }
         }
         result
     }

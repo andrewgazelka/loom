@@ -1,11 +1,13 @@
 //! Language checking before definitions become executable identities.
 mod crates;
 pub use crates::{CrateDependency, crate_dependencies};
-mod rust_effects;
 mod handler_references;
+mod rust_effects;
 mod safety;
-pub use safety::{safety_policy_bytes, untrusted_package_diagnostics, untrusted_source_diagnostics};
 use loom_proto::{DefineRequest, Diagnostic, ExportSig, Lang, ParamSig, TypeSig, ValueShape};
+pub use safety::{
+    safety_policy_bytes, untrusted_package_diagnostics, untrusted_source_diagnostics,
+};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf, process::Stdio};
 use tokio::{
@@ -367,7 +369,14 @@ fn check_rust(request: &DefineRequest, signatures: &BTreeMap<String, TypeSig>) -
         for export in &mut checked.sig.exports {
             export.effects.unknown = true;
             if export.effects.declared.is_none() {
-                checked.diagnostics.push(diagnostic(Lang::Rust, "LOOM_EFFECT_ROW", &format!("{} has unknown dependency effects; declare its residual host row", export.name)));
+                checked.diagnostics.push(diagnostic(
+                    Lang::Rust,
+                    "LOOM_EFFECT_ROW",
+                    &format!(
+                        "{} has unknown dependency effects; declare its residual host row",
+                        export.name
+                    ),
+                ));
             }
         }
     }
@@ -460,7 +469,10 @@ fn check_rust_file(request: &DefineRequest, signatures: &BTreeMap<String, TypeSi
                 }
             }
             aggregate_effects = rust_effects::aggregate(&file, signatures, &effects, &exports);
-            diagnostics.extend(rust_effects::actor_declaration_diagnostics(&file, &aggregate_effects));
+            diagnostics.extend(rust_effects::actor_declaration_diagnostics(
+                &file,
+                &aggregate_effects,
+            ));
             fn ambient_macro(tokens: proc_macro2::TokenStream) -> bool {
                 tokens.into_iter().any(|token| match token {
                     proc_macro2::TokenTree::Ident(name) => [

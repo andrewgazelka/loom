@@ -13,9 +13,15 @@ pub fn def(attr: TokenStream, item: TokenStream) -> TokenStream {
         let arguments = parse_macro_input!(attr with syn::punctuated::Punctuated::<syn::MetaNameValue, syn::Token![,]>::parse_terminated);
         let mut seen = std::collections::BTreeSet::new();
         for argument in arguments {
-            let key = argument.path.get_ident().map(ToString::to_string).unwrap_or_default();
+            let key = argument
+                .path
+                .get_ident()
+                .map(ToString::to_string)
+                .unwrap_or_default();
             if !seen.insert(key.clone()) {
-                return syn::Error::new_spanned(argument, "duplicate definition attribute").to_compile_error().into();
+                return syn::Error::new_spanned(argument, "duplicate definition attribute")
+                    .to_compile_error()
+                    .into();
             }
             match (key.as_str(), &argument.value) {
                 ("hash", syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(hash), .. })) => definition_hash = hash.clone(),
@@ -140,17 +146,25 @@ pub fn def(attr: TokenStream, item: TokenStream) -> TokenStream {
 pub fn actor(attr: TokenStream, item: TokenStream) -> TokenStream {
     if !attr.is_empty() {
         let declaration = parse_macro_input!(attr as syn::MetaNameValue);
-        let valid = declaration.path.is_ident("effects") && matches!(&declaration.value,
+        let valid = declaration.path.is_ident("effects")
+            && matches!(&declaration.value,
             syn::Expr::Array(array) if array.elems.iter().all(|value| matches!(value,
                 syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(label), .. }) if !label.value().is_empty() && label.value() != "*")));
         if !valid {
-            return syn::Error::new_spanned(declaration, "expected effects = [\"label\"]").to_compile_error().into();
+            return syn::Error::new_spanned(declaration, "expected effects = [\"label\"]")
+                .to_compile_error()
+                .into();
         }
     }
     let structure = parse_macro_input!(item as ItemStruct);
     let name = &structure.ident;
     quote! {
         #structure
+        // loom_core gates host-vs-guest codegen; it is set by loom-guest-rs's own
+        // build, never registered by the destination (guest) crate this macro expands
+        // into, so unexpected_cfgs would fire there for every actor. #[allow] must sit
+        // on the enclosing item: rustc resolves #[cfg] before an #[allow] on the same item.
+        #[allow(unexpected_cfgs)]
         #[cfg(not(feature = "loom-dependency"))]
         impl ::loom::bindings::Guest for #name {
             #[cfg(loom_core)]

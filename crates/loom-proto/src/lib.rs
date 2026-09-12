@@ -224,10 +224,10 @@ pub use codec::{
 };
 pub use fs::{DirEntry, EntryKind};
 pub use trace::{
-    TRACE_MAX_ENTRIES, TRACE_MAX_BLOB_BYTES, TRACE_MAX_METADATA_BYTES, TRACE_MAX_SCOPE_BYTES,
-    TRACE_MAX_ERROR_BYTES, validate_call_trace_limits,
-    TraceObservation, CallTrace, TraceBlob, TraceBlobKind, TraceBundle, TraceEntry, TraceKey, TraceMemo,
-    TraceOutcome, decode_call_trace, encode_call_trace,
+    CallTrace, TRACE_MAX_BLOB_BYTES, TRACE_MAX_ENTRIES, TRACE_MAX_ERROR_BYTES,
+    TRACE_MAX_METADATA_BYTES, TRACE_MAX_SCOPE_BYTES, TraceBlob, TraceBlobKind, TraceBundle,
+    TraceEntry, TraceKey, TraceMemo, TraceObservation, TraceOutcome, decode_call_trace,
+    encode_call_trace, validate_call_trace_limits,
 };
 #[cfg(test)]
 mod tests {
