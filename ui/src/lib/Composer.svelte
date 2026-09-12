@@ -3,7 +3,6 @@
   import Select from "./Select.svelte";
   import { ArrowUp, ChevronRight, Terminal } from "lucide-svelte";
   export let mode = "eval",
-    language = "ts",
     source = "",
     name = "",
     dependencies = "{}",
@@ -12,10 +11,7 @@
   function changeMode() {
     if (mode === "command") source = '{"command":"actors","args":{}}';
     else if (mode === "define")
-      source =
-        language === "rust"
-          ? "#[loom::def]\nfn main(value: i64) -> i64 {\n    value * 2\n}"
-          : "export function main(value: number): number {\n  return value * 2;\n}";
+      source = "#[loom::def]\nfn main(value: i64) -> i64 {\n    value * 2\n}";
     else source = "";
   }
 </script>
@@ -26,11 +22,11 @@
         aria-label="Definition name"
         bind:value={name}
         placeholder="Definition name"
-      /><Select label="Guest language" bind:value={language} on:change={changeMode} options={[{value:"ts",label:"TypeScript"},{value:"rust",label:"Rust"}]} />{:else}<span class="quiet right"
-        >{mode === "eval" ? "TypeScript" : "JSON command"}</span
+      />{:else}<span class="quiet right"
+        >{mode === "eval" ? "Rust" : "JSON command"}</span
       >{/if}
   </div>
-  <CodeEditor bind:value={source} language={mode === "command" ? "json" : language === "rust" && mode === "define" ? "rust" : "typescript"} {submit} />{#if mode === "define"}<details class="dependency-options">
+  <CodeEditor bind:value={source} language={mode === "command" ? "json" : "rust"} {submit} />{#if mode === "define"}<details class="dependency-options">
       <summary><ChevronRight size={11} /> Dependencies</summary><label
         >Import names → definition hashes<input
           aria-label="Dependency names and hashes"

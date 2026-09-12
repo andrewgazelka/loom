@@ -7,7 +7,6 @@
   export let load: () => Promise<unknown>;
   export let inspect: (hash: string) => void = () => {};
   export let code = false;
-  export let language: "ts" | "rust" = "ts";
   let node: HTMLDivElement, value: unknown, ready = false, error = "";
   onMount(() => {
     let disposed = false;
@@ -21,7 +20,7 @@
   });
 </script>
 <div class="row-preview" bind:this={node}>
-  {#if ready}{#if code}<CodeBlock code={String(value || "Source unavailable").slice(0,320)} language={language === "rust" ? "rust" : "typescript"} />
+  {#if ready}{#if code}<CodeBlock code={String(value || "Source unavailable").slice(0,320)} language="rust" />
     {:else}<ValueView value={record(value).type === "evaluated" ? record(value).result : value} {inspect} />{/if}
   {:else}<span class="quiet" title={error || undefined}>{error ? "Preview unavailable" : "Loading preview…"}</span>{/if}
 </div>

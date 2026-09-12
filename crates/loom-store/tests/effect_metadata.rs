@@ -7,20 +7,20 @@ use std::collections::BTreeMap;
 #[test]
 fn explicit_policy_changes_identity_but_legacy_identity_is_unchanged() -> Result<()> {
     let deps = BTreeMap::new();
-    let none = definition_identity(Lang::Ts, "source", &deps, None)?;
+    let none = definition_identity(Lang::Rust, "source", &deps, None)?;
     assert_eq!(
         none,
-        serde_json::to_vec(&json!({"version":1,"lang":"ts","source":"source","deps":{}}))?
+        serde_json::to_vec(&json!({"version":1,"lang":"rust","source":"source","deps":{}}))?
     );
     assert_ne!(
         none,
-        definition_identity(Lang::Ts, "source", &deps, Some(&[]))?
+        definition_identity(Lang::Rust, "source", &deps, Some(&[]))?
     );
     let unsorted = vec!["fs.read".into(), "exec".into(), "fs.read".into()];
     let sorted = vec!["exec".into(), "fs.read".into()];
     assert_eq!(
-        definition_identity(Lang::Ts, "source", &deps, Some(&unsorted))?,
-        definition_identity(Lang::Ts, "source", &deps, Some(&sorted))?
+        definition_identity(Lang::Rust, "source", &deps, Some(&unsorted))?,
+        definition_identity(Lang::Rust, "source", &deps, Some(&sorted))?
     );
     Ok(())
 }

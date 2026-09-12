@@ -55,7 +55,7 @@ try {
   if(process.env.LOOM_BENCH_DB&&process.env.LOOM_ARTIFACT_EVICTOR) {
     const logsRef=changed.build.logs_ref;
     assert(typeof logsRef==='string'&&/^[0-9a-f]{64}$/.test(logsRef),'Missing immutable build log reference');
-    const child=Bun.spawn([process.env.LOOM_ARTIFACT_EVICTOR,process.env.LOOM_BENCH_DB,'heck','wasm32-wasip1',logsRef],{stdout:'pipe',stderr:'pipe'});
+    const child=Bun.spawn([process.env.LOOM_ARTIFACT_EVICTOR,process.env.LOOM_BENCH_DB,'heck','wasm32-unknown-unknown',logsRef],{stdout:'pipe',stderr:'pipe'});
     const eviction={stdout:'',stderr:'',exit:-1};
     await Promise.all([
       new Response(child.stdout).text().then(value=>{eviction.stdout=value;}),
@@ -64,7 +64,7 @@ try {
     ]);
     assert(eviction.exit===0,`Artifact eviction failed: ${eviction.stderr}`);
     const removed=object(JSON.parse(eviction.stdout));
-    assert(removed.name==='heck'&&removed.target==='wasm32-wasip1'&&removed.build_log_hash===logsRef&&typeof removed.dependency_graph==='string'&&/^[0-9a-f]{64}$/.test(removed.dependency_graph)&&typeof removed.key==='string'&&Number.isSafeInteger(removed.removed_outputs)&&Number(removed.removed_outputs)>0,'Evictor did not verify removal from this build graph and compiler target');
+    assert(removed.name==='heck'&&removed.target==='wasm32-unknown-unknown'&&removed.build_log_hash===logsRef&&typeof removed.dependency_graph==='string'&&/^[0-9a-f]{64}$/.test(removed.dependency_graph)&&typeof removed.key==='string'&&Number.isSafeInteger(removed.removed_outputs)&&Number(removed.removed_outputs)>0,'Evictor did not verify removal from this build graph and compiler target');
     const rebuilt=await define(seed+2);
     const count=rebuilt.build.rustc_invocations;
     record(names[2]!,count===2,`${String(count)} compilations after removing heck CAS outputs and materializations; expected dependency + root; fresh result verified`);

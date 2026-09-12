@@ -29,7 +29,7 @@ impl Fixture {
             Service::new(
                 Store::memory().unwrap(),
                 directory.path().to_owned(),
-                vec![Lang::Ts],
+                vec![Lang::Rust],
             )
             .unwrap(),
         );

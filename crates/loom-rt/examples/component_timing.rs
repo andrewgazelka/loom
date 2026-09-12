@@ -9,12 +9,12 @@ async fn main() -> Result<()> {
     let paths = std::env::args().skip(1).collect::<Vec<_>>();
     anyhow::ensure!(
         !paths.is_empty(),
-        "provide real TS component paths (each is a distinct definition)"
+        "provide admitted Rust core wasm paths (each is a distinct definition)"
     );
     let store = Store::memory()?;
     let runtime = Runtime::new(store.clone())?;
     for path in paths {
-        let hash = support::register(&store, Lang::Ts, &path, &path)?;
+        let hash = support::register(&store, Lang::Rust, &path, &path)?;
         for iteration in 0..2 {
             let start = std::time::Instant::now();
             let call = runtime

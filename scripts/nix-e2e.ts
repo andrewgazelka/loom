@@ -26,7 +26,6 @@ try {
     return reply.result;
   }
   for(const definition of [
-    {name:'nix-ts',lang:'ts',source:'export function main(a: number, b: number): number { return a + b; }'},
     {name:'nix-rust',lang:'rust',source:'#[loom::def(effects=[])] pub fn main(a: i64,b: i64)->i64 { a+b }'},
   ]) {
     const result=await request('define',definition);
@@ -38,5 +37,5 @@ try {
   daemon.kill('SIGTERM');
   await daemon.exited;
   await rm(directory,{recursive:true,force:true});
-  console.log(`${passed}/3 packaged execution checks pass`);
+  console.log(`${passed}/2 packaged execution checks pass`);
 }

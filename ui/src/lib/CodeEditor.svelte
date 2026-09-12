@@ -5,17 +5,16 @@
   import { EditorView, keymap, drawSelection, highlightActiveLine } from "@codemirror/view";
   import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
   import { bracketMatching, indentOnInput, syntaxHighlighting, HighlightStyle } from "@codemirror/language";
-  import { javascript } from "@codemirror/lang-javascript";
   import { rust } from "@codemirror/lang-rust";
   import { json } from "@codemirror/lang-json";
   import { tags } from "@lezer/highlight";
   export let value = "";
-  export let language: "typescript" | "rust" | "json" = "typescript";
+  export let language: "rust" | "json" = "rust";
   export let submit: () => Promise<void>;
   let host: HTMLDivElement;
   let view: EditorView | undefined;
   const grammar = new Compartment();
-  const extension = (lang: string) => lang === "rust" ? rust() : lang === "json" ? json() : javascript({typescript:true});
+  const extension = (lang: string) => lang === "rust" ? rust() : json();
   const colors = HighlightStyle.define([
     {tag:[tags.keyword,tags.operator],color:"var(--syntax-keyword)"},
     {tag:[tags.string,tags.regexp],color:"var(--syntax-string)"},

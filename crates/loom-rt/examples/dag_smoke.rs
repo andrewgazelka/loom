@@ -9,10 +9,8 @@ use serde_json::json;
 async fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let rust_path = args.next().context("Rust DAG component required")?;
-    let ts_path = args.next().context("TS DAG component required")?;
     let store = Store::memory()?;
     let rust = support::register(&store, Lang::Rust, rust_path, "Rust DAG fixture")?;
-    let ts = support::register(&store, Lang::Ts, ts_path, "TS DAG fixture")?;
     let runtime = Runtime::new(store.clone())?;
     let value = json!({"meaning":42,"nested":[true,null,"content"]});
     let descriptor = json!({"op":"cas.put","args":value});
@@ -41,18 +39,11 @@ async fn main() -> Result<()> {
         store.get_value::<Value>(&descriptor_hash)? == Some(descriptor),
         "effect was not persisted as canonical DAG-CBOR"
     );
-    for direction in [
-        Direction {
-            name: "Rust to TS",
-            caller: rust.clone(),
-            target: ts.clone(),
-        },
-        Direction {
-            name: "TS to Rust",
-            caller: ts,
-            target: rust,
-        },
-    ] {
+    for direction in [Direction {
+        name: "Rust",
+        caller: rust.clone(),
+        target: rust,
+    }] {
         let result = runtime
             .call_def(&direction.caller, json!([reference, direction.target]))
             .await?;

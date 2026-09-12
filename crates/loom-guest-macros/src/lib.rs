@@ -2,7 +2,7 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{FnArg, ItemFn, ItemStruct, Pat, parse_macro_input};
 
-/// Export one free function as the component's callable definition.
+/// Export one free function as a core wasm callable definition.
 #[proc_macro_attribute]
 pub fn def(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut definition_hash = syn::LitStr::new("$self", proc_macro2::Span::call_site());
@@ -13,9 +13,15 @@ pub fn def(attr: TokenStream, item: TokenStream) -> TokenStream {
         let arguments = parse_macro_input!(attr with syn::punctuated::Punctuated::<syn::MetaNameValue, syn::Token![,]>::parse_terminated);
         let mut seen = std::collections::BTreeSet::new();
         for argument in arguments {
-            let key = argument.path.get_ident().map(ToString::to_string).unwrap_or_default();
+            let key = argument
+                .path
+                .get_ident()
+                .map(ToString::to_string)
+                .unwrap_or_default();
             if !seen.insert(key.clone()) {
-                return syn::Error::new_spanned(argument, "duplicate definition attribute").to_compile_error().into();
+                return syn::Error::new_spanned(argument, "duplicate definition attribute")
+                    .to_compile_error()
+                    .into();
             }
             match (key.as_str(), &argument.value) {
                 ("hash", syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(hash), .. })) => definition_hash = hash.clone(),
@@ -42,7 +48,7 @@ pub fn def(attr: TokenStream, item: TokenStream) -> TokenStream {
         .into();
     }
     let name = &function.sig.ident;
-    let component = format_ident!("__LoomDefinition");
+    let definition = format_ident!("__LoomDefinition");
     let mut decode = Vec::new();
     let mut arguments = Vec::new();
     let mut argument_types = Vec::new();
@@ -117,9 +123,9 @@ pub fn def(attr: TokenStream, item: TokenStream) -> TokenStream {
             ::loom::serde_json::json!({"effects":{"labels":[],"unknown":true,"declared":#declared_metadata},"exports":[{"name":#export_name,"params":[#(#parameter_signatures),*],"returns":#return_shape,"effects":{"labels":[],"unknown":true,"declared":#declared_metadata}}]})
         }
         #invocation
-        pub struct #component;
+        pub struct #definition;
         #[cfg(not(feature = "loom-dependency"))]
-        impl ::loom::bindings::Guest for #component {
+        impl ::loom::core::Guest for #definition {
             fn run(_state: Vec<u8>, _msg: Vec<u8>) -> Result<Vec<u8>, String> { Err("free definition has no actor handler".into()) }
             fn fold(_state: Vec<u8>, _event: Vec<u8>) -> Vec<u8> { panic!("free definition has no fold") }
             fn call(_def: Vec<u8>, args: Vec<u8>) -> Result<Vec<u8>, String> {
@@ -131,7 +137,7 @@ pub fn def(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
         }
         #[cfg(not(feature = "loom-dependency"))]
-        ::loom::bindings::export!(#component);
+        ::loom::export_core!(#definition);
     }.into()
 }
 
@@ -140,11 +146,14 @@ pub fn def(attr: TokenStream, item: TokenStream) -> TokenStream {
 pub fn actor(attr: TokenStream, item: TokenStream) -> TokenStream {
     if !attr.is_empty() {
         let declaration = parse_macro_input!(attr as syn::MetaNameValue);
-        let valid = declaration.path.is_ident("effects") && matches!(&declaration.value,
+        let valid = declaration.path.is_ident("effects")
+            && matches!(&declaration.value,
             syn::Expr::Array(array) if array.elems.iter().all(|value| matches!(value,
                 syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(label), .. }) if !label.value().is_empty() && label.value() != "*")));
         if !valid {
-            return syn::Error::new_spanned(declaration, "expected effects = [\"label\"]").to_compile_error().into();
+            return syn::Error::new_spanned(declaration, "expected effects = [\"label\"]")
+                .to_compile_error()
+                .into();
         }
     }
     let structure = parse_macro_input!(item as ItemStruct);
@@ -152,8 +161,7 @@ pub fn actor(attr: TokenStream, item: TokenStream) -> TokenStream {
     quote! {
         #structure
         #[cfg(not(feature = "loom-dependency"))]
-        impl ::loom::bindings::Guest for #name {
-            #[cfg(loom_core)]
+        impl ::loom::core::Guest for #name {
             fn init() -> Result<Vec<u8>, String> { ::loom::encode(&<Self as ::loom::Actor>::init()) }
             fn run(state: Vec<u8>, msg: Vec<u8>) -> Result<Vec<u8>, String> {
                 let state = if ::loom::decode_host::<::loom::Value>(&state)?.is_null() { <Self as ::loom::Actor>::init() } else { ::loom::decode_host(&state)? };
@@ -168,7 +176,7 @@ pub fn actor(attr: TokenStream, item: TokenStream) -> TokenStream {
             fn call(_def: Vec<u8>, _args: Vec<u8>) -> Result<Vec<u8>, String> { Err("actor definition has no free function".into()) }
         }
         #[cfg(not(feature = "loom-dependency"))]
-        ::loom::bindings::export!(#name);
+        ::loom::export_core!(#name);
     }.into()
 }
 

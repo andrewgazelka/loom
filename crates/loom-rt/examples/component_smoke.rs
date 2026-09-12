@@ -10,12 +10,8 @@ async fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let path = args
         .next()
-        .context("usage: component_smoke COMPONENT [ts|rust] [counter|recursive|itoa]")?;
-    let lang = if args.next().as_deref() == Some("ts") {
-        Lang::Ts
-    } else {
-        Lang::Rust
-    };
+        .context("usage: component_smoke CORE_WASM [counter|recursive|itoa]")?;
+    let lang = Lang::Rust;
     let mode = args.next().unwrap_or_default();
     let counter = mode == "counter";
     let store = Store::memory()?;

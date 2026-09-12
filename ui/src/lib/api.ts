@@ -1,5 +1,5 @@
 export interface Diagnostic {
-  lang: string;
+  lang: "rust";
   file: string;
   line: number;
   col: number;
@@ -20,7 +20,7 @@ export interface Definition {
   allowed_effects?: string[] | null;
   observed_effects?: string[];
   hash: string;
-  lang: string;
+  lang: "rust";
   name_hint?: string;
   name?: string;
   component_hash?: string | null;
@@ -29,7 +29,7 @@ export interface Definition {
 export interface Actor {
   id: string;
   behavior_hash: string;
-  lang: string;
+  lang: "rust";
   last_seq?: number;
   spawn_ms?: number;
 }

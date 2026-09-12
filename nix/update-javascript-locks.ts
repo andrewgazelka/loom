@@ -3,7 +3,7 @@
 import { join } from 'node:path';
 const root = join(import.meta.dir, '..');
 const result: Record<string, unknown> = {};
-for (const directory of ['checker', 'guest-ts', 'ui']) {
+for (const directory of ['ui']) {
   const text = await Bun.file(join(root, directory, 'bun.lock')).text();
   const lock = Bun.JSONC.parse(text);
   if (lock.lockfileVersion !== 1) throw new Error(`Unsupported Bun lock in ${directory}`);

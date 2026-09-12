@@ -17,7 +17,7 @@ impl loom::Actor for Counter {
 
 #[cfg(test)]
 mod tests {
-    use loom::bindings::Guest;
+    use loom::core::Guest;
     #[test]
     fn handler_and_fold_share_cbor_state() {
         let state = loom::encode(&loom::Value::Null).unwrap();

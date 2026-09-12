@@ -149,7 +149,7 @@ bun scripts/configure-codex-mcp.ts --token-file /path/to/loom/token
 | --- | --- |
 | `loom-actor` | one Turso file per actor, the pump, supervision |
 | `loom-api` | HTTP/WebSocket service: auth, CAS browsing, the REPL API |
-| `loom-build` | component builders |
+| `loom-build` | core wasm builder |
 | `loom-check` | effect/language checking before a definition becomes executable |
 | `loom-cli` | command-line client for a running `loomd` |
 | `loom-guest-macros` | `#[loom::def]` / `#[loom::actor]` proc macros |
@@ -164,11 +164,8 @@ bun scripts/configure-codex-mcp.ts --token-file /path/to/loom/token
 | `loomd` | the daemon binary: UI, API, and MCP endpoints |
 
 Top level: `crates/` (above), `docs/`, `examples/`, `scripts/`, `deploy/`, `nix/`,
-`checker/` (language/effect checker), `ui/` (Svelte browser REPL), `rustc/` (Rust
+`ui/` (Svelte browser REPL), `rustc/` (Rust
 guest toolchain build).
-
-Also in the tree: `guest-ts/` and `wit/` hold the TypeScript guest and WIT component
-support; Rust is the primary, actively developed path.
 
 ## Docs
 

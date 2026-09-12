@@ -17,7 +17,7 @@
   import ReferenceLink from "./ReferenceLink.svelte";
   import CodeBlock from "./CodeBlock.svelte";
   import type { CodeLanguage } from "./highlight";
-  let language: CodeLanguage = "typescript";
+  const language: CodeLanguage = "rust";
   import ValueView from "./ValueView.svelte";
   import EvaluationView from "./EvaluationView.svelte";
   export let client: Client;
@@ -33,7 +33,6 @@
   $: diagnostic = row.entry?.reply?.diagnostics ?? [];
   $: failed = !!row.entry?.error || row.entry?.reply?.ok === false;
   $: pending = !!row.entry && !row.entry.reply && !row.entry.error;
-  $: language = row.language === "rust" ? "rust" : "typescript";
   $: title = definition
     ? row.title
     : evaluated
@@ -78,7 +77,7 @@
         <summary
           ><ChevronRight size={13} /><div class="signature"><span>{title}</span><SignatureView value={row.kind === "defined" ? record(row.value).sig : record(record(row.entry?.reply?.result).def).sig} name={title} /></div><span
             class="language-marker"
-            >{row.language === "rust" ? "Rust" : "TS"}</span
+            >Rust</span
           ></summary
         >{#if row.source || source}<CodeBlock
             code={row.source || source}
@@ -124,7 +123,7 @@
             <div class="invocation-code">
               <CodeBlock
                 code={row.source || title}
-                language={evaluated ? "typescript" : "json"}
+                language={evaluated ? "rust" : "json"}
               />
             </div>
           </div>

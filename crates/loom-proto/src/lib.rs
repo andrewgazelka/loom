@@ -1,5 +1,5 @@
 mod cas;
-pub mod component_protocol;
+pub mod core_protocol;
 pub use cas::*;
 use serde::{Deserialize, Serialize};
 pub use serde_json::Value;
@@ -12,13 +12,11 @@ use ts_rs::TS;
 #[serde(rename_all = "lowercase")]
 pub enum Lang {
     #[default]
-    Ts,
     Rust,
 }
 impl Lang {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Ts => "ts",
             Self::Rust => "rust",
         }
     }
@@ -224,10 +222,10 @@ pub use codec::{
 };
 pub use fs::{DirEntry, EntryKind};
 pub use trace::{
-    TRACE_MAX_ENTRIES, TRACE_MAX_BLOB_BYTES, TRACE_MAX_METADATA_BYTES, TRACE_MAX_SCOPE_BYTES,
-    TRACE_MAX_ERROR_BYTES, validate_call_trace_limits,
-    TraceObservation, CallTrace, TraceBlob, TraceBlobKind, TraceBundle, TraceEntry, TraceKey, TraceMemo,
-    TraceOutcome, decode_call_trace, encode_call_trace,
+    CallTrace, TRACE_MAX_BLOB_BYTES, TRACE_MAX_ENTRIES, TRACE_MAX_ERROR_BYTES,
+    TRACE_MAX_METADATA_BYTES, TRACE_MAX_SCOPE_BYTES, TraceBlob, TraceBlobKind, TraceBundle,
+    TraceEntry, TraceKey, TraceMemo, TraceObservation, TraceOutcome, decode_call_trace,
+    encode_call_trace, validate_call_trace_limits,
 };
 #[cfg(test)]
 mod tests {
