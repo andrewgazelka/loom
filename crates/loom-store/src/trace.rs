@@ -387,9 +387,16 @@ pub(super) fn migrate_legacy(connection: &Connection) -> Result<()> {
             let mut previous = loom_proto::decode_call_trace(&read_trace_bytes(connection, &hash)?)
                 .map_err(anyhow::Error::msg)?;
             if previous.outcome.is_some() {
-                let recorded: BTreeMap<_,_> = previous.entries.iter().map(|entry| (&entry.key,entry)).collect();
+                let recorded: BTreeMap<_, _> = previous
+                    .entries
+                    .iter()
+                    .map(|entry| (&entry.key, entry))
+                    .collect();
                 for entry in &entries {
-                    ensure!(recorded.get(&entry.key).is_some_and(|old| **old == *entry), "legacy occurrence conflicts with completed trace");
+                    ensure!(
+                        recorded.get(&entry.key).is_some_and(|old| **old == *entry),
+                        "legacy occurrence conflicts with completed trace"
+                    );
                 }
                 continue;
             }

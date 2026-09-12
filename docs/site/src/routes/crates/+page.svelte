@@ -1,0 +1,4 @@
+<script lang="ts">let { data } = $props();</script>
+<svelte:head><title>Crates · Loom</title><meta name="description" content="Loom crates, generated from Cargo manifests and Rust module documentation." /></svelte:head>
+<div class="eyebrow">GENERATED REFERENCE</div><h1>Crates</h1><p class="page-intro">{data.crates.length} packages. Names and descriptions come from Cargo manifests; summaries come from Rust module documentation.</p>
+<div class="table-wrap"><table><thead><tr><th>Crate</th><th>Description</th><th>Source</th></tr></thead><tbody>{#each data.crates as crate}<tr><td><code>{crate.name}</code></td><td>{crate.description || crate.summary || 'No package description or module summary.'}{#if crate.description && crate.summary && crate.description !== crate.summary}<p class="crate-summary">{crate.summary}</p>{/if}</td><td><code>{crate.path}</code></td></tr>{/each}</tbody></table></div>
