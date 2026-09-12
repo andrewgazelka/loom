@@ -109,14 +109,11 @@ impl Fixtures {
         directory: &std::path::Path,
         effects: Arc<dyn EffectHandler>,
     ) -> Node {
-        let mut registry = Registry::new();
+        let registry = Arc::new(loom_behavior::StoreRegistry::new(self.store.clone()));
         for hash in [&self.handler, &self.promoted] {
-            let behavior = loom_behavior::register(&mut registry, self.store.clone(), hash)
-                .await
-                .unwrap();
-            assert_eq!(loom_actor::Behavior::hash(behavior.as_ref()), hash);
-            assert!(!loom_actor::Behavior::schema(behavior.as_ref()).is_empty());
-            assert!(registry.contains_key(hash));
+            let behavior = registry.resolve(hash).await.unwrap();
+            assert_eq!(behavior.hash(), hash);
+            assert!(!behavior.schema().is_empty());
         }
         Node::new(directory, registry, effects, Config::default())
             .await

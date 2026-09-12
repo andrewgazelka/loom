@@ -61,22 +61,20 @@ async fn serve() -> anyhow::Result<()> {
             .unwrap_or(std::path::Path::new("."))
             .join("actors")
     });
+    let service = loom_api::Service::new(
+        loom_store::Store::open(args.db)?,
+        args.root.canonicalize()?,
+        vec![loom_proto::Lang::Rust],
+    )?
+    .with_backup_directory(backup_directory);
     let node = loom_actor::Node::new(
         actors_dir,
-        loom_actor::Registry::new(),
+        service.actor_registry(),
         Arc::new(loom_actor::DefaultEffects),
         loom_actor::Config::default(),
     )
     .await?;
-    let service = Arc::new(
-        loom_api::Service::new(
-            loom_store::Store::open(args.db)?,
-            args.root.canonicalize()?,
-            vec![loom_proto::Lang::Rust],
-        )?
-        .with_backup_directory(backup_directory)
-        .with_actors(node.clone()),
-    );
+    let service = Arc::new(service.with_actors(node.clone()));
     if args.stdio {
         return tokio::select! {
             result = loom_mcp::stdio(service, node) => result,

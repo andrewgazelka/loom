@@ -58,7 +58,7 @@ impl ActorService {
         json_value(self.node.members(&args.group).await.map_err(error)?)
     }
     pub(super) async fn actor_behaviors(&self) -> anyhow::Result<Value> {
-        json_value(self.node.behaviors())
+        json_value(self.node.behaviors().await?)
     }
     pub(super) async fn actor_run(&self) -> anyhow::Result<Value> {
         json_value(json!({"processed":self.node.run_until_idle().await.map_err(error)?}))

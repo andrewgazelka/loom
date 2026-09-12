@@ -19,3 +19,4 @@ rmcp = { version = "0.17", features = ["client"] }
 loom-store = { path = "../loom-store" }
 tokio = { version = "1", features = ["full"] }
 tempfile = "3"
+async-trait = "0.1"

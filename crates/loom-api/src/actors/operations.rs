@@ -51,6 +51,7 @@ impl ActorService {
             &init,
             self.node
                 .behavior(&args.behavior_hash)
+                .await
                 .map_err(error)?
                 .child_type(),
         ))
@@ -122,7 +123,7 @@ impl ActorService {
         &self,
         args: PromoteWhereArgs,
     ) -> anyhow::Result<Value> {
-        self.node.behavior(&args.new_hash).map_err(error)?;
+        self.node.behavior(&args.new_hash).await.map_err(error)?;
         for id in self.node.actor_ids().map_err(error)? {
             let info = self.node.info(&id).await.map_err(error)?;
             if info.behavior_hash == args.old_hash && info.status != loom_actor::Status::Stopped {

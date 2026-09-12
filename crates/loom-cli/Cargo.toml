@@ -20,3 +20,5 @@ loom-store = { path = "../loom-store" }
 axum = "0.8"
 tempfile = "3"
 loom-actor = { path = "../loom-actor" }
+async-trait = "0.1"
+loom-behavior = { path = "../loom-behavior" }

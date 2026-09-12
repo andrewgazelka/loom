@@ -28,7 +28,7 @@ impl Node {
             return Ok(false);
         };
         let code = actor::code(&conn).await?;
-        let behavior = actor::behavior(&self.registry, &code.hash)?;
+        let behavior = actor::behavior(&self.registry, &code.hash).await?;
         for retry in 0..=self.config.max_retries {
             match actor::attempt(
                 &mut conn,
@@ -84,7 +84,7 @@ impl Node {
 
     pub(crate) async fn promote_inner(&self, id: &str, hash: &str, author: &str, rationale: &str) -> Result<()> {
         let actor = self.open_actor(id).await?;
-        let behavior = actor::behavior(&self.registry, hash).with_context(|| format!("actor {id} seq -1: promote"))?;
+        let behavior = actor::behavior(&self.registry, hash).await.with_context(|| format!("actor {id} seq -1: promote"))?;
         actor::promote(
             &mut *actor.conn.lock().await,
             behavior.as_ref(),

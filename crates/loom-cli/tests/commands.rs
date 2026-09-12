@@ -3,6 +3,23 @@ use loom_proto::{Lang, Response};
 use loom_store::Store;
 use std::{path::PathBuf, sync::Arc};
 
+struct TransportRegistry;
+
+#[async_trait::async_trait]
+impl loom_actor::Registry for TransportRegistry {
+    async fn resolve(&self, reference: &str) -> anyhow::Result<Arc<dyn loom_actor::Behavior>> {
+        anyhow::ensure!(reference == "counter-v1", "unknown behavior {reference}");
+        Ok(Arc::new(loom_actor::builtin::Counter::plain()))
+    }
+
+    async fn behaviors(&self) -> anyhow::Result<Vec<loom_actor::builtin::BehaviorInfo>> {
+        Ok(vec![loom_actor::builtin::BehaviorInfo {
+            hash: "counter-v1".into(),
+            description: "Transport test counter.".into(),
+        }])
+    }
+}
+
 struct Server {
     url: String,
     task: tokio::task::JoinHandle<()>,
@@ -10,10 +27,19 @@ struct Server {
 }
 impl Server {
     async fn start() -> Self {
+        Self::with_registry(false).await
+    }
+    async fn with_registry(guest: bool) -> Self {
         let directory = tempfile::tempdir().unwrap();
+        let store = Store::memory().unwrap();
+        let registry: Arc<dyn loom_actor::Registry> = if guest {
+            Arc::new(loom_behavior::StoreRegistry::new(store.clone()))
+        } else {
+            Arc::new(TransportRegistry)
+        };
         let node = loom_actor::Node::new(
             directory.path().join("actors"),
-            loom_actor::Registry::new(),
+            registry,
             Arc::new(loom_actor::DefaultEffects),
             loom_actor::Config::default(),
         )
@@ -21,7 +47,7 @@ impl Server {
         .unwrap();
         let service = Arc::new(
             Service::new(
-                Store::memory().unwrap(),
+                store,
                 PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
                 vec![Lang::Rust],
             )
@@ -175,7 +201,7 @@ fn retired_vocabulary_is_rejected() {
 #[tokio::test]
 #[ignore = "requires Rust guest toolchain and LOOM_COMPILER_CACHE_OWNER"]
 async fn real_guest_definition_commands() {
-    let server = Server::start().await;
+    let server = Server::with_registry(true).await;
     let file = tempfile::NamedTempFile::new().unwrap();
     let path = file.path().to_str().unwrap();
     let first = "pub fn main() -> i32 { let value = 41; value }";

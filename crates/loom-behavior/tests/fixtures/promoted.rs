@@ -1,18 +1,15 @@
-use loom::serde_json::{Value, json};
+use loom::serde_json::Value;
 
-#[loom::schema]
-pub fn schema() -> &'static str {
-    "ALTER TABLE entries ADD COLUMN revision TEXT"
-}
+pub const LOOM_SCHEMA: &str = "ALTER TABLE entries ADD COLUMN revision TEXT";
 
-#[loom::def]
 pub fn handle(msg: Vec<u8>) {
-    let _: Value = loom::perform(
-        "sql",
-        json!({
-            "sql":"INSERT INTO entries(body,revision) VALUES (?,?)",
-            "params":[{"type":"blob","value":msg},{"type":"text","value":"v2"}]
-        }),
+    let mut request: Value = loom::serde_json::from_str(
+        r#"{
+        "sql":"INSERT INTO entries(body,revision) VALUES (?,?)",
+        "params":[{"type":"blob","value":null},{"type":"text","value":"v2"}]
+    }"#,
     )
     .unwrap();
+    request["params"][0]["value"] = Value::Array(msg.into_iter().map(Value::from).collect());
+    let _: Value = loom::perform("sql", request).unwrap();
 }

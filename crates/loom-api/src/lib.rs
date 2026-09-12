@@ -74,6 +74,10 @@ impl Service {
         })
     }
 
+    pub fn actor_registry(&self) -> Arc<dyn loom_actor::Registry> {
+        Arc::new(loom_behavior::StoreRegistry::new(self.store.clone()))
+    }
+
     pub fn with_actors(mut self, node: loom_actor::Node) -> Self {
         self.actors = Some(actors::ActorService::new(node));
         self

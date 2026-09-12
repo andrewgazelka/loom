@@ -86,7 +86,7 @@ Actor commands call the same service operations as the existing MCP actor tools:
 | `fork <id> <seq>` | `actor_fork` |
 | `actors` | `actor_list` |
 
-Actor behaviors must be registered with the node. Each actor owns its domain tables, inbox, effects, and outbox in one Turso file. See [Actors on Turso](actors-turso.md) for transactions, supervision, and behavior changes.
+Actor behaviors resolve from stored definitions when `spawn` runs; a running node can spawn a newly added definition by name or hash. Actor entries accept one `Vec<u8>` message, with optional `LOOM_SCHEMA` SQL. Each actor pins its resolved definition hash. Each actor owns its domain tables, inbox, effects, and outbox in one Turso file. See [Actors on Turso](actors-turso.md) for transactions, supervision, and behavior changes.
 
 Client responses contain `ok`, `seq`, `result`, and `diagnostics`. WebSocket clients connect to `/v1/stream` and send `{ "token": "...", "after": 0 }` as their first message; the server streams durable events after that cursor.
 

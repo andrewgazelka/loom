@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use loom_actor::{Config, DefaultEffects, Node, Registry};
+use loom_actor::{Config, DefaultEffects, Node};
 use loom_api::{Access, Service};
 use loom_mcp::LoomMcp;
 use loom_proto::Lang;
@@ -11,6 +11,23 @@ use rmcp::{
     service::RunningService,
 };
 use serde_json::{Value, json};
+
+struct TransportRegistry;
+
+#[async_trait::async_trait]
+impl loom_actor::Registry for TransportRegistry {
+    async fn resolve(&self, reference: &str) -> anyhow::Result<Arc<dyn loom_actor::Behavior>> {
+        anyhow::ensure!(reference == "counter-v1", "unknown behavior {reference}");
+        Ok(Arc::new(loom_actor::builtin::Counter::plain()))
+    }
+
+    async fn behaviors(&self) -> anyhow::Result<Vec<loom_actor::builtin::BehaviorInfo>> {
+        Ok(vec![loom_actor::builtin::BehaviorInfo {
+            hash: "counter-v1".into(),
+            description: "Transport test counter.".into(),
+        }])
+    }
+}
 
 struct Fixture {
     client: RunningService<RoleClient, ()>,
@@ -35,7 +52,7 @@ impl Fixture {
         );
         let node = Node::new(
             directory.path().join("actors"),
-            Registry::new(),
+            Arc::new(TransportRegistry),
             Arc::new(DefaultEffects),
             Config::default(),
         )
@@ -168,15 +185,13 @@ async fn mcp_spawn_send_tree() {
     .collect();
     assert_eq!(actual, expected);
     let behaviors = fixture.call("actor_behaviors", json!({})).await;
-    for hash in ["counter-v1", "forwarder-v1", "echo-v1", "supervisor-v1"] {
-        let behavior = behaviors
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|behavior| behavior["hash"] == hash)
-            .expect("builtin behavior is discoverable");
-        assert!(!behavior["description"].as_str().unwrap().is_empty());
-    }
+    let behavior = behaviors
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|behavior| behavior["hash"] == "counter-v1")
+        .expect("transport behavior is discoverable");
+    assert!(!behavior["description"].as_str().unwrap().is_empty());
     let id = fixture.counter().await;
     fixture.send_three(&id).await;
     let tree = fixture.call("actor_tree", json!({})).await;

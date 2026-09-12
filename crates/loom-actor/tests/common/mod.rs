@@ -1,9 +1,10 @@
+use crate::registry::Registry;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use loom_actor::{Actor, Behavior, EffectError, EffectHandler, EffectKey, Registry};
+use loom_actor::{Actor, Behavior, EffectError, EffectHandler, EffectKey};
 use turso::Value;
 
 pub const H1: &str = "counter-v1";
@@ -52,12 +53,12 @@ impl EffectHandler for RecordingEffects {
     }
 }
 
-pub fn registry(behaviors: Vec<Arc<dyn Behavior>>) -> Registry {
+pub fn registry(behaviors: Vec<Arc<dyn Behavior>>) -> Arc<dyn loom_actor::Registry> {
     let mut registry = Registry::new();
     for behavior in behaviors {
         registry.insert(behavior.hash().to_owned(), behavior);
     }
-    registry
+    Arc::new(registry)
 }
 
 pub async fn integer(actor: &Actor, sql: &str) -> i64 {

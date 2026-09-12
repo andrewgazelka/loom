@@ -231,13 +231,12 @@ impl crate::Service {
         };
         for field in references {
             let target = crate::field(&args, field)?;
-            let hash = match self.store.resolve(target)? {
-                Some(definition) => definition.hash,
-                None => target.to_owned(),
-            };
-            actors.node.behavior(&hash).with_context(|| {
-                format!("definition reference {target:?} resolves to unregistered behavior {hash}")
-            })?;
+            let behavior = actors
+                .node
+                .behavior(target)
+                .await
+                .with_context(|| format!("actor definition reference {target:?}"))?;
+            let hash = behavior.hash();
             args[*field] = json!(hash);
         }
         actors.command(&self.access, command, args).await

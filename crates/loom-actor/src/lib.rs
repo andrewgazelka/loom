@@ -55,9 +55,14 @@ pub use types::{
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
-pub type Registry = HashMap<String, Arc<dyn Behavior>>;
+/// Resolves behavior identities when an operation runs, including newly stored definitions.
+#[async_trait]
+pub trait Registry: Send + Sync {
+    async fn resolve(&self, reference: &str) -> Result<Arc<dyn Behavior>>;
+    async fn behaviors(&self) -> Result<Vec<builtin::BehaviorInfo>>;
+}
 
 #[async_trait]
 pub trait Behavior: Send + Sync {
@@ -66,7 +71,7 @@ pub trait Behavior: Send + Sync {
         ChildType::Worker
     }
     fn description(&self) -> &str {
-        "Registered native behavior."
+        "Actor behavior."
     }
     fn schema(&self) -> &str;
     async fn handle(&self, cx: &mut Ctx<'_>, msg: &[u8]) -> Result<(), Trap>;
@@ -305,3 +310,9 @@ impl Ctx<'_> {
         bytes
     }
 }
+
+#[cfg(test)]
+extern crate self as loom_actor;
+#[cfg(test)]
+#[path = "../tests/registry.rs"]
+mod test_registry;

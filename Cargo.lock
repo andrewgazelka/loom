@@ -2317,6 +2317,7 @@ dependencies = [
  "axum",
  "http-body-util",
  "loom-actor",
+ "loom-behavior",
  "loom-build",
  "loom-check",
  "loom-maintenance",
@@ -2399,10 +2400,12 @@ name = "loom-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "clap",
  "loom-actor",
  "loom-api",
+ "loom-behavior",
  "loom-proto",
  "loom-store",
  "reqwest 0.12.28",
@@ -2500,6 +2503,7 @@ name = "loom-mcp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "loom-actor",
  "loom-api",

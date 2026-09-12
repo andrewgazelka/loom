@@ -61,8 +61,11 @@ pub(crate) async fn code(conn: &Connection) -> Result<Code> {
     Ok(Code { revision: row.get(0)?, hash: row.get(1)? })
 }
 
-pub(crate) fn behavior(registry: &Registry, hash: &str) -> Result<Arc<dyn Behavior>> {
-    registry.get(hash).cloned().ok_or_else(|| anyhow!("unregistered behavior {hash}"))
+pub(crate) async fn behavior(registry: &Arc<dyn Registry>, hash: &str) -> Result<Arc<dyn Behavior>> {
+    if hash == crate::supervisor::HASH {
+        return Ok(Arc::new(crate::Supervisor));
+    }
+    registry.resolve(hash).await
 }
 
 pub(crate) struct Message {

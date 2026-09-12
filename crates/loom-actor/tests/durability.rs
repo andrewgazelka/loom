@@ -1,3 +1,5 @@
+use crate::registry::Registry;
+mod registry;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -6,7 +8,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use loom_actor::{
     Actor, Behavior, ChildSpec, ChildType, Clock, Config, Ctx, DefaultEffects, Durability, EffectError, EffectHandler, EffectKey, Node,
-    Registry, Status, StoreConfig, Trap,
+    Status, StoreConfig, Trap,
 };
 use serde_json::Value;
 
@@ -36,7 +38,7 @@ async fn node_with_effects(dir: &Path, store: Option<&Path>, clock: Arc<ManualCl
     registry.insert("terminating-counter".into(), Arc::new(TerminatingCounter));
     Node::new(
         dir,
-        registry,
+        Arc::new(registry),
         effects,
         Config {
             store: store.map(|path| StoreConfig::Local { path: path.to_owned() }),
@@ -338,7 +340,7 @@ async fn renewal_survives_blocked_handler(workspace: &Path) {
     let clock = Arc::new(ManualClock::default());
     let node = Node::new(
         workspace.join("renewal-node"),
-        Registry::new(),
+        Arc::new(Registry::new()),
         effects.clone(),
         Config {
             store: Some(StoreConfig::Local { path: workspace.join("renewal-store") }),

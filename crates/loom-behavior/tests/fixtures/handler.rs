@@ -1,11 +1,7 @@
-use loom::serde_json::{Value, json};
+use loom::serde_json::Value;
 
-#[loom::schema]
-pub fn schema() -> &'static str {
-    "CREATE TABLE entries(body BLOB NOT NULL)"
-}
+pub const LOOM_SCHEMA: &str = "CREATE TABLE entries(body BLOB NOT NULL)";
 
-#[loom::def]
 pub fn handle(msg: Vec<u8>) {
     let request: Value = loom::serde_json::from_slice(&msg).unwrap();
     match request["action"].as_str().unwrap() {
@@ -15,15 +11,15 @@ pub fn handle(msg: Vec<u8>) {
                 loom::handle(
                     ["local"],
                     |effect, _| {
-                        assert_eq!(effect.name, "local");
-                        loom::Reply::Resume(json!(17))
+                        check(effect.name == "local");
+                        loom::Reply::Resume(Value::from(17))
                     },
                     || {
                         loom::scope(|scope| {
                             let child = scope
                                 .spawn(|| {
-                                    let result: i64 = loom::perform("local", json!({})).unwrap();
-                                    assert_eq!(result, 17);
+                                    let result: i64 = loom::perform("local", object([])).unwrap();
+                                    check(result == 17);
                                     insert(&msg);
                                 })
                                 .unwrap();
@@ -42,50 +38,79 @@ pub fn handle(msg: Vec<u8>) {
             let cap = loom::actor::accept(cap).unwrap();
             let token: Value = loom::serde_json::from_slice(&cap.token).unwrap();
             let cap_id = token["cap_id"].as_u64().unwrap().to_string();
-            let restored: Vec<u8> = loom::perform("actor.cap", json!({"cap_id":cap_id})).unwrap();
-            assert_eq!(restored, cap.token);
-            let body = loom::serde_json::to_vec(&json!({"action":"row","forwarded":true})).unwrap();
+            let restored: Vec<u8> =
+                loom::perform("actor.cap", object([field("cap_id", Value::from(cap_id))])).unwrap();
+            check(restored == cap.token);
+            let body = loom::serde_json::to_vec(&object([
+                field("action", Value::from("row")),
+                field("forwarded", Value::from(true)),
+            ]))
+            .unwrap();
             loom::actor::send(&cap, &body).unwrap();
-            assert!(request["trap"].as_bool() != Some(true), "trap after send");
+            check(request["trap"].as_bool() != Some(true));
         }
         "forged_send" => {
-            let body = loom::serde_json::to_vec(&json!({"action":"row"})).unwrap();
+            let body =
+                loom::serde_json::to_vec(&object([field("action", Value::from("row"))])).unwrap();
             // Ignoring a capability rejection must still abort the transaction.
-            let _ = loom::perform::<()>("actor.send", json!({"cap":request["cap"],"msg":body}));
+            let _ = loom::perform::<()>(
+                "actor.send",
+                object([
+                    field("cap", request["cap"].clone()),
+                    field("msg", bytes(&body)),
+                ]),
+            );
         }
         "spawn_send" => {
-            let init = loom::serde_json::to_vec(&json!({"action":"init"})).unwrap();
+            let init =
+                loom::serde_json::to_vec(&object([field("action", Value::from("init"))])).unwrap();
             let cap: Vec<u8> = loom::perform(
                 "actor.spawn",
-                json!({
-                    "behavior_hash":request["behavior_hash"], "init":init
-                }),
+                object([
+                    field("behavior_hash", request["behavior_hash"].clone()),
+                    field("init", bytes(&init)),
+                ]),
             )
             .unwrap();
-            let body = loom::serde_json::to_vec(&json!({"action":"row"})).unwrap();
-            loom::perform::<()>("actor.send", json!({"cap":cap,"msg":body})).unwrap();
+            let body =
+                loom::serde_json::to_vec(&object([field("action", Value::from("row"))])).unwrap();
+            loom::perform::<()>(
+                "actor.send",
+                object([field("cap", bytes(&cap)), field("msg", bytes(&body))]),
+            )
+            .unwrap();
             let token: Value = loom::serde_json::from_slice(&cap).unwrap();
             let cap_id = token["cap_id"].as_u64().unwrap().to_string();
-            loom::perform::<()>("actor.revoke", json!({"cap_id":cap_id})).unwrap();
+            loom::perform::<()>(
+                "actor.revoke",
+                object([field("cap_id", Value::from(cap_id))]),
+            )
+            .unwrap();
         }
         "unknown" => {
             // Swallowing a rejected root effect must not make a message commit.
-            let _ = loom::perform::<Value>("nope", json!({"request":[]}));
+            let _ = loom::perform::<Value>("nope", object([field("request", bytes(&[]))]));
         }
         "unknown_actor" => {
-            let _ = loom::perform::<Value>("actor.nope", json!({"request":[]}));
+            let _ = loom::perform::<Value>("actor.nope", object([field("request", bytes(&[]))]));
         }
         "effect" => {
             insert(&msg);
-            let _ = loom::perform::<Vec<u8>>("test.effect", json!({"request":[1,2,3]}));
+            let _ = loom::perform::<Vec<u8>>(
+                "test.effect",
+                object([field("request", bytes(&[1, 2, 3]))]),
+            );
         }
         "scoped_trap" => {
             loom::scope(|scope| {
                 scope
                     .spawn(|| {
-                        loom::perform::<Vec<u8>>("test.effect", json!({"request":[1,2,3]}))
-                            .unwrap();
-                        panic!("scoped fixture panic");
+                        loom::perform::<Vec<u8>>(
+                            "test.effect",
+                            object([field("request", bytes(&[1, 2, 3]))]),
+                        )
+                        .unwrap();
+                        std::panic::panic_any("scoped fixture panic");
                     })
                     .unwrap()
                     .join()
@@ -93,26 +118,59 @@ pub fn handle(msg: Vec<u8>) {
             });
         }
         "handler_trap" => {
-            loom::perform::<Vec<u8>>("test.effect", json!({"request":[1,2,3]})).unwrap();
+            loom::perform::<Vec<u8>>("test.effect", object([field("request", bytes(&[1, 2, 3]))]))
+                .unwrap();
             let _ = loom::handle(
                 ["local"],
-                |_, _| panic!("handler fixture panic"),
+                |_, _| std::panic::panic_any("handler fixture panic"),
                 || loom::perform::<Value>("local", Value::Null),
             );
         }
-        action => panic!("unknown fixture action {action}"),
+        _ => std::panic::panic_any("unknown fixture action"),
     }
 }
 
 fn insert(msg: &[u8]) {
     let rows: Value = loom::perform(
         "sql",
-        json!({
-            "sql":"INSERT INTO entries(body) VALUES (?) RETURNING body",
-            "params":[{"type":"blob","value":msg}]
-        }),
+        object([
+            field(
+                "sql",
+                Value::from("INSERT INTO entries(body) VALUES (?) RETURNING body"),
+            ),
+            field("params", Value::Array(Vec::from([cell(msg)]))),
+        ]),
     )
     .unwrap();
-    assert_eq!(rows["columns"], json!(["body"]));
-    assert_eq!(rows["rows"], json!([[{"type":"blob","value":msg}]]));
+    check(rows["columns"] == Value::Array(Vec::from([Value::from("body")])));
+    check(rows["rows"] == Value::Array(Vec::from([Value::Array(Vec::from([cell(msg)]))])));
+}
+
+struct Field {
+    name: &'static str,
+    value: Value,
+}
+fn field(name: &'static str, value: Value) -> Field {
+    Field { name, value }
+}
+fn object<const N: usize>(fields: [Field; N]) -> Value {
+    let mut object = loom::serde_json::Map::new();
+    for field in fields {
+        object.insert(field.name.to_owned(), field.value);
+    }
+    Value::Object(object)
+}
+fn bytes(value: &[u8]) -> Value {
+    Value::Array(value.iter().copied().map(Value::from).collect())
+}
+fn cell(value: &[u8]) -> Value {
+    object([
+        field("type", Value::from("blob")),
+        field("value", bytes(value)),
+    ])
+}
+fn check(condition: bool) {
+    if !condition {
+        std::panic::panic_any("fixture assertion failed");
+    }
 }
