@@ -103,7 +103,7 @@ impl loom_rt::ComponentResolver for BuildResolver {
             def.component_hash = Some(component_hash.clone());
             self.store
                 .define(&def, None, &checked.source, &checked.deps)?;
-            self.store.append("system",&json!({"type":"component_built","component_hash":component_hash,"logs_ref":logs_ref,"ms":built.ms,"size":built.component.len(),"rustc_invocations":built.rustc_invocations}),0)?;
+            self.store.record_definition_event(&json!({"type":"component_built","component_hash":component_hash,"logs_ref":logs_ref,"ms":built.ms,"size":built.component.len(),"rustc_invocations":built.rustc_invocations}))?;
             Ok(())
         })
     }
@@ -146,7 +146,6 @@ pub(super) fn dependency_closure(
 #[derive(Default)]
 pub(super) struct Redefinitions {
     pub(super) rehashed: Vec<Value>,
-    pub(super) stale_actors: Vec<String>,
 }
 
 pub(super) fn dependency_signatures(

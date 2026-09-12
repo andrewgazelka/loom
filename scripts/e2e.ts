@@ -24,16 +24,5 @@ try {
     assert(reply.result.build.size>0,'empty wasm module');
     const result=await accepted('command',{command:'call',args:{hash:rustHash,args:[20,22]}});assert(result.result===42,JSON.stringify(result));
   });
-  await check('Rust actor event fold and fork',async()=>{
-    const source=await readFile(new URL('../examples/rust-counter/src/lib.rs',import.meta.url),'utf8');
-    const definition=await accepted('define',{lang:'rust',name:'e2e-counter',source});
-    const actor=await accepted('command',{command:'spawn',args:{hash:definition.result.def.hash,initial:0}});
-    await accepted('command',{command:'send',args:{actor:actor.result.id,msg:7}});
-    const state=await accepted('command',{command:'state',args:{actor:actor.result.id}});assert(state.result===7,JSON.stringify(state));
-    const fork=await accepted('command',{command:'fork',args:{actor:actor.result.id}});
-    await accepted('command',{command:'send',args:{actor:fork.result.id,msg:3}});
-    assert((await accepted('command',{command:'state',args:{actor:fork.result.id}})).result===10,'fork failed');
-    assert((await accepted('command',{command:'state',args:{actor:actor.result.id}})).result===7,'fork changed parent');
-  });
   await check('interactive Rust eval',async()=>{const reply=await accepted('eval',{source:'6 * 7'});assert(reply.result.value===42,JSON.stringify(reply));});
-} finally {console.log(`${passed}/4 native HTTP checks pass`);}
+} finally {console.log(`${passed}/3 native HTTP checks pass`);}

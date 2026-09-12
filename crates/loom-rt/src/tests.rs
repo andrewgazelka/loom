@@ -1,21 +1,13 @@
 use super::*;
 
 #[test]
-fn resolve_self_rewrites_actor_spawn_but_leaves_actor_send_and_other_defs_alone() {
-    let hash = "definition-hash";
-    let mut spawn = json!({"op":"actor.spawn","args":{"def":"$self","state":0}});
-    resolve_self(&mut spawn, hash);
-    assert_eq!(spawn["args"]["def"], json!(hash));
-    let mut spawn_other = json!({"op":"actor.spawn","args":{"def":"other-hash","state":0}});
-    resolve_self(&mut spawn_other, hash);
-    assert_eq!(spawn_other["args"]["def"], json!("other-hash"));
-    let mut send = json!({"op":"actor.send","args":{"def":"$self"}});
-    resolve_self(&mut send, hash);
-    assert_eq!(
-        send["args"]["def"],
-        json!("$self"),
-        "actor.send must not resolve $self"
-    );
+fn resolve_self_rewrites_only_self_calls() {
+    let mut call = json!({"op":"call","args":{"def":"$self"}});
+    resolve_self(&mut call, "definition-hash");
+    assert_eq!(call["args"]["def"], json!("definition-hash"));
+    let mut other = json!({"op":"call","args":{"def":"other-hash"}});
+    resolve_self(&mut other, "definition-hash");
+    assert_eq!(other["args"]["def"], json!("other-hash"));
 }
 #[tokio::test]
 async fn scoped_children_record_independently_and_replay_in_reverse_order() -> Result<()> {
@@ -82,14 +74,14 @@ async fn guest_cannot_claim_observation_is_hermetic() -> Result<()> {
     Ok(())
 }
 #[tokio::test]
-async fn keyed_exec_runs_once_across_actors() -> Result<()> {
+async fn keyed_exec_runs_once_across_calls() -> Result<()> {
     let root = tempfile::tempdir()?;
     let path = root.path().join("count");
     let runtime = Runtime::new(Store::memory()?)?;
     let descriptor = json!({"op":"exec","args":{"program":"sh","args":["-c","printf x >> \"$1\"","loom",path],"key":"once"}});
     let results = futures::future::try_join_all([
-        runtime.perform(descriptor.clone(), "actor-one", 0),
-        runtime.perform(descriptor, "actor-two", 0),
+        runtime.perform(descriptor.clone(), "call-one", 0),
+        runtime.perform(descriptor, "call-two", 0),
     ])
     .await?;
     assert_eq!(results[0]["code"], json!(0));
@@ -248,7 +240,7 @@ async fn concurrent_execution_of_one_scope_publishes_one_observation() -> Result
     )
     .await?;
     assert!(outputs.iter().all(|output| output == &outputs[0]));
-    let events = store.events(Some("system"), 0, 100)?;
+    let events = store.definition_events(0, 100)?;
     assert_eq!(
         events
             .iter()
@@ -268,7 +260,7 @@ async fn fresh_observations_do_not_accumulate_global_locks_or_effect_rows() -> R
             .await?;
     }
     assert!(runtime.inner.effect_locks.lock().unwrap().is_empty());
-    let events = store.events(Some("system"), 0, 1000)?;
+    let events = store.definition_events(0, 1000)?;
     assert_eq!(
         events
             .iter()

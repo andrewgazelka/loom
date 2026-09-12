@@ -11,21 +11,17 @@
     record,
     resultOf,
     type Definition,
-    type Actor,
     type LogEvent,
-    type Reply,
   } from "$lib/api";
   import type { Entry } from "$lib/journal";
   import SessionJournal from "$lib/SessionJournal.svelte";
   import ConnectionForm from "$lib/ConnectionForm.svelte";
   import Composer from "$lib/Composer.svelte";
-  import ActorBrowser from "$lib/ActorBrowser.svelte";
   import DefinitionBrowser from "$lib/DefinitionBrowser.svelte";
   import EffectsBrowser from "$lib/EffectsBrowser.svelte";
   import CasBrowser from "$lib/CasBrowser.svelte";
   import "@fontsource/jetbrains-mono/400.css";
   import "$lib/app.css";
-  let selectedActor = "";
   let view: WorkspaceView = "Session",
     endpoint = "",
     token = "",
@@ -35,7 +31,6 @@
     error = "",
     connected = false;
   let definitions: Definition[] = [],
-    actors: Actor[] = [],
     events: LogEvent[] = [],
     entries: Entry[] = [];
   let mode = "eval",
@@ -76,13 +71,11 @@
     try {
       const results = await Promise.all([
         current.command("defs"),
-        current.command("actors"),
         current.request("events?limit=1000"),
       ]);
       if (current !== client) return;
       definitions = items<Definition>(resultOf(results[0]!), "defs");
-      actors = items<Actor>(resultOf(results[1]!), "actors");
-      const received = items<LogEvent>(resultOf(results[2]!), "events");
+      const received = items<LogEvent>(resultOf(results[1]!), "events");
       const combined = new Map<number, LogEvent>();
       for (const event of [...received, ...events])
         combined.set(event.seq, event);
@@ -125,7 +118,7 @@
         }
         connected = true;
         reconnectAuthorized = true;
-        if (typeof data.seq === "number" && typeof data.actor === "string") {
+        if (typeof data.seq === "number" && "event" in data) {
           const item = data as unknown as LogEvent;
           events = [...events.filter((event) => event.seq !== item.seq), item]
             .sort((a, b) => a.seq - b.seq)
@@ -156,7 +149,7 @@
     connecting = true;
     const candidate = makeClient(endpoint.trim(), token.trim());
     try {
-      resultOf(await candidate.command("actors"));
+      resultOf(await candidate.command("defs"));
       client.dispose();
       client = candidate;
       endpoint = candidate.endpoint;
@@ -268,25 +261,6 @@
       busy = false;
     }
   }
-  async function runCommand(
-    command: string,
-    args: Record<string, unknown>,
-  ): Promise<Reply> {
-    const start = performance.now();
-    const reply = await client.command(command, args);
-    entries = [
-      ...entries,
-      {
-        id: Date.now(),
-        source: JSON.stringify({ command, args }, null, 2),
-        mode: "command",
-        reply,
-        ms: Math.round(performance.now() - start),
-      },
-    ];
-    await refresh();
-    return reply;
-  }
   function call(definition: Definition) {
     view = "Session";
     mode = "command";
@@ -301,7 +275,7 @@
 <svelte:head
   ><title>loom · workspace</title><meta
     name="description"
-    content="A live journal for Loom sessions, definitions, actors, and content."
+    content="A live journal for Loom sessions, definitions, and content."
   /><meta name="color-scheme" content="light dark" /></svelte:head
 >
 {#if !authenticated}
@@ -309,7 +283,7 @@
     <section class="connection-panel" aria-labelledby="connect-title" aria-busy={connecting}>
       <a href="/" class="wordmark">loom</a>
       <h1 id="connect-title">Connect to your workspace</h1>
-      <p class="gate-intro">Enter your token to access sessions, actors, and the content store.</p>
+      <p class="gate-intro">Enter your token to access sessions, definitions, and the content store.</p>
       {#if error}<p class="gate-error" role="alert">{error}</p>{/if}
       <ConnectionForm bind:endpoint bind:token bind:session {connecting} submit={save} />
     </section>
@@ -319,7 +293,7 @@
   toggleHelp={() => help = !help} toggleSettings={() => settings = !settings} />
 <div class="workspace">
   <WorkspaceNavigation {view} {sequence} {navigate}
-    definitionCount={definitions.length} actorCount={actors.length} />
+    definitionCount={definitions.length} />
   <main>
     {#if settings}<section class="connection-panel">
         <div class="panel-heading">
@@ -368,15 +342,7 @@
         {events}
         {inspect}
         {call}
-      />{:else if view === "Effects"}<EffectsBrowser {client} {events} {inspect} actor={(id) => { selectedActor = id; view = "Actors"; }} />{:else if view === "Actors"}<ActorBrowser
-        initialActor={selectedActor}
-        {client}
-        {actors}
-        {definitions}
-        {inspect}
-        {runCommand}
-        loadSource={(hash) => client.text(hash)}
-      />{:else}<CasBrowser {client} initialHash={inspectHash} />{/if}{/key}
+      />{:else if view === "Effects"}<EffectsBrowser {client} {events} {inspect} />{:else}<CasBrowser {client} initialHash={inspectHash} />{/if}{/key}
   </main>
   <footer class="workspace-footer">
     <span>loom</span><span>Content addressed · Event sourced</span>

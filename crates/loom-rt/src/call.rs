@@ -71,8 +71,8 @@ impl Runtime {
             })
     }
 
-    /// Execute one definition with caller-owned root effects. No old actor,
-    /// inbox, fold, memo, or trace persistence is involved. Arguments follow
+    /// Execute one definition with caller-owned root effects and persistence.
+    /// Arguments follow
     /// the ordinary positional `call_def` ABI; outputs use canonical Loom CBOR.
     pub async fn call_with_effects(
         &self,

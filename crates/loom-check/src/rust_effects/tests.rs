@@ -135,11 +135,9 @@ fn perform_literal_labels_are_effects_and_dynamic_labels_stay_unknown() {
     let effects = infer_source(r#"fn main(){loom::perform::<u64>("exec", 0);}"#);
     assert_eq!(effects.labels, vec!["exec"]);
     assert!(!effects.unknown);
-    for label in ["call", "actor.spawn"] {
-        let effects = infer_source(&format!("fn main(){{loom::perform({label:?}, 0);}}"));
-        assert_eq!(effects.labels, vec![label]);
-        assert!(effects.unknown);
-    }
+    let effects = infer_source(r#"fn main(){loom::perform("call", 0);}"#);
+    assert_eq!(effects.labels, vec!["call"]);
+    assert!(effects.unknown);
     assert!(infer_source("fn main(){loom::perform(label, 0);}").unknown);
     assert!(infer_source("fn main(){callback();}").unknown);
 }
@@ -159,72 +157,22 @@ fn shadowed_names_custom_traits_and_macros_are_not_claimed_pure() {
     assert!(infer_source("use external::*; fn main(){Ok();}").unknown);
 }
 #[test]
-fn known_dependency_effects_propagate_through_call_and_actor_spawn() {
+fn known_dependency_effects_propagate_through_call() {
     let sig:TypeSig=serde_json::from_value(serde_json::json!({"effects":{"labels":["llm"],"unknown":false},"exports":[{"name":"work","params":[],"returns":{"type":"null"},"effects":{"labels":["llm"],"unknown":false}}]})).unwrap();
     let mut signatures = BTreeMap::new();
     signatures.insert("worker".into(), sig);
-    for effect in ["call", "actor.spawn"] {
-        let function = effect.replace(".", "::");
-        let effects = infer(
-            &syn::parse_file(&format!(
-                "fn main(){{loom::{function}(worker::WORK_DEF,0);}}"
-            ))
-            .unwrap(),
-            &signatures,
-        )
-        .remove("main")
-        .unwrap();
-        assert_eq!(
-            effects,
-            EffectSet {
-                labels: vec![effect.into(), "llm".into()],
-                unknown: false,
-                declared: None
-            }
-        );
-    }
-}
-#[test]
-fn actor_declaration_tracks_root_requirements_without_claiming_fold_permission() {
-    let file = syn::parse_file(
-        r#"
-            #[loom::actor(effects=[])] struct Counter;
-            impl Counter { fn fold() {
-                loom::handle(["sleep"], |op,k| {}, || loom::sleep(1));
-            } }
-        "#,
+    let effects = infer(
+        &syn::parse_file("fn main(){loom::call(worker::WORK_DEF,0);}").unwrap(),
+        &signatures,
     )
+    .remove("main")
     .unwrap();
-    let inferred = infer(&file, &BTreeMap::new());
-    let row = aggregate(&file, &BTreeMap::new(), &inferred, &[]);
-    assert_eq!(row.declared, Some(vec![]));
-    assert!(row.labels.is_empty());
-    assert!(row.unknown);
-    assert!(actor_declaration_diagnostics(&file, &row).is_empty());
-    let file = syn::parse_file(
-        r#"
-            #[loom::actor(effects=[])] struct Counter;
-            impl Counter { fn fold() { loom::sleep(1); } }
-        "#,
-    )
-    .unwrap();
-    let row = aggregate(
-        &file,
-        &BTreeMap::new(),
-        &infer(&file, &BTreeMap::new()),
-        &[],
+    assert_eq!(
+        effects,
+        EffectSet {
+            labels: vec!["call".into(), "llm".into()],
+            unknown: false,
+            declared: None,
+        }
     );
-    assert_eq!(actor_declaration_diagnostics(&file, &row).len(), 1);
-}
-
-#[test]
-fn actor_summary_keeps_actor_send_without_inventing_free_exports() {
-    let file =
-        syn::parse_file("struct Counter; impl Counter {fn handle(){loom::actor::send(0,0);}} ")
-            .unwrap();
-    let inferred = infer(&file, &BTreeMap::new());
-    assert!(inferred.is_empty());
-    let effects = aggregate(&file, &BTreeMap::new(), &inferred, &[]);
-    assert_eq!(effects.labels, vec!["actor.send"]);
-    assert!(effects.unknown);
 }

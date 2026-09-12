@@ -154,34 +154,10 @@ pub struct Response {
 pub struct Event {
     #[cfg_attr(feature = "codegen", ts(type = "number"))]
     pub seq: i64,
-    pub actor: String,
     pub event: Value,
-    #[cfg_attr(feature = "codegen", ts(type = "number"))]
-    pub handler_seq: i64,
     #[cfg_attr(feature = "codegen", ts(type = "number"))]
     pub ts: i64,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "codegen", derive(TS))]
-pub struct Actor {
-    pub id: String,
-    pub behavior_hash: String,
-    pub lang: Lang,
-    pub component_hash: Option<String>,
-    #[cfg_attr(feature = "codegen", ts(type = "number"))]
-    pub last_seq: i64,
-    #[cfg_attr(feature = "codegen", ts(type = "number"))]
-    pub created_seq: i64,
-    pub parent: Option<String>,
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "codegen", derive(TS))]
-pub struct Snapshot {
-    #[cfg_attr(feature = "codegen", ts(type = "number"))]
-    pub seq: i64,
-    pub state: Value,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "codegen", derive(TS))]
 pub struct NameRevision {

@@ -3,7 +3,7 @@ mod tests;
 mod worker;
 use worker::run;
 
-use super::{append, encode};
+use super::{encode, record_definition_event};
 use anyhow::{Result, anyhow, ensure};
 use loom_proto::Value;
 use rusqlite::{Connection, OptionalExtension, params};

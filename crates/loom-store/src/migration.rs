@@ -40,14 +40,6 @@ pub(super) fn run(connection: &mut Connection) -> Result<()> {
     if !policy_exists {
         tx.execute_batch("ALTER TABLE defs ADD COLUMN allowed_effects TEXT;")?;
     }
-    let key_columns: i64 = tx.query_row(
-        "SELECT count(*) FROM pragma_table_info('inbox') WHERE pk>0",
-        [],
-        |r| r.get(0),
-    )?;
-    if key_columns == 1 {
-        tx.execute_batch("CREATE TABLE inbox_queue(actor TEXT NOT NULL REFERENCES actors(id),handler_seq INTEGER NOT NULL REFERENCES log(seq),msg TEXT NOT NULL,PRIMARY KEY(actor,handler_seq)); INSERT INTO inbox_queue SELECT actor,handler_seq,msg FROM inbox; DROP TABLE inbox; ALTER TABLE inbox_queue RENAME TO inbox;")?;
-    }
     let definitions: Vec<StoredSignature> = {
         let mut q = tx.prepare("SELECT hash,type_sig FROM defs")?;
         q.query_map([], |r| {
@@ -85,7 +77,7 @@ pub(super) fn run(connection: &mut Connection) -> Result<()> {
                 .collect(),
         };
         let event = serde_json::json!({"type":"definition_signature_migrated","version":1,"hash":definition.hash,"sig":typed});
-        super::append(&tx, "system", &event, 0)?;
+        super::record_definition_event(&tx, &event)?;
         tx.execute(
             "UPDATE defs SET type_sig=? WHERE hash=?",
             params![serde_json::to_string(&typed)?, definition.hash],
@@ -101,7 +93,7 @@ pub(super) fn run(connection: &mut Connection) -> Result<()> {
     for hash in hashes {
         let def = super::definition(&tx, &hash)?.context("definition disappeared")?;
         let source:String=tx.query_row("SELECT CAST(c.bytes AS TEXT) FROM defs d JOIN cas c ON c.hash=d.source_hash WHERE d.hash=?",[&hash],|r|r.get(0))?;
-        let recorded:Vec<u8>=tx.query_row("SELECT bytes FROM events WHERE actor='system' AND json_extract(bytes,'$.type')='defined' AND json_extract(bytes,'$.def.hash')=? ORDER BY seq DESC LIMIT 1",[&hash],|r|r.get(0))?;
+        let recorded:Vec<u8>=tx.query_row("SELECT bytes FROM definition_events WHERE json_extract(bytes,'$.type')='defined' AND json_extract(bytes,'$.def.hash')=? ORDER BY seq DESC LIMIT 1",[&hash],|r|r.get(0))?;
         let event: Value = serde_json::from_slice(&recorded)?;
         let deps = serde_json::from_value(event["deps"].clone())?;
         let identity = loom_proto::definition_identity(
@@ -116,7 +108,7 @@ pub(super) fn run(connection: &mut Connection) -> Result<()> {
         );
         super::put(&tx, "def", &identity)?;
     }
-    tx.execute("INSERT OR IGNORE INTO def_effects SELECT json_extract(bytes,'$.def_hash'),json_extract(bytes,'$.op') FROM events WHERE actor='system' AND json_extract(bytes,'$.type')='effect_invoked' AND json_type(bytes,'$.def_hash')='text'",[])?;
+    tx.execute("INSERT OR IGNORE INTO def_effects SELECT json_extract(bytes,'$.def_hash'),json_extract(bytes,'$.op') FROM definition_events WHERE json_extract(bytes,'$.type')='effect_invoked' AND json_type(bytes,'$.def_hash')='text'",[])?;
     tx.commit()?;
     Ok(())
 }
@@ -149,7 +141,7 @@ pub(super) fn replacements(
 ) -> Result<std::collections::BTreeMap<String, Value>> {
     let mut replacements = std::collections::BTreeMap::new();
     for event in events {
-        if event.actor == "system" && event.event["type"] == "definition_signature_migrated" {
+        if event.event["type"] == "definition_signature_migrated" {
             let hash = event.event["hash"]
                 .as_str()
                 .context("signature migration missing hash")?;

@@ -38,7 +38,7 @@ async fn auth_gates_every_operation_and_health_is_public() {
 #[tokio::test]
 async fn unknown_commands_fail_and_store_queries_work() {
     use http_body_util::BodyExt;
-    for command in ["undefined", "actors"] {
+    for command in ["undefined", "defs"] {
         let response = app()
             .oneshot(
                 Request::builder()
@@ -57,6 +57,6 @@ async fn unknown_commands_fail_and_store_queries_work() {
         let body: Response =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
                 .unwrap();
-        assert_eq!(body.ok, command == "actors");
+        assert_eq!(body.ok, command == "defs");
     }
 }

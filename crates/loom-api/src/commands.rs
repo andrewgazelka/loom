@@ -28,9 +28,7 @@ impl Service {
                         .definition(new)?
                         .context("replacement definition missing")?;
                     let updates = self.rehash_dependents(Some(&previous), &current).await?;
-                    return Ok(
-                        serde_json::json!({"rehashed":updates.rehashed,"stale_actors":updates.stale_actors}),
-                    );
+                    return Ok(serde_json::json!({"rehashed":updates.rehashed}));
                 }
                 let _: loom_proto::Tree = self
                     .store
@@ -202,20 +200,6 @@ impl Service {
                     .await??,
                 )?)
             }
-            "compact" => {
-                let store = self.store.clone();
-                let through = args["through_seq"]
-                    .as_i64()
-                    .context("through_seq required")?;
-                let limit = args["limit"]
-                    .as_u64()
-                    .context("limit required")?
-                    .try_into()?;
-                Ok(serde_json::to_value(
-                    tokio::task::spawn_blocking(move || store.compact_log(through, limit))
-                        .await??,
-                )?)
-            }
             "machine.create" => Ok(serde_json::to_value(
                 self.runtime
                     .create_machine(std::path::Path::new(field(args, "root")?))?,
@@ -278,41 +262,10 @@ impl Service {
                 Ok(json!(defs))
             }
             "build" => self.build_record(field(args, "hash")?),
-            "actors" => Ok(serde_json::to_value(self.store.actors()?)?),
-            "events" => Ok(serde_json::to_value(self.store.events(
-                args["actor"].as_str(),
+            "events" => Ok(serde_json::to_value(self.store.definition_events(
                 args["after"].as_i64().unwrap_or(0),
                 args["limit"].as_u64().unwrap_or(1000).min(1000) as usize,
             )?)?),
-            "state" => self.runtime.state(&self.command_actor(&request)?).await,
-            "spawn" => Ok(serde_json::to_value(
-                self.runtime
-                    .spawn(field(args, "hash")?, args["initial"].clone())
-                    .await?,
-            )?),
-            "send" => {
-                self.runtime
-                    .send(&self.command_actor(&request)?, args["msg"].clone())
-                    .await
-            }
-            "fork" => {
-                let actor = self.command_actor(&request)?;
-                let fork = self.runtime.fork_actor(&actor).await?;
-                if args["session"].is_string()
-                    || (!args["actor"].is_string() && request.session.is_some())
-                {
-                    let session = uuid::Uuid::new_v4().to_string();
-                    self.store.create_session(&session, &fork.id, "owner")?;
-                    Ok(json!({"session":session,"actor":fork}))
-                } else {
-                    Ok(serde_json::to_value(fork)?)
-                }
-            }
-            "actor.upgrade" => {
-                self.runtime
-                    .upgrade(&self.command_actor(&request)?, field(args, "hash")?)
-                    .await
-            }
             "call" => {
                 self.runtime
                     .call_def(field(args, "hash")?, args["args"].clone())

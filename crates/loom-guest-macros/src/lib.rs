@@ -1,6 +1,6 @@
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
-use syn::{FnArg, ItemFn, ItemStruct, Pat, parse_macro_input};
+use syn::{FnArg, ItemFn, Pat, parse_macro_input};
 
 /// Export a zero-argument SQL function as `loom_schema() -> u64` in the core
 /// guest ABI. The result is a packed pointer/length to a Loom CBOR envelope.
@@ -166,8 +166,6 @@ pub fn def(attr: TokenStream, item: TokenStream) -> TokenStream {
         pub struct #definition;
         #[cfg(not(feature = "loom-dependency"))]
         impl ::loom::core::Guest for #definition {
-            fn run(_state: Vec<u8>, _msg: Vec<u8>) -> Result<Vec<u8>, String> { Err("free definition has no actor handler".into()) }
-            fn fold(_state: Vec<u8>, _event: Vec<u8>) -> Vec<u8> { panic!("free definition has no fold") }
             fn call(_def: Vec<u8>, args: Vec<u8>) -> Result<Vec<u8>, String> {
                 let value: ::loom::Value = ::loom::decode_host(&args)?;
                 let values = match value { ::loom::Value::Array(values) => values, value if #count == 1 => vec![value], ::loom::Value::Null if #count == 0 => vec![], _ => return Err("arguments must be an array".into()) };
@@ -178,45 +176,6 @@ pub fn def(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
         #[cfg(not(feature = "loom-dependency"))]
         ::loom::export_core!(#definition);
-    }.into()
-}
-
-/// Export an Actor implementation. Place this attribute on its named struct.
-#[proc_macro_attribute]
-pub fn actor(attr: TokenStream, item: TokenStream) -> TokenStream {
-    if !attr.is_empty() {
-        let declaration = parse_macro_input!(attr as syn::MetaNameValue);
-        let valid = declaration.path.is_ident("effects")
-            && matches!(&declaration.value,
-            syn::Expr::Array(array) if array.elems.iter().all(|value| matches!(value,
-                syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(label), .. }) if !label.value().is_empty() && label.value() != "*")));
-        if !valid {
-            return syn::Error::new_spanned(declaration, "expected effects = [\"label\"]")
-                .to_compile_error()
-                .into();
-        }
-    }
-    let structure = parse_macro_input!(item as ItemStruct);
-    let name = &structure.ident;
-    quote! {
-        #structure
-        #[cfg(not(feature = "loom-dependency"))]
-        impl ::loom::core::Guest for #name {
-            fn init() -> Result<Vec<u8>, String> { ::loom::encode(&<Self as ::loom::Actor>::init()) }
-            fn run(state: Vec<u8>, msg: Vec<u8>) -> Result<Vec<u8>, String> {
-                let state = if ::loom::decode_host::<::loom::Value>(&state)?.is_null() { <Self as ::loom::Actor>::init() } else { ::loom::decode_host(&state)? };
-                let msg = ::loom::decode_host(&msg)?;
-                ::loom::encode(&<Self as ::loom::Actor>::handle(&state, msg))
-            }
-            fn fold(state: Vec<u8>, event: Vec<u8>) -> Vec<u8> {
-                let state = if ::loom::decode_host::<::loom::Value>(&state).expect("invalid state CBOR").is_null() { <Self as ::loom::Actor>::init() } else { ::loom::decode_host(&state).expect("invalid actor state") };
-                let event = ::loom::decode_host(&event).expect("invalid actor event");
-                ::loom::encode(&<Self as ::loom::Actor>::fold(state, &event)).expect("invalid folded state")
-            }
-            fn call(_def: Vec<u8>, _args: Vec<u8>) -> Result<Vec<u8>, String> { Err("actor definition has no free function".into()) }
-        }
-        #[cfg(not(feature = "loom-dependency"))]
-        ::loom::export_core!(#name);
     }.into()
 }
 

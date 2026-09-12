@@ -26,7 +26,7 @@ fn explicit_policy_changes_identity_but_legacy_identity_is_unchanged() -> Result
 }
 
 #[test]
-fn policy_and_observations_survive_restart_archive_and_projection_rebuild() -> Result<()> {
+fn policy_and_observations_survive_restart_and_projection_rebuild() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("effects.sqlite");
     let deps = BTreeMap::new();
@@ -62,18 +62,13 @@ fn policy_and_observations_survive_restart_archive_and_projection_rebuild() -> R
                 .is_empty()
         );
         for op in ["fs.read", "fs.read", "exec"] {
-            store.append(
-                "system",
+            store.record_definition_event(
                 &json!({"type":"effect_invoked","def_hash":hash,"op":op}),
-                0,
             )?;
         }
-        store.append(
-            "system",
+        store.record_definition_event(
             &json!({"type":"effect_invoked","def_hash":"other","op":"random"}),
-            0,
         )?;
-        store.compact_log(store.latest_seq()?, 1000)?;
     }
     let store = Store::open(path)?;
     for rebuild in [false, true] {
@@ -97,11 +92,11 @@ fn trusted_host_effects_remain_logged_without_a_definition_projection() -> Resul
     let event = json!({"type":"effect_invoked","def_hash":null,"op":"exec"});
     {
         let store = Store::open(&path)?;
-        store.append("system", &event, 0)?;
+        store.record_definition_event(&event)?;
         store.rebuild_views()?;
     }
     let store = Store::open(path)?;
-    assert_eq!(store.events(Some("system"), 0, 10)?[0].event, event);
+    assert_eq!(store.definition_events(0, 10)?[0].event, event);
     let count: i64 = store.with_connection(|c| {
         Ok(c.query_row("SELECT count(*) FROM def_effects", [], |r| r.get(0))?)
     })?;

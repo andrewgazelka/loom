@@ -1,13 +1,12 @@
-mod actors;
 mod cas_browser;
-mod compaction;
 mod dag_migration;
 mod definitions;
 mod effect_index;
 mod effects;
 mod events;
 mod language;
-mod mailbox;
+mod legacy;
+mod machine;
 mod migration;
 mod objects;
 mod projections;
@@ -16,7 +15,8 @@ mod recording;
 mod tests;
 mod trace;
 use anyhow::{Context, Result, anyhow, ensure};
-use loom_proto::{Actor, Def, Event, Snapshot, Value};
+use loom_proto::{Def, Event, Value};
+pub use machine::MachineRoot;
 pub use recording::RecordingTimings;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::{
@@ -25,14 +25,6 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 pub use trace::{TraceEffect, TraceEffectsPage};
-
-#[derive(Debug, Default, serde::Serialize)]
-pub struct Compaction {
-    pub events: usize,
-    pub archive_hash: Option<String>,
-    pub before_bytes: u64,
-    pub after_bytes: u64,
-}
 
 #[derive(Clone)]
 pub struct Store {
@@ -50,21 +42,8 @@ impl Store {
         )
     }
     fn initialize(mut connection: Connection, durability: recording::Durability) -> Result<Self> {
+        legacy::validate(&connection)?;
         language::validate(&connection)?;
-        connection.create_scalar_function(
-            "loom_archive",
-            1,
-            rusqlite::functions::FunctionFlags::SQLITE_UTF8
-                | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
-            |context| {
-                let bytes: Vec<u8> = context.get(0)?;
-                let decoded = zstd::stream::decode_all(bytes.as_slice())
-                    .map_err(|e| rusqlite::Error::UserFunctionError(Box::new(e)))?;
-                decode::<Value>(&decoded)
-                    .and_then(|value| Ok(serde_json::to_string(&value)?))
-                    .map_err(|e| rusqlite::Error::UserFunctionError(e.into()))
-            },
-        )?;
         connection.create_scalar_function(
             "loom_json",
             1,
@@ -151,14 +130,14 @@ fn put_value<T: serde::Serialize>(c: &Connection, kind: &str, value: &T) -> Resu
     c.execute("INSERT OR IGNORE INTO cas_codecs VALUES (?,113)", [&hash])?;
     Ok(hash)
 }
-fn append(c: &Connection, actor: &str, event: &Value, handler_seq: i64) -> Result<i64> {
+fn record_definition_event(c: &Connection, event: &Value) -> Result<i64> {
     let hash = put_value(c, "event", event)?;
     c.execute(
-        "INSERT INTO log(actor,event_hash,handler_seq,ts) VALUES (?,?,?,unixepoch())",
-        params![actor, hash, handler_seq],
+        "INSERT INTO definition_records(event_hash,ts) VALUES (?,unixepoch())",
+        params![hash],
     )?;
     let seq = c.last_insert_rowid();
-    if actor == "system" && event["type"] == "effect_invoked" {
+    if event["type"] == "effect_invoked" {
         record_observed_effect(c, event)?;
     }
     Ok(seq)
@@ -196,26 +175,6 @@ fn definition(c: &Connection, hash: &str) -> Result<Option<Def>> {
         .collect::<rusqlite::Result<_>>()?;
     Ok(Some(def))
 }
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct PendingMessage {
-    pub actor: String,
-    pub handler_seq: i64,
-    pub msg: Value,
-}
-fn pending(c: &Connection, actor: &str) -> Result<Option<PendingMessage>> {
-    let mut q =
-        c.prepare("SELECT handler_seq,msg FROM inbox WHERE actor=? ORDER BY handler_seq LIMIT 1")?;
-    let mut rows = q.query([actor])?;
-    match rows.next()? {
-        Some(r) => Ok(Some(PendingMessage {
-            actor: actor.into(),
-            handler_seq: r.get(0)?,
-            msg: serde_json::from_str(&r.get::<_, String>(1)?)?,
-        })),
-        None => Ok(None),
-    }
-}
-
 fn encode<T: serde::Serialize>(value: &T) -> Result<Vec<u8>> {
     loom_proto::encode(value).map_err(anyhow::Error::msg)
 }

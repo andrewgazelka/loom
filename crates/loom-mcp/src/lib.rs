@@ -172,7 +172,7 @@ impl LoomMcp {
         .unwrap()
     }
     #[tool(
-        description = "Run a command with its JSON args object: machine.create {root:string} returns actor with id; call {hash:string,args:Value[]} invokes a definition; resolve {hash:string} accepts name/hash/CID; defs {} and actors {} list definitions/actors; state {actor:string}, spawn {hash:string,initial:Value}, send {actor:string,msg:Value}, events {actor?:string,after?:number,limit?:number}, deps {hash:string}; cas.list {limit?,after?,kind?,q?}, cas.inspect {hash:string}. For machine filesystem work define guest code using fs.list, then call it with machine id. Read loom_intro_rust for effect signatures."
+        description = "Run a command with its JSON args object: machine.create {root:string} returns machine with id; call {hash:string,args:Value[]} invokes a definition; resolve {hash:string} accepts name/hash/CID; defs {} lists definitions; events {after?:number,limit?:number} lists definition events, deps {hash:string}; cas.list {limit?,after?,kind?,q?}, cas.inspect {hash:string}. For machine filesystem work define guest code using fs.list, then call it with machine id. Read loom_intro_rust for effect signatures."
     )]
     async fn loom_command(
         &self,
@@ -218,7 +218,7 @@ impl LoomMcp {
 #[tool_handler]
 impl ServerHandler for LoomMcp {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo{instructions:Some("Loom runs Rust core WebAssembly guests. All I/O goes through loom effects. Define checks and builds; call/spawn use definition hashes. The actor_* tools inspect and drive the native actor network; actor_behaviors lists spawnable hashes and actor_tree shows the root supervisor.".into()),capabilities:ServerCapabilities::builder().enable_tools().enable_resources().enable_prompts().build(),..Default::default()}
+        ServerInfo{instructions:Some("Loom runs Rust core WebAssembly guests. All I/O goes through loom effects. Define checks and builds; calls use definition hashes. The actor_* tools inspect and drive the native actor network; actor_behaviors lists spawnable hashes and actor_tree shows the root supervisor.".into()),capabilities:ServerCapabilities::builder().enable_tools().enable_resources().enable_prompts().build(),..Default::default()}
     }
     async fn list_prompts(
         &self,
@@ -241,7 +241,7 @@ impl ServerHandler for LoomMcp {
     ) -> Result<GetPromptResult, rmcp::ErrorData> {
         let text = match request.name.as_str() {
             "loom_intro_rust" => {
-                "Write ordinary Rust using the loom SDK. Export free functions with #[loom::def(effects=[...])] or implement Actor with #[loom::actor(effects=[...])]. Declare residual host effects when dispatch is unknown; the runtime enforces that row. perform(name, args) suspends the guest. handle/handle_any install deep guest handlers; callbacks perform in the outer context. scope.spawn and job.join run borrowed closures; call(def,args) calls another definition without inheriting handlers. fs::list(machine,path) returns typed DirEntry values with name, size, and kind: EntryKind::File, Directory, Symlink, Other. machine is an actor ID; path is relative to its pinned root. fs::walk adds bounded recursion. fs::read returns String, fs::read_optional returns Option<String>, fs::write writes UTF-8 content. preview::writes runs under a guest handler that returns filesystem diff previews without writing those files. No std::fs/net/time/env/process; use Loom effects. Cargo diagnostics include file,line,col,code and hint; build.ms is actual elapsed time. Guest effect values cross typed DAG-CBOR; MCP envelopes use JSON."
+                "Write ordinary Rust using the loom SDK. Export free functions with #[loom::def(effects=[...])]. Declare residual host effects when dispatch is unknown; the runtime enforces that row. perform(name, args) suspends the guest. handle/handle_any install deep guest handlers; callbacks perform in the outer context. scope.spawn and job.join run borrowed closures; call(def,args) calls another definition without inheriting handlers. fs::list(machine,path) returns typed DirEntry values with name, size, and kind: EntryKind::File, Directory, Symlink, Other. machine is a machine ID; path is relative to its pinned root. fs::walk adds bounded recursion. fs::read returns String, fs::read_optional returns Option<String>, fs::write writes UTF-8 content. preview::writes runs under a guest handler that returns filesystem diff previews without writing those files. No std::fs/net/time/env/process; use Loom effects. Cargo diagnostics include file,line,col,code and hint; build.ms is actual elapsed time. Guest effect values cross typed DAG-CBOR; MCP envelopes use JSON."
             }
             _ => return Err(rmcp::ErrorData::invalid_params("unknown prompt", None)),
         };
@@ -270,8 +270,6 @@ impl ServerHandler for LoomMcp {
             "actor://{id}/outbox",
             "actor://{id}/lineage",
             "loom://def/{name}",
-            "loom://actor/{id}/state",
-            "loom://actor/{id}/log",
             "loom://build/{component_hash}",
         ] {
             templates.push(
@@ -302,27 +300,6 @@ impl ServerHandler for LoomMcp {
                     session: None,
                     command: "resolve".into(),
                     args: serde_json::json!({"hash":name}),
-                })
-                .await
-        } else if let Some(path) = uri.strip_prefix("loom://actor/") {
-            let Some((id, kind)) = path.rsplit_once('/') else {
-                return Err(rmcp::ErrorData::invalid_params("invalid actor URI", None));
-            };
-            let command = match kind {
-                "state" => "state",
-                "log" => "events",
-                _ => {
-                    return Err(rmcp::ErrorData::invalid_params(
-                        "unknown actor resource",
-                        None,
-                    ));
-                }
-            };
-            self.service_for(&context)
-                .command(CommandRequest {
-                    session: None,
-                    command: command.into(),
-                    args: serde_json::json!({"actor":id}),
                 })
                 .await
         } else if let Some(hash) = uri.strip_prefix("loom://build/") {

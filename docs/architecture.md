@@ -22,7 +22,7 @@ Each invariant names the code that enforces it today. "(round N)" marks a decisi
 10. **Validating a candidate behavior never delivers the fork's outbox.** A fork's `status = fork` and the pump refuses to deliver from it; only `Matched`/`DivergedAt`/`Differs`/`Trapped` leave the fork. `crates/loom-actor/src/history.rs::validate_inner`, `crates/loom-actor/src/types.rs::Verdict`.
 11. **Code identity is content, not a version number.** A behavior is addressed by hash in `code_changes`; a definition is addressed by its checked source hash. `crates/loom-actor/src/schema.rs` (`code_changes`), `crates/loom-check/src/lib.rs` (`CheckedDef`). Item-level, name-resolved behavior hashing (round 3, `tools/hash-rustc`, not yet in the tree) replaces today's whole-source hash for actor behaviors.
 12. **One writer per Turso file is the concurrency unit.** Actors run concurrently with each other across files; one message runs at a time within one file, held behind one connection guarded by a mutex. `crates/loom-actor/src/node.rs` (`connections: HashMap<ActorId, Arc<Mutex<Connection>>>`).
-13. **One control surface.** `loomd` serves MCP (stdio and HTTP) and the HTTP/WebSocket API from one `Service`; the REPL UI is a client of that same surface, not a second implementation. `crates/loom-mcp/src/lib.rs`, `crates/loom-api/src/lib.rs`. Actor-specific tools (`actor_send`, `actor_spawn`, `actor_tree`, ...) are decided but not yet wired (round 3/4; `loom-actor` has no `loom-mcp` caller today).
+13. **One control surface.** `loomd` serves MCP (stdio and HTTP) and the HTTP/WebSocket API from one `Service`; the REPL UI is a client of that same surface, not a second implementation. `crates/loom-mcp/src/lib.rs`, `crates/loom-api/src/lib.rs`. Actor tools (`actor_send`, `actor_spawn`, `actor_tree`, ...) and `actor://` resources call `loom-actor` through `crates/loom-mcp/src/actors.rs`. The REPL's retired actor-state panel has been removed.
 14. **Rust safety checks admit code; they do not prove isolation.** Denying `unsafe`, non-`Send` captures and escaping borrows is a correctness and admission check, not a formal soundness proof; sibling jobs sharing one execution's memory are one trust domain. `crates/loom-check/src/safety.rs`, stated in `docs/plan-unified-memory.md#memory-isolation-decision`.
 15. **One guest language.** Rust is the only supported guest language, and core wasm is the only guest execution model. The former guest SDK, checker, interface definitions, and component execution paths have been removed. `crates/loom-proto/src/core_protocol.rs` admits only current core-wasm artifacts; `crates/loom-store/src/language.rs` rejects non-Rust stores before migration.
 
@@ -78,22 +78,22 @@ graph TD
     Obj --> Leases
 ```
 
-`loom-store` sits under both the definition path (CAS, names, the legacy event-fold actor tables) and, historically, actors; round 4 retires its `actors`/`inbox`/`log` tables once `loom-actor` is the only actor runtime, leaving `loom-store` as CAS plus definitions.
+`loom-store` owns CAS, definitions, names, and definition-call recording. Round 4 retired its event-fold actor model; actors run only in `loom-actor`, with `loom-behavior` executing Loom definitions inside actor transactions. Stores containing retired actor tables are rejected at open by table name.
 
 ## 4. Life of a message
 
-The decided end-state control surface routes an actor send through an `actor_send` MCP tool. That tool does not exist yet (round 3); today the equivalent call is `Node::send`, exercised directly in `crates/loom-actor/tests/integration.rs`. The transaction boundary and pump below the tool line are real and tested now.
+The `actor_send` MCP tool calls `Node::send` with an actor id, a delivery key, and a JSON message, then runs the node until idle. `crates/loom-mcp/src/actors.rs` implements the tool; `crates/loom-actor/tests/integration.rs` exercises the transaction boundary and pump.
 
 ```mermaid
 sequenceDiagram
     participant Client as MCP client
-    participant MCP as loomd (actor_send, round 3)
+    participant MCP as loomd (actor_send)
     participant Node as Node::send
     participant A as Sender actor file (A.db)
     participant Pump as Pump
     participant B as Receiver actor file (B.db)
 
-    Client->>MCP: actor_send(target=A, msg)
+    Client->>MCP: actor_send(id=A, msg)
     MCP->>Node: send(A, key, msg)
     Node->>A: INSERT OR IGNORE inbox (external key)
     Note over A: A's handler runs on the next step:<br/>one transaction = domain writes + effects rows + outbox rows + cursor
@@ -142,12 +142,12 @@ Lineage is `SELECT * FROM code_changes ORDER BY seq` on the actor's own file: it
 | `loom-build` | build and identity | `crates/loom-build/src/lib.rs` — rustc build sidecars, build cache, crate registry (`registry.rs`) |
 | `loom-guest-rs`, `loom-guest-macros` | execution | `crates/loom-guest-rs/src/lib.rs` — synchronous Rust guest API, `scope`/`spawn`, `handle`/`handle_any` |
 | `loom-rt` | execution | `crates/loom-rt/src/lib.rs` — Wasmtime fibers, shared-memory executions (`sharedcore.rs`), root handler (`root_handler.rs`), machines (`machine.rs`) |
-| `loom-store` | storage / identity | `crates/loom-store/src/lib.rs` — CAS, SQLite event history, definitions, names; still holds the legacy event-fold actor tables (round 4 removes them) |
+| `loom-store` | storage / identity | `crates/loom-store/src/lib.rs` — CAS, definitions, names, and definition-call recording; the event-fold actor model is retired |
 | `loom-actor` | actors | `crates/loom-actor/src/lib.rs` — one Turso file per actor, `Behavior`, `Ctx`, supervision, history, validate |
 | `loom-maintenance` | storage | `crates/loom-maintenance/src/lib.rs` — backups, bounded index and build-cache maintenance |
 | `loom-process`, `loom-model` | execution support | `crates/loom-process/src/lib.rs`, `crates/loom-model/src/lib.rs` — supervised process execution, model provider boundary |
 | `loom-api` | control surface | `crates/loom-api/src/lib.rs` — HTTP/WebSocket transport, auth (`auth.rs`), shared `Service` |
-| `loom-mcp` | control surface | `crates/loom-mcp/src/lib.rs` — MCP tools (`loom_define`, `loom_eval`, `loom_command`, `crate_add`, `loom_upgrade`, `loom_resolve` today; actor tools round 3) |
+| `loom-mcp` | control surface | `crates/loom-mcp/src/lib.rs` — MCP tools (`loom_define`, `loom_eval`, `loom_command`, `crate_add`, `loom_upgrade`, `loom_resolve`) and `crates/loom-mcp/src/actors.rs` (`actor_*` tools and `actor://` resources) |
 | `loom-cli`, `loomd` | control surface | `crates/loom-cli/src/main.rs`, `crates/loomd/src/main.rs` — terminal client, server entrypoint |
 
 ## 8. What is deliberately not here
@@ -161,10 +161,10 @@ Lineage is `SELECT * FROM code_changes ORDER BY seq` on the actor's own file: it
 
 ## 9. Roadmap
 
-- **Round 1 (landed, `58bee73`).** Shared execution (core wasm, fibers, safe-code admission), guest-defined algebraic effect handlers, content-addressed handler linking. Done-when: `bun scripts/bench/effects-handlers.ts` at 13/13, `bun scripts/bench/shared-execution.ts` at 7/7.
+- **Round 1 (landed, `58bee73`).** Shared execution (core wasm, fibers, safe-code admission), guest-defined algebraic effect handlers, content-addressed handler linking. Done-when: `bun scripts/bench/effects-handlers.ts` at 12/12 after retiring the actor-fold control, `bun scripts/bench/shared-execution.ts` at 7/7.
 - **Round 2.** MCP surface consolidation, README rewrite (Rust-first, under 200 lines), repository rename follow-through. Done-when: README is the single onboarding doc under 200 lines and the four current MCP tools are its documented entrypoint.
 - **Round 3 (this doc's "in progress" items).** `hash-rustc` item-level behavior hashing, `code_changes.behavior_hash`/`wasm_hash`/`toolchain_hash`, memoized validation, clippy-clean workspace, always-up durability (object store, leases). Guest-language and interface removal is complete: Rust guests execute only as core wasm. Remaining done-when: `tools/hash-rustc` exists and is the source of `code_changes.behavior_hash`; `cargo clippy --workspace` is clean; a `local`/`remote` durability tier exists and is tested against machine loss.
-- **Round 4.** Retire the event-fold actor model in `loom-store` (`actors`, `inbox`, `log` tables) now that `loom-actor` is the only actor runtime; wire `loom-actor` into `loomd`/`loom-mcp` with the full actor tool surface (`actor_list`/`tree`/`info`/`send`/`spawn`/`stop`/`restart`/`promote`/`promote_where`/`lineage`/`dead_letters`/`fork`/`validate`/`sql`/`whereis`/`register`/`members`/`behaviors`/`run` and the `actor://` resources). Done-when: `crates/loom-store/src/schema.sql` has no `actors`/`inbox`/`log` tables, and the REPL UI drives actors over the MCP actor tools.
+- **Round 4.** The old event-fold actor model in `loom-store` and `loom-rt` is retired; `loom-actor` is the only actor runtime. `loomd`/`loom-mcp` expose its `actor_*` tools and `actor://` resources. `crates/loom-store/src/schema.sql` has no `actors`/`inbox`/`log` tables. The REPL's old actor-state panel is removed; actor operations use MCP.
 
 ## 10. Glossary
 

@@ -1,11 +1,11 @@
-use crate::{Store, append};
+use crate::{Store, record_definition_event};
 use anyhow::{Context, Result, ensure};
 use loom_proto::{CallTrace, TraceBlob, TraceBlobKind, TraceBundle, TraceOutcome};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::{BTreeMap, BTreeSet};
 
 impl Store {
-    /// Atomically publish a completed call or an actor recovery checkpoint.
+    /// Atomically publish a completed definition call or its recovery checkpoint.
     /// Blob bytes are produced by the trusted host codec; this boundary verifies
     /// their identity without decoding and re-encoding each effect result.
     pub fn persist_call_trace(&self, bundle: &TraceBundle) -> Result<String> {
@@ -67,7 +67,7 @@ impl Store {
             })
             .collect::<Result<Vec<_>>>()?;
         let event: Vec<u8> = connection.query_row(
-            "SELECT e.bytes FROM call_traces t JOIN events e ON e.seq=t.last_seq WHERE t.scope=?",
+            "SELECT e.bytes FROM call_traces t JOIN definition_events e ON e.seq=t.last_seq WHERE t.scope=?",
             [scope],
             |row| row.get(0),
         )?;
@@ -229,7 +229,7 @@ pub(super) fn persist(
     project_observations(connection, &bundle.observations)?;
     let completed = bundle.trace.outcome.is_some();
     let event = serde_json::json!({"type":if completed {"call_completed"} else {"call_checkpoint"}, "scope":bundle.trace.scope,"definition_hash":bundle.trace.definition_hash,"args_hash":bundle.trace.args_hash,"trace_hash":hash,"outcome":bundle.trace.outcome,"memos":bundle.memos,"observations":bundle.observations});
-    let seq = append(connection, "system", &event, 0)?;
+    let seq = record_definition_event(connection, &event)?;
     connection.execute("INSERT INTO call_traces(scope,trace_hash,completed,last_seq) VALUES (?,?,?,?) ON CONFLICT(scope) DO UPDATE SET trace_hash=excluded.trace_hash,completed=excluded.completed,last_seq=excluded.last_seq", params![bundle.trace.scope,hash,completed,seq])?;
     Ok(())
 }
@@ -241,7 +241,7 @@ struct ExistingTrace {
 pub(super) fn rebuild(connection: &Connection) -> Result<()> {
     connection.execute("DELETE FROM call_traces", [])?;
     let events: Vec<ProjectionEvent> = {
-        let mut query = connection.prepare("SELECT seq,bytes FROM events WHERE json_extract(bytes,'$.type') IN ('call_completed','call_checkpoint') ORDER BY seq")?;
+        let mut query = connection.prepare("SELECT seq,bytes FROM definition_events WHERE json_extract(bytes,'$.type') IN ('call_completed','call_checkpoint') ORDER BY seq")?;
         query
             .query_map([], |row| {
                 Ok(ProjectionEvent {
@@ -333,7 +333,7 @@ pub(super) fn migrate_legacy(connection: &Connection) -> Result<()> {
     // Legacy failures had no effect_results row, but their terminal audit event
     // still carries the descriptor and occurrence required for deterministic replay.
     let failures: Vec<Vec<u8>> = {
-        let mut query = connection.prepare("SELECT e.bytes FROM events e JOIN cas d ON d.hash=json_extract(e.bytes,'$.desc_hash') WHERE json_extract(e.bytes,'$.type')='effect_completed' AND json_type(e.bytes,'$.error')='text' AND json_type(e.bytes,'$.scope')='text' AND json_type(e.bytes,'$.occurrence')='integer' AND d.kind='desc' ORDER BY e.seq")?;
+        let mut query = connection.prepare("SELECT e.bytes FROM definition_events e JOIN cas d ON d.hash=json_extract(e.bytes,'$.desc_hash') WHERE json_extract(e.bytes,'$.type')='effect_completed' AND json_type(e.bytes,'$.error')='text' AND json_type(e.bytes,'$.scope')='text' AND json_type(e.bytes,'$.occurrence')='integer' AND d.kind='desc' ORDER BY e.seq")?;
         query
             .query_map([], |row| row.get(0))?
             .collect::<rusqlite::Result<_>>()?

@@ -32,7 +32,7 @@ fn queued_results_are_visible_and_shutdown_drains() -> Result<()> {
         store.effect_get(&descriptor, "scope", 0)?,
         Some(json!([1, 2]))
     );
-    assert_eq!(store.events(None, 0, 100)?.len(), 2);
+    assert_eq!(store.definition_events(0, 100)?.len(), 2);
     Ok(())
 }
 
@@ -40,8 +40,8 @@ fn queued_results_are_visible_and_shutdown_drains() -> Result<()> {
 fn synchronous_log_mutation_follows_queued_recording() -> Result<()> {
     let store = Store::memory()?;
     store.enqueue_recording(&json!({"type":"effect_invoked","def_hash":null,"op":"first"}))?;
-    let last = store.append("system", &json!({"type":"last"}), 0)?;
-    let events = store.events(None, 0, 100)?;
+    let last = store.record_definition_event(&json!({"type":"last"}))?;
+    let events = store.definition_events(0, 100)?;
     assert_eq!(events[0].event["op"], "first");
     assert_eq!(events[1].seq, last);
     Ok(())
@@ -126,7 +126,7 @@ fn concurrent_duplicate_results_survive_barriers() -> Result<()> {
         Ok(())
     })?;
     store.flush()?;
-    assert_eq!(store.events(None, 0, 1000)?.len(), 100);
+    assert_eq!(store.definition_events(0, 1000)?.len(), 100);
     Ok(())
 }
 
@@ -258,7 +258,7 @@ fn mixed_sync_and_queued_results_during_commits_never_poison_the_writer() -> Res
         Ok(())
     })?;
     store.flush()?;
-    assert!(store.events(None, 0, 1000)?.len() >= 200);
+    assert!(store.definition_events(0, 1000)?.len() >= 200);
     for occurrence in 0..200 {
         let result = store
             .effect_get("contention", "scope", occurrence)?
@@ -383,7 +383,7 @@ fn acknowledged_result_survives_killed_process() -> Result<()> {
         store.get_value::<serde_json::Value>(&desc)?,
         Some(json!({"op":"crash-control"}))
     );
-    assert_eq!(store.events(None, 0, 100)?.len(), 1);
+    assert_eq!(store.definition_events(0, 100)?.len(), 1);
     Ok(())
 }
 

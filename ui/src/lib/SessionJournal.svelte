@@ -35,10 +35,9 @@
     if (row.kind === "defined")
       return (
         !!record(row.metadata).name &&
-        !String(record(row.metadata).name).startsWith("session/") &&
-        record(row.metadata).name !== "loom/session"
+        !String(record(row.metadata).name).startsWith("session/")
       );
-    return ["evaluated", "actor_created", "actor_upgraded", "effect"].includes(
+    return ["evaluated", "effect"].includes(
       row.kind,
     );
   }

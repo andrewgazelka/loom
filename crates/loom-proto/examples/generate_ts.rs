@@ -28,8 +28,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         CommandRequest::decl(),
         Response::decl(),
         Event::decl(),
-        Actor::decl(),
-        Snapshot::decl(),
         NameRevision::decl(),
         Desc::<Value>::decl(),
     ];
