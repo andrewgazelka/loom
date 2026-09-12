@@ -4,6 +4,12 @@ use anyhow::{Context, Result, ensure};
 use turso::{Connection, IntoParams};
 
 pub(crate) async fn inspect_query(conn: &Connection, sql: &str, params: impl IntoParams) -> Result<Rows> {
+    inspect_statement(sql)?;
+    query(conn, sql, params).await
+}
+
+pub(crate) fn inspect_statement(sql: &str) -> Result<()> {
+    crate::guest_sql::check_functions(sql)?;
     use turso_parser::{
         ast::{Cmd, Stmt},
         parser::Parser,
@@ -52,5 +58,5 @@ pub(crate) async fn inspect_query(conn: &Connection, sql: &str, params: impl Int
         anyhow::bail!("read-only inspection refuses {kind} statement");
     }
     ensure!(parser.next_cmd()?.is_none(), "read-only inspection refuses multiple statements");
-    query(conn, sql, params).await
+    Ok(())
 }

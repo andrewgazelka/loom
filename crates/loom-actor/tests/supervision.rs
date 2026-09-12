@@ -1,3 +1,4 @@
+use loom_actor::{Cap, Rights};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,14 +33,15 @@ impl Behavior for Probe {
                 }
             }
             Some("watch") => {
-                let target = command["target"].as_str().ok_or_else(|| Trap::new("watch requires target"))?;
-                let reference = cx.monitor(target).await?;
+                let target: Cap = serde_json::from_value(command["target"].clone()).map_err(|e| Trap::new(e.to_string()))?;
+                let reference = cx.monitor(&target).await?;
                 cx.sql("INSERT INTO references_saved(ref) VALUES (?)", [reference]).await?;
             }
             Some("terminate") => cx.exit("normal").await?,
             Some("ask") => {
-                let target = command["target"].as_str().ok_or_else(|| Trap::new("ask requires target"))?;
-                cx.send(target, br#"{"type":"which_children"}"#).await?;
+                let target: Cap = serde_json::from_value(command["target"].clone()).map_err(|e| Trap::new(e.to_string()))?;
+                let reply_cap = cx.self_cap().await?;
+                cx.send(&target, &bytes(json!({"type":"which_children", "reply_cap":reply_cap}))).await?;
             }
             _ => {}
         }
@@ -138,7 +140,7 @@ async fn monitor_delivers_down_once() {
     let node = node(dir.path()).await;
     let b = node.spawn_root("probe-v1", &bytes(json!({"type":"init"}))).await.unwrap();
     let a = node.spawn_root("probe-v1", &bytes(json!({"type":"init"}))).await.unwrap();
-    node.send(&a, "watch", &bytes(json!({"type":"watch","target":b}))).await.unwrap();
+    node.send(&a, "watch", &bytes(json!({"type":"watch","target":node.cap_for(&b, Rights::ALL).await.unwrap()}))).await.unwrap();
     drain(&node).await;
     let watcher = node.open(&a).await.unwrap();
     let saved = watcher.sql("SELECT ref FROM references_saved", ()).await.unwrap();
@@ -288,7 +290,9 @@ async fn rest_for_one_order() {
     }
 
     let requester = node.spawn_root("probe-v1", &bytes(json!({"type":"init"}))).await.unwrap();
-    node.send(&requester, "ask", &bytes(json!({"type":"ask","target":supervisor_id}))).await.unwrap();
+    node.send(&requester, "ask", &bytes(json!({"type":"ask","target":node.cap_for(&supervisor_id, Rights::ALL).await.unwrap()})))
+        .await
+        .unwrap();
     drain(&node).await;
     let replies = messages(&node.open(&requester).await.unwrap(), "children").await;
     assert_eq!(replies.len(), 1);
@@ -319,7 +323,9 @@ async fn resume_keeps_tree_intact() {
     let grandchild_id = children(&child).await.remove(0);
     let grandchild = node.open(&grandchild_id).await.unwrap();
     let monitor_id = node.spawn_root("probe-v1", &bytes(json!({"type":"init"}))).await.unwrap();
-    node.send(&monitor_id, "watch", &bytes(json!({"type":"watch","target":child_id}))).await.unwrap();
+    node.send(&monitor_id, "watch", &bytes(json!({"type":"watch","target":node.cap_for(&child_id, Rights::ALL).await.unwrap()})))
+        .await
+        .unwrap();
     drain(&node).await;
     let monitor = node.open(&monitor_id).await.unwrap();
     let links = child.sql("SELECT * FROM links ORDER BY peer", ()).await.unwrap().rows;

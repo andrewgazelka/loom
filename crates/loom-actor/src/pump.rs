@@ -109,7 +109,7 @@ impl Node {
             self.commit_control(id, tx).await?;
             self.wake.notify_one();
         }
-        self.sync_shutdowns(id).await?;
+        progressed |= self.sync_shutdown_requests(id).await?;
         let sync_result = self.sync_index(id).await;
         if let Some(error) = failure {
             return Err(error);
@@ -140,6 +140,7 @@ impl Node {
                     let mut conn = published.conn.lock().await;
                     let tx = conn.transaction().await?;
                     actor::set_meta(&tx, "durability", spec.durability.name()).await?;
+                    actor::set_meta(&tx, "shutdown", &serde_json::to_string(&spec.shutdown)?).await?;
                     actor::set_meta(&tx, "ready", "true").await?;
                     self.commit_control(&child, tx).await?;
                     drop(conn);

@@ -9,6 +9,15 @@ impl Node {
     }
     pub(crate) async fn relate(&self, sender: &str, target: &str, kind: &str, msg: &[u8], key: &str) -> Result<()> {
         match kind {
+            "revoke" => {
+                let cap: crate::Cap = serde_json::from_slice(msg)?;
+                ensure!(cap.target == target, "revoke target mismatch");
+                self.revoke_cap(&cap).await.map_err(Into::into)
+            }
+            "promote" => {
+                let operation: crate::cap_ops::Promotion = serde_json::from_slice(msg)?;
+                self.promote_inner(target, &operation.hash, &operation.author, &operation.rationale).await
+            }
             "stop" => self.stop_unlocked(target, std::str::from_utf8(msg)?, key, sender).await,
             "shutdown" => self.shutdown(sender, target, key).await,
             "link" | "unlink" => {

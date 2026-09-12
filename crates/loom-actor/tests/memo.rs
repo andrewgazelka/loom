@@ -1,5 +1,5 @@
 use super::memo::{self, MemoConfig};
-use crate::{Behavior, Config, Ctx, DefaultEffects, Node, Registry, Trap, Verdict, actor};
+use crate::{Behavior, Cap, Config, Ctx, DefaultEffects, Node, Registry, Rights, Trap, Verdict, actor};
 use async_trait::async_trait;
 use std::{
     collections::BTreeSet,
@@ -27,8 +27,8 @@ impl Behavior for Sender {
         self.calls.fetch_add(1, Ordering::SeqCst);
         cx.sql("INSERT INTO state VALUES (?)", [self.state]).await?;
         cx.effect("echo", b"input").await?;
-        let target = std::str::from_utf8(msg).map_err(|e| Trap::new(e.to_string()))?;
-        cx.send(target, self.send).await
+        let target: Cap = serde_json::from_slice(msg).map_err(|e| Trap::new(e.to_string()))?;
+        cx.send(&target, self.send).await
     }
 }
 struct Fixture {
@@ -36,6 +36,7 @@ struct Fixture {
     node: Node,
     id: String,
     target: String,
+    input: Vec<u8>,
     calls: Arc<AtomicUsize>,
 }
 impl Fixture {
@@ -51,11 +52,12 @@ impl Fixture {
             registry.insert(behavior.hash.to_owned(), Arc::new(behavior) as Arc<dyn Behavior>);
         }
         let node = Node::new(dir.path(), registry, Arc::new(DefaultEffects), Config::default()).await.unwrap();
-        let target = crate::ids::root();
-        let id = node.spawn_root("original", target.as_bytes()).await.unwrap();
+        let target = node.spawn_root("counter-v1", &[]).await.unwrap();
+        let input = serde_json::to_vec(&node.cap_for(&target, Rights::ALL).await.unwrap()).unwrap();
+        let id = node.spawn_root("original", &input).await.unwrap();
         let cancellation = tokio::sync::Notify::new();
         assert!(node.step(&id, &cancellation).await.unwrap());
-        Self { dir, node, id, target, calls }
+        Self { dir, node, id, target, input, calls }
     }
     fn files(&self) -> BTreeSet<String> {
         std::fs::read_dir(self.dir.path()).unwrap().map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned()).collect()
@@ -102,7 +104,7 @@ async fn memo_key_moves_with_inputs() {
     let actor = f.node.open(&f.id).await.unwrap();
     actor.conn.lock().await.execute("UPDATE inbox SET msg=? WHERE seq=1", [b"changed".as_slice()]).await.unwrap();
     changed.insert(f.key("original", &[]).await);
-    actor.conn.lock().await.execute("UPDATE inbox SET msg=? WHERE seq=1", [f.target.as_bytes()]).await.unwrap();
+    actor.conn.lock().await.execute("UPDATE inbox SET msg=? WHERE seq=1", [f.input.as_slice()]).await.unwrap();
     assert_eq!(f.key("original", &[]).await, original);
     actor.conn.lock().await.execute("UPDATE effects SET result=? WHERE seq=1", [b"changed".as_slice()]).await.unwrap();
     changed.insert(f.key("original", &[]).await);

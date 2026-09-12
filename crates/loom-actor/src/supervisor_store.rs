@@ -1,6 +1,6 @@
-use crate::{ChildSpec, ChildType, RestartPolicy};
+use crate::{Cap, ChildSpec, ChildType, RestartPolicy};
 
-pub(crate) async fn record_child(conn: &turso::Connection, id: &str, spec: &ChildSpec) -> anyhow::Result<()> {
+pub(crate) async fn record_child(conn: &turso::Connection, cap: &Cap, spec: &ChildSpec) -> anyhow::Result<()> {
     let restart = match spec.restart {
         RestartPolicy::Permanent => "permanent",
         RestartPolicy::Transient => "transient",
@@ -11,8 +11,8 @@ pub(crate) async fn record_child(conn: &turso::Connection, id: &str, spec: &Chil
         ChildType::Supervisor => "supervisor",
     };
     let shutdown = serde_json::to_string(&spec.shutdown)?;
-    conn.execute("INSERT INTO spec(child_id,\"order\",behavior_hash,init,restart,shutdown,link,type,monitor,durability) SELECT ?,COALESCE(MAX(\"order\"),0)+1,?,?,?,?,?,?,?,? FROM spec",
-        turso::params![id, spec.behavior_hash.as_str(), spec.init.as_slice(), restart, shutdown, spec.link, child_type, spec.monitor, spec.durability.name()]).await?;
+    conn.execute("INSERT INTO spec(child_id,\"order\",behavior_hash,init,restart,shutdown,link,type,monitor,durability,cap) SELECT ?,COALESCE(MAX(\"order\"),0)+1,?,?,?,?,?,?,?,?,? FROM spec",
+        turso::params![cap.target.as_str(), spec.behavior_hash.as_str(), spec.init.as_slice(), restart, shutdown, spec.link, child_type, spec.monitor, spec.durability.name(), serde_json::to_string(cap)?]).await?;
     Ok(())
 }
 
@@ -22,10 +22,11 @@ pub(crate) async fn record_child(conn: &turso::Connection, id: &str, spec: &Chil
 pub(crate) struct HostSpawn {
     pub(crate) epoch: i64,
     pub(crate) child_id: String,
+    pub(crate) cap: Cap,
     pub(crate) spec: ChildSpec,
 }
 
-pub(crate) async fn record_host_spawn(conn: &turso::Connection, id: &str, spec: &ChildSpec) -> anyhow::Result<()> {
+pub(crate) async fn record_host_spawn(conn: &turso::Connection, cap: &Cap, spec: &ChildSpec) -> anyhow::Result<()> {
     use anyhow::Context;
     let rows = crate::actor::query(conn, "SELECT value FROM meta WHERE key='host_spawn_counter'", ()).await?;
     let counter = match rows.rows.first() {
@@ -34,8 +35,12 @@ pub(crate) async fn record_host_spawn(conn: &turso::Connection, id: &str, spec: 
     }
     .checked_add(1)
     .context("host spawn counter overflow")?;
-    let operation =
-        HostSpawn { epoch: crate::actor::meta(conn, "commit_epoch").await?.parse()?, child_id: id.to_owned(), spec: spec.clone() };
+    let operation = HostSpawn {
+        epoch: crate::actor::meta(conn, "commit_epoch").await?.parse()?,
+        child_id: cap.target.clone(),
+        cap: cap.clone(),
+        spec: spec.clone(),
+    };
     crate::actor::set_meta(conn, &format!("host_spawn:{counter}"), &serde_json::to_string(&operation)?).await?;
     crate::actor::set_meta(conn, "host_spawn_counter", &counter.to_string()).await
 }
@@ -68,7 +73,7 @@ pub(crate) async fn replay_host_spawns(source: &turso::Connection, target: &mut 
             continue;
         }
         let tx = target.transaction().await?;
-        record_child(&tx, &entry.operation.child_id, &entry.operation.spec).await?;
+        record_child(&tx, &entry.operation.cap, &entry.operation.spec).await?;
         crate::actor::set_meta(&tx, &entry.key, &entry.value).await?;
         crate::actor::set_meta(&tx, "host_spawn_counter", &entry.counter.to_string()).await?;
         tx.commit().await?;

@@ -30,6 +30,10 @@ pub enum EffectError {
 pub trait EffectHandler: Send + Sync {
     /// External mutations must deduplicate this key across calls and restarts.
     async fn call(&self, key: &EffectKey, kind: &str, req: &[u8]) -> Result<Vec<u8>, EffectError>;
+    /// Host capability boundary; replay implementations return recorded results.
+    async fn capability(&self, _key: &EffectKey, _conn: &turso::Connection, _request: &[u8]) -> Result<Vec<u8>, EffectError> {
+        Err(EffectError::Deterministic(anyhow!("capabilities require a node host handler")))
+    }
 }
 
 #[derive(Default)]
@@ -134,6 +138,10 @@ impl ReplayEffects {
 
 #[async_trait]
 impl EffectHandler for ReplayEffects {
+    async fn capability(&self, key: &EffectKey, _conn: &turso::Connection, request: &[u8]) -> Result<Vec<u8>, EffectError> {
+        self.call(key, "__cap", request).await
+    }
+
     async fn call(&self, key: &EffectKey, kind: &str, req: &[u8]) -> Result<Vec<u8>, EffectError> {
         let position = Position { seq: key.seq, idx: key.idx };
         let record = self.records.get(&position);
@@ -168,15 +176,10 @@ pub(crate) struct RuntimeEffects<'a> {
 }
 #[async_trait]
 impl EffectHandler for RuntimeEffects<'_> {
+    async fn capability(&self, key: &EffectKey, conn: &turso::Connection, request: &[u8]) -> Result<Vec<u8>, EffectError> {
+        crate::cap_ops::execute(self.node, conn, key, request).await
+    }
     async fn call(&self, key: &EffectKey, kind: &str, req: &[u8]) -> Result<Vec<u8>, EffectError> {
-        if kind == "__inspect" {
-            let id = std::str::from_utf8(req).map_err(|error| EffectError::Deterministic(error.into()))?;
-            if id == key.actor_id {
-                return Err(EffectError::Deterministic(anyhow!("actor {} seq {}: cannot inspect self", key.actor_id, key.seq)));
-            }
-            let state = self.node.child_state(id).await.map_err(EffectError::Environmental)?;
-            return serde_json::to_vec(&state).map_err(|error| EffectError::Deterministic(error.into()));
-        }
         self.external.call(key, kind, req).await
     }
 }

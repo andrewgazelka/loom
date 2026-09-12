@@ -19,9 +19,15 @@ pub(crate) async fn initialize(
     tx.execute_batch(crate::SCHEMA).await?;
     set_meta(&tx, "id", id).await?;
     set_meta(&tx, "parent", parent).await?;
+    let shutdown = match behavior.child_type() {
+        crate::ChildType::Worker => crate::Shutdown::Brutal,
+        crate::ChildType::Supervisor => crate::Shutdown::Infinity,
+    };
+    set_meta(&tx, "shutdown", &serde_json::to_string(&shutdown)?).await?;
     set_meta(&tx, "node_root", if parent.is_empty() { "true" } else { "false" }).await?;
     set_meta(&tx, "ready", if parent.is_empty() { "true" } else { "false" }).await?;
     set_meta(&tx, "cursor", "0").await?;
+    set_meta(&tx, "capability_epoch", "0").await?;
     set_meta(&tx, "durability", durability.name()).await?;
     set_meta(&tx, "durability_seq", "0").await?;
     set_meta(&tx, "commit_epoch", "0").await?;

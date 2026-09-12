@@ -4,37 +4,9 @@ use crate::{Node, actor, effects::ReplayEffects, history::ReplayMode};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use turso::{Connection, Value};
+use turso::Connection;
 
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
-enum Cell {
-    Null,
-    Integer(i64),
-    Real(u64),
-    Text(String),
-    Blob(Vec<u8>),
-}
-impl Cell {
-    fn capture(value: Value) -> Self {
-        match value {
-            Value::Null => Self::Null,
-            Value::Integer(value) => Self::Integer(value),
-            Value::Real(value) => Self::Real(value.to_bits()),
-            Value::Text(value) => Self::Text(value),
-            Value::Blob(value) => Self::Blob(value),
-        }
-    }
-    fn value(&self) -> Value {
-        match self {
-            Self::Null => Value::Null,
-            Self::Integer(value) => Value::Integer(*value),
-            Self::Real(value) => Value::Real(f64::from_bits(*value)),
-            Self::Text(value) => Value::Text(value.clone()),
-            Self::Blob(value) => Value::Blob(value.clone()),
-        }
-    }
-}
+use crate::sql_value::SqlValue as Cell;
 #[derive(Clone, Serialize, Deserialize)]
 struct TableImage {
     name: String,
@@ -219,6 +191,9 @@ impl Node {
             actor::meta(&source, "durability_seq").await?.parse::<i64>()? == snapshot_revision,
             "actor {id}: snapshot revision differs from head"
         );
+        crate::capability::migrate(&source).await?;
+        crate::capability::migrate(&target).await?;
+        self.migrate_authority(&target).await?;
         let snapshot_cursor = actor::cursor(&target).await?;
         let mut previous = snapshot_revision;
         for bytes in segments {
@@ -240,6 +215,7 @@ impl Node {
             let values = (0..row.column_count()).map(|column| row.get_value(column)).collect::<turso::Result<Vec<_>>>()?;
             target.execute("INSERT OR IGNORE INTO inbox(seq,key,sender,msg,received_at) VALUES (?,?,?,?,?)", values).await?;
         }
+        self.migrate_authority(&source).await?;
         let effects = ReplayEffects::load(&source).await?;
         let cursor = actor::cursor(&source).await?;
         if let Some(verdict) = self.replay(&source, &mut target, id, cursor, &effects, ReplayMode::Remote).await? {

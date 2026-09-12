@@ -16,6 +16,7 @@ pub struct Node {
     pub(crate) effects: Arc<dyn EffectHandler>,
     pub(crate) config: Config,
     root_id: ActorId,
+    pub(crate) capability_key: [u8; 32],
     pub(crate) remote: Option<Arc<crate::remote_store::RemoteStore>>,
     pub(crate) shipping: Arc<crate::durability::ShippingState>,
     pub(crate) background: Option<Arc<crate::durability_worker::Background>>,
@@ -85,7 +86,11 @@ impl Node {
             .as_ref()
             .map(|store| crate::remote_store::RemoteStore::new(store, config.lease_ttl, config.lease_clock.clone()).map(Arc::new))
             .transpose()?;
+        let mut names = None;
+        let index = crate::directory::connection(&mut names, dir.as_ref(), config.io).await?;
+        let capability_key = crate::capability::node_key(index).await?;
         let mut node = Self {
+            capability_key,
             remote,
             shipping: Arc::new(crate::durability::ShippingState::default()),
             background: None,
@@ -101,7 +106,7 @@ impl Node {
             gates: Arc::new(Mutex::new(HashMap::new())),
             run_gate: Arc::new(Mutex::new(())),
             admission: Arc::new(tokio::sync::RwLock::new(())),
-            names: Arc::new(Mutex::new(None)),
+            names: Arc::new(Mutex::new(names)),
             tasks: Arc::new(Mutex::new(HashMap::new())),
         };
         node.start_shipper();
@@ -182,6 +187,8 @@ impl Node {
         ensure!(self.path(id).is_file(), "actor {id} seq -1: actor file does not exist");
         let conn = actor::connect(&self.path(id), self.config.io).await.with_context(|| format!("actor {id} seq -1: open"))?;
         ensure!(actor::meta(&conn, "id").await? == id, "actor {id} seq -1: file identity mismatch");
+        crate::capability::migrate(&conn).await?;
+        self.migrate_authority(&conn).await?;
         self.initialize_durability(id, &conn).await?;
         let conn = Arc::new(Mutex::new(conn));
         self.connections.lock().await.insert(id.into(), conn.clone());
@@ -269,6 +276,8 @@ impl Node {
         let idx: i64 = indices.rows.first().context("missing outbox index")?.get(0)?;
         let generation: i64 = actor::meta(&tx, "generation").await?.parse()?;
         let id = ids::child(&ids::incarnation(parent, generation), seq, idx);
+        let cap = self.mint_child_cap(&id, id.as_bytes());
+        crate::capability::store_cap(&tx, &cap).await?;
         let hash = spec.behavior_hash.as_str();
         let msg = spec.init.as_slice();
         let shutdown = serde_json::to_string(&spec.shutdown)?;
@@ -288,8 +297,8 @@ impl Node {
         )
         .await?;
         if self.behavior(&actor::code(&tx).await?.hash)?.child_type() == crate::ChildType::Supervisor {
-            crate::supervisor::record_child(&tx, &id, spec).await?;
-            crate::supervisor_store::record_host_spawn(&tx, &id, spec).await?;
+            crate::supervisor::record_child(&tx, &cap, spec).await?;
+            crate::supervisor_store::record_host_spawn(&tx, &cap, spec).await?;
         }
         let spawn = Spawn::Child { id: id.clone(), spec: spec.clone(), origin_seq: seq, origin_idx: idx };
         tx.execute("INSERT INTO outbox(seq,idx,target,msg) VALUES (?,?,'spawn',?)", turso::params![seq, idx, serde_json::to_vec(&spawn)?])

@@ -1,5 +1,5 @@
 mod inspection;
-pub(crate) use inspection::inspect_query;
+pub(crate) use inspection::{inspect_query, inspect_statement};
 mod initialize;
 use crate::{Behavior, Ctx, EffectHandler, Registry, Rows, Status, Trap};
 use anyhow::{Context, Result, anyhow, ensure};

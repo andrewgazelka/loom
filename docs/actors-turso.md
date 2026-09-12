@@ -584,3 +584,73 @@ API lifecycle and remain undeliverable; memo hits create no additional forks.
 crate manifest sets `autotests = false`. The four tests cover replay-free hits,
 independent key changes, send cutoff despite state differences, and oldest-first
 eviction. Existing tests remain in the integration target.
+
+## Addendum E: capabilities
+
+Actor identities locate files; authority is a host-minted `Cap`. This supersedes
+the bare-id guest APIs above. A cap contains `target: ActorId`, `cap_id: u64`,
+`epoch: u64`, `rights: Rights`, and `mac: [u8; 32]`. Rights occupy seven bits:
+SEND, SPAWN, STOP, MONITOR, LINK, PROMOTE, and INSPECT. The MAC is
+`blake3::keyed_hash(node_key, target || cap_id || epoch || rights)`, with numeric
+fields encoded as eight little-endian bytes. The 32-byte key is generated at node
+initialization and retained in `_node.db.meta`; actor files and messages never
+receive it. A capability minted by another node therefore has no authority here.
+
+`cx.send(&cap, msg)`, `stop`, `shutdown`, `monitor`, `link`, `unlink`, `restart`,
+`inspect`, `inspect_sql`, `promote`, `send_after`, `call`, and `reply` take capabilities. The host
+checks the MAC, rights, the target's `meta.capability_epoch`, and its
+`revoked(cap_id)` table. Invalid authority is a deterministic `Trap` naming the
+operation and cap id, even when the behavior ignores the returned error. It is
+not retried as an environmental failure. Timer and monitor references remain
+handles for cancelling operations already owned by the calling actor. Shutdown
+policy lives in the target's metadata, so a STOP holder can request it without
+being the parent; the requester's pump clears its completion barrier.
+
+`cx.spawn(&spec)` returns a full-rights child cap and stores it in the parent's
+`caps(cap_id PRIMARY KEY, target, epoch, rights, mac)` table. The spawn outbox owns
+the pending child until the pump creates its file; its cap can authorize a send
+in the same transaction. `cx.self_cap()` grants authority over the caller itself.
+`cx.cap(cap_id)` retrieves a held token. `cx.attenuate(&cap, subset)` verifies the
+source, derives a distinct token with no additional rights, re-MACs it, and stores
+the result. Serialized caps can travel in message payloads; `cx.accept(cap)`
+verifies and stores a received token before a later turn retrieves it.
+
+`cx.revoke(cap_id)` verifies a held token and queues its revocation for the pump,
+which inserts that id in the target's `revoked` table after the caller commits.
+Later operations in that transaction already refuse the revoked token; if the
+transaction traps, its revocation rolls back with its other writes.
+Revoking one token leaves independently minted tokens valid. `node.bump_epoch(id)`
+increments the target's epoch and invalidates all earlier tokens for it. A fresh
+operator cap uses the new epoch. Reset preserves held caps, revocations, and the
+capability epoch while replacing domain state; reopening a node retains its key.
+
+Capability operations use the recorded `__cap` effect boundary. Validation's
+intercepting handler matches their requests against history and returns recorded
+results without invoking live verification, minting, inspection, or revocation.
+Forks retain their caps as live tokens, so isolation rests on this interception
+and the pump's refusal to deliver fork outboxes. An unchanged candidate can still
+match after authority has changed in the live node. Public `effect` and `request`
+reject reserved host operation names.
+
+The root supervisor persists child caps in its `spec` table. Existing supervisor
+specs and host spawn journals are migrated when opened. MCP callers remain the
+operator: tools mint the required authority through `node.cap_for(id, rights)`
+and verify it before their host action. `Node` and `Actor` remain host interfaces;
+guests receive `Ctx`, never the operator minting method.
+
+Behavior SQL is parsed before execution. Guest writes may target domain tables,
+but cannot mutate runtime tables, attach databases, control transactions, issue
+pragmas, install triggers or views, or invoke filesystem/extension functions.
+Runtime supervision uses a crate-private SQL entrypoint. Read-only inspection
+also rejects functions with external or mutating effects. INSPECT permits reading
+the actor file, including bearer tokens in caps, messages, and domain data; hand
+it out only when that disclosure is intended. These checks protect
+the `Ctx` boundary; native Rust behaviors and their installed schemas are trusted
+host code, not a process or filesystem sandbox. A future wasm guest must expose
+only this checked boundary.
+
+The six properties in `tests/caps.rs` cover forged tokens, attenuation,
+delegation, individual and epoch revocation, reset and reopen persistence, and
+fork interception across capability operations. Together with the prior 32
+actor tests, the requested end state is 38 passing actor tests. The combined
+integration command is `cargo test -p loom-actor -p loom-mcp`.

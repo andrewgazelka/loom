@@ -5,7 +5,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use common::{Counter, EXTRA, Forwarder, H1, H2, RecordingEffects, integer, registry, table_fingerprints};
-use loom_actor::{Config, DefaultEffects, Node, Status, Verdict};
+use loom_actor::{Cap, Config, DefaultEffects, Node, Rights, Status, Verdict};
 use turso::Value;
 
 #[tokio::test]
@@ -66,7 +66,10 @@ async fn trap_rolls_back_send() {
     let b = node.open(&receiver).await.unwrap();
     // Root creation contributes one init row; the application mailbox is empty.
     let baseline = integer(&b, "SELECT count(*) FROM inbox").await;
-    let sender = node.spawn_root("forwarder-trap", receiver.as_bytes()).await.unwrap();
+    let sender = node
+        .spawn_root("forwarder-trap", &serde_json::to_vec(&node.cap_for(&receiver, Rights::ALL).await.unwrap()).unwrap())
+        .await
+        .unwrap();
     node.run_until_idle().await.unwrap();
 
     let a = node.open(&sender).await.unwrap();
@@ -99,7 +102,8 @@ async fn send_delivers_exactly_once() {
     node.run_until_idle().await.unwrap();
     let b = node.open(&receiver).await.unwrap();
     let baseline = integer(&b, "SELECT count(*) FROM inbox").await;
-    let sender = node.spawn_root("forwarder-v1", receiver.as_bytes()).await.unwrap();
+    let sender =
+        node.spawn_root("forwarder-v1", &serde_json::to_vec(&node.cap_for(&receiver, Rights::ALL).await.unwrap()).unwrap()).await.unwrap();
     node.run_until_idle().await.unwrap();
     assert_eq!(integer(&b, "SELECT count(*) FROM inbox").await, baseline + 1);
 
@@ -206,9 +210,10 @@ async fn fork_diverged() {
         Node::new(dir.path(), registry(vec![receiver_behavior.clone()]), Arc::new(DefaultEffects), Config::default()).await.unwrap();
     let receiver = bootstrap.spawn_root("receiver", b"init").await.unwrap();
     bootstrap.run_until_idle().await.unwrap();
+    let receiver_cap = bootstrap.cap_for(&receiver, Rights::ALL).await.unwrap();
     drop(bootstrap);
-    let original = Arc::new(Counter { target: Some(receiver.clone()), ..Counter::plain() });
-    let candidate = Arc::new(Counter { hash: EXTRA, extra_effect: true, target: Some(receiver.clone()), ..Counter::plain() });
+    let original = Arc::new(Counter { target: Some(receiver_cap.clone()), ..Counter::plain() });
+    let candidate = Arc::new(Counter { hash: EXTRA, extra_effect: true, target: Some(receiver_cap.clone()), ..Counter::plain() });
     let node = Node::new(
         dir.path(),
         registry(vec![receiver_behavior, original, candidate]),
@@ -230,7 +235,8 @@ async fn fork_diverged() {
     match node.validate(&id, EXTRA, 2).await.unwrap() {
         Verdict::DivergedAt { seq, idx, expected, got } => {
             assert_eq!(seq, 5);
-            assert_eq!(idx, 1);
+            // Capability verification is index 0, followed by the send at 1.
+            assert_eq!(idx, 2);
             assert!(expected.is_empty(), "original log lacks this effect, expected must be empty: {expected:?}");
             let got: serde_json::Value = serde_json::from_slice(&got).unwrap();
             assert_eq!(got["kind"], "echo");
@@ -382,8 +388,8 @@ async fn memory_io_is_wired() {
                 cx.sql("INSERT INTO replies(msg) VALUES (?)", [msg]).await?;
                 return Ok(());
             }
-            let target = std::str::from_utf8(msg).map_err(|error| loom_actor::Trap::new(error.to_string()))?;
-            cx.call(target, b"echo witness", 1000).await?;
+            let target: Cap = serde_json::from_slice(msg).map_err(|error| loom_actor::Trap::new(error.to_string()))?;
+            cx.call(&target, b"echo witness", 1000).await?;
             Ok(())
         }
     }
@@ -402,7 +408,8 @@ async fn memory_io_is_wired() {
     node.run_until_idle().await.unwrap();
     assert_eq!(node.open(&id).await.unwrap().cursor().await.unwrap(), 3);
     let echo = node.spawn_root("echo-v1", &[]).await.unwrap();
-    let caller = node.spawn_root("echo-caller-test", echo.as_bytes()).await.unwrap();
+    let caller =
+        node.spawn_root("echo-caller-test", &serde_json::to_vec(&node.cap_for(&echo, Rights::ALL).await.unwrap()).unwrap()).await.unwrap();
     node.run_until_idle().await.unwrap();
     let rows = node.open(&caller).await.unwrap().sql("SELECT msg FROM replies", ()).await.unwrap();
     assert_eq!(rows.rows.len(), 1);

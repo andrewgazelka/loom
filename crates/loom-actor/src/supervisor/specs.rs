@@ -3,7 +3,10 @@ use crate::{ChildSpec, ChildType, Ctx, RestartPolicy, Trap, Value};
 
 pub(super) async fn specs(cx: &mut Ctx<'_>) -> Result<Vec<SpecRow>, Trap> {
     let rows = cx
-        .sql("SELECT child_id,\"order\",behavior_hash,init,restart,shutdown,link,type,monitor,durability FROM spec ORDER BY \"order\"", ())
+        .trusted_sql(
+            "SELECT child_id,\"order\",behavior_hash,init,restart,shutdown,link,type,monitor,durability,cap FROM spec ORDER BY \"order\"",
+            (),
+        )
         .await?;
     let mut result = Vec::new();
     for row in rows.rows {
@@ -24,6 +27,7 @@ pub(super) async fn specs(cx: &mut Ctx<'_>) -> Result<Vec<SpecRow>, Trap> {
             _ => return Err(error(cx, "invalid child link flag")),
         };
         result.push(SpecRow {
+            cap: serde_json::from_str(&text(cx, &row, 10)?).map_err(|e| error(cx, e))?,
             id: text(cx, &row, 0)?,
             order: integer(cx, &row, 1)?,
             spec: ChildSpec {

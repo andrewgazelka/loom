@@ -2,6 +2,11 @@ use crate::supervision::applied;
 use crate::{Node, RestartVerb, Shutdown, Status, actor};
 use anyhow::{Context, Result, ensure};
 
+struct CompletedShutdown {
+    child: String,
+    request: String,
+}
+
 impl Node {
     pub async fn stop(&self, id: &str, reason: &str) -> Result<()> {
         let _admission = self.admit().await?;
@@ -71,31 +76,45 @@ impl Node {
         Ok(true)
     }
 
-    /// Parent-owned pending controls are the restart-group barrier.
-    pub(crate) async fn sync_shutdowns(&self, id: &str) -> Result<()> {
-        let target = self.open_actor(id).await?;
-        let parent = {
-            let conn = target.conn.lock().await;
-            if actor::status(&conn).await? != Status::Stopped {
-                return Ok(());
-            }
-            actor::meta(&conn, "parent").await?
-        };
-        if !parent.is_empty() {
-            let owner = self.open_actor(&parent).await?;
-            let mut conn = owner.conn.lock().await;
-            let tx = conn.transaction().await?;
-            tx.execute("DELETE FROM shutdowns WHERE child=?", [id]).await?;
-            self.commit_control(&parent, tx).await?;
-        }
+    /// A completed target wakes requester pumps to release their own barriers.
+    pub(crate) async fn sync_shutdowns(&self, _id: &str) -> Result<()> {
+        self.wake.notify_one();
         Ok(())
+    }
+
+    /// The requester's pump removes its committed rows after target completion.
+    pub(crate) async fn sync_shutdown_requests(&self, requester: &str) -> Result<bool> {
+        let source = self.open_actor(requester).await?;
+        let pending = actor::query(&*source.conn.lock().await, "SELECT child,request FROM shutdowns", ()).await?;
+        let mut completed = Vec::new();
+        for row in pending.rows {
+            let child: String = row.get(0)?;
+            let request: String = row.get(1)?;
+            let target = self.capability_reader(&child).await?;
+            if actor::status(&target).await? == Status::Stopped {
+                completed.push(CompletedShutdown { child, request });
+            }
+        }
+        if completed.is_empty() {
+            return Ok(false);
+        }
+        let mut conn = source.conn.lock().await;
+        let tx = conn.transaction().await?;
+        for completion in completed {
+            tx.execute("DELETE FROM shutdowns WHERE child=? AND request=?", [completion.child, completion.request]).await?;
+        }
+        self.commit_control(requester, tx).await?;
+        Ok(true)
     }
 
     pub(crate) async fn shutdown(&self, sender: &str, id: &str, key: &str) -> Result<()> {
         let source = self.open_actor(sender).await?;
-        let rows = actor::query(&*source.conn.lock().await, "SELECT shutdown FROM children WHERE id=?", [id]).await?;
-        let row = rows.rows.first().context("shutdown requires owned child spec")?;
-        let policy: Shutdown = serde_json::from_str(&row.get::<String>(0)?)?;
+        let target = self.open_actor(id).await?;
+        let policy: Shutdown = {
+            let reader = self.capability_reader(id).await?;
+            serde_json::from_str(&actor::meta(&reader, "shutdown").await?)
+                .with_context(|| format!("actor {id}: invalid shutdown policy"))?
+        };
         {
             let mut conn = source.conn.lock().await;
             let tx = conn.transaction().await?;
@@ -116,7 +135,6 @@ impl Node {
                 anyhow::bail!("actor {id} seq -1: brutal shutdown reached graceful dispatch")
             }
         };
-        let target = self.open_actor(id).await?;
         let mut conn = if let Some(deadline) = deadline {
             let remaining = u64::try_from(deadline.saturating_sub(crate::effects::now()?).max(0))?;
             match tokio::time::timeout(std::time::Duration::from_millis(remaining), target.conn.lock()).await {

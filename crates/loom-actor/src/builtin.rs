@@ -1,5 +1,5 @@
 //! Native behaviors available on every node.
-use crate::{Behavior, Ctx, Registry, Trap};
+use crate::{Behavior, Cap, Ctx, Registry, Trap};
 use async_trait::async_trait;
 use std::sync::Arc;
 
@@ -7,7 +7,7 @@ pub struct Counter {
     pub hash: &'static str,
     pub upgraded: bool,
     pub extra_effect: bool,
-    pub target: Option<String>,
+    pub target: Option<Cap>,
     pub swallow_effect_errors: bool,
 }
 
@@ -72,7 +72,7 @@ pub struct Forwarder {
 #[async_trait]
 impl Behavior for Forwarder {
     fn description(&self) -> &str {
-        "Sends forwarded to the actor ID carried in each message."
+        "Sends forwarded to the capability carried in each message."
     }
     fn hash(&self) -> &str {
         if self.trap { "forwarder-trap" } else { "forwarder-v1" }
@@ -83,12 +83,9 @@ impl Behavior for Forwarder {
     }
 
     async fn handle(&self, cx: &mut Ctx<'_>, msg: &[u8]) -> Result<(), Trap> {
-        let decoded = serde_json::from_slice::<String>(msg).ok();
-        let target = match decoded.as_deref() {
-            Some(target) => target,
-            None => std::str::from_utf8(msg).map_err(|error| Trap::new(error.to_string()))?,
-        };
-        cx.send(target, b"forwarded").await?;
+        let target: Cap = serde_json::from_slice(msg).map_err(|error| Trap::new(error.to_string()))?;
+        cx.accept(target.clone()).await?;
+        cx.send(&target, b"forwarded").await?;
         if self.trap {
             return Err(Trap::new("trap after send"));
         }
@@ -115,10 +112,11 @@ impl Behavior for Echo {
         if value["type"] != "call" {
             return Ok(());
         }
-        let from = value["from"].as_str().ok_or_else(|| Trap::new("call missing from"))?;
+        let from: Cap = serde_json::from_value(value["reply_cap"].clone()).map_err(|e| Trap::new(format!("call reply_cap: {e}")))?;
+        cx.accept(from.clone()).await?;
         let reference = value["ref"].as_str().ok_or_else(|| Trap::new("call missing ref"))?;
         let payload: Vec<u8> = serde_json::from_value(value["msg"].clone()).map_err(|e| Trap::new(e.to_string()))?;
-        cx.reply(from, reference, &payload).await
+        cx.reply(&from, reference, &payload).await
     }
 }
 

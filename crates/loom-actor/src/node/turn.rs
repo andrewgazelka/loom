@@ -82,7 +82,7 @@ impl Node {
         Err(anyhow!("actor {id} seq {}: retry loop exhausted unexpectedly", message.seq))
     }
 
-    pub(super) async fn promote_inner(&self, id: &str, hash: &str, author: &str, rationale: &str) -> Result<()> {
+    pub(crate) async fn promote_inner(&self, id: &str, hash: &str, author: &str, rationale: &str) -> Result<()> {
         let actor = self.open_actor(id).await?;
         let behavior = actor::behavior(&self.registry, hash).with_context(|| format!("actor {id} seq -1: promote"))?;
         actor::promote(

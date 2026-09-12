@@ -3,6 +3,7 @@ use loom_actor::{
     Actor, Behavior, ChildSpec, Config, Ctx, DefaultEffects, EffectError, EffectHandler, EffectKey, Node, Registry, RestartPolicy,
     Shutdown, Status, Trap,
 };
+use loom_actor::{Cap, Rights};
 use serde_json::{Value, json};
 use std::{
     sync::{
@@ -30,18 +31,19 @@ impl Behavior for Fixture {
         }
         let input: Value = serde_json::from_slice(msg).map_err(|e| Trap::new(e.to_string()))?;
         let text = |key: &str| input[key].as_str().ok_or_else(|| Trap::new(format!("missing {key}")));
+        let cap = |key: &str| serde_json::from_value::<Cap>(input[key].clone()).map_err(|e| Trap::new(e.to_string()));
         match input["type"].as_str() {
             Some("init") => {
                 cx.trap_exit(input["trap_exit"].as_bool().unwrap_or(false)).await?;
                 return Ok(());
             }
             Some("watch") => {
-                let reference = cx.monitor(text("target")?).await?;
+                let reference = cx.monitor(&cap("target")?).await?;
                 cx.sql("INSERT INTO saved(ref) VALUES (?)", [reference]).await?;
             }
             Some("batch") => {
                 for number in 0..10 {
-                    cx.send(text("target")?, &encoded(json!({"type":"number","n":number}))).await?;
+                    cx.send(&cap("target")?, &encoded(json!({"type":"number","n":number}))).await?;
                     if number == 4 {
                         cx.request("pump_barrier", &[]).await?;
                     }
@@ -60,26 +62,26 @@ impl Behavior for Fixture {
             }
             Some("make_call") => {
                 let timeout = input["timeout"].as_u64().ok_or_else(|| Trap::new("missing timeout"))?;
-                let reference = cx.call(text("target")?, b"request", timeout).await?;
+                let reference = cx.call(&cap("target")?, b"request", timeout).await?;
                 cx.sql("INSERT INTO saved(ref) VALUES (?)", [reference]).await?;
             }
             Some("call") => {
                 if self.mode == "reply" {
-                    cx.reply(text("from")?, text("ref")?, b"answer").await?;
+                    cx.reply(&cap("reply_cap")?, text("ref")?, b"answer").await?;
                 }
                 if self.mode == "die" {
                     cx.exit("boom").await?;
                 }
             }
             Some("ask") => {
-                cx.send(text("target")?, &encoded(input["request"].clone())).await?;
+                let mut request = input["request"].clone();
+                request["reply_cap"] = serde_json::to_value(cx.self_cap().await?).map_err(|e| Trap::new(e.to_string()))?;
+                cx.send(&cap("target")?, &encoded(request)).await?;
             }
             _ => {}
         }
-        if self.mode == "selective"
-            && let Some(target) = input["target"].as_str()
-        {
-            cx.send(target, msg).await?;
+        if self.mode == "selective" && input.get("target").is_some() {
+            cx.send(&cap("target")?, msg).await?;
         }
         cx.sql("INSERT INTO events(body) VALUES (?)", [msg]).await?;
         Ok(())
@@ -162,9 +164,9 @@ async fn pair_fifo_and_down_after_messages() {
     let runtime = node_with_effects(dir.path(), barrier.clone()).await;
     let a = spawn(&runtime, "ordinary").await;
     let b = spawn(&runtime, "ordinary").await;
-    runtime.send(&b, "watch", &encoded(json!({"type":"watch","target":a}))).await.unwrap();
+    runtime.send(&b, "watch", &encoded(json!({"type":"watch","target":runtime.cap_for(&a, Rights::ALL).await.unwrap()}))).await.unwrap();
     drain(&runtime).await;
-    runtime.send(&a, "batch", &encoded(json!({"type":"batch","target":b}))).await.unwrap();
+    runtime.send(&a, "batch", &encoded(json!({"type":"batch","target":runtime.cap_for(&b, Rights::ALL).await.unwrap()}))).await.unwrap();
     let running_node = runtime.clone();
     let running = tokio::spawn(async move { running_node.run_until_idle().await });
     tokio::time::timeout(Duration::from_secs(30), barrier.entered.notified()).await.expect("pump never reached its midpoint");
@@ -212,7 +214,10 @@ async fn defer_is_selective_receive() {
     let b = spawn(&runtime, "selective").await;
     let receiver = spawn(&runtime, "ordinary").await;
     for kind in ["x", "y", "z"] {
-        runtime.send(&b, kind, &encoded(json!({"type":kind,"target":receiver}))).await.unwrap();
+        runtime
+            .send(&b, kind, &encoded(json!({"type":kind,"target":runtime.cap_for(&receiver, Rights::ALL).await.unwrap()})))
+            .await
+            .unwrap();
     }
     drain(&runtime).await;
     let actor = runtime.open(&b).await.unwrap();
@@ -244,7 +249,14 @@ async fn call_reply_timeout_and_death() {
     for mode in ["reply", "silent", "die"] {
         let callee = spawn(&runtime, mode).await;
         let timeout = if mode == "silent" { 50 } else { 5_000 };
-        runtime.send(&caller, mode, &encoded(json!({"type":"make_call","target":callee,"timeout":timeout}))).await.unwrap();
+        runtime
+            .send(
+                &caller,
+                mode,
+                &encoded(json!({"type":"make_call","target":runtime.cap_for(&callee, Rights::ALL).await.unwrap(),"timeout":timeout})),
+            )
+            .await
+            .unwrap();
         drain(&runtime).await;
         let actor = runtime.open(&caller).await.unwrap();
         let reference = reference(&actor).await;
@@ -309,7 +321,10 @@ async fn kill_terminate_and_shutdown_timeout() {
     let supervisor_actor = runtime.open(&supervisor).await.unwrap();
     let child: String = supervisor_actor.sql("SELECT id FROM children", ()).await.unwrap().rows[0].get(0).unwrap();
     let watcher = spawn(&runtime, "ordinary").await;
-    runtime.send(&watcher, "watch", &encoded(json!({"type":"watch","target":child}))).await.unwrap();
+    runtime
+        .send(&watcher, "watch", &encoded(json!({"type":"watch","target":runtime.cap_for(&child, Rights::ALL).await.unwrap()})))
+        .await
+        .unwrap();
     drain(&runtime).await;
     runtime.send(&supervisor, "terminate", &encoded(json!({"type":"terminate_child","id":child}))).await.unwrap();
     drain(&runtime).await;
@@ -353,7 +368,13 @@ async fn dynamic_supervisor_and_registry() {
     assert_eq!(children.len(), 3);
     let requester = spawn(&runtime, "ordinary").await;
     runtime
-        .send(&requester, "count", &encoded(json!({"type":"ask","target":supervisor,"request":{"type":"count_children"}})))
+        .send(
+            &requester,
+            "count",
+            &encoded(
+                json!({"type":"ask","target":runtime.cap_for(&supervisor, Rights::ALL).await.unwrap(),"request":{"type":"count_children"}}),
+            ),
+        )
         .await
         .unwrap();
     drain(&runtime).await;

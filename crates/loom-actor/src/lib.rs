@@ -3,12 +3,20 @@
 #![forbid(unsafe_code)]
 
 mod actor;
+mod cap_inspection;
+mod cap_ops;
+mod sql_value;
+pub use cap_inspection::{Inspection, InspectionRow};
+pub use sql_value::SqlValue;
+mod capability;
+pub use capability::{Cap, Rights};
 pub mod builtin;
 mod directory;
 mod durability;
 mod durability_open;
 mod durability_worker;
 mod effects;
+mod guest_sql;
 mod history;
 mod hooks;
 mod ids;
@@ -121,6 +129,11 @@ impl Ctx<'_> {
     /// Behaviors own domain SQL; transaction control and runtime-table mutation
     /// are outside the Behavior contract.
     pub async fn sql(&mut self, sql: &str, params: impl IntoParams + Send) -> Result<Rows, Trap> {
+        guest_sql::check(sql).map_err(|error| self.effect_error(EffectError::Deterministic(error)))?;
+        self.trusted_sql(sql, params).await
+    }
+
+    pub(crate) async fn trusted_sql(&mut self, sql: &str, params: impl IntoParams + Send) -> Result<Rows, Trap> {
         actor::query(self.conn, sql, params).await.map_err(|e| self.runtime(e))
     }
 
@@ -157,15 +170,17 @@ impl Ctx<'_> {
         Ok(position)
     }
 
-    pub async fn send(&mut self, target: &str, msg: &[u8]) -> Result<(), Trap> {
-        ids::check(target).map_err(|e| Trap::new(e.to_string()))?;
+    pub async fn send(&mut self, cap: &Cap, msg: &[u8]) -> Result<(), Trap> {
+        self.authorize(cap, Rights::SEND, "send").await?;
+        let target = cap.target.as_str();
         let idx = self.next_index()?;
         self.outbox(idx, target, msg).await
     }
 
-    pub async fn spawn(&mut self, spec: &ChildSpec) -> Result<ActorId, Trap> {
+    pub async fn spawn(&mut self, spec: &ChildSpec) -> Result<Cap, Trap> {
         let idx = self.next_index()?;
         let id = ids::child(&ids::incarnation(self.actor_id, self.generation), self.seq, idx);
+        let cap = self.mint_child(&id).await?;
         let spawn = Spawn::Child { id: id.clone(), spec: spec.clone(), origin_seq: self.seq, origin_idx: idx };
         let msg = serde_json::to_vec(&spawn).map_err(|e| self.runtime(e))?;
         self.outbox(idx, "spawn", &msg).await?;
@@ -177,7 +192,7 @@ impl Ctx<'_> {
         let shutdown = serde_json::to_string(&spec.shutdown).map_err(|e| self.runtime(e))?;
         self.conn.execute("INSERT INTO children(id,spawned_seq,behavior_hash,init,restart,shutdown,link,monitor,child_type) VALUES (?,?,?,?,?,?,?,?,?)",
             turso::params![id.as_str(), self.seq, spec.behavior_hash.as_str(), spec.init.as_slice(), restart, shutdown, spec.link, spec.monitor, serde_json::to_string(&spec.child_type).map_err(|e| self.runtime(e))?]).await.map_err(|e| self.runtime(e))?;
-        Ok(id)
+        Ok(cap)
     }
 
     pub fn sender(&self) -> Option<ActorId> {
@@ -190,8 +205,9 @@ impl Ctx<'_> {
         let idx = self.next_index()?;
         self.outbox(idx, &format!("{kind}:{target}"), msg).await
     }
-    pub async fn monitor(&mut self, id: &str) -> Result<String, Trap> {
-        ids::check(id).map_err(|e| Trap::new(e.to_string()))?;
+    pub async fn monitor(&mut self, cap: &Cap) -> Result<String, Trap> {
+        self.authorize(cap, Rights::MONITOR, "monitor").await?;
+        let id = cap.target.as_str();
         let idx = self.next_index()?;
         let reference = format!("{}:{}:{idx}", ids::incarnation(self.actor_id, self.generation), self.seq);
         self.outbox(idx, &format!("monitor:{id}"), reference.as_bytes()).await?;
@@ -206,30 +222,40 @@ impl Ctx<'_> {
         let msg = serde_json::to_vec(&serde_json::json!({"target":target,"flush":flush})).map_err(|e| self.runtime(e))?;
         self.control("demonitor", reference, &msg).await
     }
-    pub async fn link(&mut self, id: &str) -> Result<(), Trap> {
+    pub async fn link(&mut self, cap: &Cap) -> Result<(), Trap> {
+        self.authorize(cap, Rights::LINK, "link").await?;
+        let id = cap.target.as_str();
         self.control("link", id, &[]).await
     }
-    pub async fn unlink(&mut self, id: &str) -> Result<(), Trap> {
+    pub async fn unlink(&mut self, cap: &Cap) -> Result<(), Trap> {
+        self.authorize(cap, Rights::LINK, "unlink").await?;
+        let id = cap.target.as_str();
         self.control("unlink", id, &[]).await
     }
-    pub async fn stop(&mut self, id: &str, reason: &str) -> Result<(), Trap> {
+    pub async fn stop(&mut self, cap: &Cap, reason: &str) -> Result<(), Trap> {
+        self.authorize(cap, Rights::STOP, "stop").await?;
+        let id = cap.target.as_str();
         self.control("stop", id, reason.as_bytes()).await
     }
     pub fn defer(&mut self) -> Result<(), Trap> {
         self.deferred = true;
         Ok(())
     }
-    pub async fn shutdown(&mut self, id: &str) -> Result<(), Trap> {
+    pub async fn shutdown(&mut self, cap: &Cap) -> Result<(), Trap> {
+        self.authorize(cap, Rights::STOP, "shutdown").await?;
+        let id = cap.target.as_str();
         self.control("shutdown", id, &[]).await
     }
     pub async fn exit(&mut self, reason: &str) -> Result<(), Trap> {
-        let id = self.actor_id.to_owned();
-        self.stop(&id, reason).await
+        let cap = self.self_cap().await?;
+        self.stop(&cap, reason).await
     }
     pub async fn trap_exit(&mut self, enabled: bool) -> Result<(), Trap> {
         actor::set_meta(self.conn, "trap_exit", if enabled { "true" } else { "false" }).await.map_err(|e| self.runtime(e))
     }
-    pub async fn restart(&mut self, id: &str, verb: RestartVerb) -> Result<(), Trap> {
+    pub async fn restart(&mut self, cap: &Cap, verb: RestartVerb) -> Result<(), Trap> {
+        self.authorize(cap, Rights::SPAWN, "restart").await?;
+        let id = cap.target.as_str();
         if id == self.actor_id {
             return Err(Trap::new("restart self through a supervisor or Node::restart"));
         }
@@ -237,23 +263,15 @@ impl Ctx<'_> {
         let idx = self.next_index()?;
         self.outbox(idx, "spawn", &msg).await
     }
-    /// Inspect an owned child through a recorded effect, so supervision replays.
-    pub async fn inspect(&mut self, id: &str) -> Result<ChildState, Trap> {
-        let rows = self.sql("SELECT id FROM children WHERE id=?", [id]).await?;
-        if rows.rows.is_empty() {
-            return Err(Trap::new("inspect requires an owned child"));
-        }
-        let bytes = self.effect("__inspect", id.as_bytes()).await?;
-        serde_json::from_slice(&bytes).map_err(|e| self.runtime(e))
-    }
-
     pub async fn request(&mut self, kind: &str, req: &[u8]) -> Result<String, Trap> {
+        self.check_external_effect(kind)?;
         let idx = self.next_index()?;
         let position = self.insert_outbox(idx, &format!("effect:{kind}"), req).await?;
         Ok(format!("req:{}:{}", position.seq, position.idx))
     }
 
     pub async fn effect(&mut self, kind: &str, req: &[u8]) -> Result<Vec<u8>, Trap> {
+        self.check_external_effect(kind)?;
         let idx = self.next_index()?;
         let key = EffectKey { actor_id: self.actor_id.into(), seq: self.seq, idx, generation: self.generation };
         let result = self.effects.call(&key, kind, req).await.map_err(|e| self.effect_error(e))?;

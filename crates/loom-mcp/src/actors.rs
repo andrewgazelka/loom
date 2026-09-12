@@ -1,5 +1,5 @@
 use crate::LoomMcp;
-use loom_actor::{ChildSpec, Node, Rows};
+use loom_actor::{Cap, ChildSpec, Node, Rights, Rows};
 use loom_api::Scope;
 use rmcp::{
     ErrorData, RoleServer, handler::server::wrapper::Parameters, model::*, service::RequestContext,
@@ -62,7 +62,18 @@ impl ActorMcp {
     pub fn new(node: Node) -> Self {
         Self { node }
     }
+    async fn authority(&self, id: &str, rights: Rights, operation: &str) -> Result<Cap, ErrorData> {
+        let cap = self.node.cap_for(id, rights).await.map_err(error)?;
+        self.node
+            .check_cap(&cap, rights, operation)
+            .await
+            .map_err(error)?;
+        Ok(cap)
+    }
     async fn tree(&self, root: &str) -> anyhow::Result<Value> {
+        self.authority(root, Rights::INSPECT, "actor_tree")
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         let entries = self.node.tree(root).await?;
         let mut nodes = std::collections::HashMap::new();
         for entry in entries.iter().rev() {
@@ -79,7 +90,8 @@ impl ActorMcp {
             .ok_or_else(|| anyhow::anyhow!("actor {root} seq -1: missing tree root"))
     }
     async fn rows(&self, id: &str, query: &str, params: Vec<Value>) -> Result<Value, ErrorData> {
-        let actor = self.node.open(id).await.map_err(error)?;
+        let cap = self.authority(id, Rights::INSPECT, "actor_sql").await?;
+        let actor = self.node.open(&cap.target).await.map_err(error)?;
         let params = sql_params(params).map_err(|e| error(format!("actor {id} seq -1: {e}")))?;
         rows_json(actor.inspect_sql(query, params).await.map_err(error)?).map_err(error)
     }
@@ -209,6 +221,9 @@ impl LoomMcp {
         self.actor_access(&context, Scope::Read)?;
         let mut list = Vec::new();
         for id in self.actors.node.actor_ids().map_err(error)? {
+            self.actors
+                .authority(&id, Rights::INSPECT, "actor_list")
+                .await?;
             let info = self.actors.node.info(&id).await.map_err(error)?;
             list.push(json!({"id":id,"status":info.status,"behavior_hash":info.behavior_hash,"cursor":info.cursor,"inbox_len":info.inbox_len,"parent":info.parent}));
         }
@@ -238,6 +253,9 @@ impl LoomMcp {
         context: RequestContext<RoleServer>,
     ) -> Result<String, ErrorData> {
         self.actor_access(&context, Scope::Read)?;
+        self.actors
+            .authority(&args.id, Rights::INSPECT, "actor_info")
+            .await?;
         json_text(self.actors.node.info(&args.id).await.map_err(error)?)
     }
     #[tool(
@@ -250,6 +268,9 @@ impl LoomMcp {
         context: RequestContext<RoleServer>,
     ) -> Result<String, ErrorData> {
         self.actor_access(&context, Scope::Execute)?;
+        self.actors
+            .authority(&args.id, Rights::SEND, "actor_send")
+            .await?;
         let key = args
             .key
             .unwrap_or_else(|| format!("mcp:{}", uuid::Uuid::new_v4()));
@@ -276,6 +297,9 @@ impl LoomMcp {
     ) -> Result<String, ErrorData> {
         self.actor_access(&context, Scope::Execute)?;
         let parent = args.parent.unwrap_or_else(|| self.actors.node.root());
+        self.actors
+            .authority(&parent, Rights::SPAWN, "actor_spawn")
+            .await?;
         let init = if args.init.is_null() {
             Vec::new()
         } else {
@@ -334,6 +358,9 @@ impl LoomMcp {
     ) -> Result<String, ErrorData> {
         self.actor_access(&context, Scope::Execute)?;
         self.actors
+            .authority(&args.id, Rights::STOP, "actor_stop")
+            .await?;
+        self.actors
             .node
             .stop(&args.id, &args.reason)
             .await
@@ -350,6 +377,9 @@ impl LoomMcp {
         context: RequestContext<RoleServer>,
     ) -> Result<String, ErrorData> {
         self.actor_access(&context, Scope::Execute)?;
+        self.actors
+            .authority(&args.id, Rights::SPAWN, "actor_restart")
+            .await?;
         let verb = serde_json::from_value(json!(args.verb))
             .map_err(|e| error(format!("actor {} seq -1: {e}", args.id)))?;
         self.actors
@@ -369,6 +399,9 @@ impl LoomMcp {
         context: RequestContext<RoleServer>,
     ) -> Result<String, ErrorData> {
         self.actor_access(&context, Scope::Define)?;
+        self.actors
+            .authority(&args.id, Rights::PROMOTE, "actor_promote")
+            .await?;
         self.actors
             .node
             .promote(&args.id, &args.behavior_hash, &args.author, &args.rationale)
@@ -394,6 +427,15 @@ impl LoomMcp {
         context: RequestContext<RoleServer>,
     ) -> Result<String, ErrorData> {
         self.actor_access(&context, Scope::Define)?;
+        self.actors.node.behavior(&args.new_hash).map_err(error)?;
+        for id in self.actors.node.actor_ids().map_err(error)? {
+            let info = self.actors.node.info(&id).await.map_err(error)?;
+            if info.behavior_hash == args.old_hash && info.status != loom_actor::Status::Stopped {
+                self.actors
+                    .authority(&id, Rights::PROMOTE, "actor_promote_where")
+                    .await?;
+            }
+        }
         json_text(
             self.actors
                 .node
@@ -446,6 +488,9 @@ impl LoomMcp {
         context: RequestContext<RoleServer>,
     ) -> Result<String, ErrorData> {
         self.actor_access(&context, Scope::Execute)?;
+        self.actors
+            .authority(&args.id, Rights::INSPECT, "actor_fork")
+            .await?;
         json_text(json!({"id":self.actors.node.fork(&args.id,args.at_seq).await.map_err(error)?}))
     }
     #[tool(
@@ -458,6 +503,9 @@ impl LoomMcp {
         context: RequestContext<RoleServer>,
     ) -> Result<String, ErrorData> {
         self.actor_access(&context, Scope::Execute)?;
+        self.actors
+            .authority(&args.id, Rights::INSPECT, "actor_validate")
+            .await?;
         json_text(
             self.actors
                 .node
@@ -506,6 +554,9 @@ impl LoomMcp {
         context: RequestContext<RoleServer>,
     ) -> Result<String, ErrorData> {
         self.actor_access(&context, Scope::Execute)?;
+        self.actors
+            .authority(&args.id, Rights::INSPECT, "actor_register")
+            .await?;
         self.actors
             .node
             .register(&args.name, &args.id)

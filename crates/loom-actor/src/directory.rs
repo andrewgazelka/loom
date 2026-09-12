@@ -220,7 +220,7 @@ async fn ensure_live(conn: &Connection) -> Result<()> {
     Ok::<(), anyhow::Error>(())
 }
 
-async fn connection<'a>(slot: &'a mut Option<Connection>, dir: &Path, io: crate::Io) -> Result<&'a mut Connection> {
+pub(crate) async fn connection<'a>(slot: &'a mut Option<Connection>, dir: &Path, io: crate::Io) -> Result<&'a mut Connection> {
     if slot.is_none() {
         let conn = actor::connect(&dir.join("_node.db"), io).await?;
         conn.execute_batch(

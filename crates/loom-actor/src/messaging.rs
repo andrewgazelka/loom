@@ -1,4 +1,4 @@
-use crate::{Ctx, Node, Status, Trap, actor, ids};
+use crate::{Cap, Ctx, Node, Rights, Status, Trap, actor, ids};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 
@@ -11,6 +11,7 @@ struct CallRequest {
     reference: String,
     msg: Vec<u8>,
     timeout_ms: u64,
+    reply_cap: Cap,
 }
 #[derive(Default)]
 pub(crate) struct TimerProgress {
@@ -44,8 +45,9 @@ impl Ctx<'_> {
     }
 
     /// Persist a timer in this message transaction; its alarm is armed after commit.
-    pub async fn send_after(&mut self, target: &str, ms: u64, msg: &[u8]) -> Result<String, Trap> {
-        ids::check(target).map_err(|e| self.runtime(e))?;
+    pub async fn send_after(&mut self, cap: &Cap, ms: u64, msg: &[u8]) -> Result<String, Trap> {
+        self.authorize(cap, Rights::SEND, "send_after").await?;
+        let target = cap.target.as_str();
         let deadline = self.deadline(ms).await?;
         let idx = self.next_index()?;
         let reference = self.reference("timer", idx);
@@ -78,8 +80,9 @@ impl Ctx<'_> {
     }
 
     /// The next handler receives exactly one reply, down, or call_timeout envelope.
-    pub async fn call(&mut self, target: &str, msg: &[u8], timeout_ms: u64) -> Result<String, Trap> {
-        ids::check(target).map_err(|e| self.runtime(e))?;
+    pub async fn call(&mut self, cap: &Cap, msg: &[u8], timeout_ms: u64) -> Result<String, Trap> {
+        self.authorize(cap, Rights::SEND | Rights::MONITOR, "call").await?;
+        let target = cap.target.as_str();
         let deadline = self.deadline(timeout_ms).await?;
         let idx = self.next_index()?;
         let reference = self.reference("call", idx);
@@ -94,13 +97,16 @@ impl Ctx<'_> {
             )
             .await
             .map_err(|e| self.runtime(e))?;
-        let request = serde_json::to_vec(&CallRequest { reference: reference.clone(), msg: msg.to_vec(), timeout_ms })
+        let own = self.self_cap().await?;
+        let reply_cap = self.attenuate(&own, Rights::SEND).await?;
+        let request = serde_json::to_vec(&CallRequest { reference: reference.clone(), msg: msg.to_vec(), timeout_ms, reply_cap })
             .map_err(|e| self.runtime(e))?;
         self.outbox(idx, &format!("call:{target}"), &request).await?;
         Ok(reference)
     }
 
-    pub async fn reply(&mut self, from: &str, reference: &str, msg: &[u8]) -> Result<(), Trap> {
+    pub async fn reply(&mut self, from: &Cap, reference: &str, msg: &[u8]) -> Result<(), Trap> {
+        self.authorize(from, Rights::SEND, "reply").await?;
         let reply = serde_json::to_vec(&serde_json::json!({"type":"reply","ref":reference,"msg":msg})).map_err(|e| self.runtime(e))?;
         self.send(from, &reply).await
     }
@@ -143,7 +149,9 @@ impl Node {
             ensure!(call.get::<String>(0)? == target, "actor {sender} seq -1: call target differs from persisted target");
         }
         self.monitor(sender, target, &request.reference).await?;
-        let envelope = serde_json::to_vec(&serde_json::json!({"type":"call","ref":request.reference,"from":sender,"msg":request.msg}))?;
+        let envelope = serde_json::to_vec(
+            &serde_json::json!({"type":"call","ref":request.reference,"from":sender,"msg":request.msg,"reply_cap":request.reply_cap}),
+        )?;
         self.deliver_message(target, key, sender, &envelope).await?;
         let mut conn = source.conn.lock().await;
         let tx = conn.transaction().await?;

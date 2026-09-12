@@ -55,6 +55,8 @@ impl Node {
         cleanup.track(staging.clone());
         cleanup.track(PathBuf::from(format!("{}-wal", staging.display())));
         let mut conn = actor::connect(&staging, self.config.io).await?;
+        crate::capability::migrate(&conn).await?;
+        self.migrate_authority(&conn).await?;
         let snapshot_cursor = actor::cursor(&conn).await?;
         let snapshot_epoch: i64 = actor::meta(&conn, "commit_epoch").await?.parse()?;
         ensure!(

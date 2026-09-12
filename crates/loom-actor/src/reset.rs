@@ -18,8 +18,10 @@ impl Node {
         tx.execute_batch(crate::SCHEMA).await?;
         actor::set_meta(&tx, "id", id).await?;
         actor::set_meta(&tx, "parent", &actor::meta(conn, "parent").await?).await?;
+        actor::set_meta(&tx, "shutdown", &actor::meta(conn, "shutdown").await?).await?;
         actor::set_meta(&tx, "init", &actor::meta(conn, "init").await?).await?;
         actor::set_meta(&tx, "cursor", "0").await?;
+        actor::set_meta(&tx, "capability_epoch", &actor::meta(conn, "capability_epoch").await?).await?;
         actor::set_meta(&tx, "commit_epoch", "0").await?;
         actor::set_meta(&tx, "durability", &actor::meta(conn, "durability").await?).await?;
         actor::set_meta(&tx, "durability_seq", &actor::meta(conn, "durability_seq").await?).await?;
@@ -53,7 +55,7 @@ impl Node {
             tx.execute("INSERT INTO code_changes(seq,behavior_hash,parent_hash,author,rationale,schema_sql) VALUES (?,?,?,?,?,?)", values)
                 .await?;
         }
-        for table in ["links", "monitors", "monitored_by"] {
+        for table in ["links", "monitors", "monitored_by", "caps", "revoked"] {
             let rows = actor::query(conn, &format!("SELECT * FROM {table} ORDER BY rowid"), ()).await?;
             for row in rows.rows {
                 let values = (0..row.column_count()).map(|i| row.get_value(i)).collect::<turso::Result<Vec<_>>>()?;

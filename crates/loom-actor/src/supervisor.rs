@@ -1,6 +1,6 @@
 //! A durable supervisor implemented entirely as a normal actor behavior.
 mod specs;
-use crate::{Behavior, ChildSpec, ChildState, ChildType, Ctx, RestartPolicy, RestartVerb, Trap, Value};
+use crate::{Behavior, Cap, ChildSpec, ChildState, ChildType, Ctx, RestartPolicy, RestartVerb, Trap, Value};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use specs::specs;
@@ -11,7 +11,7 @@ pub struct Supervisor;
 pub(crate) const HASH: &str = "supervisor-v1";
 
 const SCHEMA: &str = r#"
-CREATE TABLE IF NOT EXISTS spec(child_id TEXT PRIMARY KEY, "order" INTEGER, behavior_hash TEXT, init BLOB, restart TEXT, shutdown TEXT, link INTEGER, type TEXT, monitor INTEGER, durability TEXT NOT NULL DEFAULT 'local');
+CREATE TABLE IF NOT EXISTS spec(child_id TEXT PRIMARY KEY, "order" INTEGER, behavior_hash TEXT, init BLOB, restart TEXT, shutdown TEXT, link INTEGER, type TEXT, monitor INTEGER, durability TEXT NOT NULL DEFAULT 'local', cap TEXT NOT NULL);
 INSERT OR REPLACE INTO meta(key,value) VALUES ('trap_exit','true');
 UPDATE meta SET value='one_for_one' WHERE key='strategy' AND value IN ('park','skip','stop');
 INSERT OR IGNORE INTO meta(key,value) VALUES ('strategy','one_for_one'),('max_restarts','3'),('max_seconds','5');
@@ -34,14 +34,15 @@ enum Command {
     TerminateChild { id: String },
     RestartChild { id: String },
     DeleteChild { id: String },
-    CountChildren,
-    WhichChildren,
+    CountChildren { reply_cap: Cap },
+    WhichChildren { reply_cap: Cap },
     Down { from: String, reason: String, generation: i64, event: String, initiator: Option<String> },
     Exit { from: String, reason: String, generation: i64, event: String, initiator: Option<String> },
     Poison { child: String, generation: i64, event: String },
 }
 
 struct SpecRow {
+    cap: Cap,
     id: String,
     order: i64,
     spec: ChildSpec,
@@ -54,7 +55,7 @@ struct Failure {
     initiator: Option<String>,
 }
 struct Restart {
-    id: String,
+    cap: Cap,
     verb: RestartVerb,
 }
 #[derive(Serialize)]
@@ -87,12 +88,12 @@ fn integer(cx: &Ctx<'_>, row: &turso::Row, index: usize) -> Result<i64, Trap> {
 }
 
 async fn meta(cx: &mut Ctx<'_>, key: &str) -> Result<String, Trap> {
-    let rows = cx.sql("SELECT value FROM meta WHERE key=?", [key]).await?;
+    let rows = cx.trusted_sql("SELECT value FROM meta WHERE key=?", [key]).await?;
     let row = rows.rows.first().ok_or_else(|| error(cx, format!("missing supervisor meta {key}")))?;
     text(cx, row, 0)
 }
 async fn set_meta(cx: &mut Ctx<'_>, key: &str, value: &str) -> Result<(), Trap> {
-    cx.sql("INSERT OR REPLACE INTO meta(key,value) VALUES (?,?)", [key, value]).await?;
+    cx.trusted_sql("INSERT OR REPLACE INTO meta(key,value) VALUES (?,?)", [key, value]).await?;
     Ok(())
 }
 async fn configure(
@@ -156,30 +157,28 @@ async fn start_child(cx: &mut Ctx<'_>, spec: Option<ChildSpec>, init: Option<Vec
     Ok(())
 }
 async fn manage_child(cx: &mut Ctx<'_>, id: &str, command: &str) -> Result<(), Trap> {
-    if !specs(cx).await?.iter().any(|child| child.id == id) {
-        return Err(error(cx, format!("unknown child {id}")));
-    }
+    let child = specs(cx).await?.into_iter().find(|child| child.id == id).ok_or_else(|| error(cx, format!("unknown child {id}")))?;
     let marker = format!("terminated:{id}");
     match command {
         "terminate" => {
             set_meta(cx, &marker, "1").await?;
-            cx.shutdown(id).await?;
+            cx.shutdown(&child.cap).await?;
         }
         "restart" => {
-            if cx.inspect(id).await?.status != crate::Status::Stopped {
+            if cx.inspect(&child.cap).await?.status != crate::Status::Stopped {
                 return Err(error(cx, "restart_child requires stopped child"));
             }
-            cx.sql("DELETE FROM meta WHERE key=?", [marker]).await?;
-            cx.restart(id, RestartVerb::Reset).await?;
-            cx.monitor(id).await?;
+            cx.trusted_sql("DELETE FROM meta WHERE key=?", [marker]).await?;
+            cx.restart(&child.cap, RestartVerb::Reset).await?;
+            cx.monitor(&child.cap).await?;
         }
         "delete" => {
-            if cx.inspect(id).await?.status != crate::Status::Stopped {
+            if cx.inspect(&child.cap).await?.status != crate::Status::Stopped {
                 return Err(error(cx, "delete_child requires stopped child"));
             }
-            cx.sql("DELETE FROM spec WHERE child_id=?", [id]).await?;
-            cx.sql("DELETE FROM children WHERE id=?", [id]).await?;
-            cx.unlink(id).await?;
+            cx.trusted_sql("DELETE FROM spec WHERE child_id=?", [id]).await?;
+            cx.trusted_sql("DELETE FROM children WHERE id=?", [id]).await?;
+            cx.unlink(&child.cap).await?;
             // Keep the marker so queued lifecycle notifications remain harmless.
             set_meta(cx, &marker, "1").await?;
         }
@@ -187,14 +186,14 @@ async fn manage_child(cx: &mut Ctx<'_>, id: &str, command: &str) -> Result<(), T
     }
     Ok(())
 }
-async fn count_children(cx: &mut Ctx<'_>) -> Result<(), Trap> {
-    let sender = cx.sender().ok_or_else(|| error(cx, "count_children requires a sender"))?;
+async fn count_children(cx: &mut Ctx<'_>, sender: Cap) -> Result<(), Trap> {
+    cx.accept(sender.clone()).await?;
     let children = specs(cx).await?;
     let mut active = 0usize;
     let mut workers = 0usize;
     let mut supervisors = 0usize;
     for child in &children {
-        let state = cx.inspect(&child.id).await?;
+        let state = cx.inspect(&child.cap).await?;
         if matches!(state.status, crate::Status::Running | crate::Status::Parked) {
             active += 1;
         }
@@ -208,11 +207,11 @@ async fn count_children(cx: &mut Ctx<'_>) -> Result<(), Trap> {
     .map_err(|e| error(cx, e))?;
     cx.send(&sender, &reply).await
 }
-async fn which_children(cx: &mut Ctx<'_>) -> Result<(), Trap> {
-    let sender = cx.sender().ok_or_else(|| error(cx, "which_children requires a sender"))?;
+async fn which_children(cx: &mut Ctx<'_>, sender: Cap) -> Result<(), Trap> {
+    cx.accept(sender.clone()).await?;
     let mut children = Vec::new();
     for row in specs(cx).await? {
-        let state = cx.inspect(&row.id).await?;
+        let state = cx.inspect(&row.cap).await?;
         children.push(ChildDescription {
             id: row.id,
             order: row.order,
@@ -237,7 +236,7 @@ async fn failure(cx: &mut Ctx<'_>, failure: Failure) -> Result<(), Trap> {
     if matches!(failure.reason.as_str(), "shutdown" | "killed") && failure.initiator.as_deref() == Some(cx.self_id()) {
         return Ok(());
     }
-    if !cx.sql("SELECT value FROM meta WHERE key=?", [format!("terminated:{}", failure.child)]).await?.rows.is_empty() {
+    if !cx.trusted_sql("SELECT value FROM meta WHERE key=?", [format!("terminated:{}", failure.child)]).await?.rows.is_empty() {
         return Ok(());
     }
     let children = specs(cx).await?;
@@ -245,12 +244,12 @@ async fn failure(cx: &mut Ctx<'_>, failure: Failure) -> Result<(), Trap> {
         .iter()
         .find(|row| row.id == failure.child)
         .ok_or_else(|| error(cx, format!("notification from non-child {}", failure.child)))?;
-    let state = cx.inspect(&failure.child).await?;
+    let state = cx.inspect(&failed.cap).await?;
     if state.generation != failure.generation {
         return Ok(());
     }
     let event_key = format!("supervisor_event:{}", failure.event);
-    if !cx.sql("SELECT value FROM meta WHERE key=?", [event_key.as_str()]).await?.rows.is_empty() {
+    if !cx.trusted_sql("SELECT value FROM meta WHERE key=?", [event_key.as_str()]).await?.rows.is_empty() {
         return Ok(());
     }
     set_meta(cx, &event_key, "handled").await?;
@@ -263,7 +262,7 @@ async fn failure(cx: &mut Ctx<'_>, failure: Failure) -> Result<(), Trap> {
         return Ok(());
     }
     if restart_verb(&state, failed.spec.restart, &failure.reason) == RestartVerb::Resume {
-        return cx.restart(&failed.id, RestartVerb::Resume).await;
+        return cx.restart(&failed.cap, RestartVerb::Resume).await;
     }
     let now = cx.now().await?;
     let max_restarts: i64 = meta(cx, "max_restarts").await?.parse().map_err(|e| error(cx, e))?;
@@ -273,12 +272,12 @@ async fn failure(cx: &mut Ctx<'_>, failure: Failure) -> Result<(), Trap> {
     }
     let window = max_seconds.checked_mul(1000).ok_or_else(|| error(cx, "restart window overflow"))?;
     let since = now.checked_sub(window).ok_or_else(|| error(cx, "restart window underflow"))?;
-    let rows = cx.sql("SELECT COUNT(*) FROM restarts WHERE at>=? AND at<=?", turso::params![since, now]).await?;
+    let rows = cx.trusted_sql("SELECT COUNT(*) FROM restarts WHERE at>=? AND at<=?", turso::params![since, now]).await?;
     let row = rows.rows.first().ok_or_else(|| error(cx, "missing restart count"))?;
     if integer(cx, row, 0)? >= max_restarts {
         return cx.exit("shutdown").await;
     }
-    cx.sql("INSERT INTO restarts(child,at) VALUES (?,?)", turso::params![failure.child.as_str(), now]).await?;
+    cx.trusted_sql("INSERT INTO restarts(child,at) VALUES (?,?)", turso::params![failure.child.as_str(), now]).await?;
     let strategy = match meta(cx, "strategy").await?.as_str() {
         "one_for_one" => Strategy::OneForOne,
         "one_for_all" => Strategy::OneForAll,
@@ -297,20 +296,20 @@ async fn failure(cx: &mut Ctx<'_>, failure: Failure) -> Result<(), Trap> {
             continue;
         }
         if matches!(child.spec.restart, RestartPolicy::Temporary) {
-            cx.shutdown(&child.id).await?;
+            cx.shutdown(&child.cap).await?;
             continue;
         }
         let verb = if child.id == failed.id { restart_verb(&state, child.spec.restart, &failure.reason) } else { RestartVerb::Reset };
         // Resume/Skip preserve live relationships; only Reset stops the child.
         if verb == RestartVerb::Reset {
-            cx.shutdown(&child.id).await?;
+            cx.shutdown(&child.cap).await?;
         }
-        restarts.push(Restart { id: child.id.clone(), verb });
+        restarts.push(Restart { cap: child.cap.clone(), verb });
     }
     for restart in restarts {
-        cx.restart(&restart.id, restart.verb).await?;
+        cx.restart(&restart.cap, restart.verb).await?;
         if restart.verb == RestartVerb::Reset {
-            cx.monitor(&restart.id).await?;
+            cx.monitor(&restart.cap).await?;
         }
     }
     Ok(())
@@ -340,8 +339,8 @@ impl Behavior for Supervisor {
             Command::TerminateChild { id } => manage_child(cx, &id, "terminate").await,
             Command::RestartChild { id } => manage_child(cx, &id, "restart").await,
             Command::DeleteChild { id } => manage_child(cx, &id, "delete").await,
-            Command::CountChildren => count_children(cx).await,
-            Command::WhichChildren => which_children(cx).await,
+            Command::CountChildren { reply_cap } => count_children(cx, reply_cap).await,
+            Command::WhichChildren { reply_cap } => which_children(cx, reply_cap).await,
             Command::Exit { from, reason, generation, event, initiator } => {
                 if reason == "shutdown"
                     && cx.sender().as_deref() == Some(from.as_str())

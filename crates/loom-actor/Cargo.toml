@@ -32,3 +32,7 @@ path = "tests/durability.rs"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 turso_core = { version = "0.7.2", features = ["io_uring"] }
+
+[[test]]
+name = "caps"
+path = "tests/caps.rs"
