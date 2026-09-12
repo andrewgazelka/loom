@@ -8,7 +8,7 @@ pub use scoped::{Scope, ScopedJoinHandle, scope};
 mod handlers;
 pub mod preview;
 pub use handlers::{Continuation, Effect, Reply, handle, handle_any};
-pub use loom_guest_macros::{actor, def};
+pub use loom_guest_macros::{actor, def, schema};
 pub use serde;
 use serde::{Serialize, de::DeserializeOwned};
 pub use serde_json;

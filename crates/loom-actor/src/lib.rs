@@ -97,7 +97,8 @@ pub struct Ctx<'a> {
 }
 
 impl Ctx<'_> {
-    pub(crate) fn runtime(&mut self, error: impl std::fmt::Display) -> Trap {
+    /// Mark an environmental failure for retry after the message rolls back.
+    pub fn runtime(&mut self, error: impl std::fmt::Display) -> Trap {
         let message = format!("actor {} seq {}: {error}", self.actor_id, self.seq);
         self.failure.get_or_insert_with(|| Trap { message: message.clone(), runtime: true, durability: false });
         Trap { message, runtime: true, durability: false }

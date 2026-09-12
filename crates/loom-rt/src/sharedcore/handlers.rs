@@ -287,19 +287,26 @@ pub(super) fn dispatch<'a>(
                     return Ok(Some(encode(&json!({"error": message}))?));
                 }
                 Ok(Some(Err(message))) => {
-                    let failure = format!("handler frame {}: {message}", frame.id);
+                    let failure = execution.original_failure().unwrap_or_else(|| {
+                        ExecutionFailure::new(
+                            GuestFailure::new(format!("handler frame {}: {message}", frame.id))
+                                .into(),
+                        )
+                    });
                     *execution.handler_failure.lock().unwrap() = Some(failure.clone());
                     execution.cancel();
-                    bail!("{failure}");
+                    return Err(failure.into_error());
                 }
                 Ok(None) => {
                     caller.data_mut().permit = Some(execution.permit().await?);
                 }
                 Err(error) => {
-                    let failure = format!("handler frame {}: {error:#}", frame.id);
+                    let failure = execution.original_failure().unwrap_or_else(|| {
+                        ExecutionFailure::new(error.context(format!("handler frame {}", frame.id)))
+                    });
                     *execution.handler_failure.lock().unwrap() = Some(failure.clone());
                     execution.cancel();
-                    bail!("{failure}");
+                    return Err(failure.into_error());
                 }
             }
         }

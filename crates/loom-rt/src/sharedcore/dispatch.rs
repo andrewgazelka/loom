@@ -70,9 +70,11 @@ impl Runtime {
                 "artifact {artifact} for definition {hash} is not an admitted core wasm module; rebuild the definition"
             );
             let engine = self.inner.core_engine.clone();
-            let module =
-                tokio::task::spawn_blocking(move || Module::new(&engine, &bytes).map_err(error))
-                    .await??;
+            let cache = self.inner.compilation_cache.clone();
+            let module = tokio::task::spawn_blocking(move || {
+                cache.compile(|| Module::new(&engine, &bytes).map_err(error))
+            })
+            .await??;
             self.inner
                 .core_modules
                 .lock()
@@ -152,28 +154,9 @@ impl Runtime {
             samples: std::mem::take(&mut *execution.handler_round_trip_us.lock().unwrap()),
         };
         let result = result.map_err(|error| {
-            let failure = execution
-                .handler_failure
-                .lock()
-                .unwrap()
-                .clone()
-                .or_else(|| {
-                    execution.jobs.lock().unwrap().values().find_map(|job| {
-                        // Detached failures belong to their join handles, not to an
-                        // unrelated failure of the definition's entry.
-                        if job.detached {
-                            return None;
-                        }
-                        job.result
-                            .lock()
-                            .unwrap()
-                            .as_ref()
-                            .and_then(|result| result.as_ref().err())
-                            .cloned()
-                    })
-                });
+            let failure = execution.original_failure();
             match failure {
-                Some(failure) => error.context(failure),
+                Some(failure) => failure.into_error(),
                 None => error.context(format!("shared execution {scope}")),
             }
         });

@@ -181,6 +181,22 @@ impl Execution {
         let is_run = matches!(invocation, Invocation::Run { .. });
         let packed = match invocation {
             Invocation::Validate => return EffectOutput::value(&Value::Null),
+            Invocation::Schema => {
+                if running
+                    .instance
+                    .get_export(&mut running.store, "loom_schema")
+                    .is_none()
+                {
+                    return EffectOutput::value(&json!(""));
+                }
+                running
+                    .instance
+                    .get_typed_func::<(), i64>(&mut running.store, "loom_schema")
+                    .map_err(error)?
+                    .call_async(&mut running.store, ())
+                    .await
+                    .map_err(|cause| running.error_context(cause))? as u64
+            }
             Invocation::Call { args } => {
                 let buffer = running.input_encoded(&args).await?;
                 running
@@ -211,17 +227,19 @@ impl Execution {
                     .map_err(|cause| running.error_context(cause))? as u64
             }
         };
-        let bytes = copy_out(&self.memory, packed as u32, (packed >> 32) as u32)?;
-        let envelope: Value = loom_proto::decode(&bytes).map_err(anyhow::Error::msg)?;
-        anyhow::ensure!(
-            envelope.as_object().is_some_and(|object| object.len() == 1),
-            "invalid core result envelope"
-        );
+        let bytes = copy_out(&self.memory, packed as u32, (packed >> 32) as u32)
+            .map_err(|error| GuestFailure::new(format!("{error:#}")))?;
+        let envelope: Value = loom_proto::decode(&bytes).map_err(GuestFailure::new)?;
+        if !envelope.as_object().is_some_and(|object| object.len() == 1) {
+            return Err(GuestFailure::new("invalid core result envelope").into());
+        }
         if let Some(error) = envelope.get("error").and_then(Value::as_str) {
-            bail!("{error}");
+            return Err(GuestFailure::new(error).into());
         }
         self.check()?;
-        let output = envelope.get("ok").context("invalid core result envelope")?;
+        let output = envelope
+            .get("ok")
+            .ok_or_else(|| GuestFailure::new("invalid core result envelope"))?;
         anyhow::ensure!(
             self.jobs
                 .lock()
