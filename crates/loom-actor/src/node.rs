@@ -1,3 +1,4 @@
+mod turn;
 use crate::{Actor, ActorId, Config, EffectHandler, Registry, Spawn, Status, Verdict, actor, ids};
 use anyhow::{Context, Result, anyhow, ensure};
 use std::{
@@ -15,37 +16,52 @@ pub struct Node {
     pub(crate) effects: Arc<dyn EffectHandler>,
     pub(crate) config: Config,
     root_id: ActorId,
+    pub(crate) remote: Option<Arc<crate::remote_store::RemoteStore>>,
+    pub(crate) shipping: Arc<crate::durability::ShippingState>,
+    pub(crate) background: Option<Arc<crate::durability_worker::Background>>,
     memory_ids: Arc<std::sync::Mutex<Vec<ActorId>>>,
     pub(crate) wake: Arc<tokio::sync::Notify>,
     pub(crate) shutdown_deadlines: Arc<Mutex<HashMap<String, crate::messaging::ShutdownTimer>>>,
-    connections: Arc<Mutex<HashMap<ActorId, Arc<Mutex<Connection>>>>>,
+    pub(crate) connections: Arc<Mutex<HashMap<ActorId, Arc<Mutex<Connection>>>>>,
     gates: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
-    run_gate: Arc<Mutex<()>>,
+    pub(crate) admission: Arc<tokio::sync::RwLock<()>>,
+    pub(crate) run_gate: Arc<Mutex<()>>,
     pub(crate) tasks: Arc<Mutex<HashMap<ActorId, Arc<tokio::sync::Notify>>>>,
     pub(crate) names: Arc<Mutex<Option<Connection>>>,
 }
 
 impl Node {
     pub async fn open(&self, id: &str) -> Result<Actor> {
+        let _admission = self.admit().await?;
+        self.open_actor(id).await
+    }
+    pub(crate) async fn open_actor(&self, id: &str) -> Result<Actor> {
+        ensure!(!self.shipping.closed.load(std::sync::atomic::Ordering::Acquire), "actor {id}: node is closed");
         self.open_inner(id).await.with_context(|| format!("actor {} seq {}: open", id, -1))
     }
     pub async fn send(&self, id: &str, key: &str, msg: &[u8]) -> Result<()> {
+        let _admission = self.admit().await?;
         self.send_inner(id, key, msg).await.with_context(|| format!("actor {} seq {}: send", id, -1))
     }
     pub async fn pump(&self, id: &str) -> Result<bool> {
+        let _admission = self.admit().await?;
         self.pump_inner(id).await.with_context(|| format!("actor {} seq {}: pump", id, -1))
     }
     pub async fn run_until_idle(&self) -> Result<usize> {
+        let _admission = self.admit().await?;
         let _run = self.run_gate.lock().await;
         self.run_until_idle_inner().await.with_context(|| format!("actor {} seq {}: run_until_idle", "<node>", -1))
     }
     pub async fn promote(&self, id: &str, hash: &str, author: &str, rationale: &str) -> Result<()> {
+        let _admission = self.admit().await?;
         self.promote_inner(id, hash, author, rationale).await.with_context(|| format!("actor {} seq {}: promote", id, -1))
     }
     pub async fn skip(&self, id: &str) -> Result<()> {
+        let _admission = self.admit().await?;
         self.skip_inner(id).await.with_context(|| format!("actor {} seq {}: skip", id, -1))
     }
     pub async fn fork(&self, id: &str, at: i64) -> Result<ActorId> {
+        let _admission = self.admit().await?;
         self.fork_inner(id, at).await.with_context(|| format!("actor {} seq {}: fork", id, at))
     }
     pub async fn validate(&self, id: &str, candidate: &str, k: i64) -> Result<Verdict> {
@@ -62,7 +78,17 @@ impl Node {
             ensure!(hash == behavior.hash(), "actor <node> seq -1: registry key differs from behavior hash {hash}");
         }
         std::fs::create_dir_all(dir.as_ref()).context("actor <node> seq -1: create directory")?;
+        ensure!(!config.ship_interval.is_zero(), "ship_interval must be positive");
+        ensure!(config.store.is_none() || config.io != crate::Io::Memory, "object-store shipping requires file I/O");
+        let remote = config
+            .store
+            .as_ref()
+            .map(|store| crate::remote_store::RemoteStore::new(store, config.lease_ttl, config.lease_clock.clone()).map(Arc::new))
+            .transpose()?;
         let mut node = Self {
+            remote,
+            shipping: Arc::new(crate::durability::ShippingState::default()),
+            background: None,
             root_id: String::new(),
             memory_ids: Arc::new(std::sync::Mutex::new(Vec::new())),
             wake: Arc::new(tokio::sync::Notify::new()),
@@ -74,11 +100,13 @@ impl Node {
             connections: Arc::new(Mutex::new(HashMap::new())),
             gates: Arc::new(Mutex::new(HashMap::new())),
             run_gate: Arc::new(Mutex::new(())),
+            admission: Arc::new(tokio::sync::RwLock::new(())),
             names: Arc::new(Mutex::new(None)),
             tasks: Arc::new(Mutex::new(HashMap::new())),
         };
+        node.start_shipper();
         for id in node.actor_ids()? {
-            let actor = node.open(&id).await?;
+            let actor = node.open_actor(&id).await?;
             let conn = actor.conn.lock().await;
             let marker = actor::query(&conn, "SELECT value FROM meta WHERE key='node_root'", ()).await?;
             if marker.rows.first().map(|row| row.get::<String>(0)).transpose()?.as_deref() == Some("true") {
@@ -88,7 +116,14 @@ impl Node {
         }
         if node.root_id.is_empty() {
             node.root_id = ids::root();
-            node.create(&node.root_id, "", crate::supervisor::HASH, br#"{"type":"configure","strategy":"one_for_one"}"#).await?;
+            node.create(
+                &node.root_id,
+                "",
+                crate::supervisor::HASH,
+                br#"{"type":"configure","strategy":"one_for_one"}"#,
+                crate::Durability::Local,
+            )
+            .await?;
         }
         node.sync_index(&node.root_id).await?;
         Ok(node)
@@ -113,6 +148,24 @@ impl Node {
         let _opening = self.guard(&format!("open:{id}")).await;
         let cached = self.connections.lock().await.get(id).cloned();
         if let Some(conn) = cached {
+            if let Err(error) = self.check_lease(id) {
+                self.archive_stale(id, &mut *conn.lock().await).await?;
+                return Err(error);
+            }
+            if let Some(store) = &self.remote {
+                let mut slot = conn.lock().await;
+                let published = self.shipping.get(id)?;
+                if actor::meta(&slot, "durability_seq").await?.parse::<i64>()? < published.head.seq {
+                    self.archive_stale(id, &mut slot).await?;
+                    drop(slot);
+                    drop(_opening);
+                    return Box::pin(self.open_inner(id)).await;
+                }
+                if published.head.snapshot_seq < 0 {
+                    self.initialize_durability(id, &slot).await?;
+                }
+                store.check(id)?;
+            }
             if self.path(id).with_extension("reset-publish").exists() {
                 let mut slot = conn.lock().await;
                 if self.path(id).with_extension("reset-publish").exists() {
@@ -122,34 +175,40 @@ impl Node {
                     *slot = actor::connect(&self.path(id), self.config.io).await?;
                 }
             }
-            return Ok(Actor { id: id.into(), conn });
+            return Ok(Actor { id: id.into(), conn, managed: self.remote.is_some() });
         }
         crate::reset::recover(&self.path(id))?;
+        self.restore_on_open(id).await?;
         ensure!(self.path(id).is_file(), "actor {id} seq -1: actor file does not exist");
         let conn = actor::connect(&self.path(id), self.config.io).await.with_context(|| format!("actor {id} seq -1: open"))?;
         ensure!(actor::meta(&conn, "id").await? == id, "actor {id} seq -1: file identity mismatch");
+        self.initialize_durability(id, &conn).await?;
         let conn = Arc::new(Mutex::new(conn));
         self.connections.lock().await.insert(id.into(), conn.clone());
-        Ok(Actor { id: id.into(), conn })
+        Ok(Actor { id: id.into(), conn, managed: self.remote.is_some() })
     }
 
-    pub(crate) async fn create(&self, id: &str, parent: &str, hash: &str, msg: &[u8]) -> Result<Actor> {
+    pub(crate) async fn create(&self, id: &str, parent: &str, hash: &str, msg: &[u8], durability: crate::Durability) -> Result<Actor> {
         let _creation = self.guard(&format!("create:{id}")).await;
+        if !self.connections.lock().await.contains_key(id) {
+            self.restore_on_open(id).await?;
+        }
         if !self.path(id).exists() && !self.connections.lock().await.contains_key(id) {
             let behavior = actor::behavior(&self.registry, hash)?;
-            let conn = actor::initialize(&self.path(id), id, parent, behavior.as_ref(), msg, self.config.io).await?;
+            let conn = actor::initialize(&self.path(id), id, parent, behavior.as_ref(), msg, self.config.io, durability).await?;
             self.connections.lock().await.insert(id.into(), Arc::new(Mutex::new(conn)));
             if self.config.io == crate::Io::Memory {
                 self.memory_ids.lock().map_err(|_| anyhow!("memory actor registry poisoned"))?.push(id.into());
             }
         }
-        let actor = self.open(id).await?;
+        let actor = self.open_actor(id).await?;
         let conn = actor.conn.lock().await;
         ensure!(actor::meta(&conn, "parent").await? == parent, "actor {id} seq 0: parent mismatch");
         // A retry after publication but before snapshot registration finishes creation.
         if self.config.io != crate::Io::Memory && actor::cursor(&conn).await? == 0 {
             actor::snapshot(&conn, &self.snapshot_path(id, actor::meta(&conn, "generation").await?.parse()?, 0), 0).await?;
         }
+        self.initialize_durability(id, &conn).await?;
         drop(conn);
         Ok(actor)
     }
@@ -169,7 +228,13 @@ impl Node {
                 continue;
             }
             let name = path.file_stem().and_then(|n| n.to_str()).context("actor <node> seq -1: invalid filename")?;
-            if name == "_node" || name.contains(".snap.") || name.contains(".reset.") {
+            if name == "_node"
+                || name.contains(".snap.")
+                || name.contains(".reset.")
+                // Stale files are preserved by design; never listed; removed only by an operator.
+                || name.contains(".stale.")
+                || name.contains(".remote-base")
+            {
                 continue;
             }
             ids::check(name)?;
@@ -187,13 +252,14 @@ impl Node {
     }
 
     pub async fn spawn(&self, parent: &str, spec: &crate::ChildSpec) -> Result<ActorId> {
+        let _admission = self.admit().await?;
         self.spawn_inner(parent, spec).await.with_context(|| format!("actor {parent} seq -1: spawn"))
     }
 
     async fn spawn_inner(&self, parent: &str, spec: &crate::ChildSpec) -> Result<ActorId> {
         let _creation = self.guard("host-spawn").await;
         actor::behavior(&self.registry, &spec.behavior_hash)?;
-        let root = self.open(parent).await?;
+        let root = self.open_actor(parent).await?;
         let mut conn = root.conn.lock().await;
         let tx = conn.transaction().await?;
         ensure!(actor::status(&tx).await? == Status::Running, "actor {} seq -1: root is not running", parent);
@@ -223,11 +289,12 @@ impl Node {
         .await?;
         if self.behavior(&actor::code(&tx).await?.hash)?.child_type() == crate::ChildType::Supervisor {
             crate::supervisor::record_child(&tx, &id, spec).await?;
+            crate::supervisor_store::record_host_spawn(&tx, &id, spec).await?;
         }
         let spawn = Spawn::Child { id: id.clone(), spec: spec.clone(), origin_seq: seq, origin_idx: idx };
         tx.execute("INSERT INTO outbox(seq,idx,target,msg) VALUES (?,?,'spawn',?)", turso::params![seq, idx, serde_json::to_vec(&spawn)?])
             .await?;
-        tx.commit().await?;
+        self.commit_control(parent, tx).await?;
         drop(conn);
         self.pump_unlocked(parent).await?;
         self.wake.notify_one();
@@ -235,107 +302,12 @@ impl Node {
     }
 
     async fn send_inner(&self, id: &str, key: &str, msg: &[u8]) -> Result<()> {
-        let actor = self.open(id).await?;
-        actor::inject(&*actor.conn.lock().await, key, "external", msg).await.with_context(|| format!("actor {id} seq -1: send"))?;
-        self.wake.notify_one();
-        Ok(())
-    }
-
-    pub(crate) async fn step(&self, id: &str, cancellation: &tokio::sync::Notify) -> Result<bool> {
-        let admission = self.guard(&format!("lifecycle:{id}")).await;
-        let actor = self.open(id).await?;
-        let mut conn = actor.conn.lock().await;
-        if actor::status(&conn).await? != Status::Running || actor::meta(&conn, "ready").await? != "true" {
-            return Ok(false);
-        }
-        drop(admission);
-        let generation: i64 = actor::meta(&conn, "generation").await?.parse()?;
-        let cursor = actor::cursor(&conn).await?;
-        if self.config.io != crate::Io::Memory
-            && cursor > 0
-            && cursor % self.config.snapshot_every == 0
-            && actor::query(&conn, "SELECT seq FROM inbox WHERE state='done' AND seq>? LIMIT 1", [cursor]).await?.rows.is_empty()
-        {
-            actor::snapshot(&conn, &self.snapshot_path(id, generation, cursor), cursor).await?;
-        }
-        let Some(message) = actor::next(&conn).await? else {
-            return Ok(false);
-        };
-        let code = actor::code(&conn).await?;
-        let behavior = actor::behavior(&self.registry, &code.hash)?;
-        for retry in 0..=self.config.max_retries {
-            match actor::attempt(
-                &mut conn,
-                id,
-                &message,
-                behavior.as_ref(),
-                code.revision,
-                &crate::effects::RuntimeEffects { node: self, external: self.effects.as_ref() },
-                Some(cancellation),
-            )
-            .await
-            {
-                Ok(false) => return Ok(false),
-                Ok(true) => {
-                    let cursor = actor::cursor(&conn).await?;
-                    if self.config.io != crate::Io::Memory
-                        && cursor > 0
-                        && cursor % self.config.snapshot_every == 0
-                        && actor::query(&conn, "SELECT seq FROM inbox WHERE state='done' AND seq>? LIMIT 1", [cursor])
-                            .await?
-                            .rows
-                            .is_empty()
-                    {
-                        actor::snapshot(&conn, &self.snapshot_path(id, generation, cursor), cursor).await?;
-                    }
-                    return Ok(true);
-                }
-                Err(error) if error.runtime && retry < self.config.max_retries => {
-                    tokio::time::sleep(self.config.retry_backoff.saturating_mul(u32::try_from(retry + 1)?)).await;
-                }
-                Err(error) => {
-                    actor::poison(
-                        &mut conn,
-                        id,
-                        &message,
-                        &error.message,
-                        behavior.as_ref(),
-                        &crate::effects::RuntimeEffects { node: self, external: self.effects.as_ref() },
-                    )
-                    .await?;
-                    return Ok(true);
-                }
-            }
-        }
-        Err(anyhow!("actor {id} seq {}: retry loop exhausted unexpectedly", message.seq))
-    }
-
-    async fn promote_inner(&self, id: &str, hash: &str, author: &str, rationale: &str) -> Result<()> {
-        let actor = self.open(id).await?;
-        let behavior = actor::behavior(&self.registry, hash).with_context(|| format!("actor {id} seq -1: promote"))?;
-        actor::promote(
-            &mut *actor.conn.lock().await,
-            behavior.as_ref(),
-            author,
-            rationale,
-            &crate::effects::RuntimeEffects { node: self, external: self.effects.as_ref() },
-        )
-        .await
-        .with_context(|| format!("actor {id} seq -1: promote"))?;
-        self.sync_index(id).await
-    }
-
-    async fn skip_inner(&self, id: &str) -> Result<()> {
-        let actor = self.open(id).await?;
+        let actor = self.open_actor(id).await?;
         let mut conn = actor.conn.lock().await;
         let tx = conn.transaction().await?;
-        ensure!(actor::status(&tx).await? == Status::Parked, "actor {id} seq -1: skip requires parked status");
-        let message = actor::next(&tx).await?.context(format!("actor {id} seq -1: no message to skip"))?;
-        crate::mailbox::complete(&tx, message.seq).await?;
-        actor::set_meta(&tx, &format!("skipped:{}", message.seq), "1").await?;
-        actor::set_meta(&tx, &format!("code_at:{}", message.seq), &actor::code(&tx).await?.revision.to_string()).await?;
-        actor::set_meta(&tx, "status", "running").await?;
-        tx.commit().await?;
+        actor::inject(&tx, key, "external", msg).await.with_context(|| format!("actor {id} seq -1: send"))?;
+        self.commit_control(id, tx).await?;
+        self.wake.notify_one();
         Ok(())
     }
 }

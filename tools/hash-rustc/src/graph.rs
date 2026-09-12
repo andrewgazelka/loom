@@ -25,6 +25,12 @@ struct Item {
     cycle: Option<Vec<String>>,
 }
 
+impl Document {
+    pub fn hash_for(&self, path: &str) -> Option<&str> {
+        self.items.get(path).map(|item| item.hash.as_str())
+    }
+}
+
 struct Definition {
     id: LocalDefId,
     path: String,
@@ -32,7 +38,7 @@ struct Definition {
     entry: bool,
 }
 
-fn supported(kind: DefKind) -> bool {
+pub(crate) fn supported(kind: DefKind) -> bool {
     matches!(
         kind,
         DefKind::Fn

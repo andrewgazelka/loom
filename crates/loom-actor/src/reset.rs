@@ -7,6 +7,7 @@ use turso::Connection;
 impl Node {
     pub(crate) async fn reset(&self, conn: &mut Connection, id: &str, key: &str) -> Result<()> {
         anyhow::ensure!(self.config.io != crate::Io::Memory, "actor {id} seq -1: reset requires persistent I/O");
+        self.check_lease(id)?;
         let generation = actor::meta(conn, "generation").await?.parse::<i64>()?.checked_add(1).context("generation overflow")?;
         let archive = self.dir.join(format!("{id}.reset.{generation}.db"));
         vacuum(conn, &archive).await?;
@@ -20,6 +21,8 @@ impl Node {
         actor::set_meta(&tx, "init", &actor::meta(conn, "init").await?).await?;
         actor::set_meta(&tx, "cursor", "0").await?;
         actor::set_meta(&tx, "commit_epoch", "0").await?;
+        actor::set_meta(&tx, "durability", &actor::meta(conn, "durability").await?).await?;
+        actor::set_meta(&tx, "durability_seq", &actor::meta(conn, "durability_seq").await?).await?;
         actor::set_meta(&tx, "boundary:0", "0").await?;
         actor::set_meta(&tx, "hook_counter", "0").await?;
         actor::set_meta(&tx, "memory_max", &actor::meta(conn, "memory_max").await?).await?;
@@ -62,7 +65,9 @@ impl Node {
         if !init.is_empty() {
             actor::inject(&tx, "init", &actor::meta(conn, "parent").await?, &init).await?;
         }
+        self.check_lease(id)?;
         tx.commit().await?;
+        self.reset_durability(id, &fresh).await?;
         actor::snapshot(&fresh, &self.snapshot_path(id, generation, 0), 0).await?;
         let ready = self.dir.join(format!("{id}.reset-publish"));
         vacuum(&fresh, &ready).await?;

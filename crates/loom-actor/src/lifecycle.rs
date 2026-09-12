@@ -4,6 +4,7 @@ use anyhow::{Context, Result, ensure};
 
 impl Node {
     pub async fn stop(&self, id: &str, reason: &str) -> Result<()> {
+        let _admission = self.admit().await?;
         self.stop_unlocked(id, reason, &format!("host:{}", ulid::Ulid::new()), "")
             .await
             .with_context(|| format!("actor {id} seq -1: stop"))?;
@@ -18,17 +19,16 @@ impl Node {
         {
             task.notify_one();
         }
-        let actor = self.open(id).await?;
+        let actor = self.open_actor(id).await?;
         let mut conn = actor.conn.lock().await;
         let behavior = actor::behavior(&self.registry, &actor::code(&conn).await?.hash)?;
         crate::hooks::stop(
             &mut conn,
             id,
-            reason,
-            key,
-            initiator,
+            crate::hooks::Stop { reason, key, initiator },
             behavior.as_ref(),
             &crate::effects::RuntimeEffects { node: self, external: self.effects.as_ref() },
+            self,
         )
         .await?;
         if actor::status(&conn).await? == Status::Stopped {
@@ -48,7 +48,7 @@ impl Node {
         if let Some(task) = self.tasks.lock().await.get(id) {
             task.notify_one();
         }
-        let target = self.open(id).await?;
+        let target = self.open_actor(id).await?;
         let mut conn = target.conn.lock().await;
         let exists = !actor::query(&conn, "SELECT ref FROM timers WHERE ref=? AND kind='shutdown'", [key]).await?.rows.is_empty();
         if !exists {
@@ -59,11 +59,10 @@ impl Node {
         crate::hooks::stop(
             &mut conn,
             id,
-            "kill",
-            &format!("{key}:kill"),
-            initiator,
+            crate::hooks::Stop { reason: "kill", key: &format!("{key}:kill"), initiator },
             behavior.as_ref(),
             &crate::effects::RuntimeEffects { node: self, external: self.effects.as_ref() },
+            self,
         )
         .await?;
         self.shutdown_deadlines.lock().await.retain(|_, timer| timer.target != id);
@@ -74,7 +73,7 @@ impl Node {
 
     /// Parent-owned pending controls are the restart-group barrier.
     pub(crate) async fn sync_shutdowns(&self, id: &str) -> Result<()> {
-        let target = self.open(id).await?;
+        let target = self.open_actor(id).await?;
         let parent = {
             let conn = target.conn.lock().await;
             if actor::status(&conn).await? != Status::Stopped {
@@ -83,25 +82,30 @@ impl Node {
             actor::meta(&conn, "parent").await?
         };
         if !parent.is_empty() {
-            self.open(&parent).await?.conn.lock().await.execute("DELETE FROM shutdowns WHERE child=?", [id]).await?;
+            let owner = self.open_actor(&parent).await?;
+            let mut conn = owner.conn.lock().await;
+            let tx = conn.transaction().await?;
+            tx.execute("DELETE FROM shutdowns WHERE child=?", [id]).await?;
+            self.commit_control(&parent, tx).await?;
         }
         Ok(())
     }
 
     pub(crate) async fn shutdown(&self, sender: &str, id: &str, key: &str) -> Result<()> {
-        let source = self.open(sender).await?;
+        let source = self.open_actor(sender).await?;
         let rows = actor::query(&*source.conn.lock().await, "SELECT shutdown FROM children WHERE id=?", [id]).await?;
         let row = rows.rows.first().context("shutdown requires owned child spec")?;
         let policy: Shutdown = serde_json::from_str(&row.get::<String>(0)?)?;
-        source
-            .conn
-            .lock()
-            .await
-            .execute(
+        {
+            let mut conn = source.conn.lock().await;
+            let tx = conn.transaction().await?;
+            tx.execute(
                 "INSERT INTO shutdowns(child,request) VALUES (?,?) ON CONFLICT(child) DO UPDATE SET request=excluded.request",
                 [id, key],
             )
             .await?;
+            self.commit_control(sender, tx).await?;
+        }
         if matches!(policy, Shutdown::Brutal) {
             return self.stop_unlocked(id, "kill", key, sender).await;
         }
@@ -112,7 +116,7 @@ impl Node {
                 anyhow::bail!("actor {id} seq -1: brutal shutdown reached graceful dispatch")
             }
         };
-        let target = self.open(id).await?;
+        let target = self.open_actor(id).await?;
         let mut conn = if let Some(deadline) = deadline {
             let remaining = u64::try_from(deadline.saturating_sub(crate::effects::now()?).max(0))?;
             match tokio::time::timeout(std::time::Duration::from_millis(remaining), target.conn.lock()).await {
@@ -160,7 +164,7 @@ impl Node {
             .await?;
         }
         actor::set_meta(&tx, &format!("applied:{key}"), "1").await?;
-        tx.commit().await?;
+        self.commit_control(id, tx).await?;
         if let Some(deadline) = deadline {
             self.shutdown_deadlines.lock().await.insert(
                 key.to_owned(),
@@ -178,20 +182,25 @@ impl Node {
     }
 
     pub async fn restart(&self, id: &str, verb: RestartVerb) -> Result<()> {
-        self.pump(id).await?;
+        let _admission = self.admit().await?;
+        self.pump_unlocked(id).await?;
         let restarted = self
             .restart_unlocked(id, verb, &format!("host:{}", ulid::Ulid::new()))
             .await
             .with_context(|| format!("actor {id} seq -1: restart"))?;
         ensure!(restarted, "actor {id} seq -1: graceful shutdown or outbox delivery is still pending");
-        actor::set_meta(&*self.open(id).await?.conn.lock().await, "ready", "true").await?;
+        let owner = self.open_actor(id).await?;
+        let mut conn = owner.conn.lock().await;
+        let tx = conn.transaction().await?;
+        actor::set_meta(&tx, "ready", "true").await?;
+        self.commit_control(id, tx).await?;
         self.wake.notify_one();
         Ok(())
     }
 
     pub(crate) async fn restart_unlocked(&self, id: &str, verb: RestartVerb, key: &str) -> Result<bool> {
         let _lifecycle = self.guard(&format!("lifecycle:{id}")).await;
-        let actor = self.open(id).await?;
+        let actor = self.open_actor(id).await?;
         {
             let conn = actor.conn.lock().await;
             if applied(&conn, key).await? {
@@ -237,7 +246,7 @@ impl Node {
         actor::set_meta(&tx, "ready", "false").await?;
         actor::set_meta(&tx, "reason", "").await?;
         actor::set_meta(&tx, &format!("applied:{key}"), "1").await?;
-        tx.commit().await?;
+        self.commit_control(id, tx).await?;
         self.shutdown_deadlines.lock().await.retain(|_, timer| timer.target != id);
         Ok(true)
     }

@@ -27,6 +27,7 @@ pub struct Encoder<'tcx> {
     bindings: Vec<hir::HirId>,
     parameters: HashMap<LocalDefId, usize>,
     targets: Vec<hir::HirId>,
+    auditing: bool,
 }
 
 impl<'tcx> Encoder<'tcx> {
@@ -39,6 +40,18 @@ impl<'tcx> Encoder<'tcx> {
             bindings: Vec::new(),
             parameters: HashMap::new(),
             targets: Vec::new(),
+            auditing: false,
+        }
+    }
+
+    pub fn audit(mut self) -> Result<Vec<Part>, String> {
+        self.auditing = true;
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.encode())) {
+            Ok(parts) => Ok(parts),
+            Err(payload) => match payload.downcast::<CoverageRefusal>() {
+                Ok(refusal) => Err(refusal.reason),
+                Err(payload) => std::panic::resume_unwind(payload),
+            },
         }
     }
 
@@ -67,6 +80,13 @@ impl<'tcx> Encoder<'tcx> {
     }
 
     fn unsupported(&self, thing: &str) -> ! {
+        if self.auditing {
+            // A typed, local unwind exits the HIR visitor without emitting a
+            // fatal diagnostic or swallowing unrelated compiler panics.
+            std::panic::resume_unwind(Box::new(CoverageRefusal {
+                reason: thing.to_owned(),
+            }));
+        }
         self.tcx.dcx().fatal(format!(
             "hash-rustc: unsupported {thing} in {}",
             self.tcx.def_path_str(self.owner)
@@ -157,4 +177,8 @@ impl<'tcx> Encoder<'tcx> {
             .unwrap_or_else(|| self.unsupported("missing loop target"));
         self.scalar(position);
     }
+}
+
+struct CoverageRefusal {
+    reason: String,
 }
