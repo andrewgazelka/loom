@@ -115,10 +115,28 @@ impl<'tcx> Visitor<'tcx> for Encoder<'tcx> {
                 }
             }
             hir::QPath::TypeRelative(ty, segment) => {
-                let results = self
+                let resolution = if let Some(results) = self
                     .typeck
-                    .unwrap_or_else(|| self.unsupported("type-relative path outside body"));
-                self.resolution(results.qpath_res(path, id));
+                    .filter(|results| results.type_dependent_def_id(id).is_some())
+                {
+                    results.qpath_res(path, id)
+                } else {
+                    let hir::Node::Ty(node) = self.tcx.hir_node(id) else {
+                        self.unsupported("type-relative non-type path outside body");
+                    };
+                    let lowered = rustc_hir_analysis::lower_ty(self.tcx, node);
+                    let rustc_middle::ty::Alias(_, projection) = lowered.kind() else {
+                        self.unsupported("type-relative path without a projection");
+                    };
+                    let definition = match projection.kind {
+                        rustc_middle::ty::AliasTyKind::Projection { def_id }
+                        | rustc_middle::ty::AliasTyKind::Inherent { def_id }
+                        | rustc_middle::ty::AliasTyKind::Opaque { def_id }
+                        | rustc_middle::ty::AliasTyKind::Free { def_id } => def_id,
+                    };
+                    hir::def::Res::Def(self.tcx.def_kind(definition), definition)
+                };
+                self.resolution(resolution);
                 self.visit_ty_unambig(ty);
                 if let Some(args) = segment.args {
                     self.visit_generic_args(args);

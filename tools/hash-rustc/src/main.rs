@@ -7,6 +7,7 @@ extern crate rustc_data_structures;
 extern crate rustc_driver;
 extern crate rustc_errors;
 extern crate rustc_hir;
+extern crate rustc_hir_analysis;
 extern crate rustc_interface;
 extern crate rustc_metadata;
 extern crate rustc_middle;
@@ -19,9 +20,11 @@ mod cache_backend;
 mod cache_flags;
 mod cache_metrics;
 mod coverage;
+mod effects;
 mod encode;
 mod entries;
 mod graph;
+mod mono;
 mod object_cache;
 mod object_store;
 mod preimages;
@@ -43,6 +46,7 @@ impl Callbacks for HashCallbacks {
         // An installed rustc finds its sysroot relative to its executable. This
         // driver lives elsewhere; explicit --sysroot always takes precedence.
         config.opts.sysroot.default = PathBuf::from(env!("HASH_RUSTC_SYSROOT"));
+        config.opts.unstable_opts.always_encode_mir = true;
         if std::env::var_os("LOOM_OBJECT_CACHE").is_some() {
             config.make_codegen_backend =
                 Some(Box::new(|_| Box::new(cache_backend::CachingBackend::new())));
@@ -54,7 +58,10 @@ impl Callbacks for HashCallbacks {
             coverage::write(tcx, &PathBuf::from(path));
         }
         if self.destination.is_some() {
-            self.document = Some(graph::collect(tcx));
+            let mut document = graph::collect(tcx);
+            document.effects = effects::collect(tcx);
+            document.schema = effects::schema(tcx);
+            self.document = Some(document);
         }
         Compilation::Continue
     }

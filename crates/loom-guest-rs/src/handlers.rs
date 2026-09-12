@@ -124,6 +124,16 @@ where
     install(handler, None, body)
 }
 
+/// Install a handler whose pinned identity supplies compiler effect metadata.
+/// The checker resolves the hash to `handler` before compiling the guest.
+pub fn handle_pinned<H, F, R>(_hash: &str, handler: H, body: F) -> Result<R, EffectError>
+where
+    H: FnMut(Effect, Continuation) -> Reply + Send,
+    F: FnOnce() -> R,
+{
+    handle_any(handler, body)
+}
+
 /// Install a handler selecting a statically visible set of effect names.
 /// An empty set selects no effects. This is also the effect-row checker's
 /// effect selection API; `handle_any` selects every effect dynamically.

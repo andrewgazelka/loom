@@ -170,57 +170,8 @@ mod unsafe_tests {
                 "accepted {source}"
             );
         }
-        let safe = syn::parse_file(
-            "#[loom::def] fn main() { let values = vec![1, 2]; let _ = values[0]; }",
-        )
-        .unwrap();
+        let safe = syn::parse_file("pub fn main() { let values = vec![1, 2]; let _ = values[0]; }")
+            .unwrap();
         assert!(unsafe_source_diagnostics(&safe).is_empty());
-    }
-}
-
-pub(crate) fn unsupported_mode_diagnostics(file: &syn::File) -> Vec<loom_proto::Diagnostic> {
-    struct Attributes {
-        threaded: bool,
-    }
-    impl<'ast> Visit<'ast> for Attributes {
-        fn visit_attribute(&mut self, attribute: &'ast syn::Attribute) {
-            if attribute
-                .path()
-                .segments
-                .last()
-                .is_some_and(|part| part.ident == "def")
-            {
-                let _ = attribute.parse_nested_meta(|meta| {
-                    self.threaded |= meta.path.is_ident("threads");
-                    Ok(())
-                });
-            }
-        }
-    }
-    let mut attributes = Attributes { threaded: false };
-    attributes.visit_file(file);
-    if attributes.threaded {
-        vec![crate::diagnostic(
-            loom_proto::Lang::Rust,
-            "LOOM_THREADS_UNSUPPORTED",
-            "#[loom::def(threads)] is unsupported; use the ordinary #[loom::def] entrypoint",
-        )]
-    } else {
-        Vec::new()
-    }
-}
-
-#[cfg(test)]
-mod unsupported_mode_tests {
-    use super::*;
-    #[test]
-    fn threaded_abi_is_rejected_and_isolated_definition_is_allowed() {
-        let threaded = syn::parse_file("#[loom::def(threads)] fn main() {} ").unwrap();
-        assert_eq!(
-            unsupported_mode_diagnostics(&threaded)[0].code,
-            "LOOM_THREADS_UNSUPPORTED"
-        );
-        let isolated = syn::parse_file("#[loom::def] fn main() {} ").unwrap();
-        assert!(unsupported_mode_diagnostics(&isolated).is_empty());
     }
 }

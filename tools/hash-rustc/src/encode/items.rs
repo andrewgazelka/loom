@@ -4,11 +4,22 @@ use rustc_hir::def_id::LocalDefId;
 use rustc_hir::intravisit::Visitor;
 use rustc_hir::intravisit::VisitorExt;
 
-use super::Encoder;
+use super::{Encoder, Part};
 
 impl<'tcx> Encoder<'tcx> {
     pub(super) fn item(&mut self, id: LocalDefId) {
         let parent = self.tcx.local_parent(id);
+        if self.tcx.def_kind(id) == DefKind::AssocTy {
+            self.text("associated-type-slot");
+            let slot = self
+                .tcx
+                .associated_item_def_ids(parent)
+                .iter()
+                .filter(|member| self.tcx.def_kind(**member) == DefKind::AssocTy)
+                .position(|member| *member == id.to_def_id())
+                .expect("associated type belongs to its container");
+            self.scalar(slot);
+        }
         if matches!(self.tcx.def_kind(parent), DefKind::Impl { .. }) {
             let hir::Node::Item(parent) = self.tcx.hir_node_by_def_id(parent) else {
                 unreachable!()
@@ -97,6 +108,53 @@ impl<'tcx> Encoder<'tcx> {
         self.end();
     }
 
+    fn impl_dependencies(&mut self) {
+        self.text("adt-impls");
+        self.parts.push(Part::Unordered(
+            std::mem::take(&mut self.implementations)
+                .into_iter()
+                .map(|id| vec![Part::Reference(id)])
+                .collect(),
+        ));
+    }
+
+    fn implementation(&mut self, implementation: &'tcx hir::Impl<'tcx>) {
+        self.text("impl");
+        self.scalar(implementation.constness);
+        self.visit_generics(implementation.generics);
+        self.visit_ty_unambig(implementation.self_ty);
+        self.scalar(implementation.of_trait.is_some());
+        if let Some(header) = implementation.of_trait {
+            self.scalar(header.safety);
+            self.scalar(header.polarity);
+            self.scalar(header.defaultness);
+            self.visit_trait_ref(&header.trait_ref);
+        }
+        let members = implementation
+            .items
+            .iter()
+            .map(|member| {
+                let id = member.owner_id.def_id.to_def_id();
+                let mut parts = Vec::new();
+                if let Some(declaration) = self.tcx.associated_item(id).trait_item_def_id() {
+                    let slot = self
+                        .tcx
+                        .associated_item_def_ids(self.tcx.parent(declaration))
+                        .iter()
+                        .position(|candidate| *candidate == declaration)
+                        .expect("trait impl member has a declaration");
+                    parts.push(Part::Bytes(b"trait-member-slot".to_vec()));
+                    parts.push(Part::Bytes((slot as u64).to_le_bytes().to_vec()));
+                }
+                // Implementation membership references the actual body, not the
+                // trait declaration used to identify generic dispatch in callers.
+                parts.push(Part::Reference(id));
+                parts
+            })
+            .collect();
+        self.parts.push(Part::Unordered(members));
+    }
+
     fn function(&mut self, sig: hir::FnSig<'tcx>, body: hir::BodyId) {
         self.text("function");
         self.header(sig.header);
@@ -142,8 +200,9 @@ impl<'tcx> Encoder<'tcx> {
                 self.visit_generics(generics);
                 self.visit_ty_unambig(ty);
             }
-            Struct(_, generics, data) | Union(_, generics, data) => {
+            Struct(name, generics, data) | Union(name, generics, data) => {
                 self.tag(&item.kind);
+                self.text(name.name.as_str());
                 self.visit_generics(generics);
                 // The data is copied out of the item; visit through its borrowed original below.
                 let original = match &item.kind {
@@ -152,12 +211,16 @@ impl<'tcx> Encoder<'tcx> {
                 };
                 self.scalar(data.fields().len());
                 self.visit_variant_data(original);
+                self.impl_dependencies();
             }
-            Enum(_, generics, ref definition) => {
+            Enum(name, generics, ref definition) => {
                 self.text("enum");
+                self.text(name.name.as_str());
                 self.visit_generics(generics);
                 self.visit_enum_def(definition);
+                self.impl_dependencies();
             }
+            Impl(ref implementation) => self.implementation(implementation),
             Trait {
                 constness,
                 is_auto,

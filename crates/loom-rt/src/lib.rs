@@ -77,14 +77,12 @@ impl EffectContext {
             trace: self.trace.clone(),
         }
     }
-    fn with_declared(mut self, declared: Option<&[String]>) -> Self {
-        if let Some(declared) = declared {
-            let declared = declared.iter().cloned().collect::<BTreeSet<_>>();
-            self.allowed = Some(match self.allowed.take() {
-                Some(allowed) => allowed.intersection(&declared).cloned().collect(),
-                None => declared,
-            });
-        }
+    fn with_inferred(mut self, labels: &[String]) -> Self {
+        let inferred = labels.iter().cloned().collect::<BTreeSet<_>>();
+        self.allowed = Some(match self.allowed.take() {
+            Some(allowed) => allowed.intersection(&inferred).cloned().collect(),
+            None => inferred,
+        });
         self
     }
     fn permits(&self, op: &str) -> bool {

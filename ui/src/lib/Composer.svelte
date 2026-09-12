@@ -11,7 +11,7 @@
   function changeMode() {
     if (mode === "command") source = '{"command":"defs","args":{}}';
     else if (mode === "define")
-      source = "#[loom::def]\nfn main(value: i64) -> i64 {\n    value * 2\n}";
+      source = "pub fn main(value: i64) -> i64 {\n    value * 2\n}";
     else source = "";
   }
 </script>

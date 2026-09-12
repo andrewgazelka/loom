@@ -364,3 +364,68 @@ fn callee_body_change_invalidates_caller_but_preserves_sibling() {
         "assert_eq!(fixture::entry(std::hint::black_box(42)), 42 ^ 19); assert_eq!(fixture::independent::sibling(std::hint::black_box(42)), 42 ^ 31);",
     );
 }
+
+#[test]
+fn external_aggregate_objects_are_reused_and_execute() {
+    let root = tempfile::tempdir().unwrap();
+    let cache = root.path().join("cache");
+    let source = "pub fn entry(value: u64) -> u64 { let mut values = Vec::new(); for i in 0..value { values.push(i); } values.iter().sum::<u64>() + 7 }";
+    let flags = ["-Ccodegen-units=16", "-Copt-level=0"];
+    stats(&compile(&root.path().join("first"), &cache, source, &flags));
+    let directory = root.path().join("changed");
+    let changed = stats(&compile(
+        &directory,
+        &cache,
+        &source.replace("+ 7", "+ 9"),
+        &flags,
+    ));
+    assert!(
+        changed.hits > 0,
+        "external aggregate CGUs must reuse: {changed:?}"
+    );
+    run(
+        &directory,
+        "assert_eq!(fixture::entry(std::hint::black_box(10)), 54);",
+    );
+}
+
+#[test]
+fn external_generic_with_local_drop_impl_bypasses() {
+    let root = tempfile::tempdir().unwrap();
+    let cache = root.path().join("cache");
+    let source = "static VALUE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0); struct Record; impl Drop for Record { fn drop(&mut self) { VALUE.store(7, std::sync::atomic::Ordering::SeqCst); } } pub fn entry() -> u64 { drop(Box::new(Record)); VALUE.load(std::sync::atomic::Ordering::SeqCst) }";
+    let flags = ["-Ccodegen-units=16", "-Copt-level=0"];
+    stats(&compile(&root.path().join("first"), &cache, source, &flags));
+    let directory = root.path().join("changed");
+    stats(&compile(
+        &directory,
+        &cache,
+        &source.replace("store(7", "store(9"),
+        &flags,
+    ));
+    run(&directory, "assert_eq!(fixture::entry(), 9);");
+}
+
+#[test]
+fn external_aggregate_relocations_survive_crate_rename() {
+    let root = tempfile::tempdir().unwrap();
+    let cache = root.path().join("cache");
+    let source = "pub fn entry(value: u64) -> u64 { let mut values = Vec::new(); for i in 0..value { values.push(i); } values.iter().sum::<u64>() + 7 }";
+    let flags = ["-Ccodegen-units=16", "-Copt-level=0"];
+    stats(&compile_named(
+        &root.path().join("a"),
+        &cache,
+        source,
+        &flags,
+        "crate_a",
+    ));
+    let directory = root.path().join("b");
+    stats(&compile_named(
+        &directory, &cache, source, &flags, "crate_b",
+    ));
+    run_named(
+        &directory,
+        "assert_eq!(fixture::entry(std::hint::black_box(10)), 52);",
+        "crate_b",
+    );
+}

@@ -121,6 +121,29 @@ async fn environmental_effect_error_retries_even_when_guest_ignores_it() {
 }
 
 #[tokio::test]
+async fn registration_reads_root_schema_constant() {
+    let fixtures = fixtures().await;
+    let mut registry = Registry::new();
+    let behavior =
+        loom_behavior::register(&mut registry, fixtures.store.clone(), &fixtures.handler)
+            .await
+            .unwrap();
+    assert_eq!(
+        behavior.schema(),
+        "CREATE TABLE entries(body BLOB NOT NULL)"
+    );
+    let promoted =
+        loom_behavior::register(&mut registry, fixtures.store.clone(), &fixtures.promoted)
+            .await
+            .unwrap();
+    assert_eq!(
+        promoted.schema(),
+        "ALTER TABLE entries ADD COLUMN revision TEXT"
+    );
+    fixtures.assert_no_legacy_execution();
+}
+
+#[tokio::test]
 async fn definition_without_schema_exports_empty_schema() {
     let fixtures = fixtures().await;
     let registry = loom_behavior::StoreRegistry::new(fixtures.store.clone());
