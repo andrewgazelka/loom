@@ -122,17 +122,19 @@ are reported rather than overwritten. Equivalent concurrent inserts converge.
 The adapter uses synchronized store access without holding database locks over
 compiler calls.
 
-`crates/loom-rt/build.rs` creates the backend namespace from the resolved backend
-dependency sources, feature graph, rustc identity, target and build flags. Source
-files and directories are Cargo inputs, so same-version local backend patches
-invalidate the namespace. Package locations and guest/module identities are not
-namespace inputs; compiler flags remain verbatim, including path-bearing flags.
-Metadata is read offline from the locked workspace. Its default feature selection
-matches this workspace, where only loom-rt directly depends on Wasmtime; arbitrary
-downstream feature unification or dependency-feature CLI overrides are outside
-that build contract and require extending the namespace producer first. The
-upstream package version or `precompile_compatibility_hash` alone would not
-identify same-version patches.
+The backend namespace is computed when the engine is built, as BLAKE3 over
+`Engine::precompile_compatibility_hash`: the Wasmtime version, the target triple,
+and the compiler's flags and tunables. Wasmtime defines that hash as the condition
+for one engine accepting another's serialized output, which is exactly what a
+mapping asserts. `LoomCompilationCache::new` takes the configuration its engine
+will use and hashes a probe engine built from it, because the hash is reachable
+only from an `Engine` and an engine cannot be built after its cache is attached;
+installing a cache store is not one of the hashed inputs. Package locations,
+Cargo's resolved feature graph, and guest/module identities are not namespace
+inputs. A same-version local patch to Wasmtime or Cranelift sources does not move
+the namespace: nothing here patches them, and Cranelift refuses to deserialize a
+value written by a different Cranelift version (its `VersionMarker` carries the
+crate version), so such a value is rejected rather than replayed.
 
 The blob is published before its index row. An interrupted publication can leave
 an unreferenced object. The index's `ON DELETE RESTRICT` foreign key retains live

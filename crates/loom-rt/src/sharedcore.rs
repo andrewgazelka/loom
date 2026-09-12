@@ -9,7 +9,8 @@ use futures::{
 use std::sync::atomic::{AtomicBool, AtomicU8};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 use wasmtime::{
-    Caller, Config, ExternType, Instance as CoreInstance, Module, SharedMemory, UpdateDeadline,
+    Caller, Config, ExternType, Instance as CoreInstance, Module, SharedMemory, Strategy,
+    UpdateDeadline,
 };
 
 mod cancellation;
@@ -26,14 +27,19 @@ const STACK_BYTES: u32 = 256 * 1024;
 const MAX_MEMORY: u64 = 256 * 1024 * 1024;
 const EXECUTION_SECONDS: u64 = 30;
 
-pub(super) fn engine(cache: Arc<LoomCompilationCache>) -> Result<Engine> {
+/// The cache is namespaced by the engine it serves, so it is built from the same
+/// configuration before that configuration installs it.
+pub(super) fn engine(store: Store) -> Result<(Engine, Arc<LoomCompilationCache>)> {
     let mut config = Config::new();
     config
+        .strategy(Strategy::Cranelift)
         .wasm_threads(true)
         .shared_memory(true)
         .epoch_interruption(true);
-    cache.configure(&mut config)?;
-    Engine::new(&config).map_err(|e| anyhow::anyhow!("{e:#}"))
+    let cache = Arc::new(LoomCompilationCache::new(store, &config)?);
+    config.enable_incremental_compilation(cache.clone())?;
+    let engine = Engine::new(&config).map_err(|e| anyhow::anyhow!("{e:#}"))?;
+    Ok((engine, cache))
 }
 // Keep the classification while sharing a failure with cancelled sibling tasks.
 #[derive(Clone)]

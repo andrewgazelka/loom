@@ -17,17 +17,29 @@ struct CacheTraffic {
     insert_failures: usize,
 }
 
+/// The engine configuration a cache is built for. The production cache namespaces
+/// its rows by the engine that would replay them, so it and the engine under test
+/// are built from the same configuration.
+fn engine_config(opt_level: OptLevel) -> Config {
+    let mut config = Config::new();
+    config.strategy(Strategy::Cranelift);
+    config.cranelift_opt_level(opt_level);
+    config
+}
+
 #[derive(Debug)]
 struct RecordingCache {
     production: LoomCompilationCache,
+    opt_level: OptLevel,
     allowed_keys: Option<BTreeSet<Vec<u8>>>,
     traffic: Mutex<CacheTraffic>,
 }
 
 impl RecordingCache {
-    fn new(store: Store, allowed_keys: Option<BTreeSet<Vec<u8>>>) -> Self {
+    fn new(store: Store, allowed_keys: Option<BTreeSet<Vec<u8>>>, opt_level: OptLevel) -> Self {
         Self {
-            production: LoomCompilationCache::new(store).unwrap(),
+            production: LoomCompilationCache::new(store, &engine_config(opt_level)).unwrap(),
+            opt_level,
             allowed_keys,
             traffic: Mutex::new(CacheTraffic::default()),
         }
@@ -149,13 +161,10 @@ fn compile_and_invoke(
     cache: &Arc<RecordingCache>,
     wasm: &[u8],
     expected: i32,
-    opt_level: OptLevel,
 ) -> AcceptedCompilation {
     assert_eq!(COMPILER_LOG.collect().reports, 0, "unclaimed compiler log");
     {
-        let mut config = Config::new();
-        config.strategy(Strategy::Cranelift);
-        config.cranelift_opt_level(opt_level);
+        let mut config = engine_config(cache.opt_level);
         config
             .enable_incremental_compilation(cache.clone())
             .unwrap();
@@ -207,8 +216,12 @@ fn shared_function_hits_cas_across_modules() {
     let module_c = wasm(8, b'C');
     assert_ne!(blake3::hash(&module_a), blake3::hash(&module_b));
 
-    let cache_a = Arc::new(RecordingCache::new(Store::open(&database).unwrap(), None));
-    let accepted_a = compile_and_invoke(&cache_a, &module_a, 12, OptLevel::Speed);
+    let cache_a = Arc::new(RecordingCache::new(
+        Store::open(&database).unwrap(),
+        None,
+        OptLevel::Speed,
+    ));
+    let accepted_a = compile_and_invoke(&cache_a, &module_a, 12);
     let traffic_a = cache_a.snapshot();
     assert_eq!(accepted_a.hits, 0, "empty A cache unexpectedly hit");
     assert_eq!(traffic_a.candidate_hits, 0);
@@ -218,8 +231,9 @@ fn shared_function_hits_cas_across_modules() {
     let cache_c = Arc::new(RecordingCache::new(
         Store::open(directory.path().join("control.sqlite")).unwrap(),
         None,
+        OptLevel::Speed,
     ));
-    let accepted_c = compile_and_invoke(&cache_c, &module_c, 13, OptLevel::Speed);
+    let accepted_c = compile_and_invoke(&cache_c, &module_c, 13);
     let traffic_c = cache_c.snapshot();
     assert_eq!(accepted_c.hits, 0, "empty C cache unexpectedly hit");
     assert_eq!(traffic_c.candidate_hits, 0);
@@ -248,8 +262,9 @@ fn shared_function_hits_cas_across_modules() {
     let cache_b = Arc::new(RecordingCache::new(
         Store::open(&database).unwrap(),
         Some(body_keys.clone()),
+        OptLevel::Speed,
     ));
-    let accepted_b = compile_and_invoke(&cache_b, &module_b, 12, OptLevel::Speed);
+    let accepted_b = compile_and_invoke(&cache_b, &module_b, 12);
     let traffic_b = cache_b.snapshot();
     assert!(accepted_b.hits > 0, "compiler rejected every cached body");
     assert!(
@@ -277,8 +292,12 @@ fn shared_function_hits_cas_across_modules() {
     drop(cache_b);
 
     // The same persisted entries must miss when compiler flags change.
-    let cache_flags = Arc::new(RecordingCache::new(Store::open(&database).unwrap(), None));
-    let accepted_flags = compile_and_invoke(&cache_flags, &module_a, 12, OptLevel::None);
+    let cache_flags = Arc::new(RecordingCache::new(
+        Store::open(&database).unwrap(),
+        None,
+        OptLevel::None,
+    ));
+    let accepted_flags = compile_and_invoke(&cache_flags, &module_a, 12);
     let traffic_flags = cache_flags.snapshot();
     assert_eq!(accepted_flags.hits, 0, "changed compiler flags reused code");
     assert_eq!(traffic_flags.candidate_hits, 0);
