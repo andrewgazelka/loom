@@ -46,20 +46,7 @@ async fn prepare_compiler_dependencies(
         .sysroot
         .join("lib/rustlib/src/rust/library/Cargo.toml");
     let mut command = Command::new(&toolchain.cargo);
-    command.env_clear();
-    for name in [
-        "PATH",
-        "HOME",
-        "RUSTUP_HOME",
-        "RUSTUP_TOOLCHAIN",
-        "CARGO_HOME",
-        "TMPDIR",
-        "RUSTC",
-    ] {
-        if let Some(value) = std::env::var_os(name) {
-            command.env(name, value);
-        }
-    }
+    direct::compiler_environment(&mut command);
     toolchain.configure(&mut command)?;
     command
         .env("RUSTC_BOOTSTRAP", "1")
