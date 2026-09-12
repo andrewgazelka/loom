@@ -141,3 +141,14 @@ the workspace root at build time.
 | `sources` | the runtime source tree the daemon compiles guests against |
 
 `javascript.nix` builds the Svelte app that `sources` links in as `ui/build`.
+
+## Darwin links guest build scripts with Apple's cc
+
+`nix/loom.sh` exports `CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER=/usr/bin/cc` on
+macOS. rustc places its sysroot's `lib` on the linker's dyld search path, and
+nixpkgs' clang loads `libLLVM.dylib` by name, so with the nightly guest
+toolchain on that path the packaged `cc` aborted with `Symbol not found:
+_LLVMInitializeLanaiAsmParser` while linking a dependency's build script
+(the fifth run of `scripts/e2e-unison.sh`). Apple's `cc` links against no LLVM
+dylib. The launcher refuses to start without `/usr/bin/cc`. The wasm32 guest
+itself links with rust-lld and is unaffected; Linux keeps the nixpkgs linker.
