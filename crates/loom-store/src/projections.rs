@@ -41,6 +41,11 @@ impl Store {
                     }
                     let def: Def = serde_json::from_value(definition)?;
                     tx.execute("INSERT INTO defs(hash,lang,name_hint,type_sig,component_hash,source_hash,allowed_effects) VALUES (?,?,?,?,?,?,?) ON CONFLICT(hash) DO UPDATE SET component_hash=coalesce(excluded.component_hash,defs.component_hash)",params![def.hash,def.lang.as_str(),e["name"].as_str(),serde_json::to_string(&def.sig)?,def.component_hash,e["source_hash"].as_str().context("missing source hash")?,def.allowed_effects.as_ref().map(serde_json::to_string).transpose()?])?;
+                    if !e["identity"].is_null() {
+                        let identity: loom_proto::BuildIdentity =
+                            serde_json::from_value(e["identity"].clone())?;
+                        tx.execute("UPDATE defs SET behavior_hash=?,wasm_hash=?,toolchain_hash=?,item_hashes_ref=? WHERE hash=?",params![identity.behavior_hash,identity.wasm_hash,identity.toolchain_hash,identity.item_hashes_ref,def.hash])?;
+                    }
                     let deps: BTreeMap<String, String> = serde_json::from_value(e["deps"].clone())?;
                     for hash in deps.values() {
                         tx.execute(

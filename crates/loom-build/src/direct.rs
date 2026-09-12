@@ -60,14 +60,33 @@ use admission::{graph_shareable, materialize_root_workspace};
 #[cfg(test)]
 mod tests;
 
-async fn run(mut command: Command) -> Result<std::process::Output, BuildError> {
-    tokio::time::timeout(
+async fn run(command: Command) -> Result<std::process::Output, BuildError> {
+    run_with_deadline(
+        command,
         std::time::Duration::from_secs(300),
-        command.kill_on_drop(true).output(),
+        "root Rust compiler",
     )
     .await
-    .map_err(|_| rejected("Rust compiler exceeded 300 seconds"))?
-    .map_err(BuildError::from)
+}
+
+async fn bootstrap(command: Command) -> Result<std::process::Output, BuildError> {
+    run_with_deadline(
+        command,
+        std::time::Duration::from_secs(900),
+        "Cargo dependency bootstrap",
+    )
+    .await
+}
+
+async fn run_with_deadline(
+    mut command: Command,
+    deadline: std::time::Duration,
+    phase: &str,
+) -> Result<std::process::Output, BuildError> {
+    tokio::time::timeout(deadline, command.kill_on_drop(true).output())
+        .await
+        .map_err(|_| rejected(format!("{phase} exceeded {} seconds", deadline.as_secs())))?
+        .map_err(BuildError::from)
 }
 
 fn compiler_environment(command: &mut Command) {

@@ -1,13 +1,7 @@
 use super::*;
 #[tokio::test]
 async fn auth_gates_every_operation_and_health_is_public() {
-    for path in [
-        "/v1/define",
-        "/v1/eval",
-        "/v1/command",
-        "/v1/events",
-        "/v1/cas/hash",
-    ] {
+    for path in ["/v1/command", "/v1/events", "/v1/cas/hash"] {
         let response = app()
             .oneshot(
                 Request::builder()

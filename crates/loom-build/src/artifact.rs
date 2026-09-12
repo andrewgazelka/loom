@@ -59,6 +59,7 @@ pub(super) fn build_fingerprint(root: &Path) -> Result<String, BuildError> {
     hash.update(include_bytes!("materialize.rs"));
     hash.update(include_bytes!("intake.rs"));
     hash.update(loom_check::safety_policy_bytes());
+    hash.update(include_bytes!("identity.rs"));
     hash.update(include_bytes!("direct.rs"));
     hash.update(include_bytes!("direct/recipe.rs"));
     hash.update(include_bytes!("direct/compile.rs"));

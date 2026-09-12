@@ -74,7 +74,8 @@ async fn serve() -> anyhow::Result<()> {
             args.root.canonicalize()?,
             vec![loom_proto::Lang::Rust],
         )?
-        .with_backup_directory(backup_directory),
+        .with_backup_directory(backup_directory)
+        .with_actors(node.clone()),
     );
     if args.stdio {
         return tokio::select! {

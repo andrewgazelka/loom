@@ -3,7 +3,7 @@ PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS cas(hash TEXT PRIMARY KEY,kind TEXT NOT NULL,bytes BLOB NOT NULL,created_at INTEGER NOT NULL,codec INTEGER NOT NULL CHECK(codec IN (85,113)));
 CREATE TABLE IF NOT EXISTS cas_codecs(hash TEXT NOT NULL REFERENCES cas(hash) ON DELETE CASCADE,codec INTEGER NOT NULL CHECK(codec IN (85,113)),PRIMARY KEY(hash,codec));
 CREATE TABLE IF NOT EXISTS definition_records(seq INTEGER PRIMARY KEY AUTOINCREMENT,event_hash TEXT NOT NULL REFERENCES cas(hash),ts INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS defs(hash TEXT PRIMARY KEY,lang TEXT NOT NULL,name_hint TEXT,type_sig TEXT NOT NULL,component_hash TEXT,source_hash TEXT NOT NULL REFERENCES cas(hash),allowed_effects TEXT);
+CREATE TABLE IF NOT EXISTS defs(hash TEXT PRIMARY KEY,lang TEXT NOT NULL,name_hint TEXT,type_sig TEXT NOT NULL,component_hash TEXT,source_hash TEXT NOT NULL REFERENCES cas(hash),allowed_effects TEXT,behavior_hash TEXT,wasm_hash TEXT,toolchain_hash TEXT,item_hashes_ref TEXT REFERENCES cas(hash));
 CREATE TABLE IF NOT EXISTS def_deps(def_hash TEXT NOT NULL REFERENCES defs(hash),dep_hash TEXT NOT NULL,PRIMARY KEY(def_hash,dep_hash));
 CREATE TABLE IF NOT EXISTS names(name TEXT NOT NULL,hash TEXT NOT NULL REFERENCES defs(hash),since_seq INTEGER NOT NULL REFERENCES definition_records(seq),PRIMARY KEY(name,since_seq));
 CREATE TABLE IF NOT EXISTS effect_results(desc_hash TEXT NOT NULL,scope TEXT NOT NULL,occurrence INTEGER NOT NULL,result_hash TEXT NOT NULL REFERENCES cas(hash),PRIMARY KEY(desc_hash,scope,occurrence));

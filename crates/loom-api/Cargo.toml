@@ -3,6 +3,7 @@ name = "loom-api"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+loom-actor = { path = "../loom-actor" }
 toml = "0.8"
 anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }

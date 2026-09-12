@@ -333,3 +333,28 @@ fn restored_build_script_retains_execute_permission() {
     );
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+#[tokio::test]
+async fn compiler_deadline_waits_for_completion_and_names_timeout_phase() {
+    let mut completes = Command::new("sleep");
+    completes.arg("0.01");
+    let output = run_with_deadline(
+        completes,
+        std::time::Duration::from_secs(5),
+        "test compiler",
+    )
+    .await
+    .unwrap();
+    assert!(output.status.success());
+
+    let mut exceeds = Command::new("sleep");
+    exceeds.arg("60");
+    let error = run_with_deadline(
+        exceeds,
+        std::time::Duration::from_millis(10),
+        "test compiler",
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("test compiler exceeded"));
+}

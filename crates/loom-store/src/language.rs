@@ -35,5 +35,20 @@ pub(super) fn validate(connection: &Connection) -> Result<()> {
             definition.hash,
         );
     }
+    for column in [
+        "behavior_hash",
+        "wasm_hash",
+        "toolchain_hash",
+        "item_hashes_ref",
+    ] {
+        let present: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('defs') WHERE name=?)",
+            [column],
+            |row| row.get(0),
+        )?;
+        if !present {
+            bail!("unsupported store schema: table defs missing column {column}; open a new store");
+        }
+    }
     Ok(())
 }

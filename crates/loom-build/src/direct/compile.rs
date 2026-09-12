@@ -7,6 +7,8 @@ pub(crate) struct Request<'a> {
     pub definition: &'a CheckedDef,
     pub sdk_fingerprint: &'a str,
     pub store: &'a Store,
+    pub driver: &'a crate::identity::Driver,
+    pub identity_directory: &'a Path,
 }
 
 pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
@@ -18,6 +20,8 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
         definition,
         sdk_fingerprint,
         store,
+        driver,
+        identity_directory,
     } = request;
     // Cargo canonicalizes paths (notably /tmp -> /private/tmp on macOS). Use
     // that same spelling for graph ownership and relocation, not string aliases.
@@ -84,6 +88,10 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
     let graph = cache.join("rust-artifacts").join(&key);
     fs::create_dir_all(&graph).await?;
     let target = graph.join("target");
+    let published_identity_directory = identity_directory;
+    let staged_identity_directory = target.join("item-identity").join(&definition.hash);
+    fs::create_dir_all(&staged_identity_directory).await?;
+    let identity_directory = staged_identity_directory.as_path();
     let lineage = blake3::hash(definition.name.as_bytes())
         .to_hex()
         .to_string();
@@ -131,7 +139,22 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
             let restore_ms = restore_started.elapsed().as_millis();
             fs::create_dir_all(&root_incremental).await?;
             recipe.relocate(directory, &target.join("root-output"), &root_incremental)?;
-            let command = if isolated {
+            recipe.compiler = driver.path.to_string_lossy().into_owned();
+            recipe.environment.insert(
+                "LOOM_ITEM_HASHES".into(),
+                identity_directory
+                    .join("items.json")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            recipe.environment.insert(
+                "LOOM_ITEM_PREIMAGES".into(),
+                identity_directory
+                    .join("item-preimages")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            let mut command = if isolated {
                 fs::write(target.join("direct.sh"), recipe.shell()).await?;
                 let mut command = Command::new(root.join("rustc/sandbox.sh"));
                 command
@@ -150,6 +173,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
                     .current_dir(directory);
                 command
             };
+            driver.configure(&mut command, identity_directory);
             let compiler_started = std::time::Instant::now();
             let output = run(command).await?;
             let compiler_ms = compiler_started.elapsed().as_millis();
@@ -172,6 +196,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
                     rustc_invocations: repairs + 1,
                 });
             }
+            crate::identity::publish(identity_directory, published_identity_directory)?;
             return Ok(Built {
                 bytes: fs::read(recipe.output()?).await?,
                 logs,
@@ -217,7 +242,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
         .env("LOOM_COMPILER_CACHE_MIRROR", &mirror)
         .env("LOOM_ROOT_INCREMENTAL", &root_incremental)
         .env("LOOM_TRUSTED_SOURCES", graph.join("trusted-sources"));
-    let output = run(command).await?;
+    let output = bootstrap(command).await?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let graph_identity = serde_json::json!({"dependency_graph":key});
     let logs = format!(
@@ -241,6 +266,54 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
         });
     }
     let artifact = crate::cargo_artifact(&stdout, &directory.join("Cargo.toml"), &target)?;
+    let mut root_recipe = Recipe::parse(
+        &fs::read(target.join("root-rustc.recipe")).await?,
+        directory,
+    )?;
+    root_recipe.compiler = driver.path.to_string_lossy().into_owned();
+    let mut hash_command = Command::new(&driver.path);
+    compiler_environment(&mut hash_command);
+    hash_command
+        .args(&root_recipe.arguments)
+        .envs(&root_recipe.environment)
+        .current_dir(root_recipe.working_directory());
+    driver.configure(&mut hash_command, identity_directory);
+    let hash_command = if isolated {
+        root_recipe.environment.insert(
+            "LOOM_ITEM_HASHES".into(),
+            identity_directory
+                .join("items.json")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        root_recipe.environment.insert(
+            "LOOM_ITEM_PREIMAGES".into(),
+            identity_directory
+                .join("item-preimages")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        fs::write(target.join("direct.sh"), root_recipe.shell()).await?;
+        let mut command = Command::new(root.join("rustc/sandbox.sh"));
+        compiler_environment(&mut command);
+        command
+            .arg("rustc")
+            .arg(cache)
+            .arg(directory)
+            .arg(&target)
+            .arg(root);
+        command
+    } else {
+        hash_command
+    };
+    let hash_output = run(hash_command).await?;
+    if !hash_output.status.success() {
+        return Err(rejected(format!(
+            "hash-rustc driver {}: {}",
+            driver.path.display(),
+            String::from_utf8_lossy(&hash_output.stderr)
+        )));
+    }
     if !root_build_script {
         let mut recipe = Recipe::parse(
             &fs::read(target.join("root-rustc.recipe")).await?,
@@ -279,10 +352,11 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
         });
         write_graph(store, &key, &recipe)?;
     }
+    crate::identity::publish(identity_directory, published_identity_directory)?;
     Ok(Built {
         bytes: fs::read(artifact).await?,
         logs,
         diagnostics,
-        rustc_invocations,
+        rustc_invocations: rustc_invocations + 1,
     })
 }

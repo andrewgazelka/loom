@@ -123,15 +123,6 @@ pub struct DefineRequest {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "codegen", derive(TS))]
-pub struct EvalRequest {
-    #[serde(default)]
-    pub session: Option<String>,
-    pub source: String,
-    #[serde(default)]
-    pub deps: BTreeMap<String, String>,
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "codegen", derive(TS))]
 pub struct CommandRequest {
     #[serde(default)]
     pub session: Option<String>,
@@ -280,4 +271,13 @@ pub fn definition_identity(
         identity["allowed_effects"] = serde_json::to_value(labels)?;
     }
     serde_json::to_vec(&identity)
+}
+
+/// Content identities emitted by the mandatory item-hashing compiler.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildIdentity {
+    pub behavior_hash: String,
+    pub wasm_hash: String,
+    pub toolchain_hash: String,
+    pub item_hashes_ref: String,
 }

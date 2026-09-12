@@ -4,6 +4,7 @@ mod definitions;
 mod effect_index;
 mod effects;
 mod events;
+mod identity;
 mod language;
 mod legacy;
 mod machine;

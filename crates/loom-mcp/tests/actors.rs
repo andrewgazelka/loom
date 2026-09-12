@@ -114,7 +114,30 @@ fn request(name: &str, args: Value) -> CallToolRequestParams {
 async fn mcp_spawn_send_tree() {
     let fixture = Fixture::new().await;
     let tools = fixture.client.list_all_tools().await.unwrap();
-    assert!(tools.iter().any(|tool| tool.name == "loom_define"));
+    let definitions: std::collections::BTreeSet<_> = tools
+        .iter()
+        .filter(|tool| tool.name.starts_with("loom_"))
+        .map(|tool| tool.name.as_ref())
+        .collect();
+    assert_eq!(
+        definitions,
+        [
+            "loom_add",
+            "loom_view",
+            "loom_update",
+            "loom_history",
+            "loom_diff",
+            "loom_run",
+            "loom_find",
+            "loom_dependents",
+            "loom_command"
+        ]
+        .into_iter()
+        .collect()
+    );
+    assert!(!tools.iter().any(|tool| tool.name == "crate_add"));
+    let found = fixture.call("loom_find", json!({"text":"missing"})).await;
+    assert_eq!(found["ok"], true, "{found}");
     let actual: std::collections::BTreeSet<_> = tools
         .iter()
         .filter(|tool| tool.name.starts_with("actor_"))

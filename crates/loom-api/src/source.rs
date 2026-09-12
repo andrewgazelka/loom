@@ -101,8 +101,18 @@ impl loom_rt::ComponentResolver for BuildResolver {
             let component_hash = self.store.put("component", &built.component)?;
             let logs_ref = self.store.put("blob", built.logs.as_bytes())?;
             def.component_hash = Some(component_hash.clone());
-            self.store
-                .define(&def, None, &checked.source, &checked.deps)?;
+            self.store.define_with_identity(
+                &def,
+                None,
+                &checked.source,
+                &checked.deps,
+                Some(
+                    built
+                        .identity
+                        .as_ref()
+                        .context("builder returned no item identity")?,
+                ),
+            )?;
             self.store.record_definition_event(&json!({"type":"component_built","component_hash":component_hash,"logs_ref":logs_ref,"ms":built.ms,"size":built.component.len(),"rustc_invocations":built.rustc_invocations}))?;
             Ok(())
         })
@@ -143,11 +153,6 @@ pub(super) fn dependency_closure(
     Ok(closure)
 }
 
-#[derive(Default)]
-pub(super) struct Redefinitions {
-    pub(super) rehashed: Vec<Value>,
-}
-
 pub(super) fn dependency_signatures(
     store: &Store,
     deps: &BTreeMap<String, String>,
@@ -169,12 +174,4 @@ pub(super) fn source_reference(source: &str) -> Option<&str> {
     source
         .strip_prefix('#')
         .filter(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
-}
-
-pub(super) fn valid_alias(alias: &str) -> bool {
-    let mut bytes = alias.bytes();
-    bytes
-        .next()
-        .is_some_and(|byte| byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'$'))
-        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$'))
 }

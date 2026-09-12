@@ -33,30 +33,62 @@ cargo run --release -p loomd -- --db loom.sqlite
 Open <http://127.0.0.1:8787> and enter the same token. The daemon serves the built Svelte application, HTTP API, WebSocket event stream, and MCP endpoint. The token authorizes the single owner; keep the listener on loopback unless network access is intended.
 
 ```sh
-cargo run -p loom-cli -- --eval '6 * 7'
+cargo run -p loom-cli -- --token "$LOOM_TOKEN" run sum '[20,22]'
 cargo run -p loomd -- --db loom.sqlite --stdio
 ```
 
 The second command starts the MCP stdio transport. Configure an MCP client to run it with `LOOM_TOKEN` and an absolute `--root` pointing at this checkout. Streamable HTTP MCP is at `/mcp` and requires the same bearer token.
 
-## Define and call
+## Command reference
+
+The CLI, HTTP commands, and MCP tools use the same definition operations. The CLI reads files for `add` and `update`; the service stores their source in CAS. `view` reads that stored source, including when the original file has changed or disappeared.
+
+| CLI | MCP tool | Result |
+| --- | --- | --- |
+| `add <file.rs> [--name n]` | `loom_add` | Name, definition hash, entry item hash, Wasm hash, and item table |
+| `view <name-or-hash>` | `loom_view` | Stored source and item table |
+| `update <name> <file.rs>` | `loom_update` | New definition and name binding; old hash remains runnable |
+| `history <name>` | `loom_history` | Hash chain, timestamps, and changed items between entries |
+| `diff <old-hash> <new-hash>` | `loom_diff` | Added, removed, and changed items, with their hashes |
+| `run <name-or-hash> [args-json]` | `loom_run` | Output and recorded effects |
+| `find <text>` | `loom_find` | Matching names and item names |
+| `dependents <hash>` | `loom_dependents` | Definitions with a dependency pinned to the hash |
 
 ```sh
-curl -sS http://127.0.0.1:8787/v1/define \
-  -H "Authorization: Bearer $LOOM_TOKEN" -H 'Content-Type: application/json' \
-  -d '{"name":"add","source":"#[loom::def] pub fn main(a: i64, b: i64) -> i64 { a + b }"}'
+loom --token "$LOOM_TOKEN" add sum.rs --name sum
+loom --token "$LOOM_TOKEN" run sum '[20,22]'
+loom --token "$LOOM_TOKEN" view sum
+loom --token "$LOOM_TOKEN" update sum sum.rs
+loom --token "$LOOM_TOKEN" history sum
 ```
 
-The returned definition hash identifies the callable. Invoke `POST /v1/command` with `{"command":"call","args":{"hash":"<hash>","args":[20,22]}}`. Rust definitions build during `define` and return structured cargo diagnostics. A Rust single-file definition uses the same endpoint with `"lang":"rust"` and source such as:
+Guest Rust has no macros. Every crate-root `pub fn` is an entry. An optional schema is declared as `pub const LOOM_SCHEMA: &str`; effect rows are inferred by the compiler driver. There are no effect declarations. `add` reports each entry’s inferred row in `entries.<name>.effects`, with `labels` and `unknown` fields.
 
 ```rust
-#[loom::def]
-pub fn add(a: i64, b: i64) -> i64 { a + b }
+pub fn sum(a: i64, b: i64) -> i64 { a + b }
 ```
 
-Actors use the `actor_*` MCP tools and `actor://` resources. Each actor owns its domain tables, inbox, effects, and outbox in one Turso file. See [Actors on Turso](actors-turso.md) for transactions, supervision, and behavior changes.
+HTTP clients post `{ "command": "run", "args": { "target": "sum", "args": [20,22] } }` to `/v1/command` with the bearer token. `add` takes `source` and an optional `name`; `update` takes `name` and `source`. The remaining definition arguments are `target` for `view`, `name` for `history`, `old` and `new` for `diff`, `text` for `find`, and `hash` for `dependents`.
 
-Client responses contain `ok`, `seq`, `result`, and `diagnostics`. Results above 8 KB become CAS references. Use the `resolve` command to retrieve a reference. WebSocket clients connect to `/v1/stream` and send `{ "token": "...", "after": 0 }` as their first message; the server streams durable events after that cursor.
+Item hashes describe compiler-resolved definitions. Renaming a local variable or reformatting source leaves them unchanged. A changed helper can change its callers' hashes too. The definition hash preserves the source identity, while the Wasm and toolchain hashes identify its executable build. Builds require the `hash-rustc` driver and reject missing identity outputs. Stores without `defs.behavior_hash` are rejected by column name.
+
+Actor commands call the same service operations as the existing MCP actor tools:
+
+| CLI | MCP tool |
+| --- | --- |
+| `spawn <def> [init]` | `actor_spawn` |
+| `send <id> <msg>` | `actor_send` |
+| `tree` | `actor_tree` |
+| `info <id>` | `actor_info` |
+| `lineage <id>` | `actor_lineage` |
+| `validate <id> <candidate> <k>` | `actor_validate` |
+| `promote <id> <hash> --rationale <text>` | `actor_promote` |
+| `fork <id> <seq>` | `actor_fork` |
+| `actors` | `actor_list` |
+
+Actor behaviors must be registered with the node. Each actor owns its domain tables, inbox, effects, and outbox in one Turso file. See [Actors on Turso](actors-turso.md) for transactions, supervision, and behavior changes.
+
+Client responses contain `ok`, `seq`, `result`, and `diagnostics`. WebSocket clients connect to `/v1/stream` and send `{ "token": "...", "after": 0 }` as their first message; the server streams durable events after that cursor.
 
 ## DAG-CBOR and links
 
@@ -87,7 +119,7 @@ Stores containing retired actor tables are rejected at open with an error naming
 | `loom-mcp` | MCP tools, prompts and resources |
 | `loom-cli`, `loomd` | Terminal client and server entrypoint |
 
-Rust definitions built through `loom_define` use the [shared-core ABI](shared-core-abi.md), with `loom.perform` dispatching through guest handlers to the outermost host handler.
+Rust definitions built through `loom_add` use the [shared-core ABI](shared-core-abi.md), with `loom.perform` dispatching through guest handlers to the outermost host handler.
 
 ## Verify
 
@@ -159,14 +191,7 @@ Machine filesystem effects resolve from a pinned root directory handle. Parent t
 
 These snapshots observe selected files across the process interval. They do not enumerate every write, track metadata-only changes, or distinguish concurrent writers. Historical effects without snapshots remain browsable, with no invented diff.
 
-Crate intake uses `loom --token "$LOOM_TOKEN" crate add serde@1.0.210` or the MCP `crate_add` tool with `{name, version}`. The registry checksum is verified before the source tree enters the CAS. Pin the returned hash in a Rust bundle's manifest:
-
-```toml
-[loom.crates]
-serde = { hash = "<returned 64-digit hash>", features = ["derive"] }
-```
-
-Updating a definition name leaves existing dependency hashes intact. Run `loom --token "$LOOM_TOKEN" upgrade <old-hash> <new-hash>` or MCP `loom_upgrade` to rewrite named dependents explicitly. Both definition hashes and crate source hashes use this command; its result lists the changed identities. Actor behavior changes use `actor_promote`.
+Dependencies remain pinned when a definition name moves. `update` retains its existing dependency pins and effect policy unless replacements are supplied. Use `--deps '{"alias":"<hash>"}'` to replace pins and `--allowed-effects '[]'` to deny effects; explicit `null` clears the effect policy. Use `dependents <hash>` to find callers and update each caller explicitly. Actor behavior changes use `promote` or MCP `actor_promote`.
 
 ## Guest-defined effect handlers
 
