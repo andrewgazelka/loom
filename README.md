@@ -143,7 +143,6 @@ Resources: `actor://<id>/inbox`, `.../effects`, `.../outbox`, `.../lineage`, and
 bun scripts/configure-codex-mcp.ts --token-file /path/to/loom/token
 ```
 
-#
 ## Content-addressed code
 
 Loom can identify Rust definitions by resolved HIR content with `tools/hash-rustc`.
@@ -155,10 +154,10 @@ Mutually recursive items share one cycle hash and receive indexed member hashes.
 Inherent method calls resolve to one method; trait calls retain the trait method identity.
 Generic bodies hash once, and monomorphized implementations are outside that identity.
 Wasm and toolchain digests must separately identify each executable realization.
-The loom-build and storage seam is documented above and is not yet connected.
+The loom-build and storage seam is documented in docs/content-addressed-code.md and is not yet connected.
 
 Details: [docs/content-addressed-code.md](docs/content-addressed-code.md).
-# Layout
+## Layout
 
 | crate | is |
 | --- | --- |
