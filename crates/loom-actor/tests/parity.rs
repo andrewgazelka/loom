@@ -300,7 +300,8 @@ async fn kill_terminate_and_shutdown_timeout() {
     assert_eq!(runtime.info(killed.id()).await.unwrap().reason, "killed");
 
     let supervisor = runtime.spawn_root("supervisor-v1", &encoded(json!({"type":"configure","strategy":"one_for_one"}))).await.unwrap();
-    let mut spec = ChildSpec::new("ordinary", &encoded(json!({"type":"init","trap_exit":true})));
+    let mut spec =
+        ChildSpec::new("ordinary", &encoded(json!({"type":"init","trap_exit":true})), runtime.behavior("ordinary").unwrap().child_type());
     spec.restart = RestartPolicy::Temporary;
     spec.shutdown = Shutdown::TimeoutMs(30);
     runtime.send(&supervisor, "start", &encoded(json!({"type":"start_child","spec":spec}))).await.unwrap();
@@ -325,7 +326,7 @@ async fn kill_terminate_and_shutdown_timeout() {
 async fn dynamic_supervisor_and_registry() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = node(dir.path()).await;
-    let mut template = ChildSpec::new("ordinary", &encoded(json!({"type":"init"})));
+    let mut template = ChildSpec::new("ordinary", &encoded(json!({"type":"init"})), runtime.behavior("ordinary").unwrap().child_type());
     template.restart = RestartPolicy::Temporary;
     let supervisor =
         runtime.spawn_root("supervisor-v1", &encoded(json!({"type":"configure","strategy":"dynamic","template":template}))).await.unwrap();

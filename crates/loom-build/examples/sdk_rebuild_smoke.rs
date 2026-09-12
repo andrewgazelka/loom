@@ -23,14 +23,24 @@ fn version(lock: &str, name: &str) -> String {
         .unwrap()
         .to_owned()
 }
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<std::process::ExitCode, Box<dyn std::error::Error>> {
+    if let Some(status) = loom_build::compiler_cache_entry()? {
+        return Ok(status);
+    }
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(run())?;
+    Ok(std::process::ExitCode::SUCCESS)
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let root = PathBuf::from(args.next().ok_or("missing current root")?);
     let legacy = PathBuf::from(args.next().ok_or("missing legacy root")?);
     let output = PathBuf::from(args.next().ok_or("missing component output")?);
     let cache = PathBuf::from(std::env::var_os("LOOM_BUILD_DIR").ok_or("set LOOM_BUILD_DIR")?);
-    let checker = Checker::new(root.clone());
+    let checker = Checker::new();
     let mut request = DefineRequest {
         lang: Lang::Rust,
         name: "legacy_render".into(),

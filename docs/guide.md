@@ -1,6 +1,6 @@
 # Loom
 
-Loom runs TypeScript and Rust WebAssembly components behind one Rust actor host. Definitions, component bytes, event payloads, and effect results are content-addressed with BLAKE3. SQLite WAL holds the append-only event history and rebuildable indexes.
+Loom runs Rust core WebAssembly modules behind one Rust actor host. Definitions, core wasm bytes, event payloads, and effect results are content-addressed with BLAKE3. SQLite WAL holds the append-only event history and rebuildable indexes.
 
 **Memory isolation is a security requirement. Rust safety checks are not a formally proven boundary against adversarial code.** Compiler and library soundness bugs can expose undefined behavior through safe Rust; denying `unsafe` does not close that class of bug. Loom keeps separate Wasm memories and exchanges DAG-CBOR values instead of sharing guest pointers. Wasm validation, the engine, and checked host interfaces remain trusted, and the complete system has no end-to-end formal proof. See the [memory isolation decision](plan-unified-memory.md#memory-isolation-decision) for the concrete Rust soundness issue and supporting sources.
 
@@ -8,7 +8,7 @@ The long-term goal is a formally verified guest language, compiler, and runtime 
 
 ## Run locally
 
-On Apple Silicon macOS or x86-64 Linux, Nix supplies the daemon, Svelte app, checker, and both guest toolchains:
+On Apple Silicon macOS or x86-64 Linux, Nix supplies the daemon, Svelte app, and Rust guest toolchain:
 
 ```sh
 nix run .
@@ -20,14 +20,12 @@ Pass daemon options after `--`, for example `nix run . -- --bind 127.0.0.1:8788`
 
 ### Development without Nix
 
-Install Rust 1.97 or newer, Bun 1.3.13, `cargo-component` 0.21.1, and the `wasm32-wasip1` and `wasm32-wasip2` targets. Linux machine execution also needs Bubblewrap. The component builder uses the StarlingMonkey engine shipped in the locked `@bytecodealliance/componentize-js` package.
+Install Rust 1.97, its `rust-src` component, and Bun 1.3.13. Linux machine execution also needs Bubblewrap. The builder rebuilds the standard library for `wasm32-unknown-unknown` with atomics enabled.
 
 ```sh
-rustup target add wasm32-wasip1 wasm32-wasip2
-cargo install --locked cargo-component --version 0.21.1
-(cd loom-checker && bun install --frozen-lockfile)
-(cd loom-guest-ts && bun install --frozen-lockfile)
-(cd loom-ui && bun install --frozen-lockfile && bun run build)
+rustup component add rust-src
+rustup target add wasm32-unknown-unknown
+(cd ui && bun install --frozen-lockfile && bun run build)
 export LOOM_TOKEN='replace-with-your-token'
 cargo run --release -p loomd -- --db loom.sqlite
 ```
@@ -46,29 +44,29 @@ The second command starts the MCP stdio transport. Configure an MCP client to ru
 ```sh
 curl -sS http://127.0.0.1:8787/v1/define \
   -H "Authorization: Bearer $LOOM_TOKEN" -H 'Content-Type: application/json' \
-  -d '{"name":"add","source":"export function main(a: number, b: number): number { return a + b; }"}'
+  -d '{"name":"add","source":"#[loom::def] pub fn main(a: i64, b: i64) -> i64 { a + b }"}'
 ```
 
-The returned definition hash identifies the callable. Invoke `POST /v1/command` with `{"command":"call","args":{"hash":"<hash>","args":[20,22]}}`. TS definitions build on first use; Rust definitions build during `define` and return structured cargo diagnostics. A Rust single-file definition uses the same endpoint with `"lang":"rust"` and source such as:
+The returned definition hash identifies the callable. Invoke `POST /v1/command` with `{"command":"call","args":{"hash":"<hash>","args":[20,22]}}`. Rust definitions build during `define` and return structured cargo diagnostics. A Rust single-file definition uses the same endpoint with `"lang":"rust"` and source such as:
 
 ```rust
 #[loom::def]
 pub fn add(a: i64, b: i64) -> i64 { a + b }
 ```
 
-Actors export `run` and `fold` in TS or implement `loom::Actor` under `#[loom::actor]` in Rust. `examples/` contains executable fixtures. Guest actor effects use `loom::actor::send(actor, msg)` and `loom::actor::spawn(DEF, state)` in Rust, or `actor.send(actorId, msg)` and `actor.spawn(def, state)` from the TS `actor` object. Their effect labels are `actor.send` and `actor.spawn`. Actor commands include `spawn`, `send`, `state`, `fork`, and `actor.upgrade`. Cross-language calls use the same DAG-CBOR values and host effect dispatcher.
+Guest actors implement `loom::Actor` under `#[loom::actor]`. `examples/` contains executable fixtures. Guest actor effects use `loom::actor::send(actor, msg)` and `loom::actor::spawn(DEF, state)`. Their effect labels are `actor.send` and `actor.spawn`. Actor commands include `spawn`, `send`, `state`, `fork`, and `actor.upgrade`.
 
 Client responses contain `ok`, `seq`, `result`, and `diagnostics`. Results above 8 KB become CAS references. Use the `resolve` command to retrieve a reference. WebSocket clients connect to `/v1/stream` and send `{ "token": "...", "after": 0 }` as their first message; the server streams durable events after that cursor.
 
 ## DAG-CBOR and links
 
-The Rust and TS guests use deterministic DAG-CBOR at the WIT boundary. Structured CAS values use the same codec; component binaries, source bundles, and other raw bytes retain the raw codec. JSON clients represent a link as exactly `{ "$ref": "<CID>" }`. In DAG-CBOR this becomes tag 42 containing the zero-prefixed binary CID. Local links use CIDv1 with a BLAKE3-256 digest and distinguish DAG-CBOR (`0x71`) from raw bytes (`0x55`). Definition identities remain source hashes.
+Rust guests use deterministic DAG-CBOR at the core wasm effect boundary. Structured CAS values use the same codec; core wasm binaries, source bundles, and other raw bytes retain the raw codec. JSON clients represent a link as exactly `{ "$ref": "<CID>" }`. In DAG-CBOR this becomes tag 42 containing the zero-prefixed binary CID. Local links use CIDv1 with a BLAKE3-256 digest and distinguish DAG-CBOR (`0x71`) from raw bytes (`0x55`). Definition identities remain source hashes.
 
 Maps have string keys ordered by encoded length and then bytes. Decoders reject duplicate keys, nonminimal or indefinite encodings, other tags, malformed CIDs, undefined, nonfinite floats, and trailing bytes. Floats use 64 bits. The shared JSON value model encodes safe integral numbers as integers; Rust integers outside JavaScript's safe range are rejected instead of losing precision across languages.
 
 Filesystem results have typed Rust SDK values. `DirEntry` has named `name`, `size`, and `kind` fields and encodes as a DAG-CBOR array. Host-produced results decode directly in the guest without rebuilding and re-encoding an intermediate value. Foreign bytes whose content determines a hash still receive strict canonical validation. HTTP and MCP envelopes use JSON; the guest boundary and structured CAS payloads use DAG-CBOR.
 
-Compiled components carry an effect-protocol version. Components built against the earlier map-shaped filesystem results must be rebuilt before execution; their historical source and CAS records remain readable. This prevents an old guest decoder from silently interpreting the new result shape.
+Compiled core modules carry an effect-protocol version. Modules built against the earlier map-shaped filesystem results must be rebuilt before execution; their historical source and CAS records remain readable. This prevents an old guest decoder from silently interpreting the new result shape.
 
 Opening an older database performs a transactional migration of structured values and links and invalidates compiled guests that used the old codec. The migration preserves event sequence numbers and verifies references before committing. Older databases with recorded effects whose requests were never stored, or pending handlers, require explicit recovery before migration: opening fails without changing the database rather than risking duplicate external effects. Back up the database before upgrading.
 
@@ -76,10 +74,10 @@ Opening an older database performs a transactional migration of structured value
 
 | Crate | Responsibility |
 | --- | --- |
-| `loom-proto` | Shared values, signatures, protocol, DAG-CBOR and TS declarations |
+| `loom-proto` | Shared values, signatures, protocol and DAG-CBOR |
 | `loom-store` | CAS, SQLite event history, projections, names, snapshots, effects |
 | `loom-check` | Language checking and definition identity |
-| `loom-build` | Component compiler sidecars and build cache |
+| `loom-build` | Rust compiler sidecars and build cache |
 | `loom-guest-rs`, `loom-guest-macros` | Synchronous Rust guest API and exports |
 | `loom-rt` | Wasmtime fibers, actors, effects, machines |
 | `loom-maintenance` | Backups, bounded index and build-cache maintenance |
@@ -88,15 +86,13 @@ Opening an older database performs a transactional migration of structured value
 | `loom-mcp` | MCP tools, prompts and resources |
 | `loom-cli`, `loomd` | Terminal client and server entrypoint |
 
-Rust definitions built through `loom_define` use the [shared-core ABI](shared-core-abi.md), with `loom.perform` dispatching through guest handlers to the outermost host handler. Component definitions use `loom-wit/handler.wit` and `loom:host/effects.perform`; ambient WASI imports trap. Folds can handle effects locally, but an effect reaching the host is refused.
+Rust definitions built through `loom_define` use the [shared-core ABI](shared-core-abi.md), with `loom.perform` dispatching through guest handlers to the outermost host handler. Folds can handle effects locally, but an effect reaching the host is refused.
 
 ## Verify
 
 ```sh
 cargo test --workspace --locked
-(cd loom-checker && bun test)
-(cd loom-guest-ts && bun test)
-(cd loom-ui && bun run check && bun run build)
+(cd ui && bun run check && bun run build)
 LOOM_TOKEN="$LOOM_TOKEN" bun scripts/e2e.ts
 LOOM_TOKEN="$LOOM_TOKEN" bun scripts/mcp-e2e.ts
 ./scripts/acceptance.sh
@@ -104,7 +100,16 @@ LOOM_TOKEN="$LOOM_TOKEN" bun scripts/mcp-e2e.ts
 ./scripts/nix-check.sh
 ```
 
-The HTTP and MCP scripts require a running daemon and real language toolchains. They build and execute guest components. `acceptance.sh` reports how many complete specification milestones pass; a missing or failing milestone remains a failure. A passing unit test suite alone does not imply all 11 milestones are delivered. Debug builds of the Wasmtime compiler are substantially slower than release builds when compiling a new TS component.
+The HTTP and MCP scripts require a running daemon and the Rust guest toolchain. They build and execute guest modules. `acceptance.sh` reports how many complete specification milestones pass; a missing or failing milestone remains a failure. A passing unit test suite alone does not imply all 11 milestones are delivered.
+
+The two API guest integration tests are ignored by default because they compile Rust guests and need an executable that handles compiler-cache requests. Run them with the matching Rust compiler and `rust-src` installed:
+
+```sh
+cargo build -p loom-build --example build_smoke
+LOOM_BUILD_DIR="$(mktemp -d)" \
+LOOM_COMPILER_CACHE_OWNER="$PWD/target/debug/examples/build_smoke" \
+cargo test -p loom-api --lib -- --include-ignored --test-threads=1
+```
 
 ## Container
 
@@ -113,9 +118,9 @@ export LOOM_TOKEN='replace-with-your-token'
 podman compose -f deploy/compose.yaml up --build
 ```
 
-The image includes the compiler sidecars and static UI. Data and build cache live under `/data`. The compose file binds the service to host loopback. Use the backup command for a consistent SQLite snapshot while the server is running. A plain copy of an active SQLite file may omit WAL data.
+The image includes the Rust compiler sidecars and static UI. Data and build cache live under `/data`. The compose file binds the service to host loopback. Use the backup command for a consistent SQLite snapshot while the server is running. A plain copy of an active SQLite file may omit WAL data.
 
-`scripts/container-smoke.sh` builds the image and checks both guest languages over HTTP and MCP, a vendored Rust crate, build sandbox isolation, and clean SIGTERM shutdown. The Compose configuration unmasks the outer container's `/proc` paths so nested build namespaces can mount private procfs; builds retain their isolated network, filesystem, and cleared environment. `scripts/remote-check.sh acceptance` runs the milestone suite on the configured Linux development node within an 8-core, 24-GB systemd user unit.
+`scripts/container-smoke.sh` builds the image and checks Rust guest definitions over HTTP and MCP, a vendored Rust crate, build sandbox isolation, and clean SIGTERM shutdown. The Compose configuration unmasks the outer container's `/proc` paths so nested build namespaces can mount private procfs; builds retain their isolated network, filesystem, and cleared environment. `scripts/remote-check.sh acceptance` runs the milestone suite on the configured Linux development node within an 8-core, 24-GB systemd user unit.
 
 ### Codex over MCP
 
@@ -135,11 +140,11 @@ To verify a fresh Codex session against an **isolated test daemon**, set its URL
 LOOM_URL=http://127.0.0.1:18891 LOOM_TOKEN_FILE=/path/to/test-state/token bun scripts/codex-mcp-run.ts
 ```
 
-The runner creates a separate 10,000-file fixture, starts Codex with only Loom configured and a read-only shell sandbox, and retains its real JSONL trace. The six-gate verifier checks model-written TS and Rust definitions, independent results, filesystem changes, and five-scan warm medians below 1,500 ms. It ignores unrelated user configuration for this isolated run. Do not point it at the live application database.
+The runner creates a separate 10,000-file fixture, starts Codex with only Loom configured and a read-only shell sandbox, and retains its real JSONL trace. The six-gate verifier checks model-written Rust definitions, independent results, filesystem changes, and five-scan warm medians below 1,500 ms. It ignores unrelated user configuration for this isolated run. Do not point it at the live application database.
 
 ## Effects and file changes
 
-Calling an effect performs it: `loom::sleep(100)` suspends until its timer finishes, and `loom::perform::<T>(label, args)` performs a custom effect. Concurrent Rust work on the shared-core path uses `loom::scope`, `scope.spawn(|| ...)`, and `child.join()`. Use `loom::spawn(|| ...)` with `'static` captures for fire-and-forget work or a `JoinHandle` moved into another task. Dropping that handle leaves its task running; the host cancels unfinished detached tasks when the definition entry returns, without an implicit wait. Joining a trapped detached task returns its error; an unjoined detached failure is discarded. A synchronous `loom::call(DEF, args)` can run inside a scoped child. TypeScript uses `perform<T>(op, args)` and plain effect functions. Rust examples built as WIT components and TypeScript definitions have no concurrency API; both execute effect calls sequentially.
+Calling an effect performs it: `loom::sleep(100)` suspends until its timer finishes, and `loom::perform::<T>(label, args)` performs a custom effect. Concurrent Rust work on the shared-core path uses `loom::scope`, `scope.spawn(|| ...)`, and `child.join()`. Use `loom::spawn(|| ...)` with `'static` captures for fire-and-forget work or a `JoinHandle` moved into another task. Dropping that handle leaves its task running; the host cancels unfinished detached tasks when the definition entry returns, without an implicit wait. Joining a trapped detached task returns its error; an unjoined detached failure is discarded. A synchronous `loom::call(DEF, args)` can run inside a scoped child.
 
 Definition signatures distinguish inferred effects, the host-enforced `allowed_effects` policy, and effects observed during execution. Inference is conservative: dynamic calls, getters, iterators, and unexpanded Rust code can leave the set unknown. Omitting `allowed_effects` permits all host effects; `[]` permits none. Explicit policies are part of definition identity. Cross-definition calls inherit the intersection of caller and callee permissions, including on cache hits. Scoped children inherit the caller's permissions.
 

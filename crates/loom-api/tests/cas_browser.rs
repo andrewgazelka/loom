@@ -24,7 +24,7 @@ impl Fixture {
             Service::new(
                 store.clone(),
                 PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
-                vec![Lang::Ts],
+                vec![Lang::Rust],
             )
             .unwrap(),
         );

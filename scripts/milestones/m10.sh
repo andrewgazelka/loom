@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 (
-  cd loom-ui
+  cd ui
   bun install --frozen-lockfile
   bun run check
   bun run build

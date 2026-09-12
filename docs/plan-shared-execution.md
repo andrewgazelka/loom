@@ -34,4 +34,4 @@ The selected target is `wasm32-unknown-unknown`, with the matching pinned Rust s
 
 Guest execution uses eight shared worker threads with a global runnable queue. An actual two-child atomic rendezvous exposed starvation in Tokio's non-stealable LIFO wake-up slot after the initialization mutex was released. A yield-only control made the same module finish, and the dedicated guest executor then passed without that diagnostic yield. Root and child guest futures both use this executor; host effects remain asynchronous. Cancellation acknowledgement follows actual guest-future and Store destruction, including when every guest worker is busy.
 
-The metadata scan remains at 10/12; the durability policy decision and TypeScript guest removal remain queued. Shared memory does not justify attributing the earlier metadata timings to the new backend or to content search.
+The metadata scan remains at 10/12; the durability policy decision remains queued. Shared memory does not justify attributing the earlier metadata timings to the new backend or to content search.

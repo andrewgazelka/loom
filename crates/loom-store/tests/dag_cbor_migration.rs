@@ -34,7 +34,7 @@ fn legacy_state_refs_and_log_migrate_reopen_and_compact() -> Result<()> {
     let c = legacy(&path)?;
     let leaf = put(&c, "result", &json!({"answer":42}))?;
     let state = put(&c, "state", &json!({"leaf":{"$ref":leaf}}))?;
-    let actor = json!({"id":"a","behavior_hash":"behavior","lang":"ts","component_hash":"old-component","last_seq":0,"created_seq":0,"parent":null});
+    let actor = json!({"id":"a","behavior_hash":"behavior","lang":"rust","component_hash":"old-component","last_seq":0,"created_seq":0,"parent":null});
     event(&c, "system", &json!({"type":"actor_created","actor":actor}))?;
     let seq = event(&c, "a", &json!({"state":{"$ref":state}}))?;
     event(
@@ -43,7 +43,7 @@ fn legacy_state_refs_and_log_migrate_reopen_and_compact() -> Result<()> {
         &json!({"type":"session_created","id":"session","actor":"a","owner":"owner"}),
     )?;
     c.execute(
-        "INSERT INTO actors VALUES ('a','behavior','ts','old-component',?,1,NULL)",
+        "INSERT INTO actors VALUES ('a','behavior','rust','old-component',?,1,NULL)",
         [seq],
     )?;
     c.execute(

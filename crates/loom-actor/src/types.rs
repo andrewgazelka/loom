@@ -6,6 +6,7 @@ use std::time::Duration;
 
 #[derive(Clone, Debug)]
 pub struct Config {
+    pub io: Io,
     pub snapshot_every: i64,
     /// Retries after the first attempt, before supervision receives the error.
     pub max_retries: usize,
@@ -14,7 +15,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { snapshot_every: 64, max_retries: 3, retry_backoff: Duration::from_millis(10) }
+        Self { io: Io::Auto, snapshot_every: 64, max_retries: 3, retry_backoff: Duration::from_millis(10) }
     }
 }
 
@@ -74,18 +75,18 @@ pub struct Rows {
     pub rows: Vec<turso::Row>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct TableHash {
     pub name: String,
     pub hash: String,
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct TableDifference {
     pub name: String,
     pub original_hash: String,
     pub fork_hash: String,
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub enum Verdict {
     Matched { tables: Vec<TableHash> },
     DivergedAt { seq: i64, idx: i64, expected: Vec<u8>, got: Vec<u8> },
@@ -170,15 +171,18 @@ impl<'de> Deserialize<'de> for ChildSpec {
     }
 }
 impl ChildSpec {
-    pub fn new(hash: &str, init: &[u8]) -> Self {
+    pub fn new(hash: &str, init: &[u8], child_type: ChildType) -> Self {
         Self {
             behavior_hash: hash.into(),
             init: init.into(),
             restart: RestartPolicy::Permanent,
-            shutdown: if hash == "supervisor-v1" { Shutdown::Infinity } else { Shutdown::Brutal },
+            shutdown: match child_type {
+                ChildType::Supervisor => Shutdown::Infinity,
+                ChildType::Worker => Shutdown::Brutal,
+            },
             link: true,
             monitor: false,
-            child_type: if hash == "supervisor-v1" { ChildType::Supervisor } else { ChildType::Worker },
+            child_type,
         }
     }
 }
@@ -197,4 +201,36 @@ pub struct TreeEntry {
     pub id: ActorId,
     pub status: Status,
     pub behavior_hash: String,
+}
+
+/// Database I/O selected explicitly for all files owned by the node.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Io {
+    #[default]
+    Auto,
+    Syscall,
+    IoUring,
+    Memory,
+}
+impl Io {
+    pub(crate) fn name(self) -> Result<&'static str> {
+        match self {
+            Self::Auto => Ok(if cfg!(target_os = "linux") { "io_uring" } else { "syscall" }),
+            Self::Syscall => Ok("syscall"),
+            Self::Memory => Ok("memory"),
+            Self::IoUring if cfg!(target_os = "linux") => Ok("io_uring"),
+            Self::IoUring => anyhow::bail!("io_uring is unavailable on {}", std::env::consts::OS),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct AssertionResult {
+    pub query: String,
+    pub passed: bool,
+}
+#[derive(Debug, Serialize)]
+pub struct ValidationResult {
+    pub verdict: Verdict,
+    pub assertions: Vec<AssertionResult>,
 }

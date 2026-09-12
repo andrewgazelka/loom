@@ -1,5 +1,5 @@
 import {expect,test} from "bun:test";
-import {diffLines,decodeText} from "../loom-ui/src/lib/text-diff";
+import {diffLines,decodeText} from "../ui/src/lib/text-diff";
 test("insertions and removals preserve unchanged context",()=>{
  expect(diffLines("a\nb\nc","a\nx\nc")).toEqual([{kind:"same",text:"a"},{kind:"removed",text:"b"},{kind:"added",text:"x"},{kind:"same",text:"c"}]);
 });

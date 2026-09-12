@@ -15,11 +15,13 @@ struct Finished {
 }
 struct Progress {
     moved: bool,
+    processed: usize,
     deadline: Option<i64>,
 }
 
 impl Node {
-    pub(crate) async fn run_until_idle_inner(&self) -> Result<()> {
+    pub(crate) async fn run_until_idle_inner(&self) -> Result<usize> {
+        let mut processed = 0;
         let mut jobs = tokio::task::JoinSet::new();
         let mut owners = HashMap::new();
         let mut running = BTreeSet::new();
@@ -42,19 +44,25 @@ impl Node {
                     let start = tokio::sync::oneshot::channel::<()>();
                     let start_tx = start.0;
                     let start_rx = start.1;
+                    let cancellation = std::sync::Arc::new(tokio::sync::Notify::new());
+                    let task_cancellation = cancellation.clone();
                     let abort = jobs.spawn(async move {
                         let _ = start_rx.await;
-                        let result = node.step(&actor_id).await;
+                        let result = node.step(&actor_id, &task_cancellation).await;
                         node.tasks.lock().await.remove(&actor_id);
                         let result = match result {
-                            Ok(moved) => node.pump(&actor_id).await.map(|pumped| Progress { moved: moved || pumped, deadline: None }),
+                            Ok(moved) => node.pump(&actor_id).await.map(|pumped| Progress {
+                                moved: moved || pumped,
+                                processed: usize::from(moved),
+                                deadline: None,
+                            }),
                             Err(error) => Err(error),
                         };
                         Finished { task: tokio::task::id(), owner: task_owner, result }
                     });
                     owners.insert(abort.id(), owner);
                     running.insert(id.clone());
-                    self.tasks.lock().await.insert(id, abort);
+                    self.tasks.lock().await.insert(id, cancellation);
                     let _ = start_tx.send(());
                 }
                 if timer_scan_needed && !timer_running {
@@ -62,8 +70,11 @@ impl Node {
                     timer_running = true;
                     let node = self.clone();
                     let abort = jobs.spawn(async move {
-                        let result =
-                            node.fire_timers().await.map(|timers| Progress { moved: timers.progressed, deadline: timers.next_deadline });
+                        let result = node.fire_timers().await.map(|timers| Progress {
+                            moved: timers.progressed,
+                            processed: 0,
+                            deadline: timers.next_deadline,
+                        });
                         Finished { task: tokio::task::id(), owner: Owner::Timers, result }
                     });
                     owners.insert(abort.id(), Owner::Timers);
@@ -83,7 +94,7 @@ impl Node {
                     timer_scan_needed = true;
                     continue;
                 }
-                return Ok(());
+                return Ok(processed);
             }
             let completed = tokio::select! {
                 completed = jobs.join_next() => completed,
@@ -108,6 +119,7 @@ impl Node {
                     }
                     match done.result {
                         Ok(progress) => {
+                            processed += progress.processed;
                             if matches!(done.owner, Owner::Timers) {
                                 deadline = progress.deadline;
                             }
@@ -123,7 +135,9 @@ impl Node {
                         }
                         Err(error) => {
                             failure = Some(error);
-                            jobs.abort_all();
+                            for signal in self.tasks.lock().await.values() {
+                                signal.notify_one();
+                            }
                         }
                     }
                 }
@@ -139,7 +153,9 @@ impl Node {
                     }
                     if !error.is_cancelled() {
                         failure = Some(error.into());
-                        jobs.abort_all();
+                        for signal in self.tasks.lock().await.values() {
+                            signal.notify_one();
+                        }
                     }
                     idle.clear();
                     timer_scan_needed = true;

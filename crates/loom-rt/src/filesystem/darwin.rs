@@ -86,7 +86,7 @@ fn record(bytes: &[u8]) -> Result<DirEntry> {
 
 pub(super) fn list(directory: &File, limit: usize) -> Result<Vec<DirEntry>> {
     let mut attributes = libc::attrlist {
-        bitmapcount: libc::ATTR_BIT_MAP_COUNT as u16,
+        bitmapcount: libc::ATTR_BIT_MAP_COUNT,
         reserved: 0,
         commonattr: libc::ATTR_CMN_RETURNED_ATTRS | libc::ATTR_CMN_NAME | libc::ATTR_CMN_OBJTYPE,
         volattr: 0,
@@ -118,7 +118,7 @@ pub(super) fn list(directory: &File, limit: usize) -> Result<Vec<DirEntry>> {
             ensure!(entries.len() < limit, "directory entry limit exceeded");
             let length = word(&buffer, offset)? as usize;
             ensure!(
-                length >= 36 && length % 4 == 0,
+                length >= 36 && length.is_multiple_of(4),
                 "invalid getattrlistbulk record length"
             );
             let end = offset

@@ -13,8 +13,7 @@ check() {
   fi
 }
 check 'Rust codec' cargo test --locked -p loom-proto --test dag_cbor
-check 'TypeScript codec' bun test ./loom-guest-ts/codec.test.ts
 check 'database migration' cargo test --locked -p loom-store --test dag_cbor_migration
-check 'native cross-language links' bash scripts/dag-cbor-e2e.sh
-printf '%s/4 DAG-CBOR gates pass; first failing step: %s\n' "$passed" "${first:-none}"
-[[ "$passed" -eq 4 ]]
+check 'native Rust links' bash scripts/dag-cbor-e2e.sh
+printf '%s/3 DAG-CBOR gates pass; first failing step: %s\n' "$passed" "${first:-none}"
+[[ "$passed" -eq 3 ]]

@@ -194,7 +194,7 @@ pub(crate) fn main(
                     recipe.source.join("Cargo.toml").display()
                 ),
             )?;
-            eprintln!("loom-rustc-cache-hit {name} {key}");
+            eprintln!("rustc-cache-hit {name} {key}");
             Ok(true)
         }
         "record" => {

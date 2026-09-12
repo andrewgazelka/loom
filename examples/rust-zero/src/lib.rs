@@ -6,7 +6,7 @@ pub fn answer() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loom::bindings::Guest;
+    use loom::core::Guest;
     #[test]
     fn zero_argument_call_uses_empty_positional_envelope() {
         let args = <AnswerInvocation as loom::Invocation>::arguments(AnswerArgs {}).unwrap();

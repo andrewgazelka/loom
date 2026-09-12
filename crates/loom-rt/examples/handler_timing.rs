@@ -5,13 +5,24 @@ use loom_store::Store;
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
-    let first = args.next().context("usage: handler_timing [--cancel-borrow] MODULE.wasm EXPECTED_BLAKE3")?;
+    let first = args
+        .next()
+        .context("usage: handler_timing [--cancel-borrow] MODULE.wasm EXPECTED_BLAKE3")?;
     let cancellation = first == "--cancel-borrow";
-    let path = if cancellation { args.next().context("cancellation module required")? } else { first };
-    let expected = args.next().context("expected compiler artifact BLAKE3 is required")?;
+    let path = if cancellation {
+        args.next().context("cancellation module required")?
+    } else {
+        first
+    };
+    let expected = args
+        .next()
+        .context("expected compiler artifact BLAKE3 is required")?;
     anyhow::ensure!(args.next().is_none(), "unexpected benchmark argument");
     let bytes = std::fs::read(&path)?;
-    anyhow::ensure!(blake3::hash(&bytes).to_hex().as_str() == expected, "benchmark module does not match the compiler artifact");
+    anyhow::ensure!(
+        blake3::hash(&bytes).to_hex().as_str() == expected,
+        "benchmark module does not match the compiler artifact"
+    );
     let runtime = Runtime::new(Store::memory()?)?;
     let mut result = if cancellation {
         // SAFETY: --cancel-borrow is a trusted diagnostic entrypoint. The

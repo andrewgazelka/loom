@@ -10,14 +10,6 @@
       "url": "https://static.rust-lang.org/dist/2026-07-09/rust-1.97.0-x86_64-unknown-linux-gnu.tar.xz",
       "hash": "sha256-HPF+SQW4QdTI4/dkZ6wUjVX7P1S/ITyG8NKHo2Rx2QQ="
     },
-    "wasip1": {
-      "url": "https://static.rust-lang.org/dist/2026-07-09/rust-std-1.97.0-wasm32-wasip1.tar.xz",
-      "hash": "sha256-fqWcZTHWCGu48mBFYCXeXwl6dgPM0tgCEACGVBZa45M="
-    },
-    "wasip2": {
-      "url": "https://static.rust-lang.org/dist/2026-07-09/rust-std-1.97.0-wasm32-wasip2.tar.xz",
-      "hash": "sha256-3yikEH2VMJvreejl0xIQ+RLS8onyYnGAxjhUr0+fS94="
-    },
     "rust-src": {
       "url": "https://static.rust-lang.org/dist/2026-07-09/rust-src-1.97.0.tar.xz",
       "hash": "sha256-8lMKzWtNolohFR41YNkIsx8ILt1paPltJoLIwsFcZrc="

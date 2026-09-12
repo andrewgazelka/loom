@@ -97,28 +97,11 @@
           runHook postInstall
         '';
       };
-  project = directory:
-    pkgs.stdenvNoCC.mkDerivation {
-      pname = directory;
-      version = "0.1.0";
-      src = packageSource directory;
-      strictDeps = true;
-      dontBuild = true;
-      installPhase = ''
-        runHook preInstall
-        mkdir -p "$out"
-        cp -R . "$out/"
-        ln -s ${dependencies directory}/node_modules "$out/node_modules"
-        runHook postInstall
-      '';
-    };
 in {
-  checker = project "loom-checker";
-  guest = project "loom-guest-ts";
   ui = pkgs.stdenvNoCC.mkDerivation {
-    pname = "loom-ui";
+    pname = "ui";
     version = "0.1.0";
-    src = packageSource "loom-ui";
+    src = packageSource "ui";
     strictDeps = true;
     nativeBuildInputs = [
       pkgs.bun
@@ -126,9 +109,9 @@ in {
     ];
     configurePhase = ''
       runHook preConfigure
-      export HOME="$TMPDIR/loom-ui-home"
+      export HOME="$TMPDIR/ui-home"
       mkdir -p "$HOME"
-      ln -s ${dependencies "loom-ui"}/node_modules node_modules
+      ln -s ${dependencies "ui"}/node_modules node_modules
       runHook postConfigure
     '';
     buildPhase = ''

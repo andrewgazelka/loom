@@ -62,6 +62,11 @@ fn main() -> ExitCode {
             destination: std::env::var_os("LOOM_ITEM_HASHES").map(PathBuf::from),
             document: None,
         };
+        let preimages = std::env::var_os("LOOM_ITEM_PREIMAGES").map(PathBuf::from);
+        if callbacks.destination.is_some() && preimages.is_none() {
+            eprintln!("hash-rustc: LOOM_ITEM_HASHES requires LOOM_ITEM_PREIMAGES=<directory>");
+            return ExitCode::FAILURE;
+        }
         if let Some(path) = &callbacks.destination
             && let Err(error) = std::fs::remove_file(path)
             && error.kind() != std::io::ErrorKind::NotFound
@@ -70,11 +75,6 @@ fn main() -> ExitCode {
                 "hash-rustc: cannot remove stale {}: {error}",
                 path.display()
             );
-            return ExitCode::FAILURE;
-        }
-        let preimages = std::env::var_os("LOOM_ITEM_PREIMAGES").map(PathBuf::from);
-        if callbacks.destination.is_some() && preimages.is_none() {
-            eprintln!("hash-rustc: LOOM_ITEM_HASHES requires LOOM_ITEM_PREIMAGES=<directory>");
             return ExitCode::FAILURE;
         }
         let args: Vec<String> = std::env::args().collect();

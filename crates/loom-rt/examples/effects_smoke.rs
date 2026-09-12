@@ -38,11 +38,7 @@ async fn main() -> Result<()> {
     let component = store.put("component", &std::fs::read(path)?)?;
     let open = register(&store, &component, None)?;
     let denied = register(&store, &component, Some(vec![]))?;
-    let caller = register(
-        &store,
-        &component,
-        Some(vec!["call".into()]),
-    )?;
+    let caller = register(&store, &component, Some(vec!["call".into()]))?;
     let runtime = Runtime::new(store.clone())?;
     let leaf = json!({"op":"cas.put","args":{"secret":42}});
     let warm = runtime.call_def(&open, json!([leaf])).await?;
@@ -76,8 +72,6 @@ async fn main() -> Result<()> {
             .observed_effects
             .is_empty()
     );
-    println!(
-        "effects native 3/3: permitted CAS, cached denial, delegated call"
-    );
+    println!("effects native 3/3: permitted CAS, cached denial, delegated call");
     Ok(())
 }

@@ -10,9 +10,9 @@ pub struct Actor {
     pub(crate) conn: Arc<Mutex<Connection>>,
 }
 
-pub(crate) async fn connect(path: &Path) -> Result<Connection> {
+pub(crate) async fn connect(path: &Path, io: crate::Io) -> Result<Connection> {
     let path = path.to_str().context("database path is not UTF-8")?;
-    let db = turso::Builder::new_local(path).experimental_vacuum(true).build().await?;
+    let db = turso::Builder::new_local(path).with_io(io.name()?.to_owned()).experimental_vacuum(true).build().await?;
     let conn = db.connect()?;
     query(&conn, "PRAGMA journal_mode=WAL", ()).await?;
     query(&conn, "PRAGMA synchronous=NORMAL", ()).await?;
@@ -86,6 +86,10 @@ impl Actor {
         let conn = self.conn.lock().await;
         query(&conn, sql, params).await.with_context(|| format!("actor {} seq -1: SQL", self.id))
     }
+    /// Inspect exactly one SELECT; reject writes before any statement executes.
+    pub async fn inspect_sql(&self, sql: &str, params: Vec<turso::Value>) -> Result<Rows> {
+        inspect_query(&*self.conn.lock().await, sql, params).await.with_context(|| format!("actor {} seq -1: SQL", self.id))
+    }
     pub async fn cursor(&self) -> Result<i64> {
         cursor(&*self.conn.lock().await).await.with_context(|| format!("actor {} seq -1: cursor", self.id))
     }
@@ -120,7 +124,8 @@ pub(crate) async fn attempt(
     behavior: &dyn Behavior,
     revision: i64,
     effects: &dyn EffectHandler,
-) -> Result<(), Trap> {
+    cancellation: Option<&tokio::sync::Notify>,
+) -> Result<bool, Trap> {
     let runtime = |e: anyhow::Error| Trap { message: format!("actor {id} seq {}: {e:#}", message.seq), runtime: true };
     let tx = conn.transaction().await.map_err(|e| runtime(e.into()))?;
     let mut cx = Ctx {
@@ -135,7 +140,17 @@ pub(crate) async fn attempt(
         sender: message.sender.clone(),
         generation: meta(&tx, "generation").await.map_err(runtime)?.parse().map_err(|e| runtime(anyhow!("invalid generation: {e}")))?,
     };
-    let result = handle(behavior, &mut cx, &message.msg).await;
+    // Cancellation is confined to the handler. Transaction completion must be
+    // driven to completion even when a kill arrives during asynchronous I/O.
+    let result = tokio::select! {
+        result = handle(behavior, &mut cx, &message.msg) => Some(result),
+        _ = async { match cancellation { Some(signal) => signal.notified().await, None => std::future::pending().await } } => None,
+    };
+    let Some(result) = result else {
+        drop(cx);
+        tx.rollback().await.map_err(|error| runtime(error.into()))?;
+        return Ok(false);
+    };
     let result = Trap::finish(cx.failure.take(), result);
     let deferred = cx.deferred;
     drop(cx);
@@ -146,11 +161,12 @@ pub(crate) async fn attempt(
     }
     if deferred {
         tx.rollback().await.map_err(|e| runtime(e.into()))?;
-        return crate::mailbox::defer(conn, id, message.seq).await;
+        return crate::mailbox::defer(conn, id, message.seq).await.map(|()| true);
     }
     crate::mailbox::complete(&tx, message.seq).await.map_err(runtime)?;
     set_meta(&tx, &format!("code_at:{}", message.seq), &revision.to_string()).await.map_err(runtime)?;
-    tx.commit().await.map_err(|e| runtime(e.into()))
+    tx.commit().await.map_err(|e| runtime(e.into()))?;
+    Ok(true)
 }
 
 pub(crate) async fn poison(
@@ -244,9 +260,16 @@ pub(crate) async fn snapshot(conn: &Connection, path: &Path, seq: i64) -> Result
     Ok(())
 }
 
-pub(crate) async fn initialize(path: &Path, id: &str, parent: &str, behavior: &dyn Behavior, msg: &[u8]) -> Result<()> {
+pub(crate) async fn initialize(
+    path: &Path,
+    id: &str,
+    parent: &str,
+    behavior: &dyn Behavior,
+    msg: &[u8],
+    io: crate::Io,
+) -> Result<Connection> {
     let staging = path.with_extension(format!("creating-{}", ulid::Ulid::new()));
-    let mut conn = connect(&staging).await?;
+    let mut conn = connect(&staging, io).await?;
     let tx = conn.transaction().await?;
     tx.execute_batch(crate::SCHEMA).await?;
     set_meta(&tx, "id", id).await?;
@@ -272,8 +295,13 @@ pub(crate) async fn initialize(path: &Path, id: &str, parent: &str, behavior: &d
         [behavior.hash(), behavior.schema()],
     )
     .await?;
-    inject(&tx, "init", parent, msg).await?;
+    if !msg.is_empty() {
+        inject(&tx, "init", parent, msg).await?;
+    }
     tx.commit().await?;
+    if io == crate::Io::Memory {
+        return Ok(conn);
+    }
     let ready = staging.with_extension("ready");
     let ready_str = ready.to_str().context("actor path is not UTF-8")?;
     conn.execute(format!("VACUUM INTO '{}'", ready_str.replace('\'', "''")), ()).await?;
@@ -284,7 +312,7 @@ pub(crate) async fn initialize(path: &Path, id: &str, parent: &str, behavior: &d
     if Path::new(&wal).exists() {
         std::fs::remove_file(wal)?;
     }
-    Ok(())
+    connect(path, io).await
 }
 
 /// Runtime notifications share an event identity across parent, link, and monitor delivery.
@@ -367,4 +395,56 @@ pub(crate) async fn stop_state(conn: &Connection, id: &str, reason: &str, key: &
     }
     set_meta(conn, &format!("applied:{key}"), "1").await?;
     Ok(())
+}
+
+pub(crate) async fn inspect_query(conn: &Connection, sql: &str, params: Vec<turso::Value>) -> Result<Rows> {
+    use turso_parser::{
+        ast::{Cmd, Stmt},
+        parser::Parser,
+    };
+    let mut parser = Parser::new(sql.as_bytes());
+    let command = parser.next_cmd()?.context("empty SQL statement")?;
+    let statement = match command {
+        Cmd::Stmt(statement) | Cmd::Explain(statement) | Cmd::ExplainQueryPlan(statement) => statement,
+    };
+    let kind = match statement {
+        Stmt::Select(_) => None,
+        Stmt::Insert { .. } => Some("insert"),
+        Stmt::Update(_) => Some("update"),
+        Stmt::Delete { .. } => Some("delete"),
+        Stmt::Pragma { .. } => Some("pragma"),
+        Stmt::Attach { .. } => Some("attach"),
+        Stmt::Detach { .. } => Some("detach"),
+        Stmt::Begin { .. } => Some("begin"),
+        Stmt::Commit { .. } => Some("commit"),
+        Stmt::Rollback { .. } => Some("rollback"),
+        Stmt::Savepoint { .. } => Some("savepoint"),
+        Stmt::Release { .. } => Some("release"),
+        Stmt::Vacuum { .. } => Some("vacuum"),
+        Stmt::Analyze { .. } => Some("analyze"),
+        Stmt::Reindex { .. } => Some("reindex"),
+        Stmt::Optimize { .. } => Some("optimize"),
+        Stmt::AlterTable(_) => Some("alter table"),
+        Stmt::CreateIndex { .. } => Some("create index"),
+        Stmt::CreateTable { .. } => Some("create table"),
+        Stmt::CreateTrigger { .. } => Some("create trigger"),
+        Stmt::CreateView { .. } => Some("create view"),
+        Stmt::CreateMaterializedView { .. } => Some("create materialized view"),
+        Stmt::CreateVirtualTable(_) => Some("create virtual table"),
+        Stmt::CreateType { .. } => Some("create type"),
+        Stmt::CreateDomain { .. } => Some("create domain"),
+        Stmt::CreateSequence { .. } => Some("create sequence"),
+        Stmt::DropIndex { .. } => Some("drop index"),
+        Stmt::DropTable { .. } => Some("drop table"),
+        Stmt::DropTrigger { .. } => Some("drop trigger"),
+        Stmt::DropView { .. } => Some("drop view"),
+        Stmt::DropType { .. } => Some("drop type"),
+        Stmt::DropDomain { .. } => Some("drop domain"),
+        Stmt::DropSequence { .. } => Some("drop sequence"),
+    };
+    if let Some(kind) = kind {
+        anyhow::bail!("read-only inspection refuses {kind} statement");
+    }
+    ensure!(parser.next_cmd()?.is_none(), "read-only inspection refuses multiple statements");
+    query(conn, sql, params).await
 }

@@ -6,7 +6,12 @@ use serde::Serialize;
 #[link(wasm_import_module = "loom")]
 unsafe extern "C" {
     #[link_name = "handle_push"]
-    pub(crate) fn host_handle_push(function: u32, data: u32, labels_ptr: u32, labels_len: u32) -> u64;
+    pub(crate) fn host_handle_push(
+        function: u32,
+        data: u32,
+        labels_ptr: u32,
+        labels_len: u32,
+    ) -> u64;
     #[link_name = "handle_pop"]
     pub(crate) fn host_handle_pop(frame: u64) -> i32;
     #[link_name = "resume"]
@@ -38,11 +43,16 @@ pub fn perform<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, Effect
         response.result
     }
     #[cfg(not(target_arch = "wasm32"))]
-    { let _ = bytes; Err("core effects require wasm32".into()) }
+    {
+        let _ = bytes;
+        Err("core effects require wasm32".into())
+    }
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
-struct HostResponse<T> { result: Result<T, String> }
+struct HostResponse<T> {
+    result: Result<T, String>,
+}
 #[cfg(any(target_arch = "wasm32", test))]
 impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for HostResponse<T> {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -52,8 +62,13 @@ impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for HostResponse<T
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
                 formatter.write_str("one host response result")
             }
-            fn visit_map<M: serde::de::MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
-                let key: String = map.next_key()?.ok_or_else(|| serde::de::Error::custom("missing host response"))?;
+            fn visit_map<M: serde::de::MapAccess<'de>>(
+                self,
+                mut map: M,
+            ) -> Result<Self::Value, M::Error> {
+                let key: String = map
+                    .next_key()?
+                    .ok_or_else(|| serde::de::Error::custom("missing host response"))?;
                 let result = match key.as_str() {
                     "ok" => Ok(map.next_value()?),
                     "error" => Err(map.next_value()?),
@@ -72,20 +87,27 @@ impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for HostResponse<T
 /// # Safety
 /// The host provides a valid immutable guest allocation for this call's duration.
 pub unsafe fn input<'a>(pointer: u32, length: u32) -> &'a [u8] {
-    if length == 0 { return &[]; }
+    if length == 0 {
+        return &[];
+    }
     unsafe { std::slice::from_raw_parts(pointer as *const u8, length as usize) }
 }
 
 #[derive(Serialize)]
 #[serde(untagged)]
-enum Response<T> { Success { ok: T }, Failure { error: String } }
+enum Response<T> {
+    Success { ok: T },
+    Failure { error: String },
+}
 
 pub fn response<T: Serialize>(result: Result<T, String>) -> u64 {
     let response = match result {
         Ok(ok) => Response::Success { ok },
         Err(error) => Response::Failure { error },
     };
-    let bytes = crate::encode(&response).expect("invalid core response").into_boxed_slice();
+    let bytes = crate::encode(&response)
+        .expect("invalid core response")
+        .into_boxed_slice();
     let length = bytes.len() as u64;
     let pointer = Box::into_raw(bytes) as *mut u8 as u32;
     (length << 32) | pointer as u64
@@ -93,7 +115,10 @@ pub fn response<T: Serialize>(result: Result<T, String>) -> u64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn loom_alloc(size: u32, align: u32) -> u32 {
-    let Ok(layout) = std::alloc::Layout::from_size_align(size.max(1) as usize, align as usize) else { return 0; };
+    let Ok(layout) = std::alloc::Layout::from_size_align(size.max(1) as usize, align as usize)
+    else {
+        return 0;
+    };
     // SAFETY: valid nonzero layout; host checks allocation failure.
     unsafe { std::alloc::alloc(layout) as u32 }
 }
@@ -102,8 +127,11 @@ pub extern "C" fn loom_alloc(size: u32, align: u32) -> u32 {
 /// Pointer and layout must match a live allocation returned by this guest.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn loom_dealloc(pointer: u32, size: u32, align: u32) {
-    let layout = std::alloc::Layout::from_size_align(size.max(1) as usize, align as usize).expect("invalid allocation layout");
-    unsafe { std::alloc::dealloc(pointer as *mut u8, layout); }
+    let layout = std::alloc::Layout::from_size_align(size.max(1) as usize, align as usize)
+        .expect("invalid allocation layout");
+    unsafe {
+        std::alloc::dealloc(pointer as *mut u8, layout);
+    }
 }
 
 /// # Safety
@@ -111,19 +139,32 @@ pub unsafe extern "C" fn loom_dealloc(pointer: u32, size: u32, align: u32) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn loom_task_run(function: u32, data: u32) {
     let run: unsafe fn(*mut ()) = unsafe { std::mem::transmute(function as usize) };
-    unsafe { run(data as *mut ()); }
+    unsafe {
+        run(data as *mut ());
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
 mod allocator {
-    use std::{alloc::{GlobalAlloc, Layout}, cell::UnsafeCell, sync::atomic::{AtomicBool, Ordering}};
-    struct SharedAllocator { locked: AtomicBool, heap: UnsafeCell<dlmalloc::Dlmalloc> }
+    use std::{
+        alloc::{GlobalAlloc, Layout},
+        cell::UnsafeCell,
+        sync::atomic::{AtomicBool, Ordering},
+    };
+    struct SharedAllocator {
+        locked: AtomicBool,
+        heap: UnsafeCell<dlmalloc::Dlmalloc>,
+    }
     // SAFETY: all allocator state access is serialized by locked. Critical
     // sections cannot invoke guest effects or suspend a Store.
     unsafe impl Sync for SharedAllocator {}
     impl SharedAllocator {
         fn with_heap<T>(&self, f: impl FnOnce(&mut dlmalloc::Dlmalloc) -> T) -> T {
-            while self.locked.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+            while self
+                .locked
+                .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_err()
+            {
                 std::hint::spin_loop();
             }
             let result = f(unsafe { &mut *self.heap.get() });
@@ -140,11 +181,16 @@ mod allocator {
         }
     }
     #[global_allocator]
-    static ALLOCATOR: SharedAllocator = SharedAllocator { locked: AtomicBool::new(false), heap: UnsafeCell::new(dlmalloc::Dlmalloc::new()) };
+    static ALLOCATOR: SharedAllocator = SharedAllocator {
+        locked: AtomicBool::new(false),
+        heap: UnsafeCell::new(dlmalloc::Dlmalloc::new()),
+    };
 }
 
 pub trait Guest {
-    fn init() -> Result<Vec<u8>, String> { Err("free definition has no actor initializer".into()) }
+    fn init() -> Result<Vec<u8>, String> {
+        Err("free definition has no actor initializer".into())
+    }
     fn call(definition: Vec<u8>, args: Vec<u8>) -> Result<Vec<u8>, String>;
     fn run(state: Vec<u8>, message: Vec<u8>) -> Result<Vec<u8>, String>;
     fn fold(state: Vec<u8>, event: Vec<u8>) -> Vec<u8>;
@@ -167,43 +213,8 @@ fn encoded_response_bytes(result: Result<Vec<u8>, String>) -> Vec<u8> {
             envelope.extend_from_slice(&bytes);
             envelope
         }
-        Err(error) => crate::encode(&Response::<()>::Failure { error })
-            .expect("invalid core response"),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn encoded_envelopes_match_typed_arrays_null_and_errors() {
-        let entries = vec![crate::DirEntry {
-            name: "file.rs".into(), size: 42, kind: crate::EntryKind::File,
-        }];
-        let typed = encoded_response_bytes(Ok(crate::encode(&entries).unwrap()));
-        assert_eq!(typed, crate::encode(&Response::Success { ok: &entries }).unwrap());
-        let decoded: HostResponse<Vec<crate::DirEntry>> = crate::decode_host(&typed).unwrap();
-        assert_eq!(decoded.result.unwrap(), entries);
-
-        let null = encoded_response_bytes(Ok(crate::encode(&()).unwrap()));
-        assert_eq!(null, crate::encode(&Response::Success { ok: () }).unwrap());
-        let decoded: HostResponse<()> = crate::decode_host(&null).unwrap();
-        assert_eq!(decoded.result, Ok(()));
-
-        let error = "task failed".to_string();
-        let failed = encoded_response_bytes(Err(error.clone()));
-        assert_eq!(failed, crate::encode(&Response::<()>::Failure { error: error.clone() }).unwrap());
-        let decoded: HostResponse<()> = crate::decode_host(&failed).unwrap();
-        assert_eq!(decoded.result, Err(error));
-    }
-
-    #[test]
-    fn malformed_guest_payloads_remain_for_strict_host_admission() {
-        for payload in [vec![0, 0], vec![0x18, 0]] {
-            let wrapped = encoded_response_bytes(Ok(payload.clone()));
-            assert_eq!(&wrapped[4..], payload);
-            assert!(crate::decode::<crate::Value>(&wrapped).is_err());
+        Err(error) => {
+            crate::encode(&Response::<()>::Failure { error }).expect("invalid core response")
         }
     }
 }
@@ -221,13 +232,23 @@ macro_rules! export_core {
             $crate::core::encoded_response(<$guest as $crate::core::Guest>::init())
         }
         #[unsafe(no_mangle)]
-        pub unsafe extern "C" fn loom_run(state: u32, state_len: u32, msg: u32, msg_len: u32) -> u64 {
+        pub unsafe extern "C" fn loom_run(
+            state: u32,
+            state_len: u32,
+            msg: u32,
+            msg_len: u32,
+        ) -> u64 {
             let state = unsafe { $crate::core::input(state, state_len) }.to_vec();
             let msg = unsafe { $crate::core::input(msg, msg_len) }.to_vec();
             $crate::core::encoded_response(<$guest as $crate::core::Guest>::run(state, msg))
         }
         #[unsafe(no_mangle)]
-        pub unsafe extern "C" fn loom_fold(state: u32, state_len: u32, event: u32, event_len: u32) -> u64 {
+        pub unsafe extern "C" fn loom_fold(
+            state: u32,
+            state_len: u32,
+            event: u32,
+            event_len: u32,
+        ) -> u64 {
             let state = unsafe { $crate::core::input(state, state_len) }.to_vec();
             let event = unsafe { $crate::core::input(event, event_len) }.to_vec();
             $crate::core::encoded_response(Ok(<$guest as $crate::core::Guest>::fold(state, event)))
@@ -240,19 +261,31 @@ macro_rules! export_core {
 /// immutable op allocation until return. Returned bytes transfer to the host,
 /// which frees them with loom_dealloc(pointer, length, 1).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn loom_handler_run(function: u32, data: u32, k: u64, op_ptr: u32, op_len: u32) -> u64 {
+pub unsafe extern "C" fn loom_handler_run(
+    function: u32,
+    data: u32,
+    k: u64,
+    op_ptr: u32,
+    op_len: u32,
+) -> u64 {
     let op = crate::decode_host(unsafe { input(op_ptr, op_len) }).expect("invalid handler effect");
     let run: crate::handlers::HandlerRun = unsafe { std::mem::transmute(function as usize) };
     let reply = unsafe { run(data as *mut (), k, op) };
     #[derive(Serialize)]
     #[serde(untagged)]
-    enum WireReply { Resume { resume: crate::Value }, Forward { forward: () }, Deferred { deferred: () } }
+    enum WireReply {
+        Resume { resume: crate::Value },
+        Forward { forward: () },
+        Deferred { deferred: () },
+    }
     let wire = match reply {
         crate::Reply::Resume(resume) => WireReply::Resume { resume },
         crate::Reply::Forward => WireReply::Forward { forward: () },
         crate::Reply::Deferred => WireReply::Deferred { deferred: () },
     };
-    let bytes = crate::encode(&wire).expect("invalid handler reply").into_boxed_slice();
+    let bytes = crate::encode(&wire)
+        .expect("invalid handler reply")
+        .into_boxed_slice();
     let length = bytes.len() as u64;
     let pointer = Box::into_raw(bytes) as *mut u8 as u32;
     (length << 32) | pointer as u64
@@ -270,11 +303,60 @@ pub unsafe extern "C" fn loom_handler_run(function: u32, data: u32, k: u64, op_p
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn loom_effect_run(pointer: u32, length: u32) -> u64 {
     #[cfg(target_arch = "wasm32")]
-    { unsafe { host_perform(pointer, length) } }
+    {
+        unsafe { host_perform(pointer, length) }
+    }
     #[cfg(not(target_arch = "wasm32"))]
     {
         let _ = pointer;
         let _ = length;
         response::<()>(Err("core effects require wasm32".into()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encoded_envelopes_match_typed_arrays_null_and_errors() {
+        let entries = vec![crate::DirEntry {
+            name: "file.rs".into(),
+            size: 42,
+            kind: crate::EntryKind::File,
+        }];
+        let typed = encoded_response_bytes(Ok(crate::encode(&entries).unwrap()));
+        assert_eq!(
+            typed,
+            crate::encode(&Response::Success { ok: &entries }).unwrap()
+        );
+        let decoded: HostResponse<Vec<crate::DirEntry>> = crate::decode_host(&typed).unwrap();
+        assert_eq!(decoded.result.unwrap(), entries);
+
+        let null = encoded_response_bytes(Ok(crate::encode(&()).unwrap()));
+        assert_eq!(null, crate::encode(&Response::Success { ok: () }).unwrap());
+        let decoded: HostResponse<()> = crate::decode_host(&null).unwrap();
+        assert_eq!(decoded.result, Ok(()));
+
+        let error = "task failed".to_string();
+        let failed = encoded_response_bytes(Err(error.clone()));
+        assert_eq!(
+            failed,
+            crate::encode(&Response::<()>::Failure {
+                error: error.clone()
+            })
+            .unwrap()
+        );
+        let decoded: HostResponse<()> = crate::decode_host(&failed).unwrap();
+        assert_eq!(decoded.result, Err(error));
+    }
+
+    #[test]
+    fn malformed_guest_payloads_remain_for_strict_host_admission() {
+        for payload in [vec![0, 0], vec![0x18, 0]] {
+            let wrapped = encoded_response_bytes(Ok(payload.clone()));
+            assert_eq!(&wrapped[4..], payload);
+            assert!(crate::decode::<crate::Value>(&wrapped).is_err());
+        }
     }
 }

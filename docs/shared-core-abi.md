@@ -1,10 +1,10 @@
 # Shared-core guest ABI
 
-Rust core definitions use `--cfg loom_core` and one imported shared memory
+Rust definitions use one imported shared memory
 per execution. The backend rebuilds `wasm32-unknown-unknown` standard libraries
 with atomics and immediate-abort panics. The stock `wasm32-wasip1-threads`
 SDK probe emitted pthread waits outside initialization, so it is rejected. Siblings are trusted code in
-one execution, not security boundaries. Component definitions retain their WIT ABI and have no scoped concurrency API.
+one execution, not security boundaries.
 
 All pointers and lengths are unsigned wasm32 values. Packed byte results use
 pointer in low 32 bits and length in high 32 bits. Except for `join_error`, byte

@@ -3,35 +3,9 @@ use axum::serve::ListenerExt;
 use clap::Parser;
 use std::{path::PathBuf, process::ExitCode, sync::Arc};
 
-#[derive(Parser)]
-struct CompilerCacheArgs {
-    #[arg(value_enum)]
-    operation: CompilerCacheOperation,
-    recipe: PathBuf,
-    mirror: PathBuf,
-}
-
-#[derive(Clone, clap::ValueEnum)]
-enum CompilerCacheOperation {
-    Lookup,
-    Record,
-}
-
 fn main() -> anyhow::Result<ExitCode> {
-    // Cargo invokes this internal mode once per compilation unit. Dispatch
-    // before starting the daemon's executor or opening its application store.
-    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("__compiler-cache")) {
-        let args = CompilerCacheArgs::parse_from(std::env::args_os().skip(1));
-        let operation = match args.operation {
-            CompilerCacheOperation::Lookup => "lookup",
-            CompilerCacheOperation::Record => "record",
-        };
-        let hit = loom_build::compiler_cache_main(operation, &args.recipe, &args.mirror)?;
-        return Ok(if hit {
-            ExitCode::SUCCESS
-        } else {
-            ExitCode::from(3)
-        });
+    if let Some(status) = loom_build::compiler_cache_entry()? {
+        return Ok(status);
     }
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -43,6 +17,8 @@ fn main() -> anyhow::Result<ExitCode> {
 struct Args {
     #[arg(long, default_value = "loom.sqlite")]
     db: PathBuf,
+    #[arg(long)]
+    actors_dir: Option<PathBuf>,
     #[arg(long, default_value = "127.0.0.1:8787")]
     bind: std::net::SocketAddr,
     #[arg(
@@ -56,8 +32,6 @@ struct Args {
     tokens_file: Option<PathBuf>,
     #[arg(long, env = "LOOM_ROOT", default_value = ".")]
     root: PathBuf,
-    #[arg(long, default_value = "ts,rust")]
-    lang: String,
     #[arg(long)]
     stdio: bool,
     #[arg(long, env = "LOOM_BACKUP_DIR")]
@@ -74,37 +48,41 @@ async fn serve() -> anyhow::Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("token required"))?,
         )?
     };
-    let languages = args
-        .lang
-        .split(',')
-        .map(|lang| match lang {
-            "ts" => Ok(loom_proto::Lang::Ts),
-            "rust" => Ok(loom_proto::Lang::Rust),
-            _ => Err(anyhow::anyhow!("unknown language {lang}")),
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    let ui = args.root.join("loom-ui/build");
+    let ui = args.root.join("ui/build");
     let backup_directory = args.backup_dir.unwrap_or_else(|| {
         args.db
             .parent()
             .unwrap_or(std::path::Path::new("."))
             .join("backups")
     });
+    let actors_dir = args.actors_dir.unwrap_or_else(|| {
+        args.db
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join("actors")
+    });
+    let node = loom_actor::Node::new(
+        actors_dir,
+        loom_actor::Registry::new(),
+        Arc::new(loom_actor::DefaultEffects),
+        loom_actor::Config::default(),
+    )
+    .await?;
     let service = Arc::new(
         loom_api::Service::new(
             loom_store::Store::open(args.db)?,
             args.root.canonicalize()?,
-            languages,
+            vec![loom_proto::Lang::Rust],
         )?
         .with_backup_directory(backup_directory),
     );
     if args.stdio {
         return tokio::select! {
-            result = loom_mcp::stdio(service) => result,
+            result = loom_mcp::stdio(service, node) => result,
             _ = shutdown.wait() => Ok(()),
         };
     }
-    let mcp = loom_api::protect(loom_mcp::router(service.clone()), authorizer.clone());
+    let mcp = loom_api::protect(loom_mcp::router(service.clone(), node), authorizer.clone());
     let app = loom_api::router(service, authorizer)
         .merge(mcp)
         .fallback_service(static_files::router(ui));
