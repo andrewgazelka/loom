@@ -9,7 +9,10 @@ fn empty_tls_exports_need_no_alignment_but_nonempty_tls_is_checked() {
 }
 #[test]
 fn shared_copy_checks_ranges_and_preserves_concurrent_atomic_access() {
-    let engine = engine().unwrap();
+    let engine = engine(Arc::new(
+        LoomCompilationCache::new(Store::memory().unwrap()).unwrap(),
+    ))
+    .unwrap();
     let memory = SharedMemory::new(&engine, wasmtime::MemoryType::shared(1, 2)).unwrap();
     copy_in(&memory, 32, &[1, 2, 3]).unwrap();
     assert_eq!(copy_out(&memory, 32, 3).unwrap(), vec![1, 2, 3]);
@@ -158,7 +161,10 @@ async fn actual_sdk_module_rendezvous() -> Result<()> {
 }
 #[test]
 fn separate_execution_memories_do_not_alias() {
-    let engine = engine().unwrap();
+    let engine = engine(Arc::new(
+        LoomCompilationCache::new(Store::memory().unwrap()).unwrap(),
+    ))
+    .unwrap();
     let first = SharedMemory::new(&engine, wasmtime::MemoryType::shared(1, 1)).unwrap();
     let second = SharedMemory::new(&engine, wasmtime::MemoryType::shared(1, 1)).unwrap();
     copy_in(&first, 64, &[42]).unwrap();

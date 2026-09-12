@@ -101,7 +101,7 @@ pub(super) fn linker(
                     match result {
                         Ok(()) => break 0,
                         Err(_) if job.detached => break 1,
-                        Err(message) => bail!("{message}"),
+                        Err(failure) => return Err(failure.into_error()),
                     }
                 }
                 tokio::select! { _ = notification => {}, _ = cancelled => bail!("shared execution cancelled"), _ = tokio::time::sleep_until(execution.deadline.into()) => bail!("shared execution deadline exceeded") }
@@ -129,7 +129,7 @@ pub(super) fn linker(
                             .context("unknown shared job")?;
                         anyhow::ensure!(job.detached, "join_error requires a detached job");
                         let message = match job.result.lock().unwrap().as_ref() {
-                            Some(Err(message)) => message.clone(),
+                            Some(Err(failure)) => failure.message.clone(),
                             _ => bail!("shared job has no error"),
                         };
                         respond(&mut caller, message.into_bytes()).await
@@ -237,11 +237,17 @@ async fn spawn(
             Ok(())
         }
         .await;
-        if result.is_err() && !child_job.detached {
+        let result = result.map_err(|error| {
+            child.original_failure().unwrap_or_else(|| {
+                ExecutionFailure::new(error.context(format!("shared job {scope}")))
+            })
+        });
+        let cancel = result.is_err() && !child_job.detached;
+        // Publish the cause before waking siblings through cancellation.
+        *child_job.result.lock().unwrap() = Some(result);
+        if cancel {
             child.cancel();
         }
-        *child_job.result.lock().unwrap() =
-            Some(result.map_err(|error| format!("shared job {scope}: {error:#}")));
         child_job.done.notify_waiters();
     })?;
     Ok(id as i64)

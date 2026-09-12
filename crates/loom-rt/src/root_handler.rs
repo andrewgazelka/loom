@@ -54,6 +54,16 @@ pub(super) fn dispatch<'a>(
     occurrence: i64,
     effects: EffectContext,
 ) -> HandlerFuture<'a> {
+    if let Some(sender) = effects.root.clone() {
+        return Box::pin(async move {
+            let descriptor = match effect_name(&desc) {
+                Ok(op) if effects.permits(op) => Ok(desc),
+                Ok(op) => Err(GuestFailure::new(format!("effect {op} is not allowed"))),
+                Err(error) => Err(GuestFailure::new(error.to_string())),
+            };
+            call::dispatch(&sender, descriptor).await
+        });
+    }
     Next {
         handlers: &HANDLERS,
     }

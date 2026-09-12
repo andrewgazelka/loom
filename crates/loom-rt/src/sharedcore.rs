@@ -26,19 +26,41 @@ const STACK_BYTES: u32 = 256 * 1024;
 const MAX_MEMORY: u64 = 256 * 1024 * 1024;
 const EXECUTION_SECONDS: u64 = 30;
 
-pub(super) fn engine() -> Result<Engine> {
+pub(super) fn engine(cache: Arc<LoomCompilationCache>) -> Result<Engine> {
     let mut config = Config::new();
     config
         .wasm_threads(true)
         .shared_memory(true)
         .epoch_interruption(true);
+    cache.configure(&mut config)?;
     Engine::new(&config).map_err(|e| anyhow::anyhow!("{e:#}"))
+}
+// Keep the classification while sharing a failure with cancelled sibling tasks.
+#[derive(Clone)]
+struct ExecutionFailure {
+    message: String,
+    guest: bool,
+}
+impl ExecutionFailure {
+    fn new(error: anyhow::Error) -> Self {
+        Self {
+            guest: error.is::<GuestFailure>(),
+            message: format!("{error:#}"),
+        }
+    }
+    fn into_error(self) -> anyhow::Error {
+        if self.guest {
+            GuestFailure::new(self.message).into()
+        } else {
+            anyhow::anyhow!(self.message)
+        }
+    }
 }
 struct Job {
     handlers: Vec<u64>,
     parent: String,
     detached: bool,
-    result: Mutex<Option<std::result::Result<(), String>>>,
+    result: Mutex<Option<std::result::Result<(), ExecutionFailure>>>,
     done: Notify,
 }
 struct ScheduledTask {
@@ -51,7 +73,7 @@ struct Execution {
     handler_round_trip_us: Mutex<Vec<f64>>,
     handlers_next: AtomicU64,
     continuations: Mutex<HashMap<u64, Arc<ContinuationState>>>,
-    handler_failure: Mutex<Option<String>>,
+    handler_failure: Mutex<Option<ExecutionFailure>>,
     runtime: Runtime,
     module: Module,
     memory: SharedMemory,
@@ -98,11 +120,29 @@ impl Drop for Cleanup {
         }
     }
 }
+impl Execution {
+    fn original_failure(&self) -> Option<ExecutionFailure> {
+        self.handler_failure.lock().unwrap().clone().or_else(|| {
+            self.jobs.lock().unwrap().values().find_map(|job| {
+                if job.detached {
+                    return None;
+                }
+                job.result
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .and_then(|result| result.as_ref().err())
+                    .cloned()
+            })
+        })
+    }
+}
 enum Invocation {
     Call { args: Vec<u8> },
     Run { state: Vec<u8>, message: Vec<u8> },
     Fold { state: Vec<u8>, event: Vec<u8> },
     Validate,
+    Schema,
 }
 impl Entry<'_> {
     fn prepare(self) -> Result<Invocation> {
@@ -119,14 +159,15 @@ impl Entry<'_> {
                 event: encode(event)?,
             },
             Self::Validate => Invocation::Validate,
+            Self::Schema => Invocation::Schema,
         })
     }
 }
 fn error(error: wasmtime::Error) -> anyhow::Error {
-    anyhow::anyhow!("{error:#}")
+    call::wasm_error(error)
 }
 fn host_error(error: anyhow::Error) -> wasmtime::Error {
-    wasmtime::Error::msg(format!("{error:#}"))
+    wasmtime::Error::from_anyhow(error)
 }
 
 fn copy_out(memory: &SharedMemory, pointer: u32, length: u32) -> Result<Vec<u8>> {
@@ -218,6 +259,7 @@ pub(super) enum Entry<'a> {
         event: &'a Value,
     },
     Validate,
+    Schema,
 }
 
 struct Buffer {

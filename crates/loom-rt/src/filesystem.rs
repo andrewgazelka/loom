@@ -141,7 +141,7 @@ impl PinnedRoot {
                 target.parent.as_raw_fd(),
                 temporary.as_ptr(),
                 libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-                // openat's mode is a C vararg; mode_t is u16 on macOS, so pass c_uint as the vararg ABI expects.
+                // mode_t is u16 on macOS; C varargs promote to int, so pass c_uint.
                 0o600 as libc::c_uint,
             )
         })?;

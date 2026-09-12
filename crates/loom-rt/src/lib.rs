@@ -1,3 +1,7 @@
+mod call;
+mod compilation_cache;
+pub use call::{CallEffects, GuestFailure};
+pub use compilation_cache::{CompilationCacheStats, LoomCompilationCache};
 mod actors;
 mod calls;
 mod commands;
@@ -37,6 +41,7 @@ struct Inner {
     resolver: Option<Arc<dyn ComponentResolver>>,
     store: Store,
     core_engine: Engine,
+    compilation_cache: Arc<LoomCompilationCache>,
     core_executor: futures::executor::ThreadPool,
     core_modules: Mutex<HashMap<String, wasmtime::Module>>,
     component_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
@@ -54,6 +59,7 @@ struct HandlerMeasurements {
 }
 #[derive(Clone, Default)]
 struct EffectContext {
+    root: Option<tokio::sync::mpsc::Sender<call::Request>>,
     def_hash: Option<String>,
     actor_id: Option<String>,
     allowed: Option<BTreeSet<String>>,
@@ -68,6 +74,7 @@ impl EffectContext {
             (None, child) => child,
         };
         Self {
+            root: self.root.clone(),
             def_hash: Some(def_hash.into()),
             actor_id: self.actor_id.clone(),
             allowed,
@@ -176,17 +183,24 @@ impl Runtime {
     pub fn new(store: Store) -> Result<Self> {
         Self::create(store, None)
     }
+    /// Candidate function-cache hits and native compiler storage diagnostics.
+    pub fn compilation_cache_stats(&self) -> CompilationCacheStats {
+        self.inner.compilation_cache.stats()
+    }
     pub fn with_resolver(store: Store, resolver: Arc<dyn ComponentResolver>) -> Result<Self> {
         Self::create(store, Some(resolver))
     }
     fn create(store: Store, resolver: Option<Arc<dyn ComponentResolver>>) -> Result<Self> {
+        let compilation_cache = Arc::new(LoomCompilationCache::new(store.clone())?);
+        let core_engine = sharedcore::engine(compilation_cache.clone())?;
         let runtime = Self {
             inner: Arc::new(Inner {
                 model: loom_model::Model::from_env(store.clone())?,
                 processes: loom_process::Supervisor::new(store.clone())?,
                 resolver,
                 store,
-                core_engine: sharedcore::engine()?,
+                core_engine,
+                compilation_cache,
                 core_executor: futures::executor::ThreadPoolBuilder::new()
                     .pool_size(8)
                     .name_prefix("loom-guest-")
