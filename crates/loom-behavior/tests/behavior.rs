@@ -2,7 +2,7 @@ mod errors;
 mod support;
 
 use loom_actor::{
-    Behavior, Config, Ctx, EffectError, EffectHandler, EffectKey, Node, Registry, Trap,
+    Behavior, Config, Ctx, EffectError, EffectHandler, EffectKey, Node, Registry, Rights, Trap,
 };
 use serde_json::json;
 use std::sync::{
@@ -132,12 +132,14 @@ async fn definition_send_goes_through_outbox() {
         .await
         .unwrap();
     node.run_until_idle().await.unwrap();
+    let cap = node.cap_for(&receiver, Rights::SEND).await.unwrap();
+    let token = serde_json::to_vec(&cap).unwrap();
     let receiving = node.open(&receiver).await.unwrap();
     let baseline = integer(&receiving, "SELECT count(*) FROM inbox").await;
     let failed = node
         .spawn_root(
             &fixtures.handler,
-            &message(json!({"action":"send","target":receiver,"trap":true})),
+            &message(json!({"action":"send","cap":token,"trap":true})),
         )
         .await
         .unwrap();
@@ -165,7 +167,7 @@ async fn definition_send_goes_through_outbox() {
     let sender = node
         .spawn_root(
             &fixtures.handler,
-            &message(json!({"action":"send","target":receiver,"trap":false})),
+            &message(json!({"action":"send","cap":token,"trap":false})),
         )
         .await
         .unwrap();
@@ -199,6 +201,80 @@ async fn definition_send_goes_through_outbox() {
         baseline + 1
     );
     assert_eq!(integer(&receiving, "SELECT count(*) FROM entries").await, 1);
+    assert_eq!(integer(&sending, "SELECT count(*) FROM caps").await, 1);
+
+    let spawning = node
+        .spawn_root(
+            &fixtures.handler,
+            &message(json!({"action":"spawn_send","behavior_hash":fixtures.handler})),
+        )
+        .await
+        .unwrap();
+    node.run_until_idle().await.unwrap();
+    let parent = node.open(&spawning).await.unwrap();
+    assert_eq!(
+        integer(&parent, "SELECT count(*) FROM dead_letters").await,
+        0
+    );
+    let children = parent
+        .sql(
+            "SELECT target FROM caps WHERE target != ?",
+            [spawning.as_str()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(children.rows.len(), 1);
+    let child_id: String = children.rows[0].get(0).unwrap();
+    let child = node.open(&child_id).await.unwrap();
+    assert_eq!(integer(&child, "SELECT count(*) FROM entries").await, 1);
+    assert_eq!(integer(&child, "SELECT count(*) FROM revoked").await, 1);
+    fixtures.assert_no_legacy_execution();
+}
+
+#[tokio::test]
+async fn guest_without_cap_cannot_send() {
+    let fixtures = fixtures().await;
+    let directory = tempfile::tempdir().unwrap();
+    let node = fixtures.node(directory.path()).await;
+    let receiver = node
+        .spawn_root(&fixtures.handler, &message(json!({"action":"init"})))
+        .await
+        .unwrap();
+    node.run_until_idle().await.unwrap();
+    let mut forged = node.cap_for(&receiver, Rights::SEND).await.unwrap();
+    forged.mac[0] ^= 1;
+    let sender = node
+        .spawn_root(
+            &fixtures.handler,
+            &message(json!({"action":"forged_send","cap":serde_json::to_vec(&forged).unwrap()})),
+        )
+        .await
+        .unwrap();
+    node.run_until_idle().await.unwrap();
+    let sending = node.open(&sender).await.unwrap();
+    let letters = sending
+        .sql("SELECT error FROM dead_letters", ())
+        .await
+        .unwrap();
+    assert_eq!(letters.rows.len(), 1);
+    let error: String = letters.rows[0].get(0).unwrap();
+    assert!(error.contains("send"), "missing operation: {error}");
+    assert!(
+        error.contains(&forged.cap_id.to_string()),
+        "missing cap_id: {error}"
+    );
+    assert_eq!(sending.cursor().await.unwrap(), 0);
+    let outbound = sending
+        .sql(
+            "SELECT count(*) FROM outbox WHERE target=?",
+            [receiver.as_str()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(outbound.rows[0].get::<i64>(0).unwrap(), 0);
+    let receiving = node.open(&receiver).await.unwrap();
+    assert_eq!(integer(&receiving, "SELECT count(*) FROM inbox").await, 1);
+    assert_eq!(integer(&receiving, "SELECT count(*) FROM entries").await, 0);
     fixtures.assert_no_legacy_execution();
 }
 

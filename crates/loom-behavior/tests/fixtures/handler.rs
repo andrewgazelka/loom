@@ -37,10 +37,36 @@ pub fn handle(msg: Vec<u8>) {
             }
         }
         "send" => {
+            let cap: loom::actor::Cap =
+                loom::serde_json::from_value(request["cap"].clone()).unwrap();
+            let cap = loom::actor::accept(cap).unwrap();
+            let token: Value = loom::serde_json::from_slice(&cap.token).unwrap();
+            let cap_id = token["cap_id"].as_u64().unwrap().to_string();
+            let restored: Vec<u8> = loom::perform("actor.cap", json!({"cap_id":cap_id})).unwrap();
+            assert_eq!(restored, cap.token);
             let body = loom::serde_json::to_vec(&json!({"action":"row","forwarded":true})).unwrap();
-            loom::perform::<()>("actor.send", json!({"target":request["target"],"msg":body}))
-                .unwrap();
+            loom::actor::send(&cap, &body).unwrap();
             assert!(request["trap"].as_bool() != Some(true), "trap after send");
+        }
+        "forged_send" => {
+            let body = loom::serde_json::to_vec(&json!({"action":"row"})).unwrap();
+            // Ignoring a capability rejection must still abort the transaction.
+            let _ = loom::perform::<()>("actor.send", json!({"cap":request["cap"],"msg":body}));
+        }
+        "spawn_send" => {
+            let init = loom::serde_json::to_vec(&json!({"action":"init"})).unwrap();
+            let cap: Vec<u8> = loom::perform(
+                "actor.spawn",
+                json!({
+                    "behavior_hash":request["behavior_hash"], "init":init
+                }),
+            )
+            .unwrap();
+            let body = loom::serde_json::to_vec(&json!({"action":"row"})).unwrap();
+            loom::perform::<()>("actor.send", json!({"cap":cap,"msg":body})).unwrap();
+            let token: Value = loom::serde_json::from_slice(&cap).unwrap();
+            let cap_id = token["cap_id"].as_u64().unwrap().to_string();
+            loom::perform::<()>("actor.revoke", json!({"cap_id":cap_id})).unwrap();
         }
         "unknown" => {
             // Swallowing a rejected root effect must not make a message commit.
@@ -55,17 +81,24 @@ pub fn handle(msg: Vec<u8>) {
         }
         "scoped_trap" => {
             loom::scope(|scope| {
-                scope.spawn(|| {
-                    loom::perform::<Vec<u8>>("test.effect", json!({"request":[1,2,3]})).unwrap();
-                    panic!("scoped fixture panic");
-                }).unwrap().join().unwrap();
+                scope
+                    .spawn(|| {
+                        loom::perform::<Vec<u8>>("test.effect", json!({"request":[1,2,3]}))
+                            .unwrap();
+                        panic!("scoped fixture panic");
+                    })
+                    .unwrap()
+                    .join()
+                    .unwrap();
             });
         }
         "handler_trap" => {
             loom::perform::<Vec<u8>>("test.effect", json!({"request":[1,2,3]})).unwrap();
-            let _ = loom::handle(["local"], |_, _| panic!("handler fixture panic"), || {
-                loom::perform::<Value>("local", Value::Null)
-            });
+            let _ = loom::handle(
+                ["local"],
+                |_, _| panic!("handler fixture panic"),
+                || loom::perform::<Value>("local", Value::Null),
+            );
         }
         action => panic!("unknown fixture action {action}"),
     }

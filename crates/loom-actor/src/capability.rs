@@ -205,6 +205,8 @@ impl Node {
         self.sign_cap(&mut cap);
         Ok(cap)
     }
+    /// Invalidates every delegated capability for this actor by advancing its epoch.
+    /// This is the actor-wide invalidation mechanism; reset preserves capability authority.
     pub async fn bump_epoch(&self, id: &str) -> Result<()> {
         let _admission = self.admit().await?;
         let actor = self.open_actor(id).await?;

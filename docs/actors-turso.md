@@ -654,3 +654,19 @@ delegation, individual and epoch revocation, reset and reopen persistence, and
 fork interception across capability operations. Together with the prior 32
 actor tests, the requested end state is 38 passing actor tests. The combined
 integration command is `cargo test -p loom-actor -p loom-mcp`.
+
+
+The `loom-behavior` bridge carries a capability as serialized UTF-8 JSON token
+bytes in the `cap` field of each Loom CBOR `actor.*` descriptor. Spawn and
+attenuation return the same bytes. A guest receives tokens in message payloads,
+calls `actor.accept` to verify and persist them, and can retrieve accepted tokens
+with `actor.cap` using a decimal-string `cap_id`; `actor.revoke` uses that same
+string representation to preserve all 64 bits through Loom descriptors. The SDK's `actor::Cap` is a named wrapper over those
+bytes; `actor::send` accepts that handle, never an actor ID. The bridge decodes
+tokens and invokes the existing cap-taking `Ctx` methods, so native and wasm
+guests share MAC, epoch, rights, revocation, and replay checks. Neither a sender
+ID nor a descriptor naming a target grants authority. Invalid tokens produce a
+deterministic dead letter naming the operation and `cap_id`, even when the guest
+ignores the returned error. `crates/loom-behavior/README.md` defines the complete
+descriptor contract; `guest_without_cap_cannot_send` exercises a forged token
+through a compiled guest and checks rollback and absence of delivery.

@@ -83,7 +83,7 @@ fn domain_name(name: &Name) -> Result<()> {
     let name = name.as_str().to_ascii_lowercase();
     ensure!(
         !crate::schema::SYSTEM_TABLES.contains(&name.as_str())
-            && !matches!(name.as_str(), "caps" | "revoked" | "restarts")
+            && name != "restarts"
             && !name.starts_with("sqlite_")
             && !name.starts_with("turso_"),
         "guest SQL refuses mutation of runtime object {name}"

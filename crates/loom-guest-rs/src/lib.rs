@@ -84,20 +84,8 @@ pub fn exec(args: Value) -> Result<Value, EffectError> {
 pub fn llm(args: Value) -> Result<Value, EffectError> {
     perform("llm", args)
 }
-pub mod actor {
-    use super::{Def, EffectError, Invocation, Value, perform};
+pub mod actor;
 
-    pub fn send(actor: &str, msg: Value) -> Result<Value, EffectError> {
-        perform("actor.send", serde_json::json!({"actor":actor,"msg":msg}))
-    }
-
-    pub fn spawn<F: Invocation>(def: Def<F>, state: Value) -> Result<Value, EffectError> {
-        perform(
-            "actor.spawn",
-            serde_json::json!({"def":def.hash,"state":state}),
-        )
-    }
-}
 pub mod fs {
     use super::*;
     pub fn list(machine: &str, path: &str) -> Result<Vec<DirEntry>, EffectError> {

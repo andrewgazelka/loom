@@ -89,8 +89,14 @@ impl ActorMcp {
             .remove(root)
             .ok_or_else(|| anyhow::anyhow!("actor {root} seq -1: missing tree root"))
     }
-    async fn rows(&self, id: &str, query: &str, params: Vec<Value>) -> Result<Value, ErrorData> {
-        let cap = self.authority(id, Rights::INSPECT, "actor_sql").await?;
+    async fn rows(
+        &self,
+        operation: &str,
+        id: &str,
+        query: &str,
+        params: Vec<Value>,
+    ) -> Result<Value, ErrorData> {
+        let cap = self.authority(id, Rights::INSPECT, operation).await?;
         let actor = self.node.open(&cap.target).await.map_err(error)?;
         let params = sql_params(params).map_err(|e| error(format!("actor {id} seq -1: {e}")))?;
         rows_json(actor.inspect_sql(query, params).await.map_err(error)?).map_err(error)
@@ -112,7 +118,7 @@ impl ActorMcp {
                 "lineage" => "SELECT * FROM code_changes ORDER BY seq",
                 _ => return Err(error(format!("actor {id} seq -1: unknown resource {kind}"))),
             };
-            self.rows(id, query, vec![]).await?
+            self.rows(uri, id, query, vec![]).await?
         };
         Ok(ReadResourceResult {
             contents: vec![ResourceContents::text(value.to_string(), uri)],
@@ -410,6 +416,7 @@ impl LoomMcp {
         let rows = self
             .actors
             .rows(
+                "actor_promote",
                 &args.id,
                 "SELECT * FROM code_changes ORDER BY seq DESC LIMIT 1",
                 vec![],
@@ -458,7 +465,12 @@ impl LoomMcp {
         self.actor_access(&context, Scope::Read)?;
         json_text(
             self.actors
-                .rows(&args.id, "SELECT * FROM code_changes ORDER BY seq", vec![])
+                .rows(
+                    "actor_lineage",
+                    &args.id,
+                    "SELECT * FROM code_changes ORDER BY seq",
+                    vec![],
+                )
                 .await?,
         )
     }
@@ -474,7 +486,12 @@ impl LoomMcp {
         self.actor_access(&context, Scope::Read)?;
         json_text(
             self.actors
-                .rows(&args.id, "SELECT * FROM dead_letters ORDER BY seq", vec![])
+                .rows(
+                    "actor_dead_letters",
+                    &args.id,
+                    "SELECT * FROM dead_letters ORDER BY seq",
+                    vec![],
+                )
                 .await?,
         )
     }
@@ -531,7 +548,12 @@ impl LoomMcp {
         self.actor_access(&context, Scope::Read)?;
         json_text(
             self.actors
-                .rows(&args.id, &args.query, args.params.unwrap_or_default())
+                .rows(
+                    "actor_sql",
+                    &args.id,
+                    &args.query,
+                    args.params.unwrap_or_default(),
+                )
                 .await?,
         )
     }

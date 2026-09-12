@@ -1,0 +1,27 @@
+//! Actor authority is opaque token bytes obtained from messages or spawning.
+use crate::{Def, EffectError, Invocation, perform};
+
+/// Host-authenticated token. Deserialization alone does not validate authority.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct Cap {
+    pub token: Vec<u8>,
+}
+
+pub fn send(cap: &Cap, msg: &[u8]) -> Result<(), EffectError> {
+    perform("actor.send", serde_json::json!({"cap":cap,"msg":msg}))
+}
+
+/// Verify and persist a capability received in a message, returning its handle.
+pub fn accept(cap: Cap) -> Result<Cap, EffectError> {
+    perform::<()>("actor.accept", serde_json::json!({"cap":cap}))?;
+    Ok(cap)
+}
+
+/// Spawn a worker using ChildSpec's host-owned restart, link, and shutdown defaults.
+pub fn spawn<F: Invocation>(def: Def<F>, init: &[u8]) -> Result<Cap, EffectError> {
+    perform(
+        "actor.spawn",
+        serde_json::json!({"behavior_hash":def.hash,"init":init,"type":"worker"}),
+    )
+}

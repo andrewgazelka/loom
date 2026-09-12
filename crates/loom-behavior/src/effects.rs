@@ -1,23 +1,23 @@
 use crate::wire::{self, Descriptor, Mode, parse, value};
-use loom_actor::{Ctx, RestartVerb, Trap, Value as SqlValue};
+use loom_actor::{Ctx, RestartVerb, Rights, Trap, Value as SqlValue};
 use serde::Deserialize;
 use serde_json::Value;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Target {
-    target: String,
+    cap: wire::Capability,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Send {
-    target: String,
+    cap: wire::Capability,
     msg: Vec<u8>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Stop {
-    target: String,
+    cap: wire::Capability,
     reason: String,
 }
 #[derive(Deserialize)]
@@ -44,29 +44,55 @@ struct TrapExit {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Restart {
-    target: String,
+    cap: wire::Capability,
     verb: RestartVerb,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SendAfter {
-    target: String,
+    cap: wire::Capability,
     ms: u64,
     msg: Vec<u8>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Call {
-    target: String,
+    cap: wire::Capability,
     msg: Vec<u8>,
     timeout_ms: u64,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Reply {
-    from: String,
+    cap: wire::Capability,
     reference: String,
     msg: Vec<u8>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Attenuate {
+    cap: wire::Capability,
+    rights: Rights,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CapId {
+    cap_id: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InspectSql {
+    cap: wire::Capability,
+    sql: String,
+    params: Vec<wire::Cell>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Promote {
+    cap: wire::Capability,
+    behavior_hash: String,
+    author: String,
+    rationale: String,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -102,9 +128,50 @@ pub async fn dispatch(
             let rows = cx.sql(&request.sql, params).await?;
             wire::rows(cx, rows)
         }
+        "actor.accept" => {
+            let request: Target = parse(&op, args)?;
+            cx.accept(request.cap.token).await?;
+            Ok(Value::Null)
+        }
+        "actor.attenuate" => {
+            let request: Attenuate = parse(&op, args)?;
+            wire::capability_value(cx.attenuate(&request.cap.token, request.rights).await?)
+        }
+        "actor.cap" => {
+            let request: CapId = parse(&op, args)?;
+            wire::capability_value(cx.cap(wire::cap_id(&op, &request.cap_id)?).await?)
+        }
+        "actor.revoke" => {
+            let request: CapId = parse(&op, args)?;
+            cx.revoke(wire::cap_id(&op, &request.cap_id)?).await?;
+            Ok(Value::Null)
+        }
+        "actor.self_cap" => {
+            parse::<()>(&op, args)?;
+            wire::capability_value(cx.self_cap().await?)
+        }
+        "actor.promote" => {
+            let request: Promote = parse(&op, args)?;
+            cx.promote(
+                &request.cap.token,
+                &request.behavior_hash,
+                &request.author,
+                &request.rationale,
+            )
+            .await?;
+            Ok(Value::Null)
+        }
+        "actor.inspect_sql" => {
+            let request: InspectSql = parse(&op, args)?;
+            let params = request.params.into_iter().map(Into::into).collect();
+            wire::inspection(
+                cx.inspect_sql(&request.cap.token, &request.sql, params)
+                    .await?,
+            )
+        }
         "actor.send" => {
             let request: Send = parse(&op, args)?;
-            cx.send(&request.target, &request.msg).await?;
+            cx.send(&request.cap.token, &request.msg).await?;
             Ok(Value::Null)
         }
         "actor.spawn" => {
@@ -112,16 +179,16 @@ pub async fn dispatch(
             if spec.behavior_hash == "$self" {
                 spec.behavior_hash = definition.into();
             }
-            value(cx.spawn(&spec).await?)
+            wire::capability_value(cx.spawn(&spec).await?)
         }
         "actor.stop" => {
             let request: Stop = parse(&op, args)?;
-            cx.stop(&request.target, &request.reason).await?;
+            cx.stop(&request.cap.token, &request.reason).await?;
             Ok(Value::Null)
         }
         "actor.monitor" => {
             let request: Target = parse(&op, args)?;
-            value(cx.monitor(&request.target).await?)
+            value(cx.monitor(&request.cap.token).await?)
         }
         "actor.demonitor" => {
             let request: Demonitor = parse(&op, args)?;
@@ -130,17 +197,17 @@ pub async fn dispatch(
         }
         "actor.link" => {
             let request: Target = parse(&op, args)?;
-            cx.link(&request.target).await?;
+            cx.link(&request.cap.token).await?;
             Ok(Value::Null)
         }
         "actor.unlink" => {
             let request: Target = parse(&op, args)?;
-            cx.unlink(&request.target).await?;
+            cx.unlink(&request.cap.token).await?;
             Ok(Value::Null)
         }
         "actor.shutdown" => {
             let request: Target = parse(&op, args)?;
-            cx.shutdown(&request.target).await?;
+            cx.shutdown(&request.cap.token).await?;
             Ok(Value::Null)
         }
         "actor.exit" => {
@@ -155,17 +222,17 @@ pub async fn dispatch(
         }
         "actor.restart" => {
             let request: Restart = parse(&op, args)?;
-            cx.restart(&request.target, request.verb).await?;
+            cx.restart(&request.cap.token, request.verb).await?;
             Ok(Value::Null)
         }
         "actor.inspect" => {
             let request: Target = parse(&op, args)?;
-            value(cx.inspect(&request.target).await?)
+            value(cx.inspect(&request.cap.token).await?)
         }
         "actor.send_after" => {
             let request: SendAfter = parse(&op, args)?;
             value(
-                cx.send_after(&request.target, request.ms, &request.msg)
+                cx.send_after(&request.cap.token, request.ms, &request.msg)
                     .await?,
             )
         }
@@ -181,13 +248,13 @@ pub async fn dispatch(
         "actor.call" => {
             let request: Call = parse(&op, args)?;
             value(
-                cx.call(&request.target, &request.msg, request.timeout_ms)
+                cx.call(&request.cap.token, &request.msg, request.timeout_ms)
                     .await?,
             )
         }
         "actor.reply" => {
             let request: Reply = parse(&op, args)?;
-            cx.reply(&request.from, &request.reference, &request.msg)
+            cx.reply(&request.cap.token, &request.reference, &request.msg)
                 .await?;
             Ok(Value::Null)
         }

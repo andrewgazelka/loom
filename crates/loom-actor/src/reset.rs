@@ -55,6 +55,8 @@ impl Node {
             tx.execute("INSERT INTO code_changes(seq,behavior_hash,parent_hash,author,rationale,schema_sql) VALUES (?,?,?,?,?,?)", values)
                 .await?;
         }
+        // Carry caps and revoked across reset to preserve delegated authority and
+        // revocation continuity; only bump_epoch invalidates all existing caps.
         for table in ["links", "monitors", "monitored_by", "caps", "revoked"] {
             let rows = actor::query(conn, &format!("SELECT * FROM {table} ORDER BY rowid"), ()).await?;
             for row in rows.rows {
