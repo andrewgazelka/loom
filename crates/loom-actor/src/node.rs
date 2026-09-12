@@ -231,6 +231,7 @@ impl Node {
             if name == "_node"
                 || name.contains(".snap.")
                 || name.contains(".reset.")
+                // Stale files are preserved by design; never listed; removed only by an operator.
                 || name.contains(".stale.")
                 || name.contains(".remote-base")
             {

@@ -125,6 +125,7 @@ async fn ship_and_restore_on_fresh_node() {
     process(&a, &id, 5).await;
     a.ship(&id).await.unwrap();
     assert_eq!(head(&store, &id)["seq"], 5);
+    assert_eq!(head(&store, &id)["snapshot"], format!("actors/{id}/snapshots/1-0.db"));
     assert!(!head(&store, &id)["segments"].as_array().unwrap().is_empty());
     let mut spec = ChildSpec::new("terminating-counter", b"before-stop", ChildType::Worker);
     spec.link = false;

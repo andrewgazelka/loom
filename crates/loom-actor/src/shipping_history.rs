@@ -199,6 +199,7 @@ impl Node {
         id: &str,
         destination: &Path,
         snapshot_revision: i64,
+        head_seq: i64,
     ) -> Result<()> {
         let suffix = crate::ids::root();
         let source_path = destination.with_extension(format!("{suffix}.source"));
@@ -219,13 +220,17 @@ impl Node {
             "actor {id}: snapshot revision differs from head"
         );
         let snapshot_cursor = actor::cursor(&target).await?;
-        let mut previous = None;
+        let mut previous = snapshot_revision;
         for bytes in segments {
             let segment = Segment::decode(bytes)?;
-            if let Some(previous) = previous {
-                ensure!(segment.from_seq == previous + 1, "actor {id}: history segment publication gap");
-            }
-            previous = Some(segment.to_seq);
+            let expected = previous.checked_add(1).context("history revision overflow")?;
+            ensure!(
+                segment.from_seq == expected && segment.to_seq <= head_seq,
+                "actor {id}: history segment publication gap: expected from_seq {expected}, segment from_seq {} to_seq {}, head.seq {head_seq}",
+                segment.from_seq,
+                segment.to_seq
+            );
+            previous = segment.to_seq;
             segment.apply(&mut source).await?;
         }
         ensure!(actor::meta(&source, "id").await? == id, "actor {id}: segment identity mismatch");
@@ -240,7 +245,7 @@ impl Node {
         if let Some(verdict) = self.replay(&source, &mut target, id, cursor, &effects, ReplayMode::Remote).await? {
             anyhow::bail!("actor {id}: remote history replay failed: {verdict:?}");
         }
-        Segment::capture(&source, 0, previous.unwrap_or(0)).await?.apply_full(&mut target).await?;
+        Segment::capture(&source, 0, previous).await?.apply_full(&mut target).await?;
         target.execute("DELETE FROM snapshots", ()).await?;
         target
             .execute(

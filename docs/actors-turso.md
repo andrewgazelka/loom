@@ -441,7 +441,8 @@ fencing. S3 uses `Create` / `If-None-Match: *` and `Update(UpdateVersion)` /
 `If-Match`, preserving both returned version fields.
 
 `ChildSpec.durability` defaults to `Local` and is persisted as the actor's
-`durability` meta key. A Local message commits locally; the node ships at
+`durability` meta key at spawn. It is immutable: no setter exists, and reset
+carries it forward. A Local message commits locally; the node ships at
 `Config.ship_interval`, default one second, and on `Node::close`. A Remote message
 publishes its prepared transaction's segment and conditional head before the
 local transaction completes. If publication fails, SQL changes roll back and the
@@ -452,12 +453,13 @@ existing actor/generation/sequence/index key.
 
 The store layout is:
 
-- `actors/<id>/snapshots/<seq>.db`: a complete `VACUUM INTO` snapshot.
+- `actors/<id>/snapshots/<epoch>-<seq>.db`: a complete `VACUUM INTO` snapshot.
 - `actors/<id>/segments/<epoch>-<from_seq>-<to_seq>.bin`: canonical tagged JSON
   row additions and removals for inbox, effects, outbox, code changes and runtime
   bookkeeping. Integer values, blobs, nulls and floating-point bits remain exact.
-- `actors/<id>/head`: JSON `{epoch, seq, snapshot_seq, segments}`. Its cached
-  version is the condition on every head update.
+- `actors/<id>/head`: JSON `{epoch, seq, snapshot_seq, snapshot, segments}`. Its cached
+  version is the condition on every head update. `snapshot` holds the full object
+  key (null before the initial snapshot), including the epoch that wrote it.
 - `actors/<id>/lease`: JSON `{owner, epoch, expires_at}`. Expiry is Unix time in
   milliseconds; owner identities are generated per Node instance.
 

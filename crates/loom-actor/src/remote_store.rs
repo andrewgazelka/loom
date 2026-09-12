@@ -34,6 +34,7 @@ pub(crate) struct Head {
     pub epoch: u64,
     pub seq: i64,
     pub snapshot_seq: i64,
+    pub snapshot: Option<String>,
     pub segments: Vec<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -164,7 +165,7 @@ impl RemoteStore {
                 self.lost(id, epoch)
             );
             let old = self.read::<Head>(&head_key).await?;
-            let mut head = Head { epoch, seq: 0, snapshot_seq: -1, segments: Vec::new() };
+            let mut head = Head { epoch, seq: 0, snapshot_seq: -1, snapshot: None, segments: Vec::new() };
             let mode = if let Some(old) = old {
                 ensure!(old.value.epoch <= epoch, self.lost(id, epoch));
                 head = old.value;

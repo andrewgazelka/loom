@@ -102,10 +102,11 @@ impl Node {
             std::fs::remove_file(&path)?;
         }
         conn.execute(format!("VACUUM INTO '{}'", path.to_str().context("snapshot path is not UTF-8")?.replace('\'', "''")), ()).await?;
-        let result = store.put(&format!("actors/{id}/snapshots/{seq}.db"), std::fs::read(&path)?).await;
+        let key = format!("actors/{id}/snapshots/{}-{seq}.db", previous.head.epoch);
+        let result = store.put(&key, std::fs::read(&path)?).await;
         std::fs::remove_file(&path)?;
         result?;
-        let head = Head { epoch: previous.head.epoch, seq, snapshot_seq: seq, segments: Vec::new() };
+        let head = Head { epoch: previous.head.epoch, seq, snapshot_seq: seq, snapshot: Some(key), segments: Vec::new() };
         store.publish(id, head.clone()).await?;
         self.shipping.put(
             id,
@@ -228,10 +229,12 @@ impl Node {
                 std::fs::remove_file(&path)?;
             }
             conn.execute(format!("VACUUM INTO '{}'", path.to_str().context("snapshot path is not UTF-8")?.replace('\'', "''")), ()).await?;
-            let result = store.put(&format!("actors/{id}/snapshots/0.db"), std::fs::read(&path)?).await;
+            let key = format!("actors/{id}/snapshots/{}-0.db", published.head.epoch);
+            let result = store.put(&key, std::fs::read(&path)?).await;
             std::fs::remove_file(&path)?;
             result?;
             published.head.snapshot_seq = 0;
+            published.head.snapshot = Some(key);
             store.publish(id, published.head.clone()).await?;
             published.changes = Some(changes(conn).await?);
             self.shipping.put(id, published.clone())?;
