@@ -3,8 +3,10 @@ mod rust_file;
 use rust_file::check_rust_file;
 mod crates;
 pub use crates::{CrateDependency, crate_dependencies};
+mod driver_effects;
 mod handler_references;
 mod rust_effects;
+pub use driver_effects::{DriverEffectRow, DriverEffects, UnknownEffect};
 mod safety;
 use loom_proto::{DefineRequest, Diagnostic, ExportSig, Lang, ParamSig, TypeSig, ValueShape};
 pub use safety::{
@@ -29,6 +31,8 @@ pub enum CheckError {
     Io(#[from] std::io::Error),
     #[error("checker protocol: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("checker effect contract: {0}")]
+    Effects(String),
 }
 #[derive(Default)]
 pub struct Checker;
@@ -36,6 +40,8 @@ impl Checker {
     pub fn new() -> Self {
         Self
     }
+    /// Check source structure. Finalize pending effect rows with
+    /// `CheckedDef::apply_driver_effects_json` before admitting executable code.
     pub async fn check(&self, request: &DefineRequest) -> Result<CheckedDef, CheckError> {
         self.check_with_signatures(request, &BTreeMap::new()).await
     }
@@ -153,7 +159,7 @@ impl SourceBundle {
 }
 fn check_rust(request: &DefineRequest, signatures: &BTreeMap<String, TypeSig>) -> CheckedDef {
     if !request.source.trim_start().starts_with('{') {
-        return check_rust_file(request, signatures);
+        return check_rust_file(request, signatures, true);
     }
     let mut checked = CheckedDef {
         hash: String::new(),
@@ -238,7 +244,7 @@ fn check_rust(request: &DefineRequest, signatures: &BTreeMap<String, TypeSig>) -
                 deps: checked.deps.clone(),
                 allowed_effects: request.allowed_effects.clone(),
             };
-            let file = check_rust_file(&file_request, signatures);
+            let file = check_rust_file(&file_request, signatures, name == "src/lib.rs");
             checked.deps.extend(file.deps.clone());
             *source = file.source;
             if name == "src/lib.rs" {
@@ -250,50 +256,6 @@ fn check_rust(request: &DefineRequest, signatures: &BTreeMap<String, TypeSig>) -
                     error.file = name.clone();
                     error
                 }));
-        }
-    }
-    fn opaque_dependencies(value: &toml::Value, known: &BTreeMap<String, TypeSig>) -> bool {
-        let Some(table) = value.as_table() else {
-            return false;
-        };
-        table.iter().any(|(name, value)| {
-            if ["dependencies", "build-dependencies", "dev-dependencies"].contains(&name.as_str()) {
-                value.as_table().is_some_and(|dependencies| {
-                    dependencies.iter().any(|(name, _)| {
-                        !["serde", "serde_json", "loom"].contains(&name.as_str())
-                            && !known.contains_key(name)
-                    })
-                })
-            } else {
-                opaque_dependencies(value, known)
-            }
-        })
-    }
-    if manifest
-        .get("loom")
-        .and_then(|loom| loom.get("crates"))
-        .and_then(toml::Value::as_table)
-        .is_some_and(|crates| !crates.is_empty())
-        || opaque_dependencies(&manifest, signatures)
-        || manifest
-            .get("package")
-            .and_then(|package| package.get("build"))
-            .is_some()
-        || bundle.files.contains_key("build.rs")
-    {
-        checked.sig.effects.unknown = true;
-        for export in &mut checked.sig.exports {
-            export.effects.unknown = true;
-            if export.effects.declared.is_none() {
-                checked.diagnostics.push(diagnostic(
-                    Lang::Rust,
-                    "LOOM_EFFECT_ROW",
-                    &format!(
-                        "{} has unknown dependency effects; declare its residual host row",
-                        export.name
-                    ),
-                ));
-            }
         }
     }
     match serde_json::to_string(&bundle) {

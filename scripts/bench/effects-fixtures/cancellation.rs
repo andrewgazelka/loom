@@ -1,6 +1,5 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
-#[loom::def(effects = ["now"])]
 pub fn main() -> loom::Value {
     let borrowed = AtomicU32::new(0);
     loom::handle(["bench.borrow"], |effect, _| {
@@ -11,7 +10,7 @@ pub fn main() -> loom::Value {
         // never guesses SDK closure layout or adds a diagnostic guest import.
         let address = &borrowed as *const AtomicU32 as usize;
         let _: loom::Value = loom::perform("now",
-            loom::serde_json::json!({"borrow_address": address})).expect("witness");
+            { let mut map=loom::serde_json::Map::new(); map.insert("borrow_address".into(), loom::serde_json::to_value(address).expect("encode value")); loom::Value::Object(map) }).expect("witness");
         loop {
             borrowed.fetch_add(1, Ordering::SeqCst);
             std::hint::spin_loop();

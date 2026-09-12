@@ -4,12 +4,14 @@ mod definitions;
 mod effect_index;
 mod effects;
 mod events;
+mod identity;
 mod language;
 mod legacy;
 mod machine;
 mod migration;
 mod objects;
 mod projections;
+mod publication;
 mod recording;
 #[cfg(test)]
 mod tests;

@@ -3,7 +3,7 @@ use super::{
     support::{fixtures, integer},
 };
 use async_trait::async_trait;
-use loom_actor::{Behavior, EffectError, EffectHandler, EffectKey, Registry};
+use loom_actor::{EffectError, EffectHandler, EffectKey, Registry};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 
@@ -121,16 +121,29 @@ async fn environmental_effect_error_retries_even_when_guest_ignores_it() {
 }
 
 #[tokio::test]
+async fn resolution_reads_root_schema_constant() {
+    let fixtures = fixtures().await;
+    let registry = loom_behavior::StoreRegistry::new(fixtures.store.clone());
+    let behavior = registry.resolve(&fixtures.handler).await.unwrap();
+    assert_eq!(
+        behavior.schema(),
+        "CREATE TABLE entries(body BLOB NOT NULL)"
+    );
+    let promoted = registry.resolve(&fixtures.promoted).await.unwrap();
+    assert_eq!(
+        promoted.schema(),
+        "ALTER TABLE entries ADD COLUMN revision TEXT"
+    );
+    fixtures.assert_no_legacy_execution();
+}
+
+#[tokio::test]
 async fn definition_without_schema_exports_empty_schema() {
     let fixtures = fixtures().await;
-    let mut registry = Registry::new();
-    let behavior =
-        loom_behavior::register(&mut registry, fixtures.store.clone(), &fixtures.no_schema)
-            .await
-            .unwrap();
+    let registry = loom_behavior::StoreRegistry::new(fixtures.store.clone());
+    let behavior = registry.resolve(&fixtures.no_schema).await.unwrap();
     assert_eq!(behavior.hash(), fixtures.no_schema);
     assert_eq!(behavior.schema(), "");
-    assert!(registry.contains_key(&fixtures.no_schema));
     fixtures.assert_no_legacy_execution();
 }
 
@@ -138,15 +151,15 @@ async fn definition_without_schema_exports_empty_schema() {
 async fn missing_stored_definition_error_names_the_hash() {
     let directory = tempfile::tempdir().unwrap();
     let store = loom_store::Store::open(directory.path().join("empty.sqlite")).unwrap();
-    let mut registry = Registry::new();
+    let registry = loom_behavior::StoreRegistry::new(store);
     let missing = "0".repeat(64);
-    let error = match loom_behavior::register(&mut registry, store, &missing).await {
-        Ok(_) => panic!("registered a missing definition"),
+    let error = match registry.resolve(&missing).await {
+        Ok(_) => panic!("resolved a missing definition"),
         Err(error) => error,
     };
     assert!(
         format!("{error:#}").contains(&missing),
         "missing definition identity: {error:#}"
     );
-    assert!(registry.is_empty());
+    assert!(registry.behaviors().await.unwrap().is_empty());
 }

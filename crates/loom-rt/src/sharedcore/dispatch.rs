@@ -8,8 +8,55 @@ impl Runtime {
         scope: &str,
         effects: &EffectContext,
     ) -> Result<EncodedCall> {
-        self.core_execute(hash, scope, effects, false, Entry::Call { args })
-            .await
+        self.core_call_entry(hash, None, args, scope, effects).await
+    }
+    pub(crate) async fn core_call_entry(
+        &self,
+        hash: &str,
+        selected: Option<&str>,
+        args: &Value,
+        scope: &str,
+        effects: &EffectContext,
+    ) -> Result<EncodedCall> {
+        let definition = self
+            .inner
+            .store
+            .executable_definition(hash)?
+            .with_context(|| format!("definition {hash:?} not found"))?;
+        let entry = match selected {
+            Some(name) => definition
+                .sig
+                .exports
+                .iter()
+                .find(|entry| entry.name == name),
+            None if definition.sig.exports.len() == 1 => definition.sig.exports.first(),
+            None => None,
+        }
+        .with_context(|| {
+            format!(
+                "definition {hash:?} requires an entry name; candidates: {}",
+                definition
+                    .sig
+                    .exports
+                    .iter()
+                    .map(|entry| entry.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?;
+        let export = format!("loom_call_{}", entry.name);
+        let effects = effects.clone().with_inferred(&entry.effects.labels);
+        self.core_execute(
+            hash,
+            scope,
+            &effects,
+            false,
+            Entry::Call {
+                args,
+                export: &export,
+            },
+        )
+        .await
     }
     pub(crate) async fn core_execute(
         &self,
@@ -118,7 +165,7 @@ impl Runtime {
             memory,
             effects: effects
                 .delegated(hash, definition.allowed_effects.as_deref())
-                .with_declared(definition.sig.effects.declared.as_deref()),
+                .with_inferred(&definition.sig.effects.labels),
             pure,
             jobs: Mutex::new(HashMap::new()),
             tasks: Mutex::new(Vec::new()),

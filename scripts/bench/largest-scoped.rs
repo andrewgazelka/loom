@@ -1,12 +1,14 @@
-#[derive(serde::Serialize, serde::Deserialize)]
-pub struct Winner {
+struct Winner {
     path: String,
     size: i64,
 }
 
-#[loom::def(effects=["fs.list"])]
-pub fn main(machine: String, path: String) -> Winner {
-    scan(&machine, &path)
+pub fn main(machine: String, path: String) -> loom::Value {
+    let winner = scan(&machine, &path);
+    let mut result = loom::serde_json::Map::new();
+    result.insert("path".into(), winner.path.into());
+    result.insert("size".into(), winner.size.into());
+    loom::Value::Object(result)
 }
 
 fn scan(machine: &str, path: &str) -> Winner {
@@ -19,11 +21,11 @@ fn scan(machine: &str, path: &str) -> Winner {
             match entry.kind {
                 loom::EntryKind::Directory => {
                     let name = entry.name;
-                    let full = format!("{path}/{name}");
+                    let full = [path, "/", &name].concat();
                     jobs.push(scope.spawn(move || {
                         let mut child = scan(machine, &full);
                         if child.size >= 0 {
-                            child.path = format!("{name}/{}", child.path);
+                            child.path = [&name, "/", &child.path].concat();
                         }
                         child
                     }).expect("spawn failed"));

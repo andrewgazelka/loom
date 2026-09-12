@@ -58,13 +58,14 @@ See [the guide's Try it section](docs/guide.md#try-it) for transport details and
 
 ## Effects
 
+Effect rows are inferred from resolved calls, including concrete trait and generic calls. A runtime-selected `perform` label is rejected with its call site; use a literal or Rust constant label.
+
 Calling an effect performs it. A handler can supply a value, forward to an outer
 handler, or keep a one-shot continuation to resume later:
 
 ```rust
 use loom::sleep;
 
-#[loom::def(effects = ["sleep"])]
 pub fn main() {
     loom::scope(|s| {
         let a = s.spawn(|| sleep(100)).expect("spawn");
@@ -76,7 +77,12 @@ pub fn main() {
 ```
 
 The two scoped children run concurrently, so their sleeps overlap; `scope` waits for
-both before returning. The guest-handler round trip (install, dispatch, resume,
+both before returning. Guest code has no macros and no effect declarations: an entry is
+any `pub fn` at the crate root, and the set of host effects a definition can reach (its
+effect row, here `["sleep"]`) is inferred from the resolved call graph by the same rustc
+driver that computes its content hash, shown by `add` and `view`, and enforced by the
+host at run time. A `perform` whose label is not a literal or a const is a compile error
+at that line. The guest-handler round trip (install, dispatch, resume,
 remove) measured **13.811 µs median, 24.356 µs p99** over 10,000 warm calls on Linux,
 September 10, 2026. Reproduce with `bun scripts/bench/effects-handlers.ts`. See
 [docs/guide.md](docs/guide.md) for handler installation and
@@ -116,31 +122,17 @@ graph TD
     B2 -->|restart resume| B3[Worker B running, retries seq 5]
 ```
 
-A `Behavior` is a plain Rust value:
+Actor behaviors are stored Rust definitions. Add one, then spawn it by its returned
+hash or name on the running node. Every crate-root `pub fn` is an entry; effect
+rows are inferred by the driver.
 
 ```rust
-use async_trait::async_trait;
-use loom_actor::{Behavior, Ctx, Trap};
-
-pub struct Counter;
-
-#[async_trait]
-impl Behavior for Counter {
-    fn hash(&self) -> &str {
-        "counter-v1"
-    }
-
-    fn schema(&self) -> &str {
-        "CREATE TABLE IF NOT EXISTS entries(seq INTEGER, body BLOB)"
-    }
-
-    async fn handle(&self, cx: &mut Ctx<'_>, msg: &[u8]) -> Result<(), Trap> {
-        if msg == b"poison" {
-            return Err(Trap::new("counter rejects poison"));
-        }
-        cx.sql("INSERT INTO entries(seq, body) VALUES (?1, ?2)", turso::params![cx.seq(), msg]).await?;
-        Ok(())
-    }
+pub const LOOM_SCHEMA: &str = "CREATE TABLE arrivals(value INTEGER)";
+pub fn handle(_message: Vec<u8>) {
+    let args: loom::serde_json::Value = loom::serde_json::from_str(
+        "{\"sql\":\"INSERT INTO arrivals VALUES (42)\",\"params\":[]}"
+    ).unwrap();
+    let _: loom::serde_json::Value = loom::perform("sql", args).unwrap();
 }
 ```
 
@@ -152,27 +144,34 @@ hot-load sweep across every actor on a hash are in
 ## Hook in over MCP
 
 `loomd` also serves actors as MCP tools, so a coding agent can inspect and drive the
-supervision tree directly:
+supervision tree directly. CLI, HTTP, and MCP use the same verb and argument names
+and return `{ok, seq, result, diagnostics}`, including failures. Omitted spawn
+`init` defaults to `null`; promotions require `author` and `rationale`:
+
 
 | tool | does |
 | --- | --- |
-| `actor_list()` | every actor: id, status, behavior hash, cursor, inbox length, parent |
-| `actor_tree(root?)` | nested tree from a root (default the node's root supervisor) |
-| `actor_info(id)` | status, reason, cursor, deferred/inbox length, links, monitors, children |
-| `actor_send(id, key?, msg)` | inject a keyed message, run to idle, return the new cursor |
-| `actor_spawn(behavior_hash, init, parent?, spec?)` | spawn under a parent, return its id |
-| `actor_stop(id, reason)` | stop with a reason |
-| `actor_restart(id, verb)` | `resume` \| `skip` \| `reset` |
-| `actor_promote(id, behavior_hash, author, rationale)` | append a `code_changes` row |
-| `actor_promote_where(old_hash, new_hash, author, rationale)` | promote every actor on `old_hash` |
-| `actor_lineage(id)` | the actor's `code_changes` rows |
-| `actor_dead_letters(id)` | its trapped messages |
-| `actor_fork(id, at_seq)` | copy the actor's state as of `at_seq` into a new, undeliverable fork |
-| `actor_validate(id, candidate_hash, k, assertions?)` | replay the last `k` messages under `candidate_hash` on a fork, report `Matched`/`DivergedAt`/`Differs`/`Trapped` |
-| `actor_sql(id, query, params?)` | read-only inspection; a write statement is refused |
-| `actor_whereis` / `actor_register` / `actor_members` | name and group lookup |
-| `actor_behaviors()` | registered behavior hashes, one line each |
-| `actor_run()` | run every actor to idle, return messages processed |
+| `add(source, name?)` / `update(name, source)` | publish a definition and its inferred entry rows |
+| `view(target)` / `history(name)` | stored source and definition history |
+| `diff(old, new)` / `dependents(hash)` | item differences and pinned callers |
+| `run(target, args?)` / `find(text)` | execute or search definitions |
+| `actors()` | every actor: id, status, behavior hash, cursor, inbox length, parent |
+| `tree(root?)` | nested tree from a root (default the node's root supervisor) |
+| `info(id)` | status, reason, cursor, deferred/inbox length, links, monitors, children |
+| `send(id, key?, msg)` | inject a keyed message; return cursor or a failed envelope with id, sequence, and trap cause |
+| `spawn(def, init?, parent?, spec?)` | spawn under a parent, return its id |
+| `stop(id, reason)` | stop with a reason |
+| `restart(id, verb)` | `resume` \| `skip` \| `reset` |
+| `promote(id, hash, author, rationale)` | append a `code_changes` row |
+| `promote_where(old, new, author, rationale)` | promote every actor on `old_hash` |
+| `lineage(id)` | the actor's `code_changes` rows |
+| `dead_letters(id)` | its trapped messages |
+| `fork(id, seq)` | copy the actor's state as of `seq` into a new, undeliverable fork |
+| `validate(id, candidate, k, assertions?)` | replay the last `k` messages under `candidate_hash` on a fork, report `Matched`/`DivergedAt`/`Differs`/`Trapped` |
+| `sql(id, query, params?)` | read-only inspection; a write statement is refused |
+| `whereis` / `register` / `members` | name and group lookup |
+| `behaviors()` | stored definition hashes, one line each |
+| `drain()` | run every actor to idle, return messages processed |
 
 Resources: `actor://<id>/inbox`, `.../effects`, `.../outbox`, `.../lineage`, and
 `actor://tree`.
@@ -204,7 +203,6 @@ Details: [docs/content-addressed-code.md](docs/content-addressed-code.md).
 | `loom-build` | core wasm builder |
 | `loom-check` | effect/language checking before a definition becomes executable |
 | `loom-cli` | command-line client for a running `loomd` |
-| `loom-guest-macros` | `#[loom::def]` / `#[loom::actor]` proc macros |
 | `loom-guest-rs` | synchronous guest interface to the host, for Rust definitions |
 | `loom-maintenance` | garbage collection over derived indexes only; CAS and event log untouched |
 | `loom-mcp` | MCP server exposing the API as tools |

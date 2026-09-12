@@ -1,8 +1,10 @@
+use crate::registry::Registry;
+mod registry;
 use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use loom_actor::{
-    Actor, Behavior, Cap, ChildSpec, ChildType, Config, Ctx, DefaultEffects, Node, Registry, RestartVerb, Rights, Status, Trap, Verdict,
+    Actor, Behavior, Cap, ChildSpec, ChildType, Config, Ctx, DefaultEffects, Node, RestartVerb, Rights, Status, Trap, Verdict,
 };
 use serde_json::{Value, json};
 
@@ -95,7 +97,7 @@ impl Behavior for Probe {
 async fn node(path: &std::path::Path) -> Node {
     let mut registry = Registry::new();
     registry.insert("caps-probe".into(), Arc::new(Probe));
-    Node::new(path, registry, Arc::new(DefaultEffects), Config::default()).await.unwrap()
+    Node::new(path, Arc::new(registry), Arc::new(DefaultEffects), Config::default()).await.unwrap()
 }
 async fn drain(node: &Node) {
     tokio::time::timeout(Duration::from_secs(60), node.run_until_idle()).await.unwrap().unwrap();

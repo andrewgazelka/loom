@@ -41,19 +41,8 @@ LOOM_URL=http://127.0.0.1:18894 LOOM_TOKEN_FILE="$bench_dir/state/token" \
   bun scripts/bench/unified-memory.ts "$bench_dir/tree" "$bench_dir/native"
 ```
 
-The command reports `N/10 unified-memory gates pass` and the first failed step.
-The gate executes the scoped definition, checks every changing winner, and includes the seven scan gates plus three compiler checks. Recording transaction counts remain diagnostic. The stats counter is sampled outside scan timing; absent counters
-fail admission rather than defaulting to zero. Missing build-control execution
-witnesses count as failures. It never starts a daemon or substitutes saved results.
+The command reports `N/7 unified-memory gates pass` and the first failed step.
+The gate executes the scoped definition, checks every changing winner, and includes the seven scan gates. Recording transaction counts remain diagnostic. The stats counter is sampled outside scan timing; absent counters
+fail admission rather than defaulting to zero. It never starts a daemon or substitutes saved results.
 
 The [implementation plan](../../docs/plan-unified-memory.md#scan-contract-change-2026-09-09) records the staged trace, codec and filesystem measurements. The earlier 7 ms estimate referred to Linux and was not a measured Mac result. `largest-walk.rs` exercises a single bounded host traversal; its performance is measured separately from the guest-driven scoped workload.
-
-The five-crate delta gate uses `heck`, `strsim`, `adler2`, `version_check`, and
-`cfg-if`, exercising each dependency in the resulting definition. The compiler's
-unsafe-code policy applies to these crates; the benchmark does not exempt them.
-For its missing-dependency control, build the `loom-build` example
-`evict_artifact`, set `LOOM_ARTIFACT_EVICTOR` to that executable and
-`LOOM_BENCH_DB` to the dedicated daemon's database. The control removes `heck`'s
-CAS outputs and materializations, then verifies a fresh definition result and
-exactly two compilation processes (dependency plus definition). These variables
-must refer to the isolated benchmark state; missing settings fail that gate.

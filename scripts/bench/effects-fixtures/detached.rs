@@ -1,4 +1,3 @@
-#[loom::def(effects = ["sleep"])]
 pub fn main(mode: u32) -> u32 {
     match mode {
         0 => {
@@ -19,12 +18,12 @@ pub fn main(mode: u32) -> u32 {
         2 => {
             // Expected: 1, with the full "shared job ..." diagnostic available
             // as Err and the caller still able to return successfully.
-            let handle = loom::spawn(|| panic!("detached trap")).expect("spawn");
+            let handle = loom::spawn(|| std::panic::panic_any("detached trap")).expect("spawn");
             u32::from(handle.join().unwrap_err().contains("shared job"))
         }
         _ => {
             // Expected: 9 even if the detached trap happens before entry return.
-            drop(loom::spawn(|| panic!("unjoined detached trap")).expect("spawn"));
+            drop(loom::spawn(|| std::panic::panic_any("unjoined detached trap")).expect("spawn"));
             loom::sleep(10).expect("caller survives");
             9
         }

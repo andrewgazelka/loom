@@ -1,4 +1,3 @@
-#[loom::def(effects=[])]
 pub fn answer() -> i64 {
     42
 }

@@ -1,204 +1,138 @@
-use clap::Parser;
+mod operation;
+
+use anyhow::Context;
+use operation::Command;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-#[derive(Parser)]
-struct Args {
-    #[command(subcommand)]
-    operation: Option<Operation>,
-    #[arg(long, default_value = "http://127.0.0.1:8787")]
-    url: String,
-    #[arg(long, env = "LOOM_TOKEN")]
-    token: String,
-    #[arg(long)]
-    session: Option<String>,
-    #[arg(long)]
-    eval: Option<String>,
-    #[arg(long, conflicts_with_all=["eval","define"])]
-    command: Option<String>,
-    #[arg(long, conflicts_with = "eval", help = "Definition request as JSON")]
-    define: Option<String>,
-    #[arg(long, default_value = "{}")]
-    args: String,
-    #[arg(
-        long,
-        default_value = "{}",
-        help = "Definition aliases as JSON name-to-hash mapping"
-    )]
-    deps: String,
+
+fn main() -> anyhow::Result<std::process::ExitCode> {
+    if let Some(status) = loom_build::compiler_cache_entry()? {
+        return Ok(status);
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(application())?;
+    Ok(std::process::ExitCode::SUCCESS)
 }
-#[derive(clap::Subcommand)]
-enum Operation {
-    Crate {
-        #[command(subcommand)]
-        command: CrateCommand,
-    },
-    Upgrade {
-        old: String,
-        new: String,
-    },
+
+async fn application() -> anyhow::Result<()> {
+    if let Err(error) = run().await {
+        print_failure(&error);
+        std::process::exit(1);
+    }
+    Ok(())
 }
-#[derive(clap::Subcommand)]
-enum CrateCommand {
-    Add { coordinate: String },
-}
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
+
+async fn run() -> anyhow::Result<()> {
+    let args = match operation::parser().try_get_matches() {
+        Ok(args) => args,
+        Err(error) if display_request(&error) => {
+            error.print()?;
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let url = args.get_one::<String>("url").context("missing URL")?;
+    let session = args.get_one::<String>("session").map(String::as_str);
+    let token = args
+        .get_one::<String>("token")
+        .map(String::as_str)
+        .filter(|token| !token.is_empty())
+        .context("provide --token or set LOOM_TOKEN")?;
     let client = reqwest::Client::new();
-    if let Some(operation) = args.operation {
-        let body = match operation {
-            Operation::Crate {
-                command: CrateCommand::Add { coordinate },
-            } => {
-                let mut parts = coordinate.split('@');
-                let name = parts
-                    .next()
-                    .filter(|name| !name.is_empty())
-                    .ok_or_else(|| anyhow::anyhow!("expected name@version"))?;
-                let version = parts
-                    .next()
-                    .filter(|version| !version.is_empty())
-                    .ok_or_else(|| anyhow::anyhow!("expected name@version"))?;
-                anyhow::ensure!(parts.next().is_none(), "expected name@version");
-                serde_json::json!({"command":"crate.add","args":{"name":name,"version":version}})
-            }
-            Operation::Upgrade { old, new } => {
-                serde_json::json!({"command":"upgrade","args":{"old":old,"new":new}})
-            }
-        };
-        return print_response(&client, &args.url, &args.token, "command", body).await;
+    if let Some(operation) = operation::from_matches(&args)? {
+        let accepted = execute(&client, url, token, session, operation).await?;
+        if !accepted {
+            std::process::exit(1);
+        }
+        return Ok(());
     }
-    let deps: std::collections::BTreeMap<String, String> = serde_json::from_str(&args.deps)?;
-    if let Some(define) = args.define {
-        return print_response(
-            &client,
-            &args.url,
-            &args.token,
-            "define",
-            serde_json::to_value(serde_json::from_str::<loom_proto::DefineRequest>(&define)?)?,
-        )
-        .await;
-    }
-    if let Some(command) = args.command {
-        let body = serde_json::json!({"session":args.session,"command":command,"args":serde_json::from_str::<serde_json::Value>(&args.args)?});
-        return print_response(&client, &args.url, &args.token, "command", body).await;
-    }
-    if let Some(source) = args.eval {
-        return print_response(
-            &client,
-            &args.url,
-            &args.token,
-            "eval",
-            serde_json::json!({"session":args.session,"source":source,"deps":deps}),
-        )
-        .await;
-    }
-    let mut session = args.session;
     let mut input = tokio::io::BufReader::new(tokio::io::stdin()).lines();
     let mut output = tokio::io::stdout();
     loop {
         output.write_all(b"loom> ").await?;
         output.flush().await?;
-        let Some(source) = input.next_line().await? else {
+        let Some(line) = input.next_line().await? else {
             break;
         };
-        if source.trim() == ":quit" {
+        if matches!(line.trim(), ":quit" | "quit") {
             break;
         }
-        if source.trim().is_empty() {
+        if line.trim().is_empty() {
             continue;
         }
-        if source.trim() == ":help" {
-            println!(
-                "Enter a TS expression, :define <JSON>, :command <JSON>, or :quit. Definitions use {{name,lang,source,deps}}; commands use {{command,args}}."
-            );
-            continue;
-        }
-        let request = if let Some(body) = source.strip_prefix(":define ") {
-            serde_json::from_str::<loom_proto::DefineRequest>(body)
-                .and_then(serde_json::to_value)
-                .map(|body| ReplRequest {
-                    operation: "define",
-                    body,
-                })
-        } else if let Some(body) = source.strip_prefix(":command ") {
-            serde_json::from_str::<loom_proto::CommandRequest>(body)
-                .and_then(serde_json::to_value)
-                .map(|body| ReplRequest {
-                    operation: "command",
-                    body,
-                })
+        let words = if matches!(line.trim(), ":help" | "help") {
+            vec!["--help".to_owned()]
         } else {
-            Ok(ReplRequest {
-                operation: "eval",
-                body: serde_json::json!({"session":session,"source":source,"deps":deps}),
-            })
-        };
-        let request = match request {
-            Ok(request) => request,
-            Err(error) => {
-                eprintln!("{error}");
+            let Some(words) = shlex::split(&line) else {
+                print_failure(&anyhow::anyhow!("unclosed quote in command"));
                 continue;
-            }
+            };
+            words
         };
-        let response = match send(
-            &client,
-            &args.url,
-            &args.token,
-            request.operation,
-            request.body,
-        )
-        .await
+        let command = match operation::parser()
+            .try_get_matches_from(std::iter::once("loom".to_owned()).chain(words))
         {
-            Ok(response) => response,
+            Ok(command) => command,
             Err(error) => {
-                eprintln!("{error:#}");
+                if display_request(&error) {
+                    error.print()?;
+                } else {
+                    print_failure(&error.into());
+                }
                 continue;
             }
         };
-        if let Some(id) = response.result["session"].as_str() {
-            session = Some(id.to_string())
+        let command = match operation::from_matches(&command) {
+            Ok(Some(command)) => command,
+            Ok(None) => continue,
+            Err(error) => {
+                print_failure(&error);
+                continue;
+            }
+        };
+        if let Err(error) = execute(&client, url, token, session, command).await {
+            print_failure(&error);
         }
-        println!("{}", serde_json::to_string_pretty(&response)?);
     }
     Ok(())
 }
-async fn print_response(
-    client: &reqwest::Client,
-    url: &str,
-    token: &str,
-    operation: &str,
-    body: serde_json::Value,
-) -> anyhow::Result<()> {
-    let response = send(client, url, token, operation, body).await?;
-    println!("{}", serde_json::to_string_pretty(&response)?);
-    anyhow::ensure!(response.ok, "operation rejected");
-    Ok(())
-}
 
-struct ReplRequest {
-    operation: &'static str,
-    body: serde_json::Value,
-}
-async fn send(
+async fn execute(
     client: &reqwest::Client,
     url: &str,
     token: &str,
-    operation: &str,
-    body: serde_json::Value,
-) -> anyhow::Result<loom_proto::Response> {
+    session: Option<&str>,
+    command: Command,
+) -> anyhow::Result<bool> {
     let response = client
-        .post(format!("{url}/v1/{operation}"))
+        .post(format!("{}/v1/command", url.trim_end_matches('/')))
         .bearer_auth(token)
-        .json(&body)
+        .json(&serde_json::json!({"session":session,"command":command.name,"args":command.args}))
         .send()
         .await?;
     let status = response.status();
     let bytes = response.bytes().await?;
-    match serde_json::from_slice(&bytes) {
-        Ok(response) => Ok(response),
-        Err(error) => Err(anyhow::anyhow!(
+    let response: loom_proto::Response = serde_json::from_slice(&bytes).map_err(|error| {
+        anyhow::anyhow!(
             "HTTP {status}: {error}: {}",
             String::from_utf8_lossy(&bytes)
-        )),
-    }
+        )
+    })?;
+    println!("{}", serde_json::to_string_pretty(&response)?);
+    Ok(status.is_success() && response.ok)
+}
+
+fn print_failure(error: &anyhow::Error) {
+    println!(
+        "{}",
+        serde_json::json!({"ok":false,"seq":0,"result":{"error":format!("{error:#}")},"diagnostics":[]})
+    );
+}
+
+fn display_request(error: &clap::Error) -> bool {
+    matches!(
+        error.kind(),
+        clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+    )
 }

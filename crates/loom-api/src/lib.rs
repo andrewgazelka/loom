@@ -1,14 +1,16 @@
+pub mod actors;
 mod commands;
 mod definitions;
 mod http;
+mod message_failure;
 mod source;
 #[cfg(test)]
 mod tests;
+mod unison;
 pub use http::{protect, router};
 use source::*;
 mod auth;
 mod cas_browser;
-mod eval;
 use anyhow::{Context, Result, bail, ensure};
 pub use auth::{Access, Authorizer, Scope, TokenConfig};
 use axum::{
@@ -22,7 +24,7 @@ use axum::{
     response::{IntoResponse, Response as HttpResponse},
     routing::{get, post},
 };
-use loom_proto::{CommandRequest, Def, DefineRequest, EvalRequest, Lang, Response, Value};
+use loom_proto::{CommandRequest, Def, DefineRequest, Lang, Response, Value};
 use loom_store::Store;
 use serde::Deserialize;
 use serde_json::json;
@@ -39,6 +41,7 @@ use std::{
 #[derive(Clone)]
 pub struct Service {
     access: Access,
+    actors: Option<actors::ActorService>,
     pub store: Store,
     pub runtime: loom_rt::Runtime,
     checker: Arc<loom_check::Checker>,
@@ -55,11 +58,11 @@ impl Service {
         let builder = Arc::new(loom_build::Builder::new(root, store.clone()));
         let resolver = Arc::new(BuildResolver {
             store: store.clone(),
-            builder: builder.clone(),
             gate: tokio::sync::Mutex::new(()),
         });
         Ok(Self {
             access: Access::owner(),
+            actors: None,
             runtime: loom_rt::Runtime::with_resolver(store.clone(), resolver)?,
             store,
             checker,
@@ -71,6 +74,14 @@ impl Service {
         })
     }
 
+    pub fn actor_registry(&self) -> Arc<dyn loom_actor::Registry> {
+        Arc::new(loom_behavior::StoreRegistry::new(self.store.clone()))
+    }
+
+    pub fn with_actors(mut self, node: loom_actor::Node) -> Self {
+        self.actors = Some(actors::ActorService::new(node));
+        self
+    }
     pub fn scoped(&self, access: Access) -> Self {
         let mut service = self.clone();
         service.access = access;
@@ -109,6 +120,17 @@ impl Service {
                 result,
                 diagnostics: vec![],
             },
+            Err(error) if error.is::<message_failure::ActorMessageFailure>() => {
+                let failure = error
+                    .downcast_ref::<message_failure::ActorMessageFailure>()
+                    .expect("checked error type");
+                Response {
+                    ok: false,
+                    seq,
+                    result: json!({"code":"actor_message_failed","error":failure.to_string(),"id":failure.id,"seq":failure.seq,"cause":failure.cause}),
+                    diagnostics: vec![],
+                }
+            }
             Err(error) => Response {
                 ok: false,
                 seq,
@@ -175,7 +197,20 @@ fn field<'a>(args: &'a Value, name: &str) -> Result<&'a str> {
         .as_str()
         .with_context(|| format!("missing string argument {name}"))
 }
-/// Bounded metadata reads must not create new CAS blocks while browsing the store.
+/// Definition commands return their requested data directly; CAS browsing stays read-only.
 pub fn command_returns_direct(command: &str) -> bool {
-    matches!(command, "resolve" | "cas.list" | "cas.inspect")
+    matches!(
+        command,
+        "add"
+            | "view"
+            | "update"
+            | "history"
+            | "diff"
+            | "run"
+            | "find"
+            | "dependents"
+            | "resolve"
+            | "cas.list"
+            | "cas.inspect"
+    )
 }

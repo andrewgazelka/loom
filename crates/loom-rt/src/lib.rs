@@ -77,14 +77,12 @@ impl EffectContext {
             trace: self.trace.clone(),
         }
     }
-    fn with_declared(mut self, declared: Option<&[String]>) -> Self {
-        if let Some(declared) = declared {
-            let declared = declared.iter().cloned().collect::<BTreeSet<_>>();
-            self.allowed = Some(match self.allowed.take() {
-                Some(allowed) => allowed.intersection(&declared).cloned().collect(),
-                None => declared,
-            });
-        }
+    fn with_inferred(mut self, labels: &[String]) -> Self {
+        let inferred = labels.iter().cloned().collect::<BTreeSet<_>>();
+        self.allowed = Some(match self.allowed.take() {
+            Some(allowed) => allowed.intersection(&inferred).cloned().collect(),
+            None => inferred,
+        });
         self
     }
     fn permits(&self, op: &str) -> bool {
@@ -184,8 +182,7 @@ impl Runtime {
         Self::create(store, Some(resolver))
     }
     fn create(store: Store, resolver: Option<Arc<dyn ComponentResolver>>) -> Result<Self> {
-        let compilation_cache = Arc::new(LoomCompilationCache::new(store.clone())?);
-        let core_engine = sharedcore::engine(compilation_cache.clone())?;
+        let (core_engine, compilation_cache) = sharedcore::engine(store.clone())?;
         let runtime = Self {
             inner: Arc::new(Inner {
                 model: loom_model::Model::from_env(store.clone())?,

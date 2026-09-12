@@ -1,8 +1,13 @@
 use super::*;
 
 impl Service {
-    pub async fn command(&self, request: CommandRequest) -> Response {
+    pub async fn command(&self, mut request: CommandRequest) -> Response {
         if let Err(error) = loom_proto::encode(&request.args) {
+            return self.response(Err(anyhow::Error::msg(error)));
+        }
+        if let Some(verb) = loom_proto::verbs::lookup(&request.command)
+            && let Err(error) = verb.normalize(&mut request.args)
+        {
             return self.response(Err(anyhow::Error::msg(error)));
         }
         if let Err(error) = self.access.require(auth::command_scope(&request.command)) {
@@ -11,127 +16,36 @@ impl Service {
         self.response(self.command_inner(request).await)
     }
     async fn command_inner(&self, request: CommandRequest) -> Result<Value> {
+        let request = if request.command == "command" {
+            let command = field(&request.args, "command")?.to_owned();
+            ensure!(command != "command", "nested command is not allowed");
+            let mut args = request.args["args"].clone();
+            if let Some(verb) = loom_proto::verbs::lookup(&command) {
+                verb.normalize(&mut args).map_err(anyhow::Error::msg)?;
+            }
+            self.access.require(auth::command_scope(&command))?;
+            CommandRequest {
+                command,
+                args,
+                ..request
+            }
+        } else {
+            request
+        };
         let args = &request.args;
         match request.command.as_str() {
-            "crate.add" => Ok(serde_json::to_value(
-                loom_build::registry::CrateRegistry::new(self.store.clone())
-                    .add(field(args, "name")?, field(args, "version")?)
-                    .await?,
-            )?),
-            "upgrade" => {
-                let _guard = self.definitions_gate.lock().await;
-                let old = field(args, "old")?;
-                let new = field(args, "new")?;
-                if let Some(previous) = self.store.definition(old)? {
-                    let current = self
-                        .store
-                        .definition(new)?
-                        .context("replacement definition missing")?;
-                    let updates = self.rehash_dependents(Some(&previous), &current).await?;
-                    return Ok(serde_json::json!({"rehashed":updates.rehashed}));
-                }
-                let _: loom_proto::Tree = self
-                    .store
-                    .get_value(old)?
-                    .context("old crate tree missing")?;
-                let _: loom_proto::Tree = self
-                    .store
-                    .get_value(new)?
-                    .context("replacement crate tree missing")?;
-                let mut changed = Vec::new();
-                struct CrateReplacement {
-                    previous: Def,
-                    current: Def,
-                }
-                let mut replacements = Vec::new();
-                for def in self.store.definitions()? {
-                    let Some(name) = self.store.definition_name(&def.hash)? else {
-                        continue;
-                    };
-                    if self
-                        .store
-                        .resolve(&name)?
-                        .is_none_or(|current| current.hash != def.hash)
-                    {
-                        continue;
-                    }
-                    let source = self
-                        .store
-                        .source(&def.hash)?
-                        .context("definition source missing")?;
-                    let Ok(mut bundle) = serde_json::from_str::<loom_check::SourceBundle>(&source)
-                    else {
-                        continue;
-                    };
-                    let Some(manifest) = bundle
-                        .files
-                        .get_mut("Cargo.toml")
-                        .and_then(loom_check::SourceFile::text_mut)
-                    else {
-                        continue;
-                    };
-                    let mut document: toml::Value = manifest.parse()?;
-                    let Some(crates) = document
-                        .get_mut("loom")
-                        .and_then(|loom| loom.get_mut("crates"))
-                        .and_then(toml::Value::as_table_mut)
-                    else {
-                        continue;
-                    };
-                    let mut replaced = false;
-                    for entry in crates.iter_mut().map(|entry| entry.1) {
-                        if entry.get("hash").and_then(toml::Value::as_str) == Some(old) {
-                            entry["hash"] = toml::Value::String(new.into());
-                            replaced = true;
-                        }
-                    }
-                    if !replaced {
-                        continue;
-                    }
-                    *manifest = toml::to_string(&document)?;
-                    bundle.files.retain(|name, _| {
-                        !name.starts_with("vendor/") && !name.starts_with(".cargo/")
-                    });
-                    let response = self
-                        .define_inner(DefineRequest {
-                            lang: def.lang,
-                            name,
-                            source: serde_json::to_string(&bundle)?,
-                            deps: self.store.definition_deps(&def.hash)?,
-                            allowed_effects: def.allowed_effects.clone(),
-                        })
-                        .await?;
-                    ensure!(
-                        response.ok,
-                        "crate upgrade failed: {}",
-                        serde_json::to_string(&response)?
-                    );
-                    let current: Def = serde_json::from_value(response.result["def"].clone())?;
-                    changed.push(serde_json::json!({"old":def.hash,"result":response.result}));
-                    replacements.push(CrateReplacement {
-                        previous: def,
-                        current,
-                    });
-                }
-                let mut rehashed = Vec::new();
-                for replacement in replacements {
-                    let current = if let Some(name) =
-                        self.store.definition_name(&replacement.current.hash)?
-                    {
-                        self.store
-                            .resolve(&name)?
-                            .context("upgraded definition name missing")?
-                    } else {
-                        replacement.current
-                    };
-                    let updates = self
-                        .rehash_dependents(Some(&replacement.previous), &current)
-                        .await?;
-                    rehashed.extend(updates.rehashed);
-                }
-                Ok(serde_json::json!({"upgraded":changed,"rehashed":rehashed}))
+            command
+                if loom_proto::verbs::lookup(command)
+                    .is_some_and(|verb| verb.family == loom_proto::verbs::Family::Definition) =>
+            {
+                self.unison(&request.command, args).await
             }
-
+            command
+                if loom_proto::verbs::lookup(command)
+                    .is_some_and(|verb| verb.family == loom_proto::verbs::Family::Actor) =>
+            {
+                self.actor_command(command, args.clone()).await
+            }
             "cas.list" => {
                 let query = if request.args.is_null() {
                     loom_proto::CasListRequest::default()
@@ -266,11 +180,6 @@ impl Service {
                 args["after"].as_i64().unwrap_or(0),
                 args["limit"].as_u64().unwrap_or(1000).min(1000) as usize,
             )?)?),
-            "call" => {
-                self.runtime
-                    .call_def(field(args, "hash")?, args["args"].clone())
-                    .await
-            }
             "call.replay" => Ok(self
                 .runtime
                 .replay_def_timed(

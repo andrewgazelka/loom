@@ -155,7 +155,7 @@ impl Node {
                     let hash: String = row.get(0)?;
                     if let Some(verdict) = promote_replay(
                         conn,
-                        actor::behavior(&self.registry, &hash)?.as_ref(),
+                        actor::behavior(&self.registry, &hash).await?.as_ref(),
                         &row.get::<String>(1)?,
                         &row.get::<String>(2)?,
                         effects,
@@ -175,7 +175,7 @@ impl Node {
                 }
             }
             let code = actor::code(conn).await?;
-            let behavior = actor::behavior(&self.registry, &code.hash)?;
+            let behavior = actor::behavior(&self.registry, &code.hash).await?;
             for retry in 0..=self.config.max_retries {
                 effects.begin(message.seq).await;
                 let result = actor::attempt(conn, &identity, &message, behavior.as_ref(), code.revision, effects, None).await;
@@ -219,7 +219,7 @@ impl Node {
                 let hash: String = row.get(0)?;
                 if let Some(verdict) = promote_replay(
                     conn,
-                    actor::behavior(&self.registry, &hash)?.as_ref(),
+                    actor::behavior(&self.registry, &hash).await?.as_ref(),
                     &row.get::<String>(1)?,
                     &row.get::<String>(2)?,
                     effects,

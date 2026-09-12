@@ -1,16 +1,9 @@
 mod actors;
 pub use actors::ActorMcp;
 use loom_api::{Access, Service};
-use loom_proto::{CommandRequest, DefineRequest, EvalRequest};
+use loom_proto::CommandRequest;
 use rmcp::service::RequestContext;
-use rmcp::{
-    ServerHandler, ServiceExt,
-    handler::server::{tool::ToolRouter, wrapper::Parameters},
-    model::*,
-    tool, tool_handler, tool_router,
-};
-use schemars::JsonSchema;
-use serde::Deserialize;
+use rmcp::{ServerHandler, ServiceExt, model::*};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -19,129 +12,15 @@ pub struct LoomMcp {
     actors: ActorMcp,
     session: String,
     default_access: Access,
-    tool_router: ToolRouter<Self>,
 }
-#[derive(Deserialize, JsonSchema)]
-pub struct DefineArgs {
-    #[serde(default)]
-    allowed_effects: Option<Vec<String>>,
-    #[serde(default)]
-    lang: Option<String>,
-    name: String,
-    source: String,
-    #[serde(default)]
-    deps: std::collections::BTreeMap<String, String>,
-}
-#[derive(Deserialize, JsonSchema)]
-pub struct EvalArgs {
-    #[serde(default)]
-    deps: std::collections::BTreeMap<String, String>,
-    session: Option<String>,
-    source: String,
-}
-#[derive(Deserialize, JsonSchema)]
-pub struct CommandArgs {
-    session: Option<String>,
-    command: String,
-    #[serde(default)]
-    args: serde_json::Value,
-}
-#[derive(Deserialize, JsonSchema)]
-pub struct ResolveArgs {
-    hash: String,
-}
-#[derive(Deserialize, JsonSchema)]
-pub struct CrateAddArgs {
-    name: String,
-    version: String,
-}
-#[derive(Deserialize, JsonSchema)]
-pub struct UpgradeArgs {
-    old: String,
-    new: String,
-}
-#[tool_router]
 impl LoomMcp {
     pub fn new(service: Arc<Service>, default_access: Access, node: loom_actor::Node) -> Self {
         Self {
-            service,
+            service: Arc::new(service.as_ref().clone().with_actors(node.clone())),
             actors: ActorMcp::new(node),
             default_access,
             session: uuid::Uuid::new_v4().to_string(),
-            tool_router: Self::tool_router() + Self::actor_tool_router(),
         }
-    }
-    #[tool(
-        name = "crate_add",
-        description = "Fetch and checksum-verify a crates.io release into the content-addressed source store."
-    )]
-    async fn crate_add(
-        &self,
-        Parameters(args): Parameters<CrateAddArgs>,
-        context: RequestContext<rmcp::RoleServer>,
-    ) -> String {
-        let response = self
-            .service_for(&context)
-            .command(CommandRequest {
-                session: Some(self.session.clone()),
-                command: "crate.add".into(),
-                args: serde_json::json!({"name":args.name,"version":args.version}),
-            })
-            .await;
-        serde_json::to_string(&response).unwrap()
-    }
-    #[tool(
-        name = "loom_upgrade",
-        description = "Explicitly replace a definition or crate hash in named dependents and report their new identities."
-    )]
-    async fn loom_upgrade(
-        &self,
-        Parameters(args): Parameters<UpgradeArgs>,
-        context: RequestContext<rmcp::RoleServer>,
-    ) -> String {
-        let response = self
-            .service_for(&context)
-            .command(CommandRequest {
-                session: Some(self.session.clone()),
-                command: "upgrade".into(),
-                args: serde_json::json!({"old":args.old,"new":args.new}),
-            })
-            .await;
-        serde_json::to_string(&response).unwrap()
-    }
-    #[tool(
-        description = "Define checked Rust compiled to core WebAssembly. Builds return cargo diagnostics and duration."
-    )]
-    async fn loom_define(
-        &self,
-        Parameters(args): Parameters<DefineArgs>,
-        context: RequestContext<rmcp::RoleServer>,
-    ) -> String {
-        let lang = match args.lang.as_deref() {
-            None | Some("rust") => loom_proto::Lang::Rust,
-            Some(_) => {
-                return serde_json::to_string(
-                    &self
-                        .service
-                        .response(Err(anyhow::anyhow!("invalid language"))),
-                )
-                .unwrap();
-            }
-        };
-        serde_json::to_string(
-            &self.service.inline(
-                self.service_for(&context)
-                    .define(DefineRequest {
-                        allowed_effects: args.allowed_effects,
-                        lang,
-                        name: args.name,
-                        source: args.source,
-                        deps: args.deps,
-                    })
-                    .await,
-            ),
-        )
-        .unwrap()
     }
     fn service_for(&self, context: &RequestContext<rmcp::RoleServer>) -> Service {
         let access = context
@@ -152,73 +31,49 @@ impl LoomMcp {
             .unwrap_or_else(|| self.default_access.clone());
         self.service.scoped(access)
     }
-    #[tool(description = "Evaluate a Rust expression in this connection's session.")]
-    async fn loom_eval(
+}
+impl ServerHandler for LoomMcp {
+    async fn list_tools(
         &self,
-        Parameters(args): Parameters<EvalArgs>,
-        context: RequestContext<rmcp::RoleServer>,
-    ) -> String {
-        serde_json::to_string(
-            &self.service.inline(
-                self.service_for(&context)
-                    .eval(EvalRequest {
-                        session: Some(args.session.unwrap_or_else(|| self.session.clone())),
-                        source: args.source,
-                        deps: args.deps,
-                    })
-                    .await,
-            ),
-        )
-        .unwrap()
+        _: Option<PaginatedRequestParams>,
+        _: RequestContext<rmcp::RoleServer>,
+    ) -> Result<ListToolsResult, rmcp::ErrorData> {
+        Ok(ListToolsResult {
+            tools: loom_proto::verbs::VERBS
+                .iter()
+                .map(|verb| {
+                    Tool::new(
+                        verb.name,
+                        format!("Run the {} command.", verb.name),
+                        verb.schema()
+                            .as_object()
+                            .expect("verb schema is an object")
+                            .clone(),
+                    )
+                })
+                .collect(),
+            ..Default::default()
+        })
     }
-    #[tool(
-        description = "Run a command with its JSON args object: machine.create {root:string} returns machine with id; call {hash:string,args:Value[]} invokes a definition; resolve {hash:string} accepts name/hash/CID; defs {} lists definitions; events {after?:number,limit?:number} lists definition events, deps {hash:string}; cas.list {limit?,after?,kind?,q?}, cas.inspect {hash:string}. For machine filesystem work define guest code using fs.list, then call it with machine id. Read loom_intro_rust for effect signatures."
-    )]
-    async fn loom_command(
+    async fn call_tool(
         &self,
-        Parameters(args): Parameters<CommandArgs>,
+        request: CallToolRequestParams,
         context: RequestContext<rmcp::RoleServer>,
-    ) -> String {
-        let direct = loom_api::command_returns_direct(&args.command);
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
         let response = self
             .service_for(&context)
             .command(CommandRequest {
-                session: Some(args.session.unwrap_or_else(|| self.session.clone())),
-                command: args.command,
-                args: args.args,
+                session: Some(self.session.clone()),
+                command: request.name.into_owned(),
+                args: serde_json::Value::Object(request.arguments.unwrap_or_default()),
             })
             .await;
-        serde_json::to_string(&if direct {
-            response
-        } else {
-            self.service.inline(response)
-        })
-        .unwrap()
+        let envelope = serde_json::to_value(response)
+            .map_err(|error| rmcp::ErrorData::internal_error(error.to_string(), None))?;
+        Ok(CallToolResult::structured(envelope))
     }
-
-    #[tool(description = "Resolve a definition name, hash, or JSON CAS reference.")]
-    async fn loom_resolve(
-        &self,
-        Parameters(args): Parameters<ResolveArgs>,
-        context: RequestContext<rmcp::RoleServer>,
-    ) -> String {
-        serde_json::to_string(
-            &self
-                .service_for(&context)
-                .command(CommandRequest {
-                    session: Some(self.session.clone()),
-                    command: "resolve".into(),
-                    args: serde_json::json!({"hash":args.hash}),
-                })
-                .await,
-        )
-        .unwrap()
-    }
-}
-#[tool_handler]
-impl ServerHandler for LoomMcp {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo{instructions:Some("Loom runs Rust core WebAssembly guests. All I/O goes through loom effects. Define checks and builds; calls use definition hashes. The actor_* tools inspect and drive the native actor network; actor_behaviors lists spawnable hashes and actor_tree shows the root supervisor.".into()),capabilities:ServerCapabilities::builder().enable_tools().enable_resources().enable_prompts().build(),..Default::default()}
+        ServerInfo{instructions:Some("Loom runs Rust core WebAssembly guests. All I/O goes through loom effects. Use add to check and build Rust source, view to read stored source, update to move names, and run to execute names or hashes. history and diff compare item identities; find searches names and dependents follows pinned dependencies. The actor tools inspect and drive the native actor network; behaviors lists spawnable hashes and tree shows the root supervisor.".into()),capabilities:ServerCapabilities::builder().enable_tools().enable_resources().enable_prompts().build(),..Default::default()}
     }
     async fn list_prompts(
         &self,
@@ -227,7 +82,7 @@ impl ServerHandler for LoomMcp {
     ) -> Result<ListPromptsResult, rmcp::ErrorData> {
         Ok(ListPromptsResult {
             prompts: vec![Prompt::new(
-                "loom_intro_rust",
+                "intro_rust",
                 Some("Rust guest effects and compilation"),
                 None,
             )],
@@ -240,8 +95,8 @@ impl ServerHandler for LoomMcp {
         _: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<GetPromptResult, rmcp::ErrorData> {
         let text = match request.name.as_str() {
-            "loom_intro_rust" => {
-                "Write ordinary Rust using the loom SDK. Export free functions with #[loom::def(effects=[...])]. Declare residual host effects when dispatch is unknown; the runtime enforces that row. perform(name, args) suspends the guest. handle/handle_any install deep guest handlers; callbacks perform in the outer context. scope.spawn and job.join run borrowed closures; call(def,args) calls another definition without inheriting handlers. fs::list(machine,path) returns typed DirEntry values with name, size, and kind: EntryKind::File, Directory, Symlink, Other. machine is a machine ID; path is relative to its pinned root. fs::walk adds bounded recursion. fs::read returns String, fs::read_optional returns Option<String>, fs::write writes UTF-8 content. preview::writes runs under a guest handler that returns filesystem diff previews without writing those files. No std::fs/net/time/env/process; use Loom effects. Cargo diagnostics include file,line,col,code and hint; build.ms is actual elapsed time. Guest effect values cross typed DAG-CBOR; MCP envelopes use JSON."
+            "intro_rust" => {
+                "Use add {source,name?} to store and build a definition, view {target} to inspect its CAS source, and run {target,args?} to run it. update {name,source} moves a name; old hashes remain runnable. history {name} lists changes, diff {old,new} compares item hashes, find {text} searches names and items, and dependents {hash} lists pinned dependents. Write ordinary Rust using the loom SDK. Guest Rust has no macros. Every crate-root pub fn is an entry. Declare an optional schema with pub const LOOM_SCHEMA: &str. There are no effect declarations. The compiler driver infers effect rows; add reports them per entry in entries.<name>.effects (labels and unknown). perform(name, args) suspends the guest. handle/handle_any install deep guest handlers; callbacks perform in the outer context. scope.spawn and job.join run borrowed closures; call(def,args) calls another definition without inheriting handlers. fs::list(machine,path) returns typed DirEntry values with name, size, and kind: EntryKind::File, Directory, Symlink, Other. machine is a machine ID; path is relative to its pinned root. fs::walk adds bounded recursion. fs::read returns String, fs::read_optional returns Option<String>, fs::write writes UTF-8 content. preview::writes runs under a guest handler that returns filesystem diff previews without writing those files. No std::fs/net/time/env/process; use Loom effects. Cargo diagnostics include file,line,col,code and hint; build.ms is actual elapsed time. Guest effect values cross typed DAG-CBOR; MCP envelopes use JSON."
             }
             _ => return Err(rmcp::ErrorData::invalid_params("unknown prompt", None)),
         };
@@ -298,8 +153,8 @@ impl ServerHandler for LoomMcp {
             self.service_for(&context)
                 .command(CommandRequest {
                     session: None,
-                    command: "resolve".into(),
-                    args: serde_json::json!({"hash":name}),
+                    command: "view".into(),
+                    args: serde_json::json!({"target":name}),
                 })
                 .await
         } else if let Some(hash) = uri.strip_prefix("loom://build/") {

@@ -44,12 +44,7 @@ pub(super) fn build_fingerprint(root: &Path) -> Result<String, BuildError> {
         Ok(())
     }
     let mut files = Vec::new();
-    for directory in [
-        "crates/loom-guest-rs",
-        "crates/loom-guest-macros",
-        "crates/loom-proto",
-        "rustc",
-    ] {
+    for directory in ["crates/loom-guest-rs", "crates/loom-proto", "rustc"] {
         collect(&root.join(directory), &mut files)?;
     }
     files.push(root.join("Cargo.lock"));
@@ -59,9 +54,11 @@ pub(super) fn build_fingerprint(root: &Path) -> Result<String, BuildError> {
     hash.update(include_bytes!("materialize.rs"));
     hash.update(include_bytes!("intake.rs"));
     hash.update(loom_check::safety_policy_bytes());
+    hash.update(include_bytes!("identity.rs"));
     hash.update(include_bytes!("direct.rs"));
     hash.update(include_bytes!("direct/recipe.rs"));
     hash.update(include_bytes!("direct/compile.rs"));
+    hash.update(include_bytes!("direct/entry_abi.rs"));
     hash.update(include_bytes!("direct/graph.rs"));
     hash.update(include_bytes!("direct/admission.rs"));
     hash.update(include_bytes!("manifest.rs"));

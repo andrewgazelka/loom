@@ -78,7 +78,7 @@ Phase 2 (one to two weeks): continuations as values. Gates 10-12:
 12. abandon from a handler cancels the body; scoped children drained; memory limits still hold (shared-limits.ts stays 6/6)
 
 Phase 3 (one week): effect rows checked at define time. Gate 13:
-13. #[loom::def(effects = ["sleep"])] on a body whose inferred residual row is {sleep, fs.read} fails the build with the residual named; wrapping the fs.read in a handler makes it pass. Built on loom-check/src/rust_effects.rs: handle narrows the row of its body by the frame's label set; unknown (dynamic dispatch) forces a declaration. This is the row "the host must supply", not rustc type checking; say so in the docs.
+13. The rustc driver infers residual effect rows through concrete calls. A total handler removes its labels from the body row while keeping effects from its callback. Literal and Rust constant perform labels are accepted; runtime-selected labels fail checking with the call site named. The host enforces the inferred residual row.
 
 Phase 4 (open-ended, the payoff): handlers as content-addressed definitions (handle_with(def_hash, body)), recording/replay reimplemented as the root handler, dry-run preview handler wired to FilesystemChanges.svelte, then delete the special cases in perform_contextual that the handler stack now covers. Each deletion greps the old path to zero.
 

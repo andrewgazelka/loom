@@ -44,21 +44,45 @@ impl EffectHandler for ActorOpProbe {
     }
 }
 
+struct ProbeRegistry {
+    probe: Arc<ActorOpProbe>,
+}
+
+#[async_trait::async_trait]
+impl Registry for ProbeRegistry {
+    async fn resolve(&self, reference: &str) -> anyhow::Result<Arc<dyn Behavior>> {
+        anyhow::ensure!(
+            reference == self.probe.hash(),
+            "unknown behavior {reference}"
+        );
+        Ok(self.probe.clone())
+    }
+
+    async fn behaviors(&self) -> anyhow::Result<Vec<loom_actor::builtin::BehaviorInfo>> {
+        Ok(vec![loom_actor::builtin::BehaviorInfo {
+            hash: self.probe.hash().to_owned(),
+            description: "actor operation probe".to_owned(),
+        }])
+    }
+}
+
 #[tokio::test]
 async fn unknown_actor_op_is_a_trap() {
     let fixtures = fixtures().await;
     let directory = tempfile::tempdir().unwrap();
-    let mut registry = Registry::new();
-    let definition =
-        loom_behavior::register(&mut registry, fixtures.store.clone(), &fixtures.handler)
+    let definition = Arc::new(
+        loom_behavior::LoomBehavior::new(fixtures.store.clone(), &fixtures.handler)
             .await
-            .unwrap();
+            .unwrap(),
+    );
     let probe = Arc::new(ActorOpProbe {
         definition,
         attempts: AtomicUsize::new(0),
         effect_calls: AtomicUsize::new(0),
     });
-    registry.insert(fixtures.handler.clone(), probe.clone());
+    let registry: Arc<dyn Registry> = Arc::new(ProbeRegistry {
+        probe: probe.clone(),
+    });
     let node = Node::new(directory.path(), registry, probe.clone(), Config::default())
         .await
         .unwrap();

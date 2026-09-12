@@ -36,7 +36,7 @@ impl Node {
         let source = actor.conn.lock().await;
         let cursor = actor::cursor(&source).await?;
         ensure!(k >= 0 && k <= cursor, "actor {id} seq {cursor}: validation window outside history");
-        let behavior = actor::behavior(&self.registry, candidate)?;
+        let behavior = actor::behavior(&self.registry, candidate).await?;
         let key = memo::key(&source, candidate, cursor - k, cursor, assertions).await?;
         if let Some(record) = memo::lookup(self, &key).await? {
             memo::store(self, &key, &record, config).await?;
@@ -118,7 +118,7 @@ impl Node {
         let report = self.promotion_cutoff(&conn, record, end - k, end).await?;
         actor::promote(
             &mut conn,
-            self.behavior(hash)?.as_ref(),
+            self.behavior(hash).await?.as_ref(),
             "promote_report",
             "validated candidate",
             &crate::effects::RuntimeEffects { node: self, external: self.effects.as_ref() },

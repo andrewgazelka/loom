@@ -8,20 +8,24 @@ impl Store {
         source: &str,
         deps: &BTreeMap<String, String>,
     ) -> Result<i64> {
+        self.define_with_identity(def, name, source, deps, None)
+    }
+    pub fn define_with_identity(
+        &self,
+        def: &Def,
+        name: Option<&str>,
+        source: &str,
+        deps: &BTreeMap<String, String>,
+        identity: Option<&loom_proto::BuildIdentity>,
+    ) -> Result<i64> {
         self.recording.barrier(false)?;
         let mut connection = self.lock()?;
         let tx = connection.transaction()?;
-        let identity = loom_proto::definition_identity(
-            def.lang,
-            source,
-            deps,
-            def.allowed_effects.as_deref(),
-        )?;
         ensure!(
-            blake3::hash(&identity).to_hex().as_str() == def.hash,
-            "definition hash does not match canonical identity"
+            def.hash.len() == 64 && def.hash.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "invalid definition hash {}",
+            def.hash
         );
-        put(&tx, "def", &identity)?;
         let mut def = def.clone();
         if let Some(labels) = def.allowed_effects.as_mut() {
             labels.sort();
@@ -29,21 +33,10 @@ impl Store {
         }
         def.observed_effects.clear();
         let source_hash = put(&tx, "source_bundle", source.as_bytes())?;
-        let event = serde_json::json!({"type":"defined","def":def,"name":name,"source_hash":source_hash,"deps":deps});
+        super::publication::validate(&tx, &def)?;
+        let event = serde_json::json!({"type":"defined","def":def,"name":name,"source_hash":source_hash,"deps":deps,"identity":identity});
         let seq = record_definition_event(&tx, &event)?;
-        tx.execute("INSERT INTO defs(hash,lang,name_hint,type_sig,component_hash,source_hash,allowed_effects) VALUES (?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(hash) DO UPDATE SET component_hash=coalesce(excluded.component_hash,defs.component_hash)",params![def.hash,def.lang.as_str(),name,serde_json::to_string(&def.sig)?,def.component_hash,source_hash,def.allowed_effects.as_ref().map(serde_json::to_string).transpose()?])?;
-        for hash in deps.values() {
-            tx.execute(
-                "INSERT OR IGNORE INTO def_deps VALUES (?,?)",
-                params![def.hash, hash],
-            )?;
-        }
-        if let Some(name) = name {
-            tx.execute(
-                "INSERT INTO names VALUES (?,?,?)",
-                params![name, def.hash, seq],
-            )?;
-        }
+        super::publication::project(&tx, &def, name, &source_hash, deps, identity, seq)?;
         tx.commit()?;
         Ok(seq)
     }
@@ -115,7 +108,7 @@ impl Store {
     }
     pub fn definition_deps(&self, hash: &str) -> Result<BTreeMap<String, String>> {
         let c = self.lock()?;
-        let bytes:Vec<u8>=c.query_row("SELECT bytes FROM definition_events WHERE json_extract(bytes,'$.type')='defined' AND json_extract(bytes,'$.def.hash')=? ORDER BY seq DESC LIMIT 1",[hash],|r|r.get(0))?;
+        let bytes:Vec<u8>=c.query_row("SELECT bytes FROM definition_events WHERE json_extract(bytes,'$.type')='defined' AND json_extract(bytes,'$.def.hash')=? ORDER BY seq LIMIT 1",[hash],|r|r.get(0))?;
         let event: Value = serde_json::from_slice(&bytes)?;
         Ok(serde_json::from_value(event["deps"].clone())?)
     }

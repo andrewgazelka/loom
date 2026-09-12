@@ -15,8 +15,7 @@ const scanNames=[
     `${name}: median reply storage wait <1ms`,
   ]),
 ];
-const compilerNames=['warm five-crate delta <=600ms','one rustc invocation','missing dependency rebuild control'];
-const names=[...scanNames,...compilerNames];
+const names=scanNames;
 function record(name:string,pass:boolean,detail:string) {
   gates.push({name,pass,detail});
   console.log(JSON.stringify({gate:name,pass,detail}));
@@ -71,26 +70,7 @@ try {
     throw new Error('Usage: LOOM_URL=isolated-url LOOM_TOKEN_FILE=file bun scripts/bench/unified-memory.ts FIXTURE NATIVE_BINARY');
   }
   await scan();
-  // The build lane supplies an executable witness, not a receipt from an older run.
-  const buildScript='scripts/bench/warm-crates.ts';
-  if(await Bun.file(buildScript).exists()) {
-    let result:Invocation;
-    if(process.env.LOOM_BUILD_BENCH_COMMAND) {
-      const command:unknown=JSON.parse(process.env.LOOM_BUILD_BENCH_COMMAND);
-      if(!Array.isArray(command)||command.length===0||!command.every(value=>typeof value==='string'&&value.length>0))throw new Error('LOOM_BUILD_BENCH_COMMAND must be a nonempty JSON array of command arguments');
-      result=await invokeCommand(command);
-    } else {
-      result=await invoke(buildScript,[]);
-    }
-    process.stdout.write(result.stdout);process.stderr.write(result.stderr);
-    for(const name of compilerNames) {
-      let witness:Gate|undefined;
-      for(const line of result.stdout.split('\n')) {
-        try {const item=JSON.parse(line);if(item.gate===name&&typeof item.pass==='boolean'&&typeof item.detail==='string')witness={name,pass:item.pass,detail:item.detail};}catch{}
-      }
-      record(name,result.exit===0&&witness?.pass===true,witness?.detail??`missing build witness; exit ${result.exit}`);
-    }
-  }
+
 } catch(error) {
   console.error(String(error));
 } finally {

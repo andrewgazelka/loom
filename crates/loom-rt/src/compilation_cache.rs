@@ -2,11 +2,8 @@
 use anyhow::{Context, Result, ensure};
 use loom_store::Store;
 use rusqlite::{OptionalExtension, params};
-use std::{
-    borrow::Cow,
-    sync::{Arc, Mutex},
-};
-use wasmtime::{CacheStore, Config, Strategy};
+use std::{borrow::Cow, sync::Mutex};
+use wasmtime::{CacheStore, Config, Engine};
 
 /// Candidate hits count CAS reads; Cranelift can still reject a serialized value.
 #[derive(Clone, Debug, Default)]
@@ -26,7 +23,7 @@ pub struct CompilationCacheStats {
 /// Index rows retain CAS blobs until `clear` removes this backend's mappings.
 pub struct LoomCompilationCache {
     store: Store,
-    namespace: &'static str,
+    namespace: String,
     stats: Mutex<CompilationCacheStats>,
 }
 
@@ -56,8 +53,49 @@ impl std::fmt::Display for CacheFailure {
 }
 impl std::error::Error for CacheFailure {}
 
+/// Wasmtime states engine compatibility as a `std::hash::Hash`; BLAKE3 turns it
+/// into the wide digest a namespace column wants. `finish` is never the stored
+/// value: the namespace is the whole digest, read from the hasher directly.
+struct NamespaceHasher(blake3::Hasher);
+
+impl std::hash::Hasher for NamespaceHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        self.0.update(bytes);
+    }
+    fn finish(&self) -> u64 {
+        let digest = self.0.finalize();
+        let (head, _) = digest.as_bytes().split_at(8);
+        u64::from_le_bytes(head.try_into().expect("a BLAKE3 digest is 32 bytes"))
+    }
+}
+
+/// Serialized Cranelift output is only valid for an engine that would compile it
+/// the same way, which is exactly what `Engine::precompile_compatibility_hash`
+/// covers: the Wasmtime version, the target triple, and the compiler's flags and
+/// tunables. It is reachable only from an `Engine`, while the cache has to exist
+/// before a configuration can install it, so the namespace comes from a probe
+/// engine built from that same configuration without the cache; a cache store is
+/// not one of the hashed inputs. The probe costs one extra `Engine::new` per
+/// cache, once per runtime.
+///
+/// It reads Wasmtime's version STRING, not its sources, and Cranelift's own
+/// `VersionMarker` is a version string too: a local patch to either that keeps
+/// the version is invisible to both, and stale machine code would be replayed.
+/// Patch them only with a version bump.
+fn namespace(config: &Config) -> Result<String> {
+    use std::hash::Hash;
+    let engine = Engine::new(config)
+        .map_err(|error| anyhow::anyhow!("{error:#}"))
+        .context("probe the compilation backend for its cache namespace")?;
+    let mut hasher = NamespaceHasher(blake3::Hasher::new());
+    engine.precompile_compatibility_hash().hash(&mut hasher);
+    Ok(hasher.0.finalize().to_hex().to_string())
+}
+
 impl LoomCompilationCache {
-    pub fn new(store: Store) -> Result<Self> {
+    /// `config` is the engine configuration this cache will serve, minus the cache
+    /// itself; it names the backend whose output the mappings may be replayed to.
+    pub fn new(store: Store, config: &Config) -> Result<Self> {
         store
             .with_connection(|connection| {
                 connection.execute_batch(
@@ -73,7 +111,7 @@ impl LoomCompilationCache {
             .context("initialize runtime_compilation_cache")?;
         Ok(Self {
             store,
-            namespace: env!("LOOM_COMPILATION_BACKEND_NAMESPACE"),
+            namespace: namespace(config)?,
             stats: Mutex::new(CompilationCacheStats::default()),
         })
     }
@@ -89,16 +127,10 @@ impl LoomCompilationCache {
             .with_connection(|connection| {
                 Ok(connection.execute(
                     "DELETE FROM runtime_compilation_cache WHERE backend_namespace=?",
-                    [self.namespace],
+                    [self.namespace.as_str()],
                 )?)
             })
             .context("expire runtime_compilation_cache")
-    }
-
-    pub(crate) fn configure(self: &Arc<Self>, config: &mut Config) -> Result<()> {
-        config.strategy(Strategy::Cranelift);
-        config.enable_incremental_compilation(self.clone())?;
-        Ok(())
     }
 
     /// Wasmtime's cache trait cannot return storage errors. Observe the complete

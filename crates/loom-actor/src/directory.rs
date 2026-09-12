@@ -103,7 +103,7 @@ impl Node {
     pub async fn promote_where(&self, old_hash: &str, new_hash: &str, author: &str, rationale: &str) -> Result<Vec<ActorId>> {
         let _admission = self.admit().await?;
         async {
-            actor::behavior(&self.registry, new_hash)?;
+            actor::behavior(&self.registry, new_hash).await?;
             for id in self.actor_ids()? {
                 self.sync_index(&id).await?;
             }
@@ -120,7 +120,7 @@ impl Node {
                 if actor::status(&conn).await? == Status::Stopped || actor::code(&conn).await?.hash != old_hash {
                     continue;
                 }
-                let behavior = actor::behavior(&self.registry, new_hash)?;
+                let behavior = actor::behavior(&self.registry, new_hash).await?;
                 actor::promote(
                     &mut conn,
                     behavior.as_ref(),

@@ -1,11 +1,7 @@
-use loom::serde_json::{Value, json};
+use loom::serde_json::Value;
 
-#[loom::schema]
-pub fn schema() -> &'static str {
-    "CREATE TABLE entries(body BLOB NOT NULL)"
-}
+pub const LOOM_SCHEMA: &str = "CREATE TABLE entries(body BLOB NOT NULL)";
 
-#[loom::def]
 pub fn handle(msg: Vec<u8>) {
     let request: Value = loom::serde_json::from_slice(&msg).unwrap();
     match request["action"].as_str().unwrap() {
@@ -15,15 +11,16 @@ pub fn handle(msg: Vec<u8>) {
                 loom::handle(
                     ["local"],
                     |effect, _| {
-                        assert_eq!(effect.name, "local");
-                        loom::Reply::Resume(json!(17))
+                        require(effect.name == "local", "unexpected local effect");
+                        loom::Reply::Resume(Value::from(17))
                     },
                     || {
                         loom::scope(|scope| {
                             let child = scope
                                 .spawn(|| {
-                                    let result: i64 = loom::perform("local", json!({})).unwrap();
-                                    assert_eq!(result, 17);
+                                    let result: i64 =
+                                        loom::perform("local", object([], [])).unwrap();
+                                    require(result == 17, "unexpected local result");
                                     insert(&msg);
                                 })
                                 .unwrap();
@@ -42,50 +39,68 @@ pub fn handle(msg: Vec<u8>) {
             let cap = loom::actor::accept(cap).unwrap();
             let token: Value = loom::serde_json::from_slice(&cap.token).unwrap();
             let cap_id = token["cap_id"].as_u64().unwrap().to_string();
-            let restored: Vec<u8> = loom::perform("actor.cap", json!({"cap_id":cap_id})).unwrap();
-            assert_eq!(restored, cap.token);
-            let body = loom::serde_json::to_vec(&json!({"action":"row","forwarded":true})).unwrap();
+            let restored: Vec<u8> =
+                loom::perform("actor.cap", object(["cap_id"], [Value::from(cap_id)])).unwrap();
+            require(restored == cap.token, "capability token changed");
+            let body = loom::serde_json::to_vec(&object(
+                ["action", "forwarded"],
+                [Value::from("row"), Value::from(true)],
+            ))
+            .unwrap();
             loom::actor::send(&cap, &body).unwrap();
-            assert!(request["trap"].as_bool() != Some(true), "trap after send");
+            require(request["trap"].as_bool() != Some(true), "trap after send");
         }
         "forged_send" => {
-            let body = loom::serde_json::to_vec(&json!({"action":"row"})).unwrap();
+            let body = loom::serde_json::to_vec(&object(["action"], [Value::from("row")])).unwrap();
             // Ignoring a capability rejection must still abort the transaction.
-            let _ = loom::perform::<()>("actor.send", json!({"cap":request["cap"],"msg":body}));
+            let _ = loom::perform::<()>(
+                "actor.send",
+                object(["cap", "msg"], [request["cap"].clone(), bytes(&body)]),
+            );
         }
         "spawn_send" => {
-            let init = loom::serde_json::to_vec(&json!({"action":"init"})).unwrap();
+            let init =
+                loom::serde_json::to_vec(&object(["action"], [Value::from("init")])).unwrap();
             let cap: Vec<u8> = loom::perform(
                 "actor.spawn",
-                json!({
-                    "behavior_hash":request["behavior_hash"], "init":init
-                }),
+                object(
+                    ["behavior_hash", "init"],
+                    [request["behavior_hash"].clone(), bytes(&init)],
+                ),
             )
             .unwrap();
-            let body = loom::serde_json::to_vec(&json!({"action":"row"})).unwrap();
-            loom::perform::<()>("actor.send", json!({"cap":cap,"msg":body})).unwrap();
+            let body = loom::serde_json::to_vec(&object(["action"], [Value::from("row")])).unwrap();
+            loom::perform::<()>(
+                "actor.send",
+                object(["cap", "msg"], [bytes(&cap), bytes(&body)]),
+            )
+            .unwrap();
             let token: Value = loom::serde_json::from_slice(&cap).unwrap();
             let cap_id = token["cap_id"].as_u64().unwrap().to_string();
-            loom::perform::<()>("actor.revoke", json!({"cap_id":cap_id})).unwrap();
+            loom::perform::<()>("actor.revoke", object(["cap_id"], [Value::from(cap_id)])).unwrap();
         }
         "unknown" => {
             // Swallowing a rejected root effect must not make a message commit.
-            let _ = loom::perform::<Value>("nope", json!({"request":[]}));
+            let _ = loom::perform::<Value>("nope", object(["request"], [bytes(&[])]));
         }
         "unknown_actor" => {
-            let _ = loom::perform::<Value>("actor.nope", json!({"request":[]}));
+            let _ = loom::perform::<Value>("actor.nope", object(["request"], [bytes(&[])]));
         }
         "effect" => {
             insert(&msg);
-            let _ = loom::perform::<Vec<u8>>("test.effect", json!({"request":[1,2,3]}));
+            let _ =
+                loom::perform::<Vec<u8>>("test.effect", object(["request"], [bytes(&[1, 2, 3])]));
         }
         "scoped_trap" => {
             loom::scope(|scope| {
                 scope
                     .spawn(|| {
-                        loom::perform::<Vec<u8>>("test.effect", json!({"request":[1,2,3]}))
-                            .unwrap();
-                        panic!("scoped fixture panic");
+                        loom::perform::<Vec<u8>>(
+                            "test.effect",
+                            object(["request"], [bytes(&[1, 2, 3])]),
+                        )
+                        .unwrap();
+                        fail("scoped fixture panic");
                     })
                     .unwrap()
                     .join()
@@ -93,26 +108,63 @@ pub fn handle(msg: Vec<u8>) {
             });
         }
         "handler_trap" => {
-            loom::perform::<Vec<u8>>("test.effect", json!({"request":[1,2,3]})).unwrap();
+            loom::perform::<Vec<u8>>("test.effect", object(["request"], [bytes(&[1, 2, 3])]))
+                .unwrap();
             let _ = loom::handle(
                 ["local"],
-                |_, _| panic!("handler fixture panic"),
+                |_, _| fail("handler fixture panic"),
                 || loom::perform::<Value>("local", Value::Null),
             );
         }
-        action => panic!("unknown fixture action {action}"),
+        _ => fail("unknown fixture action"),
     }
 }
 
 fn insert(msg: &[u8]) {
     let rows: Value = loom::perform(
         "sql",
-        json!({
-            "sql":"INSERT INTO entries(body) VALUES (?) RETURNING body",
-            "params":[{"type":"blob","value":msg}]
-        }),
+        object(
+            ["sql", "params"],
+            [
+                Value::from("INSERT INTO entries(body) VALUES (?) RETURNING body"),
+                Value::Array([blob(msg)].into()),
+            ],
+        ),
     )
     .unwrap();
-    assert_eq!(rows["columns"], json!(["body"]));
-    assert_eq!(rows["rows"], json!([[{"type":"blob","value":msg}]]));
+    require(
+        rows["columns"] == Value::Array([Value::from("body")].into()),
+        "unexpected SQL columns",
+    );
+    require(
+        rows["rows"] == Value::Array([Value::Array([blob(msg)].into())].into()),
+        "unexpected SQL rows",
+    );
+}
+
+fn object<const N: usize>(keys: [&str; N], values: [Value; N]) -> Value {
+    let mut object = loom::serde_json::Map::new();
+    let mut values = values.into_iter();
+    for key in keys {
+        object.insert(key.to_owned(), values.next().unwrap());
+    }
+    Value::Object(object)
+}
+
+fn bytes(value: &[u8]) -> Value {
+    loom::serde_json::to_value(value).unwrap()
+}
+
+fn blob(value: &[u8]) -> Value {
+    object(["type", "value"], [Value::from("blob"), bytes(value)])
+}
+
+fn require(condition: bool, message: &str) {
+    if !condition {
+        fail(message);
+    }
+}
+
+fn fail(message: &str) -> ! {
+    std::panic::panic_any(message.to_owned())
 }

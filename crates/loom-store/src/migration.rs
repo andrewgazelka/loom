@@ -83,31 +83,6 @@ pub(super) fn run(connection: &mut Connection) -> Result<()> {
             params![serde_json::to_string(&typed)?, definition.hash],
         )?;
     }
-    let hashes: Vec<String> = {
-        let mut q = tx.prepare(
-            "SELECT hash FROM defs WHERE NOT EXISTS(SELECT 1 FROM cas WHERE cas.hash=defs.hash)",
-        )?;
-        q.query_map([], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?
-    };
-    for hash in hashes {
-        let def = super::definition(&tx, &hash)?.context("definition disappeared")?;
-        let source:String=tx.query_row("SELECT CAST(c.bytes AS TEXT) FROM defs d JOIN cas c ON c.hash=d.source_hash WHERE d.hash=?",[&hash],|r|r.get(0))?;
-        let recorded:Vec<u8>=tx.query_row("SELECT bytes FROM definition_events WHERE json_extract(bytes,'$.type')='defined' AND json_extract(bytes,'$.def.hash')=? ORDER BY seq DESC LIMIT 1",[&hash],|r|r.get(0))?;
-        let event: Value = serde_json::from_slice(&recorded)?;
-        let deps = serde_json::from_value(event["deps"].clone())?;
-        let identity = loom_proto::definition_identity(
-            def.lang,
-            &source,
-            &deps,
-            def.allowed_effects.as_deref(),
-        )?;
-        anyhow::ensure!(
-            blake3::hash(&identity).to_hex().as_str() == hash,
-            "persisted definition {hash} does not match canonical source identity"
-        );
-        super::put(&tx, "def", &identity)?;
-    }
     tx.execute("INSERT OR IGNORE INTO def_effects SELECT json_extract(bytes,'$.def_hash'),json_extract(bytes,'$.op') FROM definition_events WHERE json_extract(bytes,'$.type')='effect_invoked' AND json_type(bytes,'$.def_hash')='text'",[])?;
     tx.commit()?;
     Ok(())

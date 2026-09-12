@@ -49,7 +49,7 @@ impl Node {
         for row in changes.rows {
             let hash: String = row.get(1)?;
             if seen.insert(hash.clone()) {
-                tx.execute_batch(actor::behavior(&self.registry, &hash)?.schema()).await?;
+                tx.execute_batch(actor::behavior(&self.registry, &hash).await?.schema()).await?;
             }
             let values = (0..row.column_count()).map(|i| row.get_value(i)).collect::<turso::Result<Vec<_>>>()?;
             tx.execute("INSERT INTO code_changes(seq,behavior_hash,parent_hash,author,rationale,schema_sql) VALUES (?,?,?,?,?,?)", values)

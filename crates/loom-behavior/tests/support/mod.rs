@@ -2,7 +2,7 @@ use anyhow::{Context, Result, ensure};
 use loom_actor::{Actor, Config, DefaultEffects, EffectHandler, Node, Registry};
 use loom_store::Store;
 use serde::Deserialize;
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 use tokio::{process::Command, sync::OnceCell};
 
 #[derive(Deserialize)]
@@ -35,27 +35,23 @@ pub async fn fixtures() -> &'static Fixtures {
 async fn build() -> Result<Fixtures> {
     let directory = tempfile::tempdir()?;
     let database = directory.path().join("definitions.sqlite");
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let executable = std::env::current_exe()?;
+    let helper = executable
         .parent()
-        .context("crate parent")?
-        .parent()
-        .context("workspace root")?
-        .to_owned();
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let mut command = Command::new(cargo);
-    command
-        .current_dir(root)
-        .args([
-            "run",
-            "--quiet",
-            "-p",
-            "loom-behavior",
-            "--example",
-            "loom-behavior-fixtures",
-            "--",
-        ])
-        .arg(&database)
-        .kill_on_drop(true);
+        .and_then(std::path::Path::parent)
+        .context("test executable must live in the Cargo target deps directory")?
+        .join("examples")
+        .join(format!(
+            "loom-behavior-fixtures{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+    ensure!(
+        helper.is_file(),
+        "fixture builder {} missing; run cargo build -p loom-behavior --example loom-behavior-fixtures",
+        helper.display()
+    );
+    let mut command = Command::new(&helper);
+    command.arg(&database).kill_on_drop(true);
     let invocation = format!("{command:?}");
     let output = command
         .output()
@@ -109,14 +105,11 @@ impl Fixtures {
         directory: &std::path::Path,
         effects: Arc<dyn EffectHandler>,
     ) -> Node {
-        let mut registry = Registry::new();
+        let registry = Arc::new(loom_behavior::StoreRegistry::new(self.store.clone()));
         for hash in [&self.handler, &self.promoted] {
-            let behavior = loom_behavior::register(&mut registry, self.store.clone(), hash)
-                .await
-                .unwrap();
-            assert_eq!(loom_actor::Behavior::hash(behavior.as_ref()), hash);
-            assert!(!loom_actor::Behavior::schema(behavior.as_ref()).is_empty());
-            assert!(registry.contains_key(hash));
+            let behavior = registry.resolve(hash).await.unwrap();
+            assert_eq!(behavior.hash(), hash);
+            assert!(!behavior.schema().is_empty());
         }
         Node::new(directory, registry, effects, Config::default())
             .await

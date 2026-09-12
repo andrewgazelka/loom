@@ -99,6 +99,7 @@ impl Runtime {
                 .invoke(
                     task_scope,
                     Invocation::Call {
+                        export: "loom_call_main".into(),
                         args: encode(&json!([])).unwrap(),
                     },
                 )
