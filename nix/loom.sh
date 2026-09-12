@@ -27,11 +27,13 @@ fi
 has_db=false
 has_bind=false
 has_auth=false
+has_actors_dir=false
 using_token_file=false
 for argument in "$@"; do
   case "$argument" in
     --db|--db=*) has_db=true ;;
     --bind|--bind=*) has_bind=true ;;
+    --actors-dir|--actors-dir=*) has_actors_dir=true ;;
     --token|--token=*|--tokens-file|--tokens-file=*) has_auth=true ;;
   esac
 done
@@ -53,6 +55,7 @@ fi
 bind=${LOOM_BIND:-127.0.0.1:8787}
 defaults=()
 if ! $has_db; then defaults+=(--db "$state/loom.sqlite"); fi
+if ! $has_actors_dir; then defaults+=(--actors-dir "$state/actors"); fi
 if ! $has_bind; then
   defaults+=(--bind "$bind")
   printf 'Loom: http://%s\n' "$bind" >&2

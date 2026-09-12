@@ -10,13 +10,18 @@ transaction, OTP-parity supervision trees.
 ## Try it
 
 ```sh
-nix run .                 # starts loomd, prints the token file path
-nix run . -- --stdio      # same daemon, MCP over stdio for a coding agent
-cargo test -p loom-actor  # 22 tests: the actor engine, standalone
+nix run .#repl               # starts loomd, prints the token URL, opens the browser
+nix run . -- --stdio         # same daemon, MCP over stdio for a coding agent
+nix shell . -c loom --help   # the loom CLI, talking to a running daemon
+cargo test -p loom-actor     # 22 tests: the actor engine, standalone
 ```
 
-Open `http://127.0.0.1:8787` and paste the printed token for the browser REPL.
-See [docs/guide.md](docs/guide.md) for running without Nix and for the HTTP API.
+`nix run .#repl` prints `Loom REPL: http://127.0.0.1:8787/#token=<token>` and
+opens it in your browser (the token rides the URL fragment, so it never
+reaches the server or its logs). The package installs two programs: `loomd`,
+the daemon, and `loom`, the CLI; `nix shell .` puts both on `PATH`, and
+`nix build .` leaves them in `result/bin`. See [docs/guide.md](docs/guide.md)
+for running without Nix and for the HTTP API.
 
 ## Effects
 
@@ -39,7 +44,12 @@ pub fn main() {
 ```
 
 The two scoped children run concurrently, so their sleeps overlap; `scope` waits for
-both before returning. The guest-handler round trip (install, dispatch, resume,
+both before returning. Guest code has no macros and no effect declarations: an entry is
+any `pub fn` at the crate root, and the set of host effects a definition can reach (its
+effect row, here `["sleep"]`) is inferred from the resolved call graph by the same rustc
+driver that computes its content hash, shown by `add` and `view`, and enforced by the
+host at run time. A `perform` whose label is not a literal or a const is a compile error
+at that line. The guest-handler round trip (install, dispatch, resume,
 remove) measured **13.811 µs median, 24.356 µs p99** over 10,000 warm calls on Linux,
 September 10, 2026. Reproduce with `bun scripts/bench/effects-handlers.ts`. See
 [docs/guide.md](docs/guide.md) for handler installation and

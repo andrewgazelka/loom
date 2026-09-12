@@ -11,12 +11,23 @@ The long-term goal is a formally verified guest language, compiler, and runtime 
 On Apple Silicon macOS or x86-64 Linux, Nix supplies the daemon, Svelte app, and Rust guest toolchain:
 
 ```sh
-nix run .
+nix run .#repl
 ```
 
-Open <http://127.0.0.1:8787> and enter the token from the file printed by the launcher. The database, token, and build caches persist under `~/Library/Application Support/loom` on macOS or `~/.local/share/loom` on Linux. `XDG_DATA_HOME` changes the base directory; `LOOM_DATA_DIR` sets the complete directory. The first Nix build downloads and compiles dependencies.
+This starts loomd, prints the token file path, and prints and opens
+`Loom REPL: http://127.0.0.1:8787/#token=<token>` in your browser (skipped,
+with a log line, when no display is available). The token rides the URL
+fragment, never a query string, so it never reaches the server or its
+logs; with `--tokens-file` there is no single token to embed, so the URL
+has no fragment and you enter one from the file yourself. The database,
+token, and build caches persist under `~/Library/Application Support/loom`
+on macOS or `~/.local/share/loom` on Linux. `XDG_DATA_HOME` changes the
+base directory; `LOOM_DATA_DIR` sets the complete directory. The first Nix
+build downloads and compiles dependencies.
 
 Pass daemon options after `--`, for example `nix run . -- --bind 127.0.0.1:8788` or `nix run . -- --stdio` for an MCP client. Set `LOOM_TOKEN` to choose a token instead of generating one. Linux process isolation uses the packaged Bubblewrap; machine execution remains platform-dependent.
+
+The package installs two programs. `loomd` is the daemon with its state directory, token, and guest toolchain arranged for it, and it is what `nix run .` and `nix run .#repl` start. `loom` is the CLI that talks to a running daemon; `nix shell . -c loom --help` puts it on `PATH` for one command, and `nix build .` leaves both in `result/bin`. The REPL launcher prints the CLI's store path on its second line.
 
 ### Development without Nix
 
