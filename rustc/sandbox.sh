@@ -14,7 +14,7 @@ target_dir=$(realpath "$4")
 repo_root=$(realpath "$5")
 [[ $(uname -s) == Linux ]] || { echo 'Rust sandbox requires Linux' >&2; exit 69; }
 case "$crate_dir/" in "$source_root/"*) ;; *) echo 'crate must be inside source root' >&2; exit 64;; esac
-for command in bwrap timeout prlimit cargo rustc cc; do
+for command in bwrap timeout prlimit cargo cc; do
   command -v "$command" >/dev/null || { echo "missing sandbox tool: $command" >&2; exit 69; }
 done
 # Clear the environment before Cargo, including RUSTC_WRAPPER and cargo config.
@@ -26,9 +26,18 @@ for public in /nix/store /usr /bin /lib /lib64 /run/current-system/sw; do
   [[ ! -e $public ]] || args+=(--ro-bind "$public" "$public")
 done
 cc_dir=$(dirname "$(command -v cc)")
-# Select the compiler actually used by the host, including a Nix toolchain when
-# a separate rustup installation also exists. Expose only its immutable sysroot.
-rust_root=$(rustc --print sysroot)
+# Compilation requires the same explicit driver selected by the native caller.
+# Resolution and sysroot discovery happen before clearing rustup's environment.
+if [[ $mode == build || $mode == rustc ]]; then
+  [[ -n ${RUSTC:-} ]] || { echo 'sandbox compilation requires RUSTC content-hashing driver' >&2; exit 69; }
+fi
+compiler_executable=$(command -v "${RUSTC:-rustc}")
+[[ -x $compiler_executable ]] || { echo 'selected compiler executable is missing' >&2; exit 69; }
+rust_root=$("$compiler_executable" --print sysroot)
+if [[ $(basename "$(realpath "$compiler_executable")") == rustup ]]; then
+  compiler_executable="$rust_root/bin/rustc"
+fi
+compiler_executable=$(realpath "$compiler_executable")
 [[ -x $rust_root/bin/rustc ]] || { echo 'selected Rust sysroot is incomplete' >&2; exit 69; }
 cargo_executable=$(command -v cargo)
 # Rustup's proxy needs the caller home; use its selected real Cargo instead.
@@ -38,7 +47,7 @@ fi
 [[ -x $cargo_executable ]] || { echo 'selected Cargo executable is missing' >&2; exit 69; }
 args+=(--ro-bind "$cargo_executable" "$cargo_executable")
 cargo_dir=$(dirname "$cargo_executable")
-args+=(--ro-bind "$rust_root" "$rust_root" --setenv RUSTC "$rust_root/bin/rustc")
+args+=(--setenv RUSTC "$compiler_executable")
 sandbox_path="$rust_root/bin:$cargo_dir:/opt/loom-bin:$cc_dir:/run/current-system/sw/bin:/usr/local/bin:/usr/bin:/bin"
 # Packaged helper tools live in separate Nix outputs. Retain public immutable
 # directories, while dropping caller-local executable/configuration directories.
@@ -59,7 +68,15 @@ case "$cc_executable" in
   *) args+=(--symlink "$cc_executable" /opt/loom-bin/cc) ;;
 esac
 args+=(--ro-bind "$source_root" "$source_root" --bind "$target_dir" "$target_dir")
-for guest in loom-guest-rs loom-guest-macros loom-proto; do
+# Mount after the source/target trees so an overlapping cache cannot hide or
+# make the driver writable. Its embedded sysroot and loader rpath stay valid.
+args+=(--ro-bind "$rust_root" "$rust_root"
+  --ro-bind "$compiler_executable" "$compiler_executable")
+if [[ $mode == rustc && -n ${LOOM_ITEM_HASHES:-} ]]; then
+  args+=(--setenv LOOM_ITEM_HASHES "$LOOM_ITEM_HASHES"
+    --setenv LOOM_ITEM_PREIMAGES "${LOOM_ITEM_PREIMAGES:?missing item preimages directory}")
+fi
+for guest in loom-guest-rs loom-proto; do
   args+=(--ro-bind "$repo_root/crates/$guest" "$repo_root/crates/$guest")
 done
 args+=(--ro-bind "$repo_root/rustc/build.sh" /opt/build.sh
@@ -80,6 +97,8 @@ if [[ $mode == vendor ]]; then
   library_manifest="$rust_root/lib/rustlib/src/rust/library/Cargo.toml"
   [[ -f $library_manifest ]] || { echo 'shared core builds require matching rust-src' >&2; exit 69; }
   args+=(--setenv RUSTC_BOOTSTRAP 1 --setenv LOOM_RUST_SRC_MANIFEST "$library_manifest")
+  # The guest shell expands these variables after bwrap installs its environment.
+  # shellcheck disable=SC2016
   run=(/bin/sh -eu -c '
     cargo metadata --format-version=1 > /dev/null
     cargo vendor --locked --sync "$LOOM_RUST_SRC_MANIFEST" vendor > .cargo/config.toml
