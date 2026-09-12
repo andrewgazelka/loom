@@ -42,6 +42,8 @@
 
 <style>
   aside {
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--line);
     font-size: 0.9em;
     color: var(--muted);
   }

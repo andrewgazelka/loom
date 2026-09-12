@@ -50,11 +50,35 @@ export function preview(value: unknown, limit = 160): string {
   return compact.length > limit ? `${compact.slice(0, limit - 1)}…` : compact;
 }
 export function invocationSummary(entry: JournalEntry): string {
+  if (entry.command === "run") {
+    const target = entry.values.target ?? "";
+    const label =
+      record(entry.result) && typeof entry.result.entry === "string"
+        ? entry.result.entry
+        : /^[a-f0-9]{64}$/.test(target)
+          ? target.slice(0, 8)
+          : target;
+    return preview(`${label}(${entry.values.args ?? "[]"})`);
+  }
   return preview(
     Object.entries(entry.values)
       .map(([key, value]) => `${key}=${preview(value, 70)}`)
       .join(" · "),
   );
+}
+export function resultSummary(entry: JournalEntry): string {
+  const result = entry.result;
+  if (record(result) && entry.command === "run")
+    return `→ ${preview(result.output)}`;
+  if (
+    record(result) &&
+    typeof result.name === "string" &&
+    typeof result.hash === "string"
+  )
+    return `${result.name} · ${result.hash.slice(0, 8)}`;
+  if (entry.command === "find" && Array.isArray(result))
+    return `${result.length} definitions`;
+  return preview(result);
 }
 /** Per-endpoint history. Only command data is captured; transport credentials never enter it. */
 export class Journal {

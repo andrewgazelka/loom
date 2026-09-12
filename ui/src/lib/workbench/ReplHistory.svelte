@@ -4,6 +4,7 @@
   import CodeBlock from "../CodeBlock.svelte";
   import {
     invocationSummary,
+    resultSummary,
     preview,
     type Journal,
     type JournalEntry,
@@ -93,7 +94,7 @@
             {#if entry.error}<span class="error">{preview(entry.error)}</span
               >{:else if entry.state === "running"}<span class="muted"
                 >Running…</span
-              >{:else}<span>{preview(entry.result)}</span>{/if}
+              >{:else}<span>{resultSummary(entry)}</span>{/if}
           </div>{/if}
         {#if expanded === entry.id}
           <div class="entry-detail">

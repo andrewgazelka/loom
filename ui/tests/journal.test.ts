@@ -1,10 +1,31 @@
 import { V } from "../src/lib/workbench/commands";
 import { describe, expect, test } from "bun:test";
 import { get } from "svelte/store";
-import { Journal } from "../src/lib/workbench/journal";
+import {
+  Journal,
+  invocationSummary,
+  resultSummary,
+} from "../src/lib/workbench/journal";
 import { commandById } from "../src/lib/workbench/commands";
 
 describe("session command history", () => {
+  test("run previews show the invocation and output while retaining full trace data", () => {
+    const journal = new Journal();
+    const id = journal.begin(commandById(V.run), {
+      target: "a".repeat(64),
+      args: "21",
+    });
+    journal.finish(id, {
+      entry: "double",
+      output: 42,
+      effects: [],
+      scope: "trace-id",
+    });
+    const entry = get(journal)[0]!;
+    expect(invocationSummary(entry)).toBe("double(21)");
+    expect(resultSummary(entry)).toBe("→ 42");
+    expect(entry.result).toMatchObject({ scope: "trace-id" });
+  });
   test("retains immutable input and result snapshots in invocation order", () => {
     const journal = new Journal();
     const values = { args: "[42]" };
