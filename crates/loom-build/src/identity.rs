@@ -27,7 +27,34 @@ fn rejected(error: impl std::fmt::Display) -> BuildError {
     BuildError::Rejected(error.to_string())
 }
 impl Driver {
+    #[cfg(test)]
     pub async fn prepare(root: &Path, cache: &Path) -> Result<Self, BuildError> {
+        Self::prepare_with_path(root, cache, None).await
+    }
+    pub async fn prepare_with_path(
+        root: &Path,
+        cache: &Path,
+        selected: Option<&Path>,
+    ) -> Result<Self, BuildError> {
+        if let Some(path) = selected {
+            let probe = Command::new(path)
+                .arg("-vV")
+                .output()
+                .await
+                .map_err(|error| {
+                    rejected(format!(
+                        "hash-rustc driver unavailable: {}: {error}",
+                        path.display()
+                    ))
+                })?;
+            if !probe.status.success() {
+                return Err(rejected(format!(
+                    "hash-rustc driver unavailable: {}: {}",
+                    path.display(),
+                    String::from_utf8_lossy(&probe.stderr)
+                )));
+            }
+        }
         let source = root.join("tools/hash-rustc");
         let manifest = source.join("Cargo.toml");
         if !manifest.is_file() {
@@ -54,27 +81,33 @@ impl Driver {
         let target = cache
             .join("hash-rustc")
             .join(blake3::hash(&guest_version).to_hex().as_str());
-        let path = target.join("release/hash-rustc");
-        // Cargo's freshness check covers changes in the independently pinned driver.
-        let output = Command::new("cargo")
-            .current_dir(&source)
-            .env_remove("RUSTC")
-            .env_remove("RUSTC_WRAPPER")
-            .env_remove("RUSTUP_TOOLCHAIN")
-            .env_remove("RUSTFLAGS")
-            .env_remove("CARGO_ENCODED_RUSTFLAGS")
-            .env("CARGO_TARGET_DIR", &target)
-            .env("CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER", "/usr/bin/cc")
-            .args(["build", "--release", "--locked", "--bin", "hash-rustc"])
-            .output()
-            .await
-            .map_err(|error| rejected(format!("hash-rustc driver {}: {error}", path.display())))?;
-        if !output.status.success() || !path.is_file() {
-            return Err(rejected(format!(
-                "hash-rustc driver unavailable: {}\n{}",
-                path.display(),
-                String::from_utf8_lossy(&output.stderr)
-            )));
+        let path = selected
+            .map(Path::to_owned)
+            .unwrap_or_else(|| target.join("release/hash-rustc"));
+        if selected.is_none() {
+            // Cargo's freshness check covers changes in the independently pinned driver.
+            let output = Command::new("cargo")
+                .current_dir(&source)
+                .env_remove("RUSTC")
+                .env_remove("RUSTC_WRAPPER")
+                .env_remove("RUSTUP_TOOLCHAIN")
+                .env_remove("RUSTFLAGS")
+                .env_remove("CARGO_ENCODED_RUSTFLAGS")
+                .env("CARGO_TARGET_DIR", &target)
+                .env("CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER", "/usr/bin/cc")
+                .args(["build", "--release", "--locked", "--bin", "hash-rustc"])
+                .output()
+                .await
+                .map_err(|error| {
+                    rejected(format!("hash-rustc driver {}: {error}", path.display()))
+                })?;
+            if !output.status.success() || !path.is_file() {
+                return Err(rejected(format!(
+                    "hash-rustc driver unavailable: {}\n{}",
+                    path.display(),
+                    String::from_utf8_lossy(&output.stderr)
+                )));
+            }
         }
         let path = std::fs::canonicalize(&path)?;
         let version = Command::new(&path)
@@ -127,23 +160,30 @@ impl Driver {
         if document.toolchain.is_empty() {
             return Err(rejected("hash-rustc document has no toolchain"));
         }
-        let entry = definition
-            .sig
-            .exports
-            .first()
-            .ok_or_else(|| rejected("definition has no entry export"))?;
-        let behavior_hash = document
-            .entry
-            .get(&entry.name)
-            .ok_or_else(|| rejected(format!("hash-rustc document missing entry {}", entry.name)))?
-            .clone();
-        if document
-            .items
-            .get(&entry.name)
-            .is_none_or(|item| item.hash != behavior_hash)
-        {
-            return Err(rejected("hash-rustc entry disagrees with item table"));
+        if document.entry.is_empty() {
+            return Err(rejected("definition has no entry export"));
         }
+        for entry in &definition.sig.exports {
+            if !document.entry.contains_key(&entry.name) {
+                return Err(rejected(format!(
+                    "hash-rustc document missing entry {}",
+                    entry.name
+                )));
+            }
+        }
+        for (name, hash) in &document.entry {
+            if document
+                .items
+                .get(name)
+                .is_none_or(|item| &item.hash != hash)
+            {
+                return Err(rejected(format!(
+                    "hash-rustc entry {name} disagrees with item table"
+                )));
+            }
+        }
+        let root_preimage = loom_proto::entry_identity_preimage(&document.entry);
+        let behavior_hash = blake3::hash(&root_preimage).to_hex().to_string();
         let preimages = directory.join("item-preimages");
         for item in document.items.values() {
             let data = ingest_object(store, &preimages, &item.hash)?;
@@ -160,6 +200,7 @@ impl Driver {
                 return Err(rejected("empty hash-rustc item reference"));
             }
         }
+        store.put("entry-root", &root_preimage).map_err(rejected)?;
         Ok(loom_proto::BuildIdentity {
             behavior_hash,
             wasm_hash: blake3::hash(wasm).to_hex().to_string(),

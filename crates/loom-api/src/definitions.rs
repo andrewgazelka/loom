@@ -16,7 +16,18 @@ impl Service {
             Err(error) => self.response(Err(error)),
         }
     }
-    pub(super) async fn define_inner(&self, mut request: DefineRequest) -> Result<Response> {
+    pub(super) async fn define_inner(&self, request: DefineRequest) -> Result<Response> {
+        self.builder.preflight().await?;
+        let mut intake = self.clone();
+        intake.store = self.store.stage_intake()?;
+        intake.builder = Arc::new(self.builder.for_store(intake.store.clone()));
+        intake.define_staged(request, &self.store).await
+    }
+    async fn define_staged(
+        &self,
+        mut request: DefineRequest,
+        destination: &Store,
+    ) -> Result<Response> {
         ensure!(
             self.languages.contains(&request.lang),
             "language {} is disabled",
@@ -90,16 +101,26 @@ impl Service {
             component_hash: Some(component_hash.clone()),
             sig: checked.sig,
         };
-        self.store.define_with_identity(
-            &def,
-            Some(&request.name),
-            &checked.source,
-            &checked.deps,
-            Some(identity),
+        let build_event = json!({"type":"component_built","component_hash":component_hash,"logs_ref":logs_ref,"ms":built.ms,"size":built.component.len(),"rustc_invocations":built.rustc_invocations});
+        destination.commit_intake(
+            &self.store,
+            loom_store::IntakePublication {
+                def: &def,
+                name: Some(&request.name),
+                source: &checked.source,
+                deps: &checked.deps,
+                identity: Some(identity),
+                build_event: &build_event,
+            },
         )?;
-        self.store.record_definition_event(&json!({"type":"component_built","component_hash":component_hash,"logs_ref":logs_ref,"ms":built.ms,"size":built.component.len(),"rustc_invocations":built.rustc_invocations}))?;
-        Ok(self.response(Ok(json!({"def":def,"build":{"ms":built.ms,"component_hash":component_hash,"size":built.component.len(),"logs_ref":logs_ref,"rustc_invocations":built.rustc_invocations}}))))
+        Ok(Response {
+            ok: true,
+            seq: destination.latest_seq()?,
+            diagnostics: Vec::new(),
+            result: json!({"def":def,"build":{"ms":built.ms,"component_hash":component_hash,"size":built.component.len(),"logs_ref":logs_ref,"rustc_invocations":built.rustc_invocations}}),
+        })
     }
+
     pub(super) async fn check_definition(
         &self,
         request: &DefineRequest,

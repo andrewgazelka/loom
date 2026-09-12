@@ -123,7 +123,13 @@ pub(crate) fn main(
                 "dependency changed after compiler-cache publication",
             ));
         }
-        dependencies.insert(path.to_string_lossy().into_owned(), owner.key);
+        dependencies.insert(
+            path.to_string_lossy().into_owned(),
+            artifacts::Dependency {
+                key: owner.key,
+                hash: owner.hash,
+            },
+        );
     }
     let inputs = artifacts::inputs(
         &recipe,

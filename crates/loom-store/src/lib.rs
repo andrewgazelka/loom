@@ -5,6 +5,7 @@ mod effect_index;
 mod effects;
 mod events;
 mod identity;
+mod intake;
 mod language;
 mod legacy;
 mod machine;
@@ -17,6 +18,7 @@ mod recording;
 mod tests;
 mod trace;
 use anyhow::{Context, Result, anyhow, ensure};
+pub use intake::IntakePublication;
 use loom_proto::{Def, Event, Value};
 pub use machine::MachineRoot;
 pub use recording::RecordingTimings;
@@ -183,3 +185,5 @@ fn encode<T: serde::Serialize>(value: &T) -> Result<Vec<u8>> {
 fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     loom_proto::decode(bytes).map_err(anyhow::Error::msg)
 }
+
+pub use definitions::EntryReference;

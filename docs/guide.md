@@ -56,7 +56,7 @@ The CLI, HTTP commands, and MCP tools use the same definition operations. The CL
 
 | CLI | MCP tool | Result |
 | --- | --- | --- |
-| `add <file.rs> [--name n]` | `add` | Name, definition hash, entry item hash, Wasm hash, and item table |
+| `add <file.rs> [--name n]` | `add` | Name, definition hash, entry item hashes, Wasm hash, and item table |
 | `view <name-or-hash>` | `view` | Stored source and item table |
 | `update <name> <file.rs>` | `update` | New definition and name binding; old hash remains runnable |
 | `history <name>` | `history` | Hash chain, timestamps, and changed items between entries |
@@ -79,11 +79,11 @@ Guest Rust has no macros. Every crate-root `pub fn` is an entry. An optional sch
 pub fn sum(a: i64, b: i64) -> i64 { a + b }
 ```
 
-A source file may expose several entries. `run <name>` selects the matching public function in a named definition, or a unique entry with that name among currently named definitions. Ambiguous names report the matching definition hashes. `run <hash>` requires a sole entry and otherwise reports the candidate names. Private helpers and nested functions are not entries.
+A source file may expose several entries. `run <name>` selects the matching public function in a named definition, or a unique entry with that name among currently named definitions. Ambiguous names report the matching definition hashes. `run <definition hash>` requires a sole entry and otherwise reports the candidate names. Each entry hash is also addressable: `run <entry hash>` executes that entry, and `view <entry hash>` returns its owning definition and identifies the selected entry. An unchanged entry shared by several revisions retains its earliest published owner. Private helpers and nested functions are not entries.
 
 HTTP clients post `{ "command": "run", "args": { "target": "sum", "args": [20,22] } }` to `/v1/command` with the bearer token. `add` takes `source` and an optional `name`; `update` takes `name` and `source`. The remaining definition arguments are `target` for `view`, `name` for `history`, `old` and `new` for `diff`, `text` for `find`, and `hash` for `dependents`.
 
-Item hashes describe compiler-resolved definitions. Renaming a local variable or reformatting source leaves them unchanged. A changed helper can change its callers' hashes too. The definition hash is the driver’s resolved-HIR entry hash. Alpha-renaming a local leaves both the definition hash and history unchanged; changing a constant changes the hash. Source revisions have their own BLAKE3 hashes. A published definition pins its executable and schema; a conflicting publication is rejected. The Wasm and toolchain hashes identify its executable build. Builds require the `hash-rustc` driver and reject missing identity outputs. Stores without `defs.behavior_hash` are rejected by column name.
+Item hashes describe compiler-resolved definitions. Renaming a local variable or reformatting source leaves them unchanged. A changed helper can change its callers' hashes too. The definition hash is a BLAKE3 Merkle root over the sorted entry name/hash pairs from the driver. Every public entry contributes, so changing a secondary entry changes the definition hash while unchanged entries retain their own resolved-HIR hashes. Alpha-renaming a local leaves both the definition hash and history unchanged; changing a constant changes the hash. Source revisions have their own BLAKE3 hashes. A published definition pins its executable and schema; a conflicting publication is rejected. The Wasm and toolchain hashes identify its executable build. Builds require the `hash-rustc` driver and reject missing identity outputs. Stores without `defs.behavior_hash` are rejected by column name.
 
 Actor commands use the same names, argument schemas, admission checks, and response envelope on CLI, HTTP, and MCP:
 
@@ -115,7 +115,7 @@ All responses, including MCP actor responses and failures, use `{ok, seq, result
 
 ## DAG-CBOR and links
 
-Rust guests use deterministic DAG-CBOR at the core wasm effect boundary. Structured CAS values use the same codec; core wasm binaries, source bundles, and other raw bytes retain the raw codec. JSON clients represent a link as exactly `{ "$ref": "<CID>" }`. In DAG-CBOR this becomes tag 42 containing the zero-prefixed binary CID. Local links use CIDv1 with a BLAKE3-256 digest and distinguish DAG-CBOR (`0x71`) from raw bytes (`0x55`). Definition identities are resolved-HIR entry hashes; source revisions use separate source hashes.
+Rust guests use deterministic DAG-CBOR at the core wasm effect boundary. Structured CAS values use the same codec; core wasm binaries, source bundles, and other raw bytes retain the raw codec. JSON clients represent a link as exactly `{ "$ref": "<CID>" }`. In DAG-CBOR this becomes tag 42 containing the zero-prefixed binary CID. Local links use CIDv1 with a BLAKE3-256 digest and distinguish DAG-CBOR (`0x71`) from raw bytes (`0x55`). Definition identities are Merkle roots over sorted entry name/hash pairs; individual entries retain their resolved-HIR hashes, and source revisions use separate source hashes.
 
 Maps have string keys ordered by encoded length and then bytes. Decoders reject duplicate keys, nonminimal or indefinite encodings, other tags, malformed CIDs, undefined, nonfinite floats, and trailing bytes. Floats use 64 bits. The shared JSON value model encodes safe integral numbers as integers; Rust integers outside JavaScript's safe range are rejected instead of losing precision across languages.
 
@@ -202,7 +202,7 @@ The runner creates a separate 10,000-file fixture, starts Codex with only Loom c
 
 Calling an effect performs it: `loom::sleep(100)` suspends until its timer finishes, and `loom::perform::<T>(label, args)` performs a custom effect. Concurrent Rust work on the shared-core path uses `loom::scope`, `scope.spawn(|| ...)`, and `child.join()`. Use `loom::spawn(|| ...)` with `'static` captures for fire-and-forget work or a `JoinHandle` moved into another task. Dropping that handle leaves its task running; the host cancels unfinished detached tasks when the definition entry returns, without an implicit wait. Joining a trapped detached task returns its error; an unjoined detached failure is discarded. A synchronous `loom::call(DEF, args)` can run inside a scoped child.
 
-Definition signatures record the residual effect row: the labels that can reach the outermost host handler. The compiler infers this row through resolved calls, including the concrete implementations selected by trait and generic calls. The host-enforced `allowed_effects` policy is a separate permission limit. Omitting `allowed_effects` adds no policy restriction; `[]` permits none. A publication pins its policy with the executable; a different policy for the same entry hash is rejected. Cross-definition calls inherit the intersection of caller and callee permissions, including on cache hits. Scoped children inherit the caller's permissions.
+Definition signatures record the residual effect row: the labels that can reach the outermost host handler. The compiler infers this row through resolved calls, including the concrete implementations selected by trait and generic calls. The host-enforced `allowed_effects` policy is a separate permission limit. Omitting `allowed_effects` adds no policy restriction; `[]` permits none. A publication pins its policy with the executable; a different policy for the same definition hash is rejected. Cross-definition calls inherit the intersection of caller and callee permissions, including on cache hits. Scoped children inherit the caller's permissions.
 
 The Effects view shows individual invocations and their outcomes. To capture file content changes from a process, pass `capture_paths: ["note.txt"]` to `exec` or `process.start`. Paths are resolved within the process root; the capture records actual before/after bytes in CAS and displays created, modified, and deleted files as diffs. Capture is limited to 64 explicitly selected regular files, at most 1 MiB each. Symlinks, unsupported files, and unavailable reads are reported explicitly.
 

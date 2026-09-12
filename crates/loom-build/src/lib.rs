@@ -91,6 +91,7 @@ pub struct Builder {
     root: PathBuf,
     cache: PathBuf,
     gate: Mutex<()>,
+    driver_path: Option<PathBuf>,
 }
 #[derive(Debug)]
 pub struct BuildOutput {
@@ -119,7 +120,28 @@ impl Builder {
             root,
             cache,
             gate: Mutex::new(()),
+            driver_path: std::env::var_os("LOOM_HASH_RUSTC").map(PathBuf::from),
         }
+    }
+    pub fn with_driver_path(mut self, path: PathBuf) -> Self {
+        self.driver_path = Some(path);
+        self
+    }
+    pub fn for_store(&self, store: loom_store::Store) -> Self {
+        Self {
+            store,
+            root: self.root.clone(),
+            cache: self.cache.clone(),
+            gate: Mutex::new(()),
+            driver_path: self.driver_path.clone(),
+        }
+    }
+    pub async fn preflight(&self) -> Result<(), BuildError> {
+        self.driver().await.map(|_| ())
+    }
+    async fn driver(&self) -> Result<identity::Driver, BuildError> {
+        identity::Driver::prepare_with_path(&self.root, &self.cache, self.driver_path.as_deref())
+            .await
     }
     pub async fn build(&self, definition: &CheckedDef) -> Result<BuildOutput, BuildError> {
         self.build_with_dependencies(definition, &BTreeMap::new())
@@ -145,7 +167,7 @@ impl Builder {
         let directory = self.cache.join(&definition.hash);
         fs::create_dir_all(&directory).await?;
         let component_path = directory.join("component.wasm");
-        let driver = identity::Driver::prepare(&self.root, &self.cache).await?;
+        let driver = self.driver().await?;
         let inputs = format!(
             "{}:{}",
             build_fingerprint(&self.root)?,

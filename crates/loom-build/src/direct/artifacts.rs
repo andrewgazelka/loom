@@ -34,6 +34,12 @@ pub(super) struct Inputs {
     arguments: Vec<String>,
     environment: BTreeMap<String, String>,
     dependencies: BTreeMap<String, String>,
+    dependency_artifacts: BTreeMap<String, String>,
+}
+
+pub(super) struct Dependency {
+    pub key: String,
+    pub hash: String,
 }
 
 struct Pending {
@@ -183,11 +189,20 @@ pub(super) fn capture(
             .get("OUT_DIR")
             .map(|path| source_tree_fn(store, Path::new(path)))
             .transpose()?;
-        let dependencies: BTreeMap<_, _> = external_paths(&unit.recipe)
-            .iter()
-            .map(|path| (path.to_string_lossy().into_owned(), owners[path].clone()))
+        let mut dependencies = BTreeMap::new();
+        for path in external_paths(&unit.recipe) {
+            dependencies.insert(
+                path.to_string_lossy().into_owned(),
+                Dependency {
+                    key: owners[&path].clone(),
+                    hash: blake3::hash(&std::fs::read(&path)?).to_hex().to_string(),
+                },
+            );
+        }
+        let dependency_keys: Vec<_> = dependencies
+            .values()
+            .map(|dependency| dependency.key.clone())
             .collect();
-        let dependency_keys: Vec<_> = dependencies.values().cloned().collect();
         let inputs = inputs(
             &unit.recipe,
             target,
@@ -264,12 +279,12 @@ pub(super) fn inputs(
     compiler: &str,
     source_tree: String,
     build_output_tree: Option<String>,
-    dependencies: &BTreeMap<String, String>,
+    dependencies: &BTreeMap<String, Dependency>,
 ) -> Inputs {
     let normalize = |value: &str| {
         let mut value = value.to_owned();
-        for (path, key) in dependencies {
-            value = value.replace(path, &format!("$DEP/{key}"));
+        for (path, dependency) in dependencies {
+            value = value.replace(path, &format!("$DEP/{}", dependency.key));
         }
         value = value.replace(recipe.source.to_string_lossy().as_ref(), "$SOURCE");
         value = value.replace(
@@ -310,8 +325,26 @@ pub(super) fn inputs(
         .iter()
         .map(|value| normalize(value))
         .collect();
-    let dependency_keys: Vec<_> = dependencies.values().cloned().collect();
+    let dependency_keys: Vec<_> = dependencies
+        .values()
+        .map(|dependency| dependency.key.clone())
+        .collect();
+    let dependency_artifacts = dependencies
+        .iter()
+        .map(|(path, dependency)| {
+            // Keep distinct metadata and archive artifacts from the same unit.
+            let name = Path::new(path)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy();
+            (
+                format!("{}/{name}", dependency.key),
+                dependency.hash.clone(),
+            )
+        })
+        .collect();
     Inputs {
+        dependency_artifacts,
         source_tree,
         build_output_tree,
         compiler: compiler.into(),
@@ -418,6 +451,40 @@ pub(super) fn restore(output: &Output, bytes: &[u8]) -> Result<(), BuildError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn dependency_bytes_change_cache_key_even_when_unit_key_is_unchanged() {
+        let recipe = Recipe::parse(
+            b"LOOM_RUSTC_ARGUMENTS\0rustc\0--extern\0serde=/target/libserde.rlib\0",
+            Path::new("/source"),
+        )
+        .unwrap();
+        let cache_key = |bytes: &[u8]| {
+            let dependencies = BTreeMap::from([(
+                "/target/libserde.rlib".to_owned(),
+                Dependency {
+                    key: "same-compilation-unit".into(),
+                    hash: blake3::hash(bytes).to_hex().to_string(),
+                },
+            )]);
+            let input = inputs(
+                &recipe,
+                Path::new("/target"),
+                "compiler",
+                "source".into(),
+                None,
+                &dependencies,
+            );
+            blake3::hash(&loom_proto::encode(&input).unwrap())
+        };
+        assert_eq!(
+            cache_key(b"original metadata"),
+            cache_key(b"original metadata")
+        );
+        assert_ne!(
+            cache_key(b"original metadata"),
+            cache_key(b"different metadata")
+        );
+    }
 
     #[test]
     fn source_directories_named_target_are_content_inputs() {

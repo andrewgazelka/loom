@@ -49,11 +49,13 @@ impl Service {
         } else {
             stored_source
         };
+        let items = self.items(&def.hash)?;
+        let selected_entry = self.store.resolve_entry(target)?;
         let mut entries = BTreeMap::new();
         for entry in &def.sig.exports {
             entries.insert(
                 entry.name.clone(),
-                json!({"effects": {
+                json!({"hash": items.get(&entry.name), "effects": {
                     "labels": entry.effects.labels,
                     "unknown": entry.effects.unknown,
                 }}),
@@ -63,7 +65,7 @@ impl Service {
             json!({"name":self.store.current_names()?.get(target).map(|_| target.to_owned()).or(self.store.definition_name(&def.hash)?),"hash":def.hash,"def":def,
             "behavior_hash":identity.behavior_hash,"wasm_hash":identity.wasm_hash,
             "toolchain_hash":identity.toolchain_hash,"items":self.items(&def.hash)?,
-            "source":source,"entries":entries}),
+            "source":source,"entries":entries,"entry":selected_entry.map(|entry| entry.name)}),
         )
     }
     fn resolve_run_target(&self, target: &str) -> Result<Def> {
@@ -209,7 +211,11 @@ impl Service {
             "run" => {
                 let target = field(args, "target")?;
                 let def = self.resolve_run_target(target)?;
-                let entry = select_entry(&def, target)?;
+                let selected = self.store.resolve_entry(target)?;
+                let entry = match &selected {
+                    Some(entry) => entry.name.as_str(),
+                    None => select_entry(&def, target)?,
+                };
                 let call = self
                     .runtime
                     .call_entry_timed(
@@ -226,7 +232,7 @@ impl Service {
                     Ok(json!({"descriptor":self.store.get_value::<Value>(&entry.descriptor_hash)?.context("effect descriptor missing")?,"outcome":entry.outcome}))
                 }).collect::<Result<Vec<_>>>()?;
                 Ok(
-                    json!({"hash":def.hash,"output":call.value,"scope":call.scope,"effects":effects}),
+                    json!({"hash":def.hash,"entry":entry,"output":call.value,"scope":call.scope,"effects":effects}),
                 )
             }
             "find" => {

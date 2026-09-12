@@ -1,6 +1,21 @@
+/// An entry hash may occur in several revisions; the earliest publication owns
+/// its stable address, so later unrelated entries cannot change its execution.
+pub struct EntryReference {
+    pub definition_hash: String,
+    pub name: String,
+}
+
 use super::*;
 
 impl Store {
+    pub fn resolve_entry(&self, hash: &str) -> Result<Option<EntryReference>> {
+        Ok(self.lock()?.query_row(
+            "SELECT d.hash,e.key FROM defs d JOIN cas c ON c.hash=d.item_hashes_ref JOIN json_each(CAST(c.bytes AS TEXT),'$.entry') e WHERE e.value=? ORDER BY (SELECT MIN(seq) FROM definition_events WHERE json_extract(bytes,'$.def.hash')=d.hash),d.hash,e.key LIMIT 1",
+            [hash.strip_prefix('#').unwrap_or(hash)],
+            |row| Ok(EntryReference { definition_hash: row.get(0)?, name: row.get(1)? }),
+        ).optional()?)
+    }
+
     pub fn define(
         &self,
         def: &Def,
@@ -21,22 +36,7 @@ impl Store {
         self.recording.barrier(false)?;
         let mut connection = self.lock()?;
         let tx = connection.transaction()?;
-        ensure!(
-            def.hash.len() == 64 && def.hash.bytes().all(|byte| byte.is_ascii_hexdigit()),
-            "invalid definition hash {}",
-            def.hash
-        );
-        let mut def = def.clone();
-        if let Some(labels) = def.allowed_effects.as_mut() {
-            labels.sort();
-            labels.dedup();
-        }
-        def.observed_effects.clear();
-        let source_hash = put(&tx, "source_bundle", source.as_bytes())?;
-        super::publication::validate(&tx, &def)?;
-        let event = serde_json::json!({"type":"defined","def":def,"name":name,"source_hash":source_hash,"deps":deps,"identity":identity});
-        let seq = record_definition_event(&tx, &event)?;
-        super::publication::project(&tx, &def, name, &source_hash, deps, identity, seq)?;
+        let seq = publication::write(&tx, def, name, source, deps, identity)?;
         tx.commit()?;
         Ok(seq)
     }
@@ -51,10 +51,13 @@ impl Store {
     }
     pub fn resolve(&self, name: &str) -> Result<Option<Def>> {
         if let Some(hash) = name.strip_prefix('#') {
-            return self.definition(hash);
+            return self.resolve(hash);
         }
         if let Some(def) = self.definition(name)? {
             return Ok(Some(def));
+        }
+        if let Some(entry) = self.resolve_entry(name)? {
+            return self.definition(&entry.definition_hash);
         }
         let connection = self.lock()?;
         let hash: Option<String> = connection
