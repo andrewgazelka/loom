@@ -1,3 +1,5 @@
+mod entry_identity;
+pub use entry_identity::entry_identity_preimage;
 mod cas;
 pub mod core_protocol;
 pub mod verbs;

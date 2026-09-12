@@ -54,7 +54,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
             .trim(),
     );
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"rustc-contract-v6-driver-all-units-mir");
+    hasher.update(b"rustc-contract-v7-dependency-artifact-digests");
     let manifest_bytes = fs::read_to_string(directory.join("Cargo.toml"))
         .await?
         .replace(root.to_string_lossy().as_ref(), "$SDK")

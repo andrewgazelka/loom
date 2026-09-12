@@ -1,6 +1,36 @@
 //! One publication invariant for live writes and durable-event projection.
 use super::*;
 
+pub(super) fn write(
+    connection: &Connection,
+    candidate: &Def,
+    name: Option<&str>,
+    source: &str,
+    deps: &BTreeMap<String, String>,
+    identity: Option<&loom_proto::BuildIdentity>,
+) -> Result<i64> {
+    ensure!(
+        candidate.hash.len() == 64 && candidate.hash.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "invalid definition hash {}",
+        candidate.hash
+    );
+    let mut def = candidate.clone();
+    if let Some(labels) = def.allowed_effects.as_mut() {
+        labels.sort();
+        labels.dedup();
+    }
+    def.observed_effects.clear();
+    let source_hash = put(connection, "source_bundle", source.as_bytes())?;
+    validate(connection, &def)?;
+    let event = serde_json::json!({
+        "type": "defined", "def": def, "name": name,
+        "source_hash": source_hash, "deps": deps, "identity": identity,
+    });
+    let seq = record_definition_event(connection, &event)?;
+    project(connection, &def, name, &source_hash, deps, identity, seq)?;
+    Ok(seq)
+}
+
 pub(super) fn validate(connection: &Connection, candidate: &Def) -> Result<()> {
     let Some(existing) = executable_definition(connection, &candidate.hash)? else {
         return Ok(());
@@ -41,9 +71,25 @@ pub(super) fn project(
     if let Some(identity) = identity {
         ensure!(
             definition.hash == identity.behavior_hash,
-            "definition hash {} differs from driver entry hash {}",
+            "definition hash {} differs from driver entry root {}",
             definition.hash,
             identity.behavior_hash
+        );
+        let bytes: Vec<u8> = connection.query_row(
+            "SELECT bytes FROM cas WHERE hash=?",
+            [&identity.item_hashes_ref],
+            |row| row.get(0),
+        )?;
+        let document: Value = serde_json::from_slice(&bytes)?;
+        let entries: BTreeMap<String, String> = serde_json::from_value(document["entry"].clone())?;
+        ensure!(!entries.is_empty(), "driver entry root has no entries");
+        let root = blake3::hash(&loom_proto::entry_identity_preimage(&entries))
+            .to_hex()
+            .to_string();
+        ensure!(
+            root == definition.hash,
+            "definition hash {} differs from computed driver entry root {root}",
+            definition.hash
         );
         ensure!(
             connection.query_row(
@@ -51,7 +97,7 @@ pub(super) fn project(
                 [&definition.hash],
                 |row| row.get::<_, bool>(0)
             )?,
-            "driver entry preimage {} not found in CAS",
+            "driver entry root preimage {} not found in CAS",
             definition.hash
         );
     }

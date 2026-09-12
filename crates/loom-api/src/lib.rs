@@ -74,6 +74,15 @@ impl Service {
         })
     }
 
+    pub fn with_driver_path(mut self, path: PathBuf) -> Self {
+        self.builder = Arc::new(
+            self.builder
+                .for_store(self.store.clone())
+                .with_driver_path(path),
+        );
+        self
+    }
+
     pub fn actor_registry(&self) -> Arc<dyn loom_actor::Registry> {
         Arc::new(loom_behavior::StoreRegistry::new(self.store.clone()))
     }

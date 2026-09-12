@@ -67,7 +67,14 @@ impl Drop for Fixture {
 async fn ingests_document_and_verified_preimage_under_distinct_hashes() {
     let fixture = Fixture::new().await;
     let identity = fixture.ingest().unwrap();
-    assert_eq!(identity.behavior_hash, fixture.hash);
+    assert_eq!(
+        identity.behavior_hash,
+        blake3::hash(&loom_proto::entry_identity_preimage(
+            &std::collections::BTreeMap::from([("main".into(), fixture.hash.clone())])
+        ))
+        .to_hex()
+        .as_str()
+    );
     assert_ne!(identity.item_hashes_ref, fixture.hash);
     assert_eq!(
         fixture.store.get(&fixture.hash).unwrap().unwrap(),
@@ -150,4 +157,36 @@ async fn rejects_corrupt_cycle_object() {
             .to_string()
             .contains("corrupt item preimage")
     );
+}
+
+#[tokio::test]
+async fn every_driver_entry_contributes_to_definition_identity() {
+    let fixture = Fixture::new().await;
+    let mut document: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(fixture.directory.join("items.json")).unwrap())
+            .unwrap();
+    document["entry"]["secondary"] = serde_json::json!(fixture.hash);
+    document["items"]["secondary"] = document["items"]["main"].clone();
+    std::fs::write(
+        fixture.directory.join("items.json"),
+        serde_json::to_vec(&document).unwrap(),
+    )
+    .unwrap();
+    let before = fixture.ingest().unwrap();
+    let changed = b"changed secondary entry";
+    let changed_hash = blake3::hash(changed).to_hex().to_string();
+    std::fs::write(
+        fixture.directory.join("item-preimages").join(&changed_hash),
+        changed,
+    )
+    .unwrap();
+    document["entry"]["secondary"] = serde_json::json!(changed_hash);
+    document["items"]["secondary"]["hash"] = serde_json::json!(changed_hash);
+    std::fs::write(
+        fixture.directory.join("items.json"),
+        serde_json::to_vec(&document).unwrap(),
+    )
+    .unwrap();
+    let after = fixture.ingest().unwrap();
+    assert_ne!(before.behavior_hash, after.behavior_hash);
 }
