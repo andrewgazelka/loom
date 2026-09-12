@@ -1,3 +1,4 @@
+import { V, panels } from "../src/lib/workbench/commands";
 import { describe, expect, test } from "bun:test";
 import {
   commands,
@@ -19,20 +20,18 @@ import {
 } from "../src/lib/workbench/schema";
 const defaults = {
   hash: fixtures.definitions[0]!.hash,
+  target: fixtures.definitions[0]!.hash,
   name: "counter",
-  expected_hash: fixtures.definitions[0]!.hash,
   source: fixtures.definitions[0]!.source,
-  before: fixtures.definitions[2]!.hash,
-  after: fixtures.definitions[0]!.hash,
+  old: fixtures.definitions[2]!.hash,
+  new: fixtures.definitions[0]!.hash,
   id: "a0-counter",
-  behavior_hash: fixtures.definitions[0]!.hash,
-  candidate_hash: fixtures.definitions[2]!.hash,
+  def: fixtures.definitions[0]!.hash,
+  candidate: fixtures.definitions[2]!.hash,
   author: "operator",
   rationale: "Fixture replay",
   reason: "shutdown",
-  old_hash: fixtures.definitions[0]!.hash,
-  new_hash: fixtures.definitions[2]!.hash,
-  at_seq: "40",
+  seq: "40",
   group: "workers",
 };
 function values(id: string): Record<string, string> {
@@ -40,7 +39,7 @@ function values(id: string): Record<string, string> {
     values: Record<string, string> = {};
   for (const field of command.fields) values[field.key] = field.initial ?? "";
   Object.assign(values, defaults);
-  if (id === "actor_sql") values.query = "SELECT * FROM inbox ORDER BY seq";
+  if (id === V.sql) values.query = "SELECT * FROM inbox ORDER BY seq";
   return values;
 }
 describe("operation contract", () => {
@@ -72,10 +71,10 @@ describe("operation contract", () => {
       expect(result).not.toBeUndefined();
     });
   test("unknown operation and fixture fail by name", async () => {
-    expect(() => commandById("actor_delete")).toThrow("Unknown command");
+    expect(() => commandById("absent_operation")).toThrow("Unknown command");
     await expect(
-      new WorkbenchClient(new MockTransport()).call(commandById("view"), {
-        hash: "absent",
+      new WorkbenchClient(new MockTransport()).call(commandById(V.view), {
+        target: "absent",
       }),
     ).rejects.toThrow("unknown definition absent");
   });
@@ -86,27 +85,37 @@ describe("operation contract", () => {
       "test-token",
       async (url, options) => {
         request = { url: String(url), options: options! };
-        return new Response(JSON.stringify(fixtures.responses.actor_send));
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            seq: 1,
+            result: { id: "a0-counter", seq: 43, cursor: 43 },
+            diagnostics: [],
+          }),
+        );
       },
     );
     const body = { id: "a0-counter", key: "explicit-key", msg: { value: 43 } };
-    await new WorkbenchClient(transport).call(commandById("actor_send"), body);
-    expect(request?.url).toBe("http://localhost:8787/api/actors/actor_send");
+    await new WorkbenchClient(transport).call(commandById(V.send), body);
+    expect(request?.url).toBe("http://localhost:8787/v1/command");
     expect(request?.options.method).toBe("POST");
     expect(request?.options.headers).toEqual({
       "Content-Type": "application/json",
       Authorization: "Bearer test-token",
     });
-    expect(JSON.parse(String(request?.options.body))).toEqual(body);
+    expect(JSON.parse(String(request?.options.body))).toEqual({
+      command: V.send,
+      args: body,
+    });
   });
-  test("HTTP failures never use fixtures or normalize success envelopes", async () => {
+  test("HTTP and protocol failures never use fixtures", async () => {
     for (const failure of [
       { status: 401, body: "token required", match: "HTTP 401" },
       { status: 200, body: "<html>proxy</html>", match: "invalid JSON" },
       {
         status: 200,
-        body: '{"ok":false,"error":"denied"}',
-        match: "actor_send.cursor",
+        body: '{"ok":false,"seq":1,"result":{"error":"denied","code":"forbidden"},"diagnostics":[]}',
+        match: "denied",
       },
     ]) {
       const client = new WorkbenchClient(
@@ -117,43 +126,43 @@ describe("operation contract", () => {
         ),
       );
       await expect(
-        client.call(commandById("actor_send"), { id: "a0-counter", msg: {} }),
+        client.call(commandById(V.send), { id: "a0-counter", msg: {} }),
       ).rejects.toThrow(failure.match);
     }
   });
-  test("malformed lists, missing preimages and unsafe integers fail", () => {
-    expect(() => parseResult(commandById("find"), {})).toThrow(
+  test("malformed lists, missing effect rows and unsafe integers fail", () => {
+    expect(() => parseResult(commandById(V.find), {})).toThrow(
       "expected array",
     );
     expect(() =>
-      parseResult(commandById("view"), {
+      parseResult(commandById(V.view), {
         ...fixtures.definitions[0],
-        items: [{ name: "entry", hash: "x" }],
+        entries: { entry: { item_hash: "x" } },
       }),
-    ).toThrow("preimage_size");
+    ).toThrow("effects");
     expect(() =>
-      parseResult(commandById("actor_send"), { cursor: 9007199254740992 }),
+      parseResult(commandById(V.send), { cursor: 9007199254740992 }),
     ).toThrow("safe integer");
   });
 });
 describe("input validation", () => {
   test("empty search works, missing mutation fields fail", () => {
-    expect(parseFields(commandById("find"), { query: "" })).toEqual({
-      query: "",
+    expect(parseFields(commandById(V.find), { text: "" })).toEqual({
+      text: "",
     });
     expect(() =>
-      parseFields(commandById("actor_promote"), { id: "a0-counter" }),
+      parseFields(commandById(V.promote), { id: "a0-counter" }),
     ).toThrow("Behavior hash is required");
   });
-  test("null initialization and omitted delivery key preserve MCP semantics", () => {
+  test("null initialization and omitted delivery key preserve command semantics", () => {
     expect(
-      parseFields(commandById("actor_spawn"), {
-        behavior_hash: "counter",
+      parseFields(commandById(V.spawn), {
+        def: "counter",
         init: "null",
       }),
-    ).toEqual({ behavior_hash: "counter", init: null });
+    ).toEqual({ def: "counter", init: null });
     expect(
-      parseFields(commandById("actor_send"), {
+      parseFields(commandById(V.send), {
         id: "a0-counter",
         msg: '{"n":1}',
       }),
@@ -161,30 +170,30 @@ describe("input validation", () => {
   });
   test("rejects invalid JSON, non-string assertions and invalid replay windows", () => {
     expect(() =>
-      parseFields(commandById("run"), { hash: "abc", args: "{" }),
+      parseFields(commandById(V.run), { target: "abc", args: "{" }),
     ).toThrow("Arguments JSON");
     expect(() =>
-      parseFields(commandById("actor_validate"), {
-        ...values("actor_validate"),
+      parseFields(commandById(V.validate), {
+        ...values(V.validate),
         assertions: "[false]",
       }),
     ).toThrow("SQL strings");
     expect(() =>
-      parseFields(commandById("actor_validate"), {
-        ...values("actor_validate"),
+      parseFields(commandById(V.validate), {
+        ...values(V.validate),
         k: "-1",
       }),
     ).toThrow("nonnegative");
     expect(() =>
-      parseFields(commandById("actor_validate"), {
-        ...values("actor_validate"),
+      parseFields(commandById(V.validate), {
+        ...values(V.validate),
         k: "9007199254740992",
       }),
     ).toThrow("safe integer");
   });
-  test("table panels use actor_sql and ordered queries", () => {
+  test("table panels use sql and ordered queries", () => {
     expect(
-      parseFields(commandById("actor_effects"), { id: "a0-counter" }),
+      parseFields(commandById(panels.effects), { id: "a0-counter" }),
     ).toEqual({
       id: "a0-counter",
       query: "SELECT * FROM effects ORDER BY seq,idx",
@@ -285,4 +294,122 @@ describe("request ownership", () => {
     expect(signal?.aborted).toBe(true);
     expect(published).toBe(false);
   });
+});
+
+describe("Rust verb table parity", () => {
+  test("every public verb, argument, optional field and default matches the server", async () => {
+    const source = await Bun.file(
+      new URL("../../crates/loom-proto/src/verbs.rs", import.meta.url),
+    ).text();
+    const table = source
+      .split("pub static VERBS: &[Verb] = &[")[1]!
+      .split("\n];")[0]!;
+    const server = [
+      ...table.matchAll(
+        /verb!\(\s*(\w+),\s*(Definition|Actor),\s*(\w+),\s*\[([\s\S]*?)\]\s*\)/g,
+      ),
+    ];
+    expect(server.length).toBe(27);
+    expect(
+      commands
+        .filter((command) => !command.query)
+        .map((command) => String(command.operation))
+        .sort(),
+    ).toEqual(server.map((match) => match[1]!).sort());
+    for (const match of server) {
+      const command = commandById(match[1]!);
+      const args = [
+        ...match[4]!.matchAll(
+          /arg!\(\s*(\w+),\s*(\w+)(?:,\s*(optional|flag|"[^"]*"))?\s*\)/g,
+        ),
+      ];
+      expect(command.fields.map((field) => field.key).sort()).toEqual(
+        args.map((arg) => arg[1]!).sort(),
+      );
+      expect(command.read).toBe(match[3] === "Read");
+      for (const arg of args) {
+        const field = command.fields.find((field) => field.key === arg[1])!;
+        expect(Boolean(field.optional || field.default !== undefined)).toBe(
+          arg[3] !== undefined && arg[3] !== "flag",
+        );
+        expect(field.default).toBe(
+          arg[3]?.startsWith('"') ? JSON.parse(arg[3]) : undefined,
+        );
+        expect(
+          field.kind === "source" ? "string" : (field.kind ?? "string"),
+        ).toBe(
+          (
+            {
+              Source: "string",
+              Json: "json",
+              Integer: "number",
+              Count: "number",
+              String: "string",
+            } as Record<string, string>
+          )[arg[2]!]!,
+        );
+      }
+    }
+  });
+  test("defaults and count bounds match the wire contract", () => {
+    expect(parseFields(commandById(V.spawn), { def: "counter" })).toEqual({
+      def: "counter",
+      init: null,
+    });
+    expect(parseFields(commandById(V.run), { target: "counter" })).toEqual({
+      target: "counter",
+      args: [],
+    });
+    expect(
+      parseFields(commandById(V.validate), {
+        id: "a",
+        candidate: "h",
+        k: "4294967295",
+      }).k,
+    ).toBe(4294967295);
+    expect(() =>
+      parseFields(commandById(V.validate), {
+        id: "a",
+        candidate: "h",
+        k: "4294967296",
+      }),
+    ).toThrow("4294967295");
+    expect(parseFields(commandById(V.fork), { id: "a", seq: "-1" }).seq).toBe(
+      -1,
+    );
+  });
+});
+
+test("blank defaulted fields and nullable optional JSON preserve server semantics", () => {
+  expect(
+    parseFields(commandById(V.run), { target: "counter", args: "" }),
+  ).toEqual({ target: "counter", args: [] });
+  expect(
+    parseFields(commandById(V.spawn), {
+      def: "counter",
+      init: "",
+      spec: "null",
+    }),
+  ).toEqual({ def: "counter", init: null, spec: null });
+  expect(
+    parseFields(commandById(V.add), {
+      source: "pub fn counter() {}",
+      allowed_effects: "null",
+    }).allowed_effects,
+  ).toBeNull();
+  expect(
+    parseFields(commandById(V.validate), {
+      id: "a",
+      candidate: "h",
+      k: "0",
+      assertions: "null",
+    }).assertions,
+  ).toBeNull();
+  expect(
+    parseFields(commandById(V.sql), {
+      id: "a",
+      query: "SELECT 1",
+      params: "null",
+    }).params,
+  ).toBeNull();
 });

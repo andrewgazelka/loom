@@ -1,3 +1,4 @@
+import { V } from "../src/lib/workbench/commands";
 import { describe, expect, test } from "bun:test";
 import { get } from "svelte/store";
 import { Journal } from "../src/lib/workbench/journal";
@@ -7,9 +8,9 @@ describe("session command history", () => {
   test("retains immutable input and result snapshots in invocation order", () => {
     const journal = new Journal();
     const values = { args: "[42]" };
-    const first = journal.begin(commandById("run"), values);
+    const first = journal.begin(commandById(V.run), values);
     values.args = "[0]";
-    const second = journal.begin(commandById("find"), { query: "counter" });
+    const second = journal.begin(commandById(V.find), { text: "counter" });
     journal.finish(second, []);
     const result = { output: [42], effects: [] };
     journal.finish(first, result);
@@ -23,14 +24,14 @@ describe("session command history", () => {
   });
   test("failed commands retain exact replay fields and a named error", () => {
     const journal = new Journal();
-    const first = journal.begin(commandById("run"), { args: "invalid" });
+    const first = journal.begin(commandById(V.run), { args: "invalid" });
     journal.fail(first, "run.args: invalid JSON");
     expect(get(journal)[0]).toMatchObject({
       state: "failed",
       error: "run.args: invalid JSON",
       values: { args: "invalid" },
     });
-    const replay = journal.begin(commandById("run"), get(journal)[0]!.values);
+    const replay = journal.begin(commandById(V.run), get(journal)[0]!.values);
     journal.finish(replay, null);
     expect(get(journal)).toHaveLength(2);
     expect(get(journal)[0]?.state).toBe("failed");
