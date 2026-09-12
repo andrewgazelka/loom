@@ -104,24 +104,24 @@ fn generate(source: &str, contract: &Contract) -> Result<String, BuildError> {
         let mut arguments = Vec::new();
         let mut decode = String::new();
         for index in 0..count {
-            decode.push_str(&format!("let argument_{index} = ::loom::serde_json::from_value(values.remove(0)).map_err(|error| error.to_string())?;\n"));
+            decode.push_str(&format!("let argument_{index} = ::loom::serde_json::from_value(values.remove(0)).map_err(|error| ::std::string::ToString::to_string(&error))?;\n"));
             arguments.push(format!("argument_{index}"));
         }
         generated.push_str(&format!(r#"
 #[unsafe(export_name = "loom_call_{name}")]
-extern "C" fn __loom_call_{name}(pointer: u32, length: u32) -> u64 {{
-    let invoke = || -> Result<::loom::serde_json::Value, String> {{
+extern "C" fn __loom_call_{name}(pointer: ::core::primitive::u32, length: ::core::primitive::u32) -> ::core::primitive::u64 {{
+    let invoke = || -> ::std::result::Result<::loom::serde_json::Value, ::std::string::String> {{
         let bytes = unsafe {{ ::loom::core::input(pointer, length) }};
         let value: ::loom::serde_json::Value = ::loom::decode_host(bytes)?;
         let mut values = match value {{
             ::loom::serde_json::Value::Array(values) => values,
-            ::loom::serde_json::Value::Null if {count} == 0 => Vec::new(),
-            value if {count} == 1 => Vec::from([value]),
-            _ => return Err("entry {name}: arguments must be an array".into()),
+            ::loom::serde_json::Value::Null if {count} == 0 => ::std::vec::Vec::new(),
+            value if {count} == 1 => ::std::vec::Vec::from([value]),
+            _ => return ::std::result::Result::Err("entry {name}: arguments must be an array".into()),
         }};
-        if values.len() != {count} {{ return Err("entry {name}: incorrect argument count".into()); }}
+        if values.len() != {count} {{ return ::std::result::Result::Err("entry {name}: incorrect argument count".into()); }}
         {decode}
-        ::loom::serde_json::to_value({name}({arguments})).map_err(|error| error.to_string())
+        ::loom::serde_json::to_value(crate::{name}({arguments})).map_err(|error| ::std::string::ToString::to_string(&error))
     }};
     ::loom::core::response(invoke())
 }}
@@ -131,7 +131,7 @@ extern "C" fn __loom_call_{name}(pointer: u32, length: u32) -> u64 {{
         generated.push_str(&format!(
             r#"
 #[unsafe(export_name = "loom_schema")]
-extern "C" fn __loom_schema() -> u64 {{ ::loom::core::response(Ok({schema:?})) }}
+extern "C" fn __loom_schema() -> ::core::primitive::u64 {{ ::loom::core::response(::std::result::Result::Ok({schema:?})) }}
 "#
         ));
     }
@@ -154,5 +154,67 @@ mod tests {
         assert!(generated.contains("loom_call_two"));
         assert!(generated.contains("loom_schema"));
         assert!(!generated.contains("export_name = \"loom_call\""));
+    }
+    #[test]
+    fn generated_wrapper_compiles_and_executes_entry_named_values() {
+        let source = r#"
+extern crate self as loom;
+pub fn values() -> i32 { 42 }
+struct Result;
+struct String;
+struct Vec;
+struct u32;
+struct u64;
+fn Err() {}
+fn Ok() {}
+pub mod serde_json {
+    pub enum Value { Array(std::vec::Vec<Value>), Null, Number(i32) }
+    pub fn to_value(value: i32) -> std::result::Result<Value, std::string::String> {
+        std::result::Result::Ok(Value::Number(value))
+    }
+}
+pub fn decode_host(_: &[u8]) -> std::result::Result<serde_json::Value, std::string::String> {
+    std::result::Result::Ok(serde_json::Value::Null)
+}
+pub mod core {
+    pub unsafe fn input(_: u32, _: u32) -> &'static [u8] { &[] }
+    pub fn response(result: std::result::Result<super::serde_json::Value, std::string::String>) -> u64 {
+        match result.unwrap() {
+            super::serde_json::Value::Number(value) => value as u64,
+            _ => panic!("expected entry output"),
+        }
+    }
+}
+fn main() { assert_eq!(__loom_call_values(0, 0), 42); }
+"#;
+        let contract = Contract {
+            entry: BTreeMap::from([("values".into(), "entry".into())]),
+            schema: None,
+        };
+        let directory =
+            std::env::temp_dir().join(format!("loom-entry-shadowing-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let input = directory.join("guest.rs");
+        let executable = directory.join("guest");
+        std::fs::write(&input, generate(source, &contract).unwrap()).unwrap();
+        let output = std::process::Command::new("rustc")
+            .args(["--edition=2024", "-A", "warnings"])
+            .arg(&input)
+            .arg("-o")
+            .arg(&executable)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            std::process::Command::new(&executable)
+                .status()
+                .unwrap()
+                .success()
+        );
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

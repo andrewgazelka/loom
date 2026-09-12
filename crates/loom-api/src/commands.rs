@@ -1,7 +1,16 @@
 use super::*;
 
 impl Service {
-    pub async fn command(&self, mut request: CommandRequest) -> Response {
+    pub async fn command(&self, request: CommandRequest) -> Response {
+        let direct = command_returns_direct(&request.command);
+        let response = self.command_response(request).await;
+        if direct {
+            response
+        } else {
+            self.inline(response)
+        }
+    }
+    async fn command_response(&self, mut request: CommandRequest) -> Response {
         if let Err(error) = loom_proto::encode(&request.args) {
             return self.response(Err(anyhow::Error::msg(error)));
         }

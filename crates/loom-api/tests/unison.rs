@@ -1,3 +1,6 @@
+#[path = "support/guest.rs"]
+mod guest;
+
 use loom_api::Service;
 use loom_proto::{CommandRequest, Lang, Value};
 use loom_store::Store;
@@ -188,9 +191,15 @@ async fn dependents_follow_pins() {
     );
 }
 
-#[tokio::test]
-#[ignore = "requires Rust guest toolchain and LOOM_COMPILER_CACHE_OWNER"]
-async fn run_selects_named_entry_and_rejects_ambiguous_hash() {
+#[test]
+fn run_selects_named_entry_and_rejects_ambiguous_hash() {
+    guest::run(
+        "run_selects_named_entry_and_rejects_ambiguous_hash",
+        named_entry_execution,
+    );
+}
+
+async fn named_entry_execution() {
     let service = service();
     let added = command(
         &service,

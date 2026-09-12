@@ -24,11 +24,18 @@ impl LoomBehavior {
         let definition = store
             .executable_definition(def_hash)?
             .with_context(|| format!("definition {def_hash} not found"))?;
-        let entry = definition
-            .sig
-            .exports
-            .first()
-            .with_context(|| format!("actor definition {def_hash}: missing entry"))?;
+        let [entry] = definition.sig.exports.as_slice() else {
+            anyhow::bail!(
+                "actor definition {def_hash}: expected exactly one entry; candidates: {}",
+                definition
+                    .sig
+                    .exports
+                    .iter()
+                    .map(|entry| entry.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        };
         anyhow::ensure!(
             entry.params.len() == 1
                 && matches!(
