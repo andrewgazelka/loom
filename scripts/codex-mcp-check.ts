@@ -74,23 +74,27 @@ try {
     assert(calls.some(call=>call.server==='loom'&&successfulLoomResult(call)),'no completed actual Loom MCP calls');
   });
   client=new LoomMcpClient({endpoint,token});await client.connect();
-  async function command(command:string,args:unknown):Promise<unknown>{const response=await client!.callTool('loom_command',{command,args});assert(response.ok,JSON.stringify(response));return response.result;}
+  async function command(command:string,args:unknown):Promise<unknown>{const response=await client!.callTool('command',{command,args});assert(response.ok,JSON.stringify(response));return response.result;}
   const machine=object(await command('machine.create',{root}));assert(typeof machine.id==='string','machine id missing');
   const hashes:Record<string,string>={};
   async function invoke(lang:string):Promise<void>{
-    const result=object(await command('call',{hash:hashes[lang],args:[machine.id,'.']}));
+    const response=await client!.callTool('run',{target:hashes[lang],args:[machine.id,'.']});
+    assert(response.ok,JSON.stringify(response));
+    const result=object(object(response.result).output);
     const path=typeof result.path==='string'?result.path.replace(/^\.\//,''):undefined;
     assert(path===expected.largest.path&&result.size===expected.largest.size,`${lang} expected${JSON.stringify(expected.largest)}, got${JSON.stringify(result)}`);
   }
   for(const lang of ['rust'])await gate(`${lang} model-written recursive definition executes correctly`,async()=>{
-    const definitions=calls.filter(call=>call.server==='loom'&&call.tool==='loom_define'&&successfulLoomResult(call)&&object(call.arguments).name===`codex-recursive-${lang}`);
+    const definitions=calls.filter(call=>call.server==='loom'&&call.tool==='add'&&successfulLoomResult(call)&&object(call.arguments).name===`codex-recursive-${lang}`);
     assert(definitions.length>0,`trace lacks successful${lang}definitiontool`);
     const traced=object(object(decodedLoomResult(definitions.at(-1)!)!.result).def);
     assert(typeof traced.hash==='string'&&traced.lang===lang,'accepted trace definition identity missing');
-    const definition=object(await command('resolve',{hash:traced.hash}));
+    const viewed=await client!.callTool('view',{target:traced.hash});
+    assert(viewed.ok,JSON.stringify(viewed));
+    const definition=object(object(viewed.result).def);
     assert(definition.hash===traced.hash,'resolved definition differs from accepted trace hash');
     assert(definition.lang===lang&&typeof definition.hash==='string',`accepted${lang}definitionmissing`);hashes[lang]=definition.hash;
-    assert(calls.some(call=>call.server==='loom'&&call.tool==='loom_command'&&successfulLoomResult(call)&&object(call.arguments).command==='call'&&object(object(call.arguments).args).hash===definition.hash),`trace lacks actual${lang}execution`);
+    assert(calls.some(call=>call.server==='loom'&&call.tool==='run'&&successfulLoomResult(call)&&object(call.arguments).target===definition.hash),`trace lacks actual${lang}execution`);
     await invoke(lang);
   });
   let mutationFile:string;

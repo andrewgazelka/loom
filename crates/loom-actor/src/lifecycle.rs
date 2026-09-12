@@ -26,7 +26,7 @@ impl Node {
         }
         let actor = self.open_actor(id).await?;
         let mut conn = actor.conn.lock().await;
-        let behavior = actor::behavior(&self.registry, &actor::code(&conn).await?.hash)?;
+        let behavior = actor::behavior(&self.registry, &actor::code(&conn).await?.hash).await?;
         crate::hooks::stop(
             &mut conn,
             id,
@@ -60,7 +60,7 @@ impl Node {
             self.shutdown_deadlines.lock().await.remove(key);
             return Ok(false);
         }
-        let behavior = actor::behavior(&self.registry, &actor::code(&conn).await?.hash)?;
+        let behavior = actor::behavior(&self.registry, &actor::code(&conn).await?.hash).await?;
         crate::hooks::stop(
             &mut conn,
             id,

@@ -1,10 +1,10 @@
 //! Profile the real checker, component builder, and runtime without the user's database.
 use anyhow::{Context, Result, ensure};
 use loom_api::Service;
-use loom_proto::{DefineRequest, EvalRequest, Lang};
+use loom_proto::{CommandRequest, Lang};
 use loom_store::Store;
 use serde_json::json;
-use std::{collections::BTreeMap, path::PathBuf, process::ExitCode, time::Instant};
+use std::{path::PathBuf, process::ExitCode, time::Instant};
 fn main() -> Result<ExitCode> {
     if let Some(status) = loom_build::compiler_cache_entry()? {
         return Ok(status);
@@ -22,12 +22,9 @@ async fn run() -> Result<()> {
     for expression in ["2 + 2", "2 + 3", "42 * 2"] {
         let start = Instant::now();
         let definition = service
-            .define(DefineRequest {
-                name: "timing/expression".into(),
-                lang: Lang::Rust,
-                source: format!("#[loom::def] pub fn main() -> i32 {{ {expression} }}"),
-                deps: BTreeMap::new(),
-                allowed_effects: None,
+            .command(CommandRequest {
+                session: None, command: "add".into(),
+                args: json!({"name":"timing/expression", "source":format!("pub fn main() -> i32 {{ {expression} }}")}),
             })
             .await;
         ensure!(definition.ok, "{definition:?}");
@@ -39,24 +36,9 @@ async fn run() -> Result<()> {
             let result = service.runtime.call_def_timed(hash, json!([])).await?;
             println!(
                 "{}",
-                json!({"operation":"call","expression":expression,"iteration":iteration,"define_ms":define_ms,"result":result})
+                json!({"operation":"run","expression":expression,"iteration":iteration,"define_ms":define_ms,"result":result})
             );
         }
-    }
-    for expression in ["2 + 2", "2 + 2", "2 + 3", "2 + 3"] {
-        let start = Instant::now();
-        let response = service
-            .eval(EvalRequest {
-                session: Some("timing".into()),
-                source: expression.into(),
-                deps: BTreeMap::new(),
-            })
-            .await;
-        ensure!(response.ok, "{response:?}");
-        println!(
-            "{}",
-            json!({"operation":"eval","expression":expression,"ms":start.elapsed().as_secs_f64()*1000.0,"result":response.result})
-        );
     }
     Ok(())
 }

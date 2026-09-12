@@ -55,11 +55,11 @@ pub(crate) fn lower(
                 ));
                 return;
             }
-            self.deps.insert(alias.clone(), hash);
+            self.deps.insert(alias.clone(), hash.clone());
             let alias = syn::Ident::new(&alias, proc_macro2::Span::call_site());
             let body = &call.args[1];
             // Absolute paths prevent local modules from replacing either ABI endpoint.
-            *expression = syn::parse_quote!(::loom::handle(::#alias::handle, #body));
+            *expression = syn::parse_quote!(::loom::handle_pinned(#hash, ::#alias::handle, #body));
         }
     }
     Lower { deps, diagnostics }.visit_file_mut(file);
@@ -80,7 +80,10 @@ mod tests {
         lower(&mut file, &mut deps, &mut errors);
         assert!(errors.is_empty());
         assert_eq!(deps.get(&format!("loom_handler_{hash}")), Some(&hash));
-        assert!(!prettyplease::unparse(&file).contains("handle_with"));
+        let lowered = prettyplease::unparse(&file);
+        assert!(!lowered.contains("handle_with"));
+        assert!(lowered.contains("::loom::handle_pinned("));
+        assert!(lowered.contains(&format!("\"{hash}\"")));
     }
     #[test]
     fn runtime_reference_is_rejected() {

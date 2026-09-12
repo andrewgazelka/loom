@@ -52,48 +52,12 @@ fn rustc_version_and_error_exit_are_preserved() {
 }
 
 #[test]
-fn consumed_loom_attributes_select_private_entries() {
+fn plain_public_root_functions_select_entries() {
     let directory = tempfile::tempdir().unwrap();
-    let macro_source = r#"
-        extern crate proc_macro;
-        use proc_macro::TokenStream;
-        #[proc_macro_attribute]
-        pub fn def(_: TokenStream, mut item: TokenStream) -> TokenStream {
-            item.extend("fn generated_wrapper() {}".parse::<TokenStream>().unwrap());
-            item
-        }
-        #[proc_macro_attribute]
-        pub fn actor(_: TokenStream, item: TokenStream) -> TokenStream { item }
-    "#;
-    std::fs::write(directory.path().join("macros.rs"), macro_source).unwrap();
-    let build = Command::new(env!("CARGO_BIN_EXE_hash-rustc"))
-        .current_dir(directory.path())
-        .args([
-            "macros.rs",
-            "--crate-name=loom_guest_macros",
-            "--crate-type=proc-macro",
-            "--edition=2024",
-        ])
-        .env_remove("LOOM_ITEM_HASHES")
-        .output()
-        .unwrap();
-    assert!(
-        build.status.success(),
-        "{}",
-        String::from_utf8_lossy(&build.stderr)
-    );
-    let artifact = directory.path().join(format!(
-        "{}loom_guest_macros{}",
-        std::env::consts::DLL_PREFIX,
-        std::env::consts::DLL_SUFFIX
-    ));
     let result = run(
         directory.path(),
-        "use loom_guest_macros as loom; mod nested { #[crate::loom::def] fn private() {} #[crate::loom::actor] struct Agent; fn ordinary() {} }",
-        &[
-            "--extern",
-            &format!("loom_guest_macros={}", artifact.display()),
-        ],
+        "pub fn entry() {} fn private() {} pub mod nested { pub fn visible() {} fn private() {} }",
+        &[],
     );
     assert!(
         result.status.success(),
@@ -102,9 +66,12 @@ fn consumed_loom_attributes_select_private_entries() {
     );
     let document = json(directory.path());
     let entries = document["entry"].as_object().unwrap();
-    assert_eq!(entries.len(), 2, "{document:#}");
-    assert!(entries.keys().any(|path| path.ends_with("nested::private")));
-    assert!(entries.keys().any(|path| path.ends_with("nested::Agent")));
+    assert_eq!(entries.len(), 1, "{document:#}");
+    assert!(
+        entries
+            .keys()
+            .any(|path| path == "entry" || path.ends_with("::entry"))
+    );
 }
 
 #[test]

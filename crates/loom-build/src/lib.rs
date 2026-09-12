@@ -5,6 +5,9 @@ use artifact::{
     VENDOR_CONFIG, build_fingerprint, cargo_artifact, is_vendored, trusted_dependency,
     validate_component,
 };
+mod identity;
+#[cfg(test)]
+mod identity_tests;
 mod intake;
 mod materialize;
 use materialize::{Materialization, materialize_rust};
@@ -91,6 +94,7 @@ pub struct Builder {
 }
 #[derive(Debug)]
 pub struct BuildOutput {
+    pub identity: Option<loom_proto::BuildIdentity>,
     pub component: Vec<u8>,
     pub ms: u64,
     pub logs: String,
@@ -141,7 +145,12 @@ impl Builder {
         let directory = self.cache.join(&definition.hash);
         fs::create_dir_all(&directory).await?;
         let component_path = directory.join("component.wasm");
-        let inputs = build_fingerprint(&self.root)?;
+        let driver = identity::Driver::prepare(&self.root, &self.cache).await?;
+        let inputs = format!(
+            "{}:{}",
+            build_fingerprint(&self.root)?,
+            driver.toolchain_hash
+        );
         let cached_inputs = fs::read_to_string(directory.join("component.inputs"))
             .await
             .ok();
@@ -151,6 +160,7 @@ impl Builder {
         {
             validate_component(&component)?;
             return Ok(BuildOutput {
+                identity: Some(driver.ingest(&self.store, &directory, definition, &component)?),
                 component,
                 ms: started.elapsed().as_millis() as u64,
                 logs: "component cache hit".into(),
@@ -207,11 +217,14 @@ impl Builder {
             directory: &directory,
             definition,
             sdk_fingerprint: &inputs,
+            driver: &driver,
+            identity_directory: &directory,
             store: &self.store,
         })
         .await?;
         if !built.diagnostics.is_empty() {
             return Ok(BuildOutput {
+                identity: None,
                 component: Vec::new(),
                 ms: started.elapsed().as_millis() as u64,
                 logs: built.logs,
@@ -234,10 +247,12 @@ impl Builder {
                     "component_encode_ms":encoding_started.elapsed().as_millis()}})
         ));
         validate_component(&component)?;
+        let identity = driver.ingest(&self.store, &directory, definition, &component)?;
         fs::write(&component_path, &component).await?;
         fs::write(directory.join("component.inputs"), inputs).await?;
         fs::write(directory.join("build.log"), &built.logs).await?;
         Ok(BuildOutput {
+            identity: Some(identity),
             component,
             ms: started.elapsed().as_millis() as u64,
             logs: built.logs,

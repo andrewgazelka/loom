@@ -28,7 +28,7 @@ async fn rust_rejects_ambient_io_and_hashes_formatting_stably() {
 async fn external_crate_initialization_is_not_claimed_pure() {
     let request=DefineRequest {
             lang:Lang::Rust,name:"external".into(),deps:BTreeMap::new(),allowed_effects:None,
-            source:serde_json::json!({"files":{"Cargo.toml":"[package]\nname='external'\nversion='0.1.0'\n[dependencies]\nthird_party='1'\n","src/lib.rs":"#[loom::def(effects=[])] pub fn main()->i64 {42}"}}).to_string(),
+            source:serde_json::json!({"files":{"Cargo.toml":"[package]\nname='external'\nversion='0.1.0'\n[dependencies]\nthird_party='1'\n","src/lib.rs":"pub fn main()->i64 {42}"}}).to_string(),
         };
     let checked = Checker::new().check(&request).await.unwrap();
     assert!(checked.diagnostics.is_empty());
@@ -39,12 +39,12 @@ async fn external_crate_initialization_is_not_claimed_pure() {
 async fn rejects_compiler_file_reads_and_macro_aliases() {
     let checker = Checker::new();
     for source in [
-        r#"#[loom::def] fn f()->String { include_str!("/etc/passwd").into() }"#,
-        r#"#[loom::def] fn f()->String { include_str!("/tmp/secret").into() }"#,
-        r#"#[loom::def] fn f()->String { env!("LOOM_TOKEN").into() }"#,
-        r#"use core::include_str as secret; #[loom::def] fn f()->String {secret!("/etc/passwd").into()}"#,
+        r#"pub fn f()->String { include_str!("/etc/passwd").into() }"#,
+        r#"pub fn f()->String { include_str!("/tmp/secret").into() }"#,
+        r#"pub fn f()->String { env!("LOOM_TOKEN").into() }"#,
+        r#"use core::include_str as secret; pub fn f()->String {secret!("/etc/passwd").into()}"#,
         r#"#[cfg_attr(all(),path="/etc/passwd")]mod secret;"#,
-        r#"use std::{fs as files}; #[loom::def]fn f(){let _=files::read("/tmp/x");}"#,
+        r#"use std::{fs as files}; pub fn f(){let _=files::read("/tmp/x");}"#,
     ] {
         let request = DefineRequest {
             lang: Lang::Rust,

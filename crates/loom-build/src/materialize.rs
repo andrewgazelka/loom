@@ -297,51 +297,6 @@ pub(super) async fn materialize_rust(request: Materialization<'_>) -> Result<(),
             "Caller cargo configuration is forbidden".into(),
         ));
     }
-    if dependency {
-        for (name, contents) in &mut files {
-            if !name.ends_with(".rs") || name.starts_with("vendor/") {
-                continue;
-            }
-            let source = contents
-                .text_mut()
-                .ok_or_else(|| BuildError::Rejected(format!("{name} must be UTF-8")))?;
-            let mut file =
-                syn::parse_file(source).map_err(|error| BuildError::Rejected(error.to_string()))?;
-            for item in &mut file.items {
-                if let syn::Item::Fn(function) = item {
-                    for attribute in &mut function.attrs {
-                        if attribute
-                            .path()
-                            .segments
-                            .last()
-                            .is_some_and(|segment| segment.ident == "def")
-                        {
-                            let hash = &definition.hash;
-                            let parsed = if matches!(&attribute.meta, syn::Meta::Path(_)) {
-                                syn::punctuated::Punctuated::<syn::MetaNameValue, syn::Token![,]>::new()
-                            } else {
-                                attribute
-                                    .parse_args_with(
-                                        syn::punctuated::Punctuated::<
-                                            syn::MetaNameValue,
-                                            syn::Token![,],
-                                        >::parse_terminated,
-                                    )
-                                    .map_err(|error| BuildError::Rejected(error.to_string()))?
-                            };
-                            let mut arguments = parsed
-                                .into_iter()
-                                .filter(|argument| !argument.path.is_ident("hash"))
-                                .collect::<Vec<_>>();
-                            arguments.push(syn::parse_quote!(hash = #hash));
-                            *attribute = syn::parse_quote!(#[loom::def(#(#arguments),*)]);
-                        }
-                    }
-                }
-            }
-            *source = prettyplease::unparse(&file);
-        }
-    }
     fs::create_dir_all(directory).await?;
     if let Some(tree) = files.get(preparation::VENDOR_TREE) {
         let hash = tree

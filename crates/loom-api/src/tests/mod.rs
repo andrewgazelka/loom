@@ -41,7 +41,7 @@ fn app() -> Router {
 }
 #[tokio::test]
 #[ignore = "requires Rust guest toolchain and LOOM_COMPILER_CACHE_OWNER pointing to loomd or build_smoke"]
-async fn explicit_effect_policy_persists_and_changes_identity() {
+async fn explicit_effect_policy_persists_and_republication_rejects_changes() {
     let service = Service::new(
         Store::memory().unwrap(),
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
@@ -51,7 +51,7 @@ async fn explicit_effect_policy_persists_and_changes_identity() {
     let request = DefineRequest {
         lang: Lang::Rust,
         name: "policy".into(),
-        source: "#[loom::def] pub fn main() -> i32 { 42 }".into(),
+        source: "pub fn main() -> i32 { 42 }".into(),
         deps: BTreeMap::new(),
         allowed_effects: Some(Vec::new()),
     };
@@ -73,15 +73,27 @@ async fn explicit_effect_policy_persists_and_changes_identity() {
             ..request
         })
         .await;
-    assert!(unrestricted.ok, "{unrestricted:?}");
-    assert_ne!(
-        restricted.result["def"]["hash"],
-        unrestricted.result["def"]["hash"]
+    assert!(!unrestricted.ok, "{unrestricted:?}");
+    assert!(
+        unrestricted.result["error"]
+            .as_str()
+            .unwrap()
+            .contains(hash),
+        "{unrestricted:?}"
+    );
+    assert_eq!(
+        service
+            .store
+            .definition(hash)
+            .unwrap()
+            .unwrap()
+            .allowed_effects,
+        Some(Vec::new())
     );
 }
 #[tokio::test]
 #[ignore = "requires Rust guest toolchain and LOOM_COMPILER_CACHE_OWNER pointing to loomd or build_smoke"]
-async fn explicit_upgrade_rehashes_dependents_and_redefinition_preserves_pins() {
+async fn redefinition_preserves_pins() {
     let service = Service::new(
         Store::memory().unwrap(),
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
@@ -93,7 +105,7 @@ async fn explicit_upgrade_rehashes_dependents_and_redefinition_preserves_pins() 
             allowed_effects: None,
             lang: Lang::Rust,
             name: "add".into(),
-            source: "#[loom::def] pub fn main(x:i32)->i32 { x+1 }".into(),
+            source: "pub fn main(x:i32)->i32 { x+1 }".into(),
             deps: BTreeMap::new(),
         })
         .await;
@@ -105,7 +117,7 @@ async fn explicit_upgrade_rehashes_dependents_and_redefinition_preserves_pins() 
         allowed_effects: None,
         lang: Lang::Rust,
         name: "caller".into(),
-        source: "#[loom::def] pub fn main()->i32 { add::main(41) }".into(),
+        source: "pub fn main()->i32 { add::main(41) }".into(),
         deps,
     };
     let before = service.define(dependent.clone()).await;
@@ -119,7 +131,7 @@ async fn explicit_upgrade_rehashes_dependents_and_redefinition_preserves_pins() 
             allowed_effects: None,
             lang: Lang::Rust,
             name: "add".into(),
-            source: "#[loom::def] pub fn main(x:i32)->i32 { x+2 }".into(),
+            source: "pub fn main(x:i32)->i32 { x+2 }".into(),
             deps: BTreeMap::new(),
         })
         .await;
@@ -128,28 +140,10 @@ async fn explicit_upgrade_rehashes_dependents_and_redefinition_preserves_pins() 
         service.store.resolve("caller").unwrap().unwrap().hash,
         before.result["def"]["hash"].as_str().unwrap()
     );
-    let upgraded = service
-        .command(CommandRequest {
-            session: None,
-            command: "upgrade".into(),
-            args: json!({"old":first.result["def"]["hash"],"new":second.result["def"]["hash"]}),
-        })
-        .await;
-    assert!(upgraded.ok, "{upgraded:?}");
-    assert_eq!(upgraded.result["rehashed"].as_array().unwrap().len(), 1);
-    let current = service.store.resolve("caller").unwrap().unwrap();
-    assert_ne!(current.hash, before.result["def"]["hash"].as_str().unwrap());
-    assert_eq!(
-        service.store.definition_deps(&current.hash).unwrap()["add"],
-        second.result["def"]["hash"].as_str().unwrap()
-    );
 }
 #[test]
-fn rust_macro_source_is_not_a_bundle_reference() {
-    assert_eq!(
-        source_reference("#[loom::def(effects=[])] pub fn add(x:i32)->i32{x+1}"),
-        None
-    );
+fn rust_source_is_not_a_bundle_reference() {
+    assert_eq!(source_reference("pub fn add(x:i32)->i32{x+1}"), None);
     assert_eq!(
         source_reference("#![allow(dead_code)]\npub fn main() {}"),
         None
@@ -179,9 +173,9 @@ async fn missing_source_archive_reports_missing_reference() {
         response.result["error"]
             .as_str()
             .unwrap()
-            .contains("Rust source bundle not found")
+            .contains(&format!("Rust source bundle {} not found", "a".repeat(64)))
     );
-    let source = "#[loom::def(effects=[])] pub fn main() { std::fs::read(\"secret\").unwrap(); }";
+    let source = "pub fn main() { std::fs::read(\"secret\").unwrap(); }";
     let checked = service
         .define(DefineRequest {
             allowed_effects: None,
@@ -211,10 +205,10 @@ async fn read_scope_cannot_execute_or_define_through_service_or_http() {
     .unwrap();
     let reader = service.scoped(authorizer.authenticate("reader").unwrap());
     let response = reader
-        .eval(EvalRequest {
+        .command(CommandRequest {
             session: None,
-            source: "42".into(),
-            deps: BTreeMap::new(),
+            command: "run".into(),
+            args: json!({"target":"missing"}),
         })
         .await;
     assert!(!response.ok);
@@ -232,11 +226,11 @@ async fn read_scope_cannot_execute_or_define_through_service_or_http() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/v1/define")
+                .uri("/v1/command")
                 .header("authorization", "Bearer reader")
                 .header("content-type", "application/json")
                 .body(axum::body::Body::from(
-                    r#"{"name":"denied","source":"export function main(){return 42;}"}"#,
+                    r#"{"command":"add","args":{"name":"denied","source":"pub fn main() {}"}}"#,
                 ))
                 .unwrap(),
         )

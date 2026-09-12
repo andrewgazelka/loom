@@ -1,4 +1,3 @@
-#[loom::def(effects=["fs.list"])]
 pub fn largest(machine: String, path: String) -> loom::Value {
     let listing = loom::fs::list(&machine, &path).expect("directory listing failed");
     let Some(entry) = listing

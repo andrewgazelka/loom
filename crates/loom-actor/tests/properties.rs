@@ -1,4 +1,5 @@
 use crate::common;
+use crate::registry::Registry;
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -425,7 +426,7 @@ async fn memory_io_is_wired() {
     {
         let result = loom_actor::Node::new(
             dir.path(),
-            loom_actor::Registry::new(),
+            Arc::new(Registry::new()),
             Arc::new(loom_actor::DefaultEffects),
             Config { io: loom_actor::Io::IoUring, ..Config::default() },
         )

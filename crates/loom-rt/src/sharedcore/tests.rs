@@ -143,6 +143,7 @@ async fn actual_sdk_module_rendezvous() -> Result<()> {
             .invoke(
                 "diagnostic".into(),
                 Invocation::Call {
+                    export: "loom_call_main".into(),
                     args: encode(&json!([])).unwrap(),
                 },
             )

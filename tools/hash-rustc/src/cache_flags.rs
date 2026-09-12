@@ -136,10 +136,9 @@ pub fn key(tcx: TyCtxt<'_>) -> Result<Vec<u8>, String> {
         ]
     );
     options!(&mut bytes, &sess.opts.unstable_opts, UnstableOptions, "-Z ",
-        accepted [embed_metadata], rejected [
+        accepted [embed_metadata, always_encode_mir], rejected [
             allow_features,
             allow_partial_mitigations,
-            always_encode_mir,
             annotate_moves,
             assert_incr_state,
             assume_incomplete_release,

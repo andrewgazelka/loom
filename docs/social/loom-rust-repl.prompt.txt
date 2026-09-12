@@ -7,7 +7,6 @@ Wordmark: "LOOM"
 Headline: "Rust without function coloring."
 Subtitle: "Concurrent effects. Ordinary functions."
 Code block:
-#[loom::def(effects=["fs.list"])]
 pub fn main(machine: String) -> Vec<Vec<loom::DirEntry>> {
     loom::scope(|s| {
         let src = s.spawn(|| loom::fs::list(&machine, "src").expect("src listing")).expect("spawn src");

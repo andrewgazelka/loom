@@ -1,9 +1,10 @@
+use crate::registry::Registry;
 use loom_actor::{Cap, Rights};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use loom_actor::{Actor, Behavior, ChildSpec, Config, Ctx, DefaultEffects, Node, Registry, Status, Trap};
+use loom_actor::{Actor, Behavior, ChildSpec, Config, Ctx, DefaultEffects, Node, Status, Trap};
 use serde_json::{Value, json};
 
 struct Probe;
@@ -94,7 +95,7 @@ async fn node(dir: &std::path::Path) -> Node {
     registry.insert(probe.hash().into(), probe);
     registry.insert(failure.hash().into(), failure);
     registry.insert("probe-fixed".into(), Arc::new(FixedProbe));
-    Node::new(dir, registry, Arc::new(DefaultEffects), Config::default()).await.unwrap()
+    Node::new(dir, Arc::new(registry), Arc::new(DefaultEffects), Config::default()).await.unwrap()
 }
 
 fn bytes(value: Value) -> Vec<u8> {
@@ -170,9 +171,9 @@ async fn link_cascades_stop() {
     for trap_exits in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let node = node(dir.path()).await;
-        let c_spec = ChildSpec::new("probe-v1", &bytes(json!({"type":"init"})), node.behavior("probe-v1").unwrap().child_type());
+        let c_spec = ChildSpec::new("probe-v1", &bytes(json!({"type":"init"})), node.behavior("probe-v1").await.unwrap().child_type());
         let b_spec =
-            ChildSpec::new("probe-v1", &bytes(json!({"type":"init","spec":c_spec})), node.behavior("probe-v1").unwrap().child_type());
+            ChildSpec::new("probe-v1", &bytes(json!({"type":"init","spec":c_spec})), node.behavior("probe-v1").await.unwrap().child_type());
         let a = node.spawn_root("probe-v1", &bytes(json!({"type":"init","trap_exit":trap_exits,"spec":b_spec}))).await.unwrap();
         drain(&node).await;
         let parent = node.open(&a).await.unwrap();
@@ -208,7 +209,7 @@ async fn one_for_one_reset_then_intensity() {
     let dir = tempfile::tempdir().unwrap();
     let node = node(dir.path()).await;
     let config = bytes(json!({"type":"configure","strategy":"one_for_one","max_restarts":2,"max_seconds":60}));
-    let supervisor_spec = ChildSpec::new("supervisor-v1", &config, node.behavior("supervisor-v1").unwrap().child_type());
+    let supervisor_spec = ChildSpec::new("supervisor-v1", &config, node.behavior("supervisor-v1").await.unwrap().child_type());
     let parent_id =
         node.spawn_root("probe-v1", &bytes(json!({"type":"init","trap_exit":true,"monitor":true,"spec":supervisor_spec}))).await.unwrap();
     drain(&node).await;
@@ -216,7 +217,7 @@ async fn one_for_one_reset_then_intensity() {
     let supervisor_ids = children(&parent).await;
     assert_eq!(supervisor_ids.len(), 1);
     let supervisor_id = &supervisor_ids[0];
-    let spec = ChildSpec::new("always-fails-v1", b"{}", node.behavior("always-fails-v1").unwrap().child_type());
+    let spec = ChildSpec::new("always-fails-v1", b"{}", node.behavior("always-fails-v1").await.unwrap().child_type());
     node.send(supervisor_id, "start", &bytes(json!({"type":"start_child","spec":spec}))).await.unwrap();
     drain(&node).await;
 
@@ -247,7 +248,8 @@ async fn rest_for_one_order() {
         .await
         .unwrap();
     for name in ["A", "B", "C"] {
-        let spec = ChildSpec::new("probe-v1", &bytes(json!({"type":"init","name":name})), node.behavior("probe-v1").unwrap().child_type());
+        let spec =
+            ChildSpec::new("probe-v1", &bytes(json!({"type":"init","name":name})), node.behavior("probe-v1").await.unwrap().child_type());
         node.send(&supervisor_id, name, &bytes(json!({"type":"start_child","spec":spec}))).await.unwrap();
     }
     drain(&node).await;
@@ -309,11 +311,11 @@ async fn resume_keeps_tree_intact() {
     let dir = tempfile::tempdir().unwrap();
     let node = node(dir.path()).await;
     let supervisor_id = node.spawn_root("supervisor-v1", &bytes(json!({"type":"configure","max_restarts":0}))).await.unwrap();
-    let grandchild_spec = ChildSpec::new("probe-v1", &bytes(json!({"type":"init"})), node.behavior("probe-v1").unwrap().child_type());
+    let grandchild_spec = ChildSpec::new("probe-v1", &bytes(json!({"type":"init"})), node.behavior("probe-v1").await.unwrap().child_type());
     let child_spec = ChildSpec::new(
         "probe-v1",
         &bytes(json!({"type":"init","spec":grandchild_spec,"monitor":true})),
-        node.behavior("probe-v1").unwrap().child_type(),
+        node.behavior("probe-v1").await.unwrap().child_type(),
     );
     node.send(&supervisor_id, "start", &bytes(json!({"type":"start_child","spec":child_spec}))).await.unwrap();
     drain(&node).await;
@@ -402,7 +404,7 @@ async fn supervisor_typed_child_gets_infinite_shutdown() {
     let dir = tempfile::tempdir().unwrap();
     let mut registry = Registry::new();
     registry.insert(AlternateSupervisor.hash().into(), Arc::new(AlternateSupervisor));
-    let node = Node::new(dir.path(), registry, Arc::new(DefaultEffects), Config::default()).await.unwrap();
+    let node = Node::new(dir.path(), Arc::new(registry), Arc::new(DefaultEffects), Config::default()).await.unwrap();
     let parent = node.root();
     let child = node.spawn_root(AlternateSupervisor.hash(), &bytes(json!({"type":"configure"}))).await.unwrap();
     let spec_rows = node.open(&parent).await.unwrap().sql("SELECT msg FROM outbox WHERE target='spawn'", ()).await.unwrap();
@@ -425,5 +427,5 @@ async fn supervisor_typed_child_gets_infinite_shutdown() {
     assert_eq!(actor.status().await.unwrap(), Status::Stopped);
     assert_eq!(meta(&actor, "reason").await, "shutdown");
     let error = node.spawn_root("unknown-supervisor", b"").await.unwrap_err();
-    assert!(format!("{error:#}").contains("unregistered behavior unknown-supervisor"));
+    assert!(format!("{error:#}").contains("unknown test behavior unknown-supervisor"));
 }

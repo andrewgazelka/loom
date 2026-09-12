@@ -1,5 +1,6 @@
 use super::memo::{self, MemoConfig};
-use crate::{Behavior, Cap, Config, Ctx, DefaultEffects, Node, Registry, Rights, Trap, Verdict, actor};
+use crate::test_registry::Registry;
+use crate::{Behavior, Cap, Config, Ctx, DefaultEffects, Node, Rights, Trap, Verdict, actor};
 use async_trait::async_trait;
 use std::{
     collections::BTreeSet,
@@ -51,7 +52,7 @@ impl Fixture {
         ] {
             registry.insert(behavior.hash.to_owned(), Arc::new(behavior) as Arc<dyn Behavior>);
         }
-        let node = Node::new(dir.path(), registry, Arc::new(DefaultEffects), Config::default()).await.unwrap();
+        let node = Node::new(dir.path(), Arc::new(registry), Arc::new(DefaultEffects), Config::default()).await.unwrap();
         let target = node.spawn_root("counter-v1", &[]).await.unwrap();
         let input = serde_json::to_vec(&node.cap_for(&target, Rights::ALL).await.unwrap()).unwrap();
         let id = node.spawn_root("original", &input).await.unwrap();

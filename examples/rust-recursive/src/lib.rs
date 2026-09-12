@@ -1,4 +1,3 @@
-#[loom::def(effects=["call"])]
 pub fn descend(depth: u32) -> u32 {
     if depth == 0 {
         0

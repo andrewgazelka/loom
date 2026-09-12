@@ -44,34 +44,78 @@ cargo run --release -p loomd -- --db loom.sqlite
 Open <http://127.0.0.1:8787> and enter the same token. The daemon serves the built Svelte application, HTTP API, WebSocket event stream, and MCP endpoint. The token authorizes the single owner; keep the listener on loopback unless network access is intended.
 
 ```sh
-cargo run -p loom-cli -- --eval '6 * 7'
+cargo run -p loom-cli -- --token "$LOOM_TOKEN" run sum '[20,22]'
 cargo run -p loomd -- --db loom.sqlite --stdio
 ```
 
 The second command starts the MCP stdio transport. Configure an MCP client to run it with `LOOM_TOKEN` and an absolute `--root` pointing at this checkout. Streamable HTTP MCP is at `/mcp` and requires the same bearer token.
 
-## Define and call
+## Command reference
+
+The CLI, HTTP commands, and MCP tools use the same definition operations. The CLI reads files for `add` and `update`; the service stores their source in CAS. `view` reads that stored source, including when the original file has changed or disappeared.
+
+| CLI | MCP tool | Result |
+| --- | --- | --- |
+| `add <file.rs> [--name n]` | `add` | Name, definition hash, entry item hash, Wasm hash, and item table |
+| `view <name-or-hash>` | `view` | Stored source and item table |
+| `update <name> <file.rs>` | `update` | New definition and name binding; old hash remains runnable |
+| `history <name>` | `history` | Hash chain, timestamps, and changed items between entries |
+| `diff <old-hash> <new-hash>` | `diff` | Added, removed, and changed items, with their hashes |
+| `run <name-or-hash> [args-json]` | `run` | Output and recorded effects |
+| `find <text>` | `find` | Matching names and item names |
+| `dependents <hash>` | `dependents` | Definitions with a dependency pinned to the hash |
 
 ```sh
-curl -sS http://127.0.0.1:8787/v1/define \
-  -H "Authorization: Bearer $LOOM_TOKEN" -H 'Content-Type: application/json' \
-  -d '{"name":"add","source":"#[loom::def] pub fn main(a: i64, b: i64) -> i64 { a + b }"}'
+loom --token "$LOOM_TOKEN" add sum.rs --name sum
+loom --token "$LOOM_TOKEN" run sum '[20,22]'
+loom --token "$LOOM_TOKEN" view sum
+loom --token "$LOOM_TOKEN" update sum sum.rs
+loom --token "$LOOM_TOKEN" history sum
 ```
 
-The returned definition hash identifies the callable. Invoke `POST /v1/command` with `{"command":"call","args":{"hash":"<hash>","args":[20,22]}}`. Rust definitions build during `define` and return structured cargo diagnostics. A Rust single-file definition uses the same endpoint with `"lang":"rust"` and source such as:
+Guest Rust has no macros. Every crate-root `pub fn` is an entry. An optional schema is declared as `pub const LOOM_SCHEMA: &str`; effect rows are inferred by the compiler driver. There are no effect declarations. `add` reports each entry’s inferred row in `entries.<name>.effects`, with `labels` and `unknown` fields.
 
 ```rust
-#[loom::def]
-pub fn add(a: i64, b: i64) -> i64 { a + b }
+pub fn sum(a: i64, b: i64) -> i64 { a + b }
 ```
 
-Actors use the `actor_*` MCP tools and `actor://` resources. Each actor owns its domain tables, inbox, effects, and outbox in one Turso file. See [Actors on Turso](actors-turso.md) for transactions, supervision, and behavior changes.
+A source file may expose several entries. `run <name>` selects the matching public function in a named definition, or a unique entry with that name among currently named definitions. Ambiguous names report the matching definition hashes. `run <hash>` requires a sole entry and otherwise reports the candidate names. Private helpers and nested functions are not entries.
 
-Client responses contain `ok`, `seq`, `result`, and `diagnostics`. Results above 8 KB become CAS references. Use the `resolve` command to retrieve a reference. WebSocket clients connect to `/v1/stream` and send `{ "token": "...", "after": 0 }` as their first message; the server streams durable events after that cursor.
+HTTP clients post `{ "command": "run", "args": { "target": "sum", "args": [20,22] } }` to `/v1/command` with the bearer token. `add` takes `source` and an optional `name`; `update` takes `name` and `source`. The remaining definition arguments are `target` for `view`, `name` for `history`, `old` and `new` for `diff`, `text` for `find`, and `hash` for `dependents`.
+
+Item hashes describe compiler-resolved definitions. Renaming a local variable or reformatting source leaves them unchanged. A changed helper can change its callers' hashes too. The definition hash is the driver’s resolved-HIR entry hash. Alpha-renaming a local leaves both the definition hash and history unchanged; changing a constant changes the hash. Source revisions have their own BLAKE3 hashes. A published definition pins its executable and schema; a conflicting publication is rejected. The Wasm and toolchain hashes identify its executable build. Builds require the `hash-rustc` driver and reject missing identity outputs. Stores without `defs.behavior_hash` are rejected by column name.
+
+Actor commands use the same names, argument schemas, admission checks, and response envelope on CLI, HTTP, and MCP:
+
+| CLI | MCP tool |
+| --- | --- |
+| `spawn <def> [init]` | `spawn` |
+| `send <id> <msg>` | `send` |
+| `tree` | `tree` |
+| `info <id>` | `info` |
+| `lineage <id>` | `lineage` |
+| `validate <id> <candidate> <k>` | `validate` |
+| `promote <id> <hash> --author <name> --rationale <text>` | `promote` |
+| `fork <id> <seq>` | `fork` |
+| `actors` | `actors` |
+| `stop <id> <reason>` | `stop` |
+| `restart <id> <verb>` | `restart` |
+| `dead_letters <id>` | `dead_letters` |
+| `sql <id> <query> [--params <json>]` | `sql` |
+| `whereis <name>` | `whereis` |
+| `register <name> <id>` | `register` |
+| `members <group>` | `members` |
+| `behaviors` | `behaviors` |
+| `promote_where <old> <new> --author <name> --rationale <text>` | `promote_where` |
+| `drain` | `drain` |
+
+Actor behaviors resolve from stored definitions when `spawn` runs; a running node can spawn a newly added definition by name or hash. Actor entries accept one `Vec<u8>` message, with optional `LOOM_SCHEMA` SQL. Each actor pins its resolved definition hash. Each actor owns its domain tables, inbox, effects, and outbox in one Turso file. See [Actors on Turso](actors-turso.md) for transactions, supervision, and behavior changes.
+
+All responses, including MCP actor responses and failures, use `{ok, seq, result, diagnostics}`. `spawn` defaults omitted `init` to `null` everywhere. Promotions require `author` and `rationale`; validation uses an unsigned 32-bit `k`. `send` returns a cursor on success; a trapped message returns `ok: false` with its actor id, message sequence, and cause. WebSocket clients connect to `/v1/stream` and send `{ "token": "...", "after": 0 }` as their first message; the server streams durable events after that cursor.
 
 ## DAG-CBOR and links
 
-Rust guests use deterministic DAG-CBOR at the core wasm effect boundary. Structured CAS values use the same codec; core wasm binaries, source bundles, and other raw bytes retain the raw codec. JSON clients represent a link as exactly `{ "$ref": "<CID>" }`. In DAG-CBOR this becomes tag 42 containing the zero-prefixed binary CID. Local links use CIDv1 with a BLAKE3-256 digest and distinguish DAG-CBOR (`0x71`) from raw bytes (`0x55`). Definition identities remain source hashes.
+Rust guests use deterministic DAG-CBOR at the core wasm effect boundary. Structured CAS values use the same codec; core wasm binaries, source bundles, and other raw bytes retain the raw codec. JSON clients represent a link as exactly `{ "$ref": "<CID>" }`. In DAG-CBOR this becomes tag 42 containing the zero-prefixed binary CID. Local links use CIDv1 with a BLAKE3-256 digest and distinguish DAG-CBOR (`0x71`) from raw bytes (`0x55`). Definition identities are resolved-HIR entry hashes; source revisions use separate source hashes.
 
 Maps have string keys ordered by encoded length and then bytes. Decoders reject duplicate keys, nonminimal or indefinite encodings, other tags, malformed CIDs, undefined, nonfinite floats, and trailing bytes. Floats use 64 bits. The shared JSON value model encodes safe integral numbers as integers; Rust integers outside JavaScript's safe range are rejected instead of losing precision across languages.
 
@@ -98,7 +142,7 @@ Stores containing retired actor tables are rejected at open with an error naming
 | `loom-mcp` | MCP tools, prompts and resources |
 | `loom-cli`, `loomd` | Terminal client and server entrypoint |
 
-Rust definitions built through `loom_define` use the [shared-core ABI](shared-core-abi.md), with `loom.perform` dispatching through guest handlers to the outermost host handler.
+Rust definitions built through `add` use the [shared-core ABI](shared-core-abi.md), with `loom.perform` dispatching through guest handlers to the outermost host handler.
 
 ## Verify
 
@@ -158,7 +202,7 @@ The runner creates a separate 10,000-file fixture, starts Codex with only Loom c
 
 Calling an effect performs it: `loom::sleep(100)` suspends until its timer finishes, and `loom::perform::<T>(label, args)` performs a custom effect. Concurrent Rust work on the shared-core path uses `loom::scope`, `scope.spawn(|| ...)`, and `child.join()`. Use `loom::spawn(|| ...)` with `'static` captures for fire-and-forget work or a `JoinHandle` moved into another task. Dropping that handle leaves its task running; the host cancels unfinished detached tasks when the definition entry returns, without an implicit wait. Joining a trapped detached task returns its error; an unjoined detached failure is discarded. A synchronous `loom::call(DEF, args)` can run inside a scoped child.
 
-Definition signatures distinguish inferred effects, the host-enforced `allowed_effects` policy, and effects observed during execution. Inference is conservative: dynamic calls, getters, iterators, and unexpanded Rust code can leave the set unknown. Omitting `allowed_effects` permits all host effects; `[]` permits none. Explicit policies are part of definition identity. Cross-definition calls inherit the intersection of caller and callee permissions, including on cache hits. Scoped children inherit the caller's permissions.
+Definition signatures record the residual effect row: the labels that can reach the outermost host handler. The compiler infers this row through resolved calls, including the concrete implementations selected by trait and generic calls. The host-enforced `allowed_effects` policy is a separate permission limit. Omitting `allowed_effects` adds no policy restriction; `[]` permits none. A publication pins its policy with the executable; a different policy for the same entry hash is rejected. Cross-definition calls inherit the intersection of caller and callee permissions, including on cache hits. Scoped children inherit the caller's permissions.
 
 The Effects view shows individual invocations and their outcomes. To capture file content changes from a process, pass `capture_paths: ["note.txt"]` to `exec` or `process.start`. Paths are resolved within the process root; the capture records actual before/after bytes in CAS and displays created, modified, and deleted files as diffs. Capture is limited to 64 explicitly selected regular files, at most 1 MiB each. Symlinks, unsupported files, and unavailable reads are reported explicitly.
 
@@ -170,14 +214,7 @@ Machine filesystem effects resolve from a pinned root directory handle. Parent t
 
 These snapshots observe selected files across the process interval. They do not enumerate every write, track metadata-only changes, or distinguish concurrent writers. Historical effects without snapshots remain browsable, with no invented diff.
 
-Crate intake uses `loom --token "$LOOM_TOKEN" crate add serde@1.0.210` or the MCP `crate_add` tool with `{name, version}`. The registry checksum is verified before the source tree enters the CAS. Pin the returned hash in a Rust bundle's manifest:
-
-```toml
-[loom.crates]
-serde = { hash = "<returned 64-digit hash>", features = ["derive"] }
-```
-
-Updating a definition name leaves existing dependency hashes intact. Run `loom --token "$LOOM_TOKEN" upgrade <old-hash> <new-hash>` or MCP `loom_upgrade` to rewrite named dependents explicitly. Both definition hashes and crate source hashes use this command; its result lists the changed identities. Actor behavior changes use `actor_promote`.
+Dependencies remain pinned when a definition name moves. `update` retains its existing dependency pins and effect policy unless replacements are supplied. Use `--deps '{"alias":"<hash>"}'` to replace pins and `--allowed_effects '[]'` to deny effects; explicit `null` clears the effect policy. Use `dependents <hash>` to find callers and update each caller explicitly. Actor behavior changes use `promote` or MCP `promote`.
 
 ## Guest-defined effect handlers
 
@@ -188,7 +225,6 @@ closure. The handler receives an `Effect` and a one-shot `Continuation`, then re
 ```rust
 use loom::{Continuation, Effect, Reply, Value};
 
-#[loom::def(effects = [])]
 pub fn main() {
     loom::handle(["sleep"], |_effect: Effect, _k: Continuation| {
         Reply::Resume(Value::Null)
@@ -228,20 +264,15 @@ replay are implemented by the same host handler chain used for execution.
 
 For content-addressed reuse, see [stored handler definitions](content-addressed-handlers.md).
 
-### Residual effect declarations
+### Residual effect rows
 
-`#[loom::def(effects = ["sleep"])]` declares the effect names that the host must
-supply. `loom-check` rejects known residual effects outside that set. A total
-`handle` removes its selected effects from the body's inferred row;
-effects performed by the handler itself remain in the outer row. Unknown
-dispatch requires an explicit declaration, which the runtime enforces at the
-root.
+Effect rows are inferred. Calling `loom::sleep(100)` adds `sleep`; calling `loom::perform("custom.label", args)` adds `custom.label`. Trait dispatch follows the implementation selected for that entry's concrete types. An unused implementation that calls `exec` does not add `exec` to the entry's row.
 
-This is Loom's conservative source analysis and runtime capability check, not
-an effect type system inside rustc. A declaration does not grant additional
-host capabilities: it intersects the caller's allowed effects. Omitting `exec`
-from the permitted root row prevents guest code from reaching the host's exec
-implementation even through dynamic dispatch.
+A total `loom::handle(["sleep"], handler, body)` removes `sleep` from the body's row. Effects performed by the handler itself remain in the outer row. `handle_any` may forward, so it does not remove labels. A pinned `handle_with` uses the stored handler's residual row and any stored total-handling labels.
+
+Effect rows are inferred through the resolved call graph. `perform` accepts a string literal or a const evaluated by rustc, such as `const L: &str = "custom.label";`. Dynamic labels are rejected at the call site with `effect label at <span> is not a literal or const; rows are inferred and need a static label`. Sandboxing is omission: total handlers remove handled labels from the residual host row, and the host refuses every effect absent from that inferred row.
+
+Caller permissions still apply. If the residual row omits `exec`, the guest cannot reach the host's exec implementation.
 
 ### Preview filesystem writes
 

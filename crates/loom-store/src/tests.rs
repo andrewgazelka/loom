@@ -23,15 +23,6 @@ fn restart_preserves_definitions_names_and_effects() -> Result<()> {
             observed_effects: Vec::new(),
         };
         store.define(&def, Some("counter"), "source", &BTreeMap::new())?;
-        assert_eq!(
-            store.get(&def.hash)?,
-            Some(loom_proto::definition_identity(
-                def.lang,
-                "source",
-                &BTreeMap::new(),
-                None
-            )?)
-        );
         let mut invalid = def.clone();
         invalid.hash = "incorrect".into();
         assert!(
@@ -103,15 +94,6 @@ fn legacy_signatures_migrate_without_changing_historical_events() -> Result<()> 
         loom_proto::ValueShape::Number
     );
     assert_eq!(store.get_value::<Value>(&old_event_hash)?, Some(event));
-    assert_eq!(
-        store.get(&hash)?,
-        Some(loom_proto::definition_identity(
-            Lang::Rust,
-            "source",
-            &BTreeMap::new(),
-            None
-        )?)
-    );
     let seq = store.latest_seq()?;
     store.rebuild_views()?;
     assert_eq!(

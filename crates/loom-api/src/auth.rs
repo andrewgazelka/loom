@@ -89,8 +89,14 @@ impl Authorizer {
     }
 }
 pub fn command_scope(command: &str) -> Scope {
+    if let Some(verb) = loom_proto::verbs::lookup(command) {
+        return match verb.permission {
+            loom_proto::verbs::Permission::Read => Scope::Read,
+            loom_proto::verbs::Permission::Execute => Scope::Execute,
+            loom_proto::verbs::Permission::Define => Scope::Define,
+        };
+    }
     match command {
-        "crate.add" | "upgrade" => Scope::Define,
         "cas.list" | "cas.inspect" | "trace.effects" | "defs" | "events" | "resolve" | "deps"
         | "build" | "stats" | "process.list" | "process.status" | "model.state" | "model.list" => {
             Scope::Read

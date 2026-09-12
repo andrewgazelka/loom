@@ -1,29 +1,31 @@
 # Loom definitions as behaviors
 
-`register(&mut registry, store, def_hash).await?` validates a stored Rust
-definition, reads its schema, and registers a `LoomBehavior` under `defs.hash`.
-Pass that registry to `loom_actor::Node::new`. The same hash is the
-`behavior_hash` accepted by actor spawning and promotion.
+`StoreRegistry::new(store)` resolves stored Rust definitions by name or hash
+when an actor is spawned or promoted. Pass it in an `Arc` to
+`loom_actor::Node::new`. Definitions added to the same store become available
+without restarting the node; actors retain their resolved definition hash.
 
-Each message invokes a `#[loom::def]` function with one `Vec<u8>` argument.
+Each message invokes a root-level `pub fn` function with one `Vec<u8>` argument.
 The bytes are unchanged, including non-UTF-8 messages. The function's return
 value is discarded; durable state belongs in the actor's SQL tables. Guest
 handlers and scoped tasks retain their normal Loom semantics. Only effects
 that escape guest handlers reach the actor context.
 
 ```rust,ignore
-#[loom::def]
 pub fn message(msg: Vec<u8>) {
-    loom::perform::<loom::Value>("sql", loom::serde_json::json!({
-        "sql": "INSERT INTO messages(body) VALUES (?)",
-        "params": [{"type":"blob", "value":msg}]
-    })).unwrap();
+    let mut request: loom::Value = loom::serde_json::from_str(r#"{
+        "sql":"INSERT INTO messages(body) VALUES (?)",
+        "params":[{"type":"blob","value":null}]
+    }"#).unwrap();
+    request["params"][0]["value"] =
+        loom::Value::Array(msg.into_iter().map(loom::Value::from).collect());
+    loom::perform::<loom::Value>("sql", request).unwrap();
 }
 ```
 
-Schema uses `#[loom::schema] pub fn schema() -> &'static str`. Its generated
+Schema uses `pub const LOOM_SCHEMA: &str`. The driver evaluates the constant and reports its SQL in the JSON `schema` field. The generated
 `loom_schema() -> u64` core export returns the ordinary Loom CBOR result
-envelope containing SQL text. Registration invokes it in a pure execution;
+envelope containing SQL text. Behavior resolution invokes it in a pure execution;
 an absent export means empty SQL. The actor runtime runs that SQL during
 creation and promotion. Schema extraction does not create a legacy actor or
 invoke `run`, `fold`, `spawn`, `send`, or `state` on `loom_rt::Runtime`.
@@ -110,9 +112,10 @@ Host effect `mode` is `"short"` by default. `"request"` selects the actor's
 two-phase outbox path; completion arrives as a later inbox message. For example:
 
 ```rust,ignore
-let request_id: String = loom::perform("echo", loom::serde_json::json!({
-    "request": [104, 105], "mode": "request"
-})).unwrap();
+let request: loom::Value = loom::serde_json::from_str(
+    r#"{"request":[104,105],"mode":"request"}"#,
+).unwrap();
+let request_id: String = loom::perform("echo", request).unwrap();
 ```
 
 Host handlers consume and return opaque bytes. A short effect is called through

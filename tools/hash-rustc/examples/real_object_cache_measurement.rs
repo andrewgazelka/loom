@@ -176,7 +176,6 @@ fn main() {
         let mut directories = vec![
             "crates/loom-guest-rs",
             "crates/loom-proto",
-            "crates/loom-guest-macros",
             "examples/rust-preview",
         ];
         if coverage {

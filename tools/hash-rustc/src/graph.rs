@@ -13,6 +13,8 @@ mod canonical;
 #[derive(Serialize)]
 pub struct Document {
     pub toolchain: String,
+    pub schema: Option<String>,
+    pub effects: crate::effects::Document,
     #[serde(skip)]
     pub preimages: crate::preimages::Preimages,
     items: BTreeMap<String, Item>,
@@ -116,6 +118,9 @@ pub fn collect(tcx: TyCtxt<'_>) -> Document {
         indices.insert(definition.id.to_def_id(), graph.add_node(index));
     }
     for definition in &mut definitions {
+        if definition.entry {
+            crate::effects::append_contract(tcx, &mut definition.parts);
+        }
         // Constructors and variants carry their structural position plus the
         // enclosing ADT hash. They are not independent HIR owners.
         definition.parts = expand_references(tcx, std::mem::take(&mut definition.parts), &indices);
@@ -206,6 +211,8 @@ pub fn collect(tcx: TyCtxt<'_>) -> Document {
     }
     Document {
         toolchain: String::new(),
+        schema: None,
+        effects: crate::effects::Document::default(),
         preimages,
         items,
         entry,

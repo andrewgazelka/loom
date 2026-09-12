@@ -1,7 +1,8 @@
+use crate::registry::Registry;
 use async_trait::async_trait;
 use loom_actor::{
-    Actor, Behavior, ChildSpec, Config, Ctx, DefaultEffects, EffectError, EffectHandler, EffectKey, Node, Registry, RestartPolicy,
-    Shutdown, Status, Trap,
+    Actor, Behavior, ChildSpec, Config, Ctx, DefaultEffects, EffectError, EffectHandler, EffectKey, Node, RestartPolicy, Shutdown, Status,
+    Trap,
 };
 use loom_actor::{Cap, Rights};
 use serde_json::{Value, json};
@@ -105,7 +106,7 @@ async fn node_with_effects(dir: &std::path::Path, effects: Arc<dyn EffectHandler
     for mode in ["ordinary", "selective", "defer-always", "reply", "silent", "die"] {
         registry.insert(mode.to_owned(), Arc::new(Fixture { mode }) as Arc<dyn Behavior>);
     }
-    Node::new(dir, registry, effects, Config::default()).await.unwrap()
+    Node::new(dir, Arc::new(registry), effects, Config::default()).await.unwrap()
 }
 
 struct PumpBarrier {
@@ -312,8 +313,11 @@ async fn kill_terminate_and_shutdown_timeout() {
     assert_eq!(runtime.info(killed.id()).await.unwrap().reason, "killed");
 
     let supervisor = runtime.spawn_root("supervisor-v1", &encoded(json!({"type":"configure","strategy":"one_for_one"}))).await.unwrap();
-    let mut spec =
-        ChildSpec::new("ordinary", &encoded(json!({"type":"init","trap_exit":true})), runtime.behavior("ordinary").unwrap().child_type());
+    let mut spec = ChildSpec::new(
+        "ordinary",
+        &encoded(json!({"type":"init","trap_exit":true})),
+        runtime.behavior("ordinary").await.unwrap().child_type(),
+    );
     spec.restart = RestartPolicy::Temporary;
     spec.shutdown = Shutdown::TimeoutMs(30);
     runtime.send(&supervisor, "start", &encoded(json!({"type":"start_child","spec":spec}))).await.unwrap();
@@ -341,7 +345,8 @@ async fn kill_terminate_and_shutdown_timeout() {
 async fn dynamic_supervisor_and_registry() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = node(dir.path()).await;
-    let mut template = ChildSpec::new("ordinary", &encoded(json!({"type":"init"})), runtime.behavior("ordinary").unwrap().child_type());
+    let mut template =
+        ChildSpec::new("ordinary", &encoded(json!({"type":"init"})), runtime.behavior("ordinary").await.unwrap().child_type());
     template.restart = RestartPolicy::Temporary;
     let supervisor =
         runtime.spawn_root("supervisor-v1", &encoded(json!({"type":"configure","strategy":"dynamic","template":template}))).await.unwrap();

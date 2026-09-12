@@ -1,5 +1,6 @@
+use crate::registry::Registry;
 use async_trait::async_trait;
-use loom_actor::{Behavior, ChildSpec, Config, Ctx, DefaultEffects, Node, Registry, RestartPolicy, Shutdown, Status, Trap};
+use loom_actor::{Behavior, ChildSpec, Config, Ctx, DefaultEffects, Node, RestartPolicy, Shutdown, Status, Trap};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -69,10 +70,10 @@ async fn shutdown_wait_does_not_stall_node() {
     let mut registry = Registry::new();
     registry.insert("shutdown-busy-v1".into(), Arc::new(Busy { started: started.clone(), cancelled: cancelled.clone() }));
     registry.insert("shutdown-receiver-v1".into(), Arc::new(Receiver { processed: processed.clone() }));
-    let node = Node::new(dir.path(), registry, Arc::new(DefaultEffects), Config::default()).await.unwrap();
+    let node = Node::new(dir.path(), Arc::new(registry), Arc::new(DefaultEffects), Config::default()).await.unwrap();
     let parent = node.root();
     let y = node.spawn_root("shutdown-receiver-v1", b"init").await.unwrap();
-    let mut spec = ChildSpec::new("shutdown-busy-v1", b"init", node.behavior("shutdown-busy-v1").unwrap().child_type());
+    let mut spec = ChildSpec::new("shutdown-busy-v1", b"init", node.behavior("shutdown-busy-v1").await.unwrap().child_type());
     spec.restart = RestartPolicy::Temporary;
     spec.shutdown = Shutdown::TimeoutMs(300);
     node.send(&parent, "start-x", &serde_json::to_vec(&serde_json::json!({"type":"start_child","spec":spec})).unwrap()).await.unwrap();

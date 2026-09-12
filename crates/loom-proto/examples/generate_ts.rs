@@ -24,7 +24,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Def::decl(),
         Diagnostic::decl(),
         DefineRequest::decl(),
-        EvalRequest::decl(),
         CommandRequest::decl(),
         Response::decl(),
         Event::decl(),

@@ -1,4 +1,3 @@
-#[loom::def(effects=["fs.walk"])]
 pub fn main(machine: String, path: String) -> loom::Value {
     let entries = loom::fs::walk(&machine, &path, 256, 100_000)
         .expect("tree walk failed");
@@ -13,5 +12,8 @@ pub fn main(machine: String, path: String) -> loom::Value {
             }
         }
     }
-    serde_json::json!({"path":best_path,"size":best_size})
+    let mut result = loom::serde_json::Map::new();
+    result.insert("path".into(), best_path.into());
+    result.insert("size".into(), best_size.into());
+    loom::Value::Object(result)
 }

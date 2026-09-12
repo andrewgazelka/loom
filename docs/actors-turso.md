@@ -14,7 +14,7 @@ scenario name.
 
 ## What an actor is
 
-An actor is: one Turso database file (`<dir>/<actor_id>.db`), one mailbox (the
+An actor is: one Turso database file (`<dir>/<id>.db`), one mailbox (the
 `inbox` table in that file), and one behavior (a Rust value implementing `Behavior`,
 addressed by a content hash, recorded in the file's `code_changes` table).
 
@@ -71,11 +71,11 @@ leaves (the file stays for reading).
 
     cx.sql(sql, params) -> Result<Rows>     // runs on the actor's open transaction
     cx.send(target_id, msg)                  // outbox row, target = actor id
-    cx.spawn(behavior_hash, init_msg) -> child_id   // outbox row + children row; id is derived (below)
+    cx.spawn(def, init?_msg) -> child_id   // outbox row + children row; id is derived (below)
     cx.request(kind, req) -> request_id      // long effect: outbox row, target = "effect:<kind>"
     cx.effect(kind, req) -> result           // short effect: runs now, keyed by (actor, seq, idx), recorded in effects
     cx.now() -> i64                          // wall clock, is a short effect (recorded)
-    cx.random(n) -> Vec<u8>                  // derived from (actor_id, seq, counter), not recorded
+    cx.random(n) -> Vec<u8>                  // derived from (id, seq, counter), not recorded
     cx.seq() -> i64
 
 A `Trap` is a handler error the runtime treats as deterministic (a returned `Err`
@@ -91,7 +91,7 @@ owned by the `Node`. Wiring a Loom wasm definition in is a later lane: it will b
 
 Short effects run inside the handler through a host `EffectHandler` trait
 (`async fn call(&self, key: &EffectKey, kind: &str, req: &[u8]) -> Result<Vec<u8>>`).
-The key `(actor_id, seq, idx)` is passed to the handler; any effect with external
+The key `(id, seq, idx)` is passed to the handler; any effect with external
 side effects must use it as its idempotency key, because the `effects` row is inside
 the transaction and a crash after the external call and before COMMIT re-runs the
 message and re-performs the effect with the same key. The `effects` table exists for
@@ -144,7 +144,7 @@ as a Trap with the error text (so nothing loops forever without a row saying so)
 
 ## Code changes
 
-    node.promote(actor_id, behavior_hash, author, rationale)
+    node.promote(id, hash, author, rationale)
 
 inserts a `code_changes` row and runs the new behavior's `schema()` in the same
 transaction. The next message runs the new behavior; a parked actor resumes. Rollback
@@ -156,11 +156,11 @@ Every `snapshot_every` messages (node config, default 64) the node, after commit
 runs `VACUUM INTO '<dir>/<id>.snap.<seq>.db'` (or Turso's equivalent backup call;
 see the existence check in the runbook) and inserts a `snapshots` row.
 
-    node.fork(actor_id, at_seq) -> fork_id
+    node.fork(id, seq) -> fork_id
 
-copies the latest snapshot with `snapshots.seq <= at_seq` to a new file
+copies the latest snapshot with `snapshots.seq <= seq` to a new file
 `<dir>/<fork_id>.db`, sets its meta id/parent, then replays inbox messages
-`(snap_seq, at_seq]` with the behavior recorded in `code_changes` at each seq and
+`(snap_seq, seq]` with the behavior recorded in `code_changes` at each seq and
 with short effects served from the `effects` table (an `EffectHandler` that answers
 by `(seq, idx)` and errors on a miss). The fork's outbox rows are never delivered:
 the fork has meta `status = fork` and the pump refuses that status.
@@ -171,9 +171,9 @@ without replay) is the v2 replacement for this section. It changes only how
 
 ## Validation of a candidate behavior
 
-    node.validate(actor_id, candidate_hash, k) -> Verdict
+    node.validate(id, candidate, k) -> Verdict
 
-1. `fork(actor_id, cursor - k)`, then promote `candidate_hash` on the fork.
+1. `fork(id, cursor - k)`, then promote `candidate_hash` on the fork.
 2. Run inbox messages `(cursor-k, cursor]` on the fork with effects served from the
    original's `effects` table.
 3. Verdict:
@@ -192,10 +192,10 @@ without replay) is the v2 replacement for this section. It changes only how
 ## Node
 
     pub struct Node { dir: PathBuf, registry: Registry, effects: Arc<dyn EffectHandler>, config: Config }
-    node.spawn_root(behavior_hash, init_msg) -> actor_id
-    node.send(actor_id, key, msg)             // external injection, keyed
+    node.spawn_root(def, init?_msg) -> id
+    node.send(id, key, msg)             // external injection, keyed
     node.run_until_idle()                     // drain every actor with cursor < max(inbox.seq) and status running; run the pump; repeat until nothing moves
-    node.open(actor_id) -> Actor              // handle over one file
+    node.open(id) -> Actor              // handle over one file
     node.promote / fork / validate / skip / stop
 
 One open Turso connection per actor file, held in a `HashMap<ActorId, Arc<Mutex<Connection>>>`;
@@ -263,7 +263,7 @@ not a supervision tree. This addendum makes it one; it is part of v1.
   the pump sets the target's status to `stopped` with the reason, then fans out `exit`
   to links and `down` to monitors, then recursively stops the target's linked children.
   Reasons: `normal`, `shutdown`, `poison`, `killed`, or a free string.
-- **child spec**: `spawn` takes `{behavior_hash, init, restart: permanent|transient|temporary, shutdown: brutal|timeout_ms, link: bool}`. Stored in the parent's `children` table.
+- **child spec**: `spawn` takes `{def, init?, restart: permanent|transient|temporary, shutdown: brutal|timeout_ms, link: bool}`. Stored in the parent's `children` table.
 - **restart** for a durable actor is one of three verbs, chosen by the supervisor:
   - `resume`: status back to `running`, cursor unchanged (retries the poison message).
   - `skip`: move the poison message to `dead_letters`, cursor past it, `running`.
@@ -358,8 +358,8 @@ optional in v1 except where marked "later" with its leaver.
 | GenServer `reply(from, msg)` | `cx.reply(from, ref, msg)` = a send with the ref | yes |
 | GenServer `cast`, `handle_info` | `cx.send`; every message is `handle` | yes |
 | GenServer `terminate(reason, state)` | `Behavior::terminate(&self, cx, reason) -> Result<()>`, default no-op; runs in a final transaction before status becomes `stopped`; not run for `kill`; a `Trap` inside it is recorded in `dead_letters` and ignored | yes |
-| `code_change(old_vsn, state, extra)` | `code_changes` row + the new behavior's `schema()`; `Behavior::upgrade(&self, cx, from_hash) -> Result<()>` runs in the promote transaction for data moves; a `Trap` there rolls the promote back | yes |
-| module hot load affects every process | `node.promote_where(old_hash, new_hash, author, rationale)`: one promote per actor currently on `old_hash` (`_node.db` `who_runs(id, behavior_hash)` maintained by the pump); each is its own transaction; a failure stops the sweep and reports the actor id | yes |
+| `code_change(old_vsn, state, extra)` | `code_changes` row + the new behavior's `schema()`; the behavior’s data migration hook runs in the promote transaction for data moves; a `Trap` there rolls the promote back | yes |
+| module hot load affects every process | `node.promote_where(old, new, author, rationale)`: one promote per actor currently on `old_hash` (`_node.db` `who_runs(id, behavior_hash)` maintained by the pump); each is its own transaction; a failure stops the sweep and reports the actor id | yes |
 | Supervisor `one_for_one`, `one_for_all`, `rest_for_one` | Addendum A | yes |
 | `simple_one_for_one` / `DynamicSupervisor` | strategy `dynamic`: one child spec template, `start_child(init)` spawns a new child from it, `terminate_child(id)`; intensity as usual | yes |
 | child spec `type: worker | supervisor`, `shutdown: brutal_kill | ms | infinity` | spec fields; on `shutdown`, a `supervisor`-typed child gets `infinity` by default; `ms` means: send `exit(shutdown)` (trappable), start a timer, on expiry `kill` | yes |
@@ -394,29 +394,30 @@ optional in v1 except where marked "later" with its leaver.
 
 The existing stdio and authenticated HTTP MCP endpoint shares one actor node with
 Loom definitions. `loomd --actors-dir <path>` selects its directory; the default is
-`<db parent>/actors`. Tool results are JSON text. Errors include actor and sequence
-context when known. `init: null` spawns without an initial inbox message; other init
+`<db parent>/actors`. Every CLI, HTTP, and MCP operation returns `{ok, seq, result, diagnostics}`,
+including errors. Message traps return `ok: false` with actor id, message sequence,
+and trap cause. Omitted `init` defaults to `null`; `init: null` spawns without an initial inbox message; other init
 and message values are encoded as JSON bytes.
 
-- `actor_list()` lists actor identities, status, behavior, cursor, inbox size, and parent.
-- `actor_tree(root?)` returns a nested tree, defaulting to the node root supervisor.
-- `actor_info(id)` returns lifecycle, mailbox, and relationship details.
-- `actor_send(id, key?, msg)` sends a keyed message, runs until idle, and returns the cursor.
-- `actor_spawn(behavior_hash, init, parent?, spec?)` spawns a child and returns its id.
-- `actor_stop(id, reason)` stops an actor with the supplied reason.
-- `actor_restart(id, verb)` applies `resume`, `skip`, or `reset`.
-- `actor_promote(id, behavior_hash, author, rationale)` returns the new code-change row.
-- `actor_promote_where(old_hash, new_hash, author, rationale)` returns promoted ids.
-- `actor_lineage(id)` returns code-change rows.
-- `actor_dead_letters(id)` returns failed-message rows.
-- `actor_fork(id, at_seq)` returns a historical fork id.
-- `actor_validate(id, candidate_hash, k, assertions?)` returns a verdict and SQL assertion results from the replayed candidate.
-- `actor_sql(id, query, params?)` returns read-only query rows and refuses writes by statement kind.
-- `actor_whereis(name)` resolves a registered name.
-- `actor_register(name, id)` registers a unique name.
-- `actor_members(group)` lists group members.
-- `actor_behaviors()` lists registered hashes and descriptions.
-- `actor_run()` runs until idle and returns the number of processed actor turns.
+- `actors()` lists actor identities, status, behavior, cursor, inbox size, and parent.
+- `tree(root?)` returns a nested tree, defaulting to the node root supervisor.
+- `info(id)` returns lifecycle, mailbox, and relationship details.
+- `send(id, key?, msg)` sends a keyed message and drains the scheduler. Success returns `id`, `seq`, and `cursor`; a trapped message returns `ok: false` with its `id`, `seq`, and `cause`, preserved even if supervision resets the actor.
+- `spawn(def, init?, parent?, spec?)` spawns a child and returns its id.
+- `stop(id, reason)` stops an actor with the supplied reason.
+- `restart(id, verb)` applies `resume`, `skip`, or `reset`.
+- `promote(id, hash, author, rationale)` returns the new code-change row.
+- `promote_where(old, new, author, rationale)` returns promoted ids.
+- `lineage(id)` returns code-change rows.
+- `dead_letters(id)` returns failed-message rows.
+- `fork(id, seq)` returns a historical fork id.
+- `validate(id, candidate, k, assertions?)` uses an unsigned 32-bit `k` and returns a verdict and SQL assertion results from the replayed candidate.
+- `sql(id, query, params?)` returns read-only query rows and refuses writes by statement kind.
+- `whereis(name)` resolves a registered name.
+- `register(name, id)` registers a unique name.
+- `members(group)` lists group members.
+- `behaviors()` lists stored definition hashes and descriptions.
+- `drain()` runs until idle and returns the number of processed actor turns.
 
 JSON resources are `actor://tree`, `actor://<id>/inbox`, `actor://<id>/effects`,
 `actor://<id>/outbox`, and `actor://<id>/lineage`. Read tools and resources require
@@ -544,7 +545,7 @@ primary keys; values have SQL type tags and byte lengths. Outbox hashes cover
 
 The current replay engine needs more inputs than the proposed five-field key.
 Snapshots can precede `N-k`, deferred messages use recorded commit order, and
-upgrade hooks consume effects at negative sequences. This implementation also
+data migration hooks consume effects at negative sequences. This implementation also
 keys source metadata, code changes, the complete inbox/effect logs, and original
 domain table hashes used to calculate the verdict. It hashes the latest snapshot
 at or before `N-k`, not a synthesized snapshot exactly there. This conservative

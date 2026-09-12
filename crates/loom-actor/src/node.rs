@@ -12,7 +12,7 @@ use turso::Connection;
 #[derive(Clone)]
 pub struct Node {
     pub(crate) dir: PathBuf,
-    pub(crate) registry: Registry,
+    pub(crate) registry: Arc<dyn Registry>,
     pub(crate) effects: Arc<dyn EffectHandler>,
     pub(crate) config: Config,
     root_id: ActorId,
@@ -27,6 +27,7 @@ pub struct Node {
     gates: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     pub(crate) admission: Arc<tokio::sync::RwLock<()>>,
     pub(crate) run_gate: Arc<Mutex<()>>,
+    pub(crate) send_outcomes: crate::send_outcome::Outcomes,
     pub(crate) tasks: Arc<Mutex<HashMap<ActorId, Arc<tokio::sync::Notify>>>>,
     pub(crate) names: Arc<Mutex<Option<Connection>>>,
 }
@@ -69,15 +70,10 @@ impl Node {
         self.validate_inner(id, candidate, k).await.with_context(|| format!("actor {} seq {}: validate", id, -1))
     }
 
-    pub async fn new(dir: impl AsRef<Path>, mut registry: Registry, effects: Arc<dyn EffectHandler>, config: Config) -> Result<Self> {
-        crate::builtin::register(&mut registry);
+    pub async fn new(dir: impl AsRef<Path>, registry: Arc<dyn Registry>, effects: Arc<dyn EffectHandler>, config: Config) -> Result<Self> {
         config.io.name().context("actor <node> seq -1: I/O selection")?;
-        registry.entry(crate::supervisor::HASH.into()).or_insert_with(|| Arc::new(crate::Supervisor));
         ensure!(config.snapshot_every > 0, "actor <node> seq -1: snapshot_every must be positive");
         ensure!(u32::try_from(config.max_retries).is_ok(), "actor <node> seq -1: max_retries exceeds backoff range");
-        for (hash, behavior) in &registry {
-            ensure!(hash == behavior.hash(), "actor <node> seq -1: registry key differs from behavior hash {hash}");
-        }
         std::fs::create_dir_all(dir.as_ref()).context("actor <node> seq -1: create directory")?;
         ensure!(!config.ship_interval.is_zero(), "ship_interval must be positive");
         ensure!(config.store.is_none() || config.io != crate::Io::Memory, "object-store shipping requires file I/O");
@@ -105,6 +101,7 @@ impl Node {
             connections: Arc::new(Mutex::new(HashMap::new())),
             gates: Arc::new(Mutex::new(HashMap::new())),
             run_gate: Arc::new(Mutex::new(())),
+            send_outcomes: Default::default(),
             admission: Arc::new(tokio::sync::RwLock::new(())),
             names: Arc::new(Mutex::new(names)),
             tasks: Arc::new(Mutex::new(HashMap::new())),
@@ -201,7 +198,7 @@ impl Node {
             self.restore_on_open(id).await?;
         }
         if !self.path(id).exists() && !self.connections.lock().await.contains_key(id) {
-            let behavior = actor::behavior(&self.registry, hash)?;
+            let behavior = actor::behavior(&self.registry, hash).await?;
             let conn = actor::initialize(&self.path(id), id, parent, behavior.as_ref(), msg, self.config.io, durability).await?;
             self.connections.lock().await.insert(id.into(), Arc::new(Mutex::new(conn)));
             if self.config.io == crate::Io::Memory {
@@ -253,19 +250,23 @@ impl Node {
 
     /// Host-created actors are temporary children of the node's durable supervisor.
     pub async fn spawn_root(&self, hash: &str, msg: &[u8]) -> Result<ActorId> {
-        let mut spec = crate::ChildSpec::new(hash, msg, self.behavior(hash)?.child_type());
+        let behavior = self.behavior(hash).await?;
+        let mut spec = crate::ChildSpec::new(behavior.hash(), msg, behavior.child_type());
         spec.restart = crate::RestartPolicy::Temporary;
         self.spawn(&self.root_id, &spec).await
     }
 
     pub async fn spawn(&self, parent: &str, spec: &crate::ChildSpec) -> Result<ActorId> {
         let _admission = self.admit().await?;
-        self.spawn_inner(parent, spec).await.with_context(|| format!("actor {parent} seq -1: spawn"))
+        let behavior = self.behavior(&spec.behavior_hash).await?;
+        let mut pinned = spec.clone();
+        pinned.behavior_hash = behavior.hash().to_owned();
+        self.spawn_inner(parent, &pinned).await.with_context(|| format!("actor {parent} seq -1: spawn"))
     }
 
     async fn spawn_inner(&self, parent: &str, spec: &crate::ChildSpec) -> Result<ActorId> {
         let _creation = self.guard("host-spawn").await;
-        actor::behavior(&self.registry, &spec.behavior_hash)?;
+        actor::behavior(&self.registry, &spec.behavior_hash).await?;
         let root = self.open_actor(parent).await?;
         let mut conn = root.conn.lock().await;
         let tx = conn.transaction().await?;
@@ -296,7 +297,7 @@ impl Node {
             ],
         )
         .await?;
-        if self.behavior(&actor::code(&tx).await?.hash)?.child_type() == crate::ChildType::Supervisor {
+        if self.behavior(&actor::code(&tx).await?.hash).await?.child_type() == crate::ChildType::Supervisor {
             crate::supervisor::record_child(&tx, &cap, spec).await?;
             crate::supervisor_store::record_host_spawn(&tx, &cap, spec).await?;
         }
@@ -322,17 +323,11 @@ impl Node {
 }
 
 impl Node {
-    pub fn behavior(&self, hash: &str) -> Result<Arc<dyn crate::Behavior>> {
-        actor::behavior(&self.registry, hash)
+    pub async fn behavior(&self, hash: &str) -> Result<Arc<dyn crate::Behavior>> {
+        actor::behavior(&self.registry, hash).await
     }
 
-    pub fn behaviors(&self) -> Vec<crate::builtin::BehaviorInfo> {
-        let mut values: Vec<_> = self
-            .registry
-            .iter()
-            .map(|(hash, behavior)| crate::builtin::BehaviorInfo { hash: hash.clone(), description: behavior.description().into() })
-            .collect();
-        values.sort_by(|left, right| left.hash.cmp(&right.hash));
-        values
+    pub async fn behaviors(&self) -> Result<Vec<crate::builtin::BehaviorInfo>> {
+        self.registry.behaviors().await
     }
 }

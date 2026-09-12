@@ -58,22 +58,18 @@ a hash; a compiled artifact is a pure function of hashes. No sccache: the
 CAS is the artifact cache.
 
 ### 1a. Ingest
-`loom crate add serde@1.0.210` (MCP tool `crate_add`) runs in the existing
-network-only vendor phase (`loom-build/src/lib.rs`, `is_vendored`): fetch the
-crates.io tarball, verify the registry checksum, unpack, store the source
-tree in the CAS as a `tree` (same `Tree { entries }` as `machine.rs:290`).
-Result: `{ name, version, hash, features_available }`. Names and versions are
-metadata rows pointing at the hash; two people adding the same crate get the
-same hash.
+Dependency intake belongs to the build's network-only vendor phase: fetch
+crates.io sources, verify registry checksums, and store source trees in the
+CAS. `loom add` accepts a Rust definition; there is no separate crate-intake
+command.
 
 ### 1b. Depend
-A definition's manifest (`[loom.deps]` today, `loom-check/src/lib.rs:272`)
-grows a `[loom.crates]` table: `serde = { hash = "<64 hex>", features =
-["derive"] }`. Aliases are the Cargo names the source uses. The definition
-hash covers the manifest, so a crate upgrade is a new definition hash, and
-dependents keep the old hash until upgraded. `loom upgrade <old> <new>`
-rewrites every definition that names `<old>` and reports the new hashes
-(Unison's `upgrade`).
+A definition pins dependencies by content hash. Its manifest participates in
+its identity, so changing a dependency creates a new definition hash.
+`loom update <name> <file.rs> --deps <pins-json>` moves that name with explicit
+pins. Existing dependents retain their pins until individually updated;
+`loom dependents <hash>` identifies them and `loom diff <old> <new>` compares
+item identities.
 
 ### 1c. Build
 Stop driving Cargo for the definition crate; drive `rustc` directly. Cargo
@@ -105,7 +101,7 @@ The shared-memory fiber tier is canceled at the user's request. Each execution i
 
 Rust's [issue #25860](https://github.com/rust-lang/rust/issues/25860) documents a lifetime/variance soundness hole. The issue notes that non-higher-ranked variants were fixed while the underlying issue persists. [cve-rs](https://github.com/Speykious/cve-rs) demonstrates memory vulnerabilities using safe Rust. The [Rust Reference](https://doc.rust-lang.org/reference/behavior-considered-undefined.html) also explains how unsound internals can let safe callers trigger undefined behavior and says its undefined-behavior model is incomplete. These are reasons to retain memory isolation, not promises that a particular demonstration works on every compiler release.
 
-Under a correct Wasm engine and host interface, corruption within a guest stays within that instance's memory. The isolation boundary depends on Wasm validation, the engine, and checked host interfaces. We must validate CBOR, sizes, and references at the host boundary rather than trust the guest compiler's safety checks. Shared-memory imports and the proposed `#[loom::def(threads)]` mode are not admitted.
+Under a correct Wasm engine and host interface, corruption within a guest stays within that instance's memory. The isolation boundary depends on Wasm validation, the engine, and checked host interfaces. We must validate CBOR, sizes, and references at the host boundary rather than trust the guest compiler's safety checks. Shared-memory imports and guest-controlled native threads are not admitted.
 
 The long-term goal is a formally verified guest language whose guarantees survive compilation and execution. That requires a verified compiler and runtime contract, including the memory model and trusted library operations. With those proof obligations established and checked, we could reconsider direct memory interaction, including shared memory where the proof covers it. A proof of a language fragment alone would not justify removing isolation. Separate Wasm memories and DAG-CBOR remain the current design until that stronger foundation exists.
 

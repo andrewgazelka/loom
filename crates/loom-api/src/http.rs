@@ -11,18 +11,13 @@ pub fn router(service: Arc<Service>, authorizer: Authorizer) -> Router {
         authorizer,
     };
     Router::new()
-        .route(
-            "/v1/define",
-            post(define).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
-        )
-        .route("/v1/eval", post(eval))
         .route("/v1/command", post(command))
         .route("/v1/cas/{hash}", get(cas))
         .route("/v1/events", get(events))
         .route("/v1/defs/{name}", get(definition))
         .route("/v1/graph/deps/{hash}", get(deps))
         .route("/v1/builds/{hash}", get(build))
-        .layer(DefaultBodyLimit::max(1024 * 1024))
+        .layer(DefaultBodyLimit::max(16 * 1024 * 1024))
         .route_layer(middleware::from_fn_with_state(
             state.authorizer.clone(),
             authorize_token,
@@ -64,43 +59,6 @@ fn protocol_response(response: Response) -> HttpResponse {
         *response.status_mut() = StatusCode::FORBIDDEN;
     }
     response
-}
-async fn define(State(s): State<ApiState>, request: Request<axum::body::Body>) -> HttpResponse {
-    let service = s.service.scoped(
-        request
-            .extensions()
-            .get::<Access>()
-            .cloned()
-            .unwrap_or_default(),
-    );
-    let bytes = match axum::body::to_bytes(request.into_body(), 16 * 1024 * 1024).await {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            let mut response = Json(service.response(Err(error.into()))).into_response();
-            *response.status_mut() = StatusCode::PAYLOAD_TOO_LARGE;
-            return response;
-        }
-    };
-    let request: DefineRequest = match serde_json::from_slice(&bytes) {
-        Ok(request) => request,
-        Err(error) => {
-            let mut response = Json(service.response(Err(error.into()))).into_response();
-            *response.status_mut() = StatusCode::BAD_REQUEST;
-            return response;
-        }
-    };
-    operation_response(&service, service.define(request).await)
-}
-async fn eval(
-    State(s): State<ApiState>,
-    axum::Extension(access): axum::Extension<Access>,
-    request: Result<Json<EvalRequest>, axum::extract::rejection::JsonRejection>,
-) -> HttpResponse {
-    let service = s.service.scoped(access);
-    match request {
-        Ok(Json(request)) => operation_response(&service, service.eval(request).await),
-        Err(error) => json_rejection(&service, error),
-    }
 }
 async fn command(
     State(s): State<ApiState>,

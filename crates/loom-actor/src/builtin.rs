@@ -1,7 +1,6 @@
-//! Native behaviors available on every node.
-use crate::{Behavior, Cap, Ctx, Registry, Trap};
+//! Native behavior fixtures for exercising the actor runtime.
+use crate::{Behavior, Cap, Ctx, Trap};
 use async_trait::async_trait;
-use std::sync::Arc;
 
 pub struct Counter {
     pub hash: &'static str,
@@ -117,12 +116,6 @@ impl Behavior for Echo {
         let reference = value["ref"].as_str().ok_or_else(|| Trap::new("call missing ref"))?;
         let payload: Vec<u8> = serde_json::from_value(value["msg"].clone()).map_err(|e| Trap::new(e.to_string()))?;
         cx.reply(&from, reference, &payload).await
-    }
-}
-
-pub(crate) fn register(registry: &mut Registry) {
-    for behavior in [Arc::new(Counter::plain()) as Arc<dyn Behavior>, Arc::new(Forwarder { trap: false }), Arc::new(Echo)] {
-        registry.entry(behavior.hash().to_owned()).or_insert(behavior);
     }
 }
 

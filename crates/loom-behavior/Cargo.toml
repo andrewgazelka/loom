@@ -6,6 +6,7 @@ license.workspace = true
 autotests = false
 
 [dependencies]
+tokio = { version = "1", features = ["sync"] }
 loom-actor = { path = "../loom-actor" }
 loom-rt = { path = "../loom-rt" }
 loom-store = { path = "../loom-store" }
