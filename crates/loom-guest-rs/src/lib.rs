@@ -24,7 +24,7 @@ use std::marker::PhantomData;
 
 #[cfg(not(loom_core))]
 pub mod bindings {
-    wit_bindgen::generate!({ path: "../../loom-wit", world: "handler", pub_export_macro: true, default_bindings_module: "::loom::bindings" });
+    wit_bindgen::generate!({ path: "../../wit", world: "handler", pub_export_macro: true, default_bindings_module: "::loom::bindings" });
 }
 
 #[cfg(loom_core)]

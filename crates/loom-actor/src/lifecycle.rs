@@ -16,7 +16,7 @@ impl Node {
         if reason == "kill"
             && let Some(task) = self.tasks.lock().await.get(id)
         {
-            task.abort();
+            task.notify_one();
         }
         let actor = self.open(id).await?;
         let mut conn = actor.conn.lock().await;
@@ -46,7 +46,7 @@ impl Node {
             return Ok(false);
         }
         if let Some(task) = self.tasks.lock().await.get(id) {
-            task.abort();
+            task.notify_one();
         }
         let target = self.open(id).await?;
         let mut conn = target.conn.lock().await;

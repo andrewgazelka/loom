@@ -13,7 +13,7 @@ try {
     const binary = process.env.LOOMD_BINARY;
     if (!binary)
       throw new Error("LOOMD_BINARY is required when LOOM_URL is unset");
-    scratch = await mkdtemp(join(tmpdir(), "loom-ui-smoke-"));
+    scratch = await mkdtemp(join(tmpdir(), "ui-smoke-"));
     daemon = Bun.spawn(
       [
         resolve(binary),
@@ -24,7 +24,7 @@ try {
         "--bind",
         "127.0.0.1:0",
         "--token",
-        "loom-ui-smoke",
+        "ui-smoke",
       ],
       { stdout: "pipe", stderr: "pipe" },
     );
@@ -64,7 +64,7 @@ try {
       `UI document returned HTTP ${indexResponse.status} with ${indexResponse.headers.get("content-type")}`,
     );
   const servedIndex = new Uint8Array(await indexResponse.arrayBuffer());
-  const builtIndex = await readFile("loom-ui/build/index.html");
+  const builtIndex = await readFile("ui/build/index.html");
   if (!Buffer.from(servedIndex).equals(builtIndex))
     throw new Error("Daemon UI document differs from the current static build");
   const html = new TextDecoder().decode(servedIndex);
@@ -87,7 +87,7 @@ try {
       );
     const served = Buffer.from(await response.arrayBuffer());
     const built = await readFile(
-      join("loom-ui/build", asset.replace(/^\.?\//, "")),
+      join("ui/build", asset.replace(/^\.?\//, "")),
     );
     if (!served.equals(built))
       throw new Error(`Startup bundle ${asset} differs from the current build`);

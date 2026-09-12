@@ -1,5 +1,5 @@
 import ts from 'typescript';
-import type {EffectSet,TypeSig,ValueShape} from '../loom-guest-ts/protocol.generated';
+import type {EffectSet,TypeSig,ValueShape} from '../guest-ts/protocol.generated';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -21,8 +21,8 @@ export class Checker {
   private version = 0;
   private service: ts.LanguageService;
   constructor() {
-    const shim = readFileSync(resolve(import.meta.dir, '../loom-guest-ts/loom.d.ts'), 'utf8');
-    const protocol = readFileSync(resolve(import.meta.dir, '../loom-guest-ts/protocol.generated.ts'), 'utf8');
+    const shim = readFileSync(resolve(import.meta.dir, '../guest-ts/loom.d.ts'), 'utf8');
+    const protocol = readFileSync(resolve(import.meta.dir, '../guest-ts/protocol.generated.ts'), 'utf8');
     const libraries = new Map<string,string>();
     const readLibrary = (path:string) => {
       if(libraries.has(path))return libraries.get(path);

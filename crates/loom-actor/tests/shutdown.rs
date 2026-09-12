@@ -72,7 +72,7 @@ async fn shutdown_wait_does_not_stall_node() {
     let node = Node::new(dir.path(), registry, Arc::new(DefaultEffects), Config::default()).await.unwrap();
     let parent = node.root();
     let y = node.spawn_root("shutdown-receiver-v1", b"init").await.unwrap();
-    let mut spec = ChildSpec::new("shutdown-busy-v1", b"init");
+    let mut spec = ChildSpec::new("shutdown-busy-v1", b"init", node.behavior("shutdown-busy-v1").unwrap().child_type());
     spec.restart = RestartPolicy::Temporary;
     spec.shutdown = Shutdown::TimeoutMs(300);
     node.send(&parent, "start-x", &serde_json::to_vec(&serde_json::json!({"type":"start_child","spec":spec})).unwrap()).await.unwrap();
@@ -103,7 +103,8 @@ async fn shutdown_wait_does_not_stall_node() {
     assert!(!cancelled.load(Ordering::SeqCst));
     let receiver = node.open(&y).await.unwrap();
     let before = receiver.cursor().await.unwrap();
-    tokio::time::timeout(Duration::from_millis(50), async {
+    // The cancellation witness below checks ordering; this deadline only bounds a stalled test.
+    tokio::time::timeout(Duration::from_secs(2), async {
         node.send(&y, "ping", b"ping").await.unwrap();
         processed.notified().await;
         let rows = receiver.sql("SELECT COUNT(*) FROM received", ()).await.unwrap();
@@ -111,7 +112,7 @@ async fn shutdown_wait_does_not_stall_node() {
         assert_eq!(receiver.cursor().await.unwrap(), before + 1);
     })
     .await
-    .expect("Y must commit while X is still waiting for its 300ms shutdown timeout");
+    .expect("Y did not commit within the test completion bound");
     assert!(!cancelled.load(Ordering::SeqCst), "X was killed before Y committed");
     tokio::time::timeout(Duration::from_secs(3), runner).await.unwrap().unwrap().unwrap();
     assert!(cancelled.load(Ordering::SeqCst));

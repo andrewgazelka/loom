@@ -1,6 +1,6 @@
 {
-  "loom-checker": {
-    "lockHash": "e531716c56d55baae64a59763ec88e395d4d6fd9f0b0a631f60b6dd8617788fe",
+  "checker": {
+    "lockHash": "7be76d86b2d9c7e0d11a03cf21a3c5a4e21d9e77b7a154811fd49db363844e30",
     "packages": [
       {
         "name": "@andreiltd/componentize-qjs-binding-darwin-arm64",
@@ -2808,7 +2808,7 @@
       }
     ]
   },
-  "loom-guest-ts": {
+  "guest-ts": {
     "lockHash": "bf4acdf4f178992cc10d3b1c13c630d0c1406b45384ae6352e002022c9ee94e0",
     "packages": [
       {
@@ -2851,8 +2851,8 @@
       }
     ]
   },
-  "loom-ui": {
-    "lockHash": "057b1f05d01d7f07d491518e7e89463df45649910acdc2bcbab0ca19f3ab0267",
+  "ui": {
+    "lockHash": "edffeb23c4f4a4133c26e76d77a989cdb7fdd2185cba93f6ad6ea4710d80bf85",
     "packages": [
       {
         "name": "@codemirror/autocomplete",

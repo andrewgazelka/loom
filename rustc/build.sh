@@ -2,7 +2,7 @@
 # Cargo bootstraps dependencies; the host adapts the reported core artifact.
 set -eu
 if [ "$#" -ne 2 ]; then
-  echo 'usage: loom-rustc/build.sh CRATE_DIR TARGET_DIR' >&2
+  echo 'usage: rustc/build.sh CRATE_DIR TARGET_DIR' >&2
   exit 64
 fi
 cd "$1"

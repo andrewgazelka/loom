@@ -2,8 +2,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 root=$PWD
-(cd loom-checker && bun install --frozen-lockfile)
-(cd loom-guest-ts && bun install --frozen-lockfile)
+(cd checker && bun install --frozen-lockfile)
+(cd guest-ts && bun install --frozen-lockfile)
 cargo build --locked --release -p loomd
 scratch=$(mktemp -d)
 server_pid=''

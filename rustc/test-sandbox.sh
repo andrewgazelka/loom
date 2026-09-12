@@ -26,11 +26,11 @@ fn main() {
 }
 RUST
 export LOOM_SANDBOX_SECRET=must-not-enter
-bash "$repo/loom-rustc/sandbox.sh" vendor "$work/source" "$work/source/root" "$work/target" "$repo"
+bash "$repo/rustc/sandbox.sh" vendor "$work/source" "$work/source/root" "$work/target" "$repo"
 [[ -f $work/source/root/Cargo.lock && -d $work/source/root/vendor ]]
 [[ -z $(find "$work/target" -name sandbox-witness -print -quit) ]]
 echo 'sandbox vendor: pinned sources and no build-script execution'
-bash "$repo/loom-rustc/sandbox.sh" build "$work/source" "$work/source/root" "$work/target" "$repo"
+bash "$repo/rustc/sandbox.sh" build "$work/source" "$work/source/root" "$work/target" "$repo"
 [[ -n $(find "$work/target" -name sandbox-witness -print -quit) ]]
 [[ -f $work/target/wasm32-wasip1/release/sandbox_witness.wasm ]]
 echo 'sandbox 4/4: vendor, credentials, network, component'

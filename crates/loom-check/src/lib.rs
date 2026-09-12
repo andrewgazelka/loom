@@ -68,7 +68,7 @@ impl Checker {
                 let mut guard = self.sidecar.lock().await;
                 if guard.is_none() {
                     let mut child = Command::new("bun")
-                        .arg(self.root.join("loom-checker/checker.ts"))
+                        .arg(self.root.join("checker/checker.ts"))
                         .stdin(Stdio::piped())
                         .stdout(Stdio::piped())
                         .stderr(Stdio::inherit())

@@ -1,1 +1,0 @@
-{"name":"loom-checker","private":true,"type":"module","scripts":{"test":"bun test"},"dependencies":{"typescript":"5.9.3","@bytecodealliance/componentize-js":"0.21.0"}}

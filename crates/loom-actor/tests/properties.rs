@@ -99,7 +99,7 @@ async fn send_delivers_exactly_once() {
     node.run_until_idle().await.unwrap();
     let b = node.open(&receiver).await.unwrap();
     let baseline = integer(&b, "SELECT count(*) FROM inbox").await;
-    let sender = node.spawn_root("forwarder", receiver.as_bytes()).await.unwrap();
+    let sender = node.spawn_root("forwarder-v1", receiver.as_bytes()).await.unwrap();
     node.run_until_idle().await.unwrap();
     assert_eq!(integer(&b, "SELECT count(*) FROM inbox").await, baseline + 1);
 
@@ -362,4 +362,74 @@ async fn validate_differs_and_multi_promotion() {
         other => panic!("expected changed domain table with matching effects, got {other:?}"),
     }
     assert_eq!(table_fingerprints(&original).await, before);
+}
+
+#[tokio::test]
+async fn memory_io_is_wired() {
+    struct Caller;
+    #[async_trait::async_trait]
+    impl loom_actor::Behavior for Caller {
+        fn hash(&self) -> &str {
+            "echo-caller-test"
+        }
+        fn schema(&self) -> &str {
+            "CREATE TABLE replies(msg BLOB)"
+        }
+        async fn handle(&self, cx: &mut loom_actor::Ctx<'_>, msg: &[u8]) -> Result<(), loom_actor::Trap> {
+            if let Ok(envelope) = serde_json::from_slice::<serde_json::Value>(msg)
+                && envelope["type"] == "reply"
+            {
+                cx.sql("INSERT INTO replies(msg) VALUES (?)", [msg]).await?;
+                return Ok(());
+            }
+            let target = std::str::from_utf8(msg).map_err(|error| loom_actor::Trap::new(error.to_string()))?;
+            cx.call(target, b"echo witness", 1000).await?;
+            Ok(())
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let node = loom_actor::Node::new(
+        dir.path(),
+        registry(vec![Arc::new(Caller)]),
+        Arc::new(loom_actor::DefaultEffects),
+        Config { io: loom_actor::Io::Memory, ..Config::default() },
+    )
+    .await
+    .unwrap();
+    let id = node.spawn_root("counter-v1", b"init").await.unwrap();
+    node.send(&id, "two", b"two").await.unwrap();
+    node.send(&id, "three", b"three").await.unwrap();
+    node.run_until_idle().await.unwrap();
+    assert_eq!(node.open(&id).await.unwrap().cursor().await.unwrap(), 3);
+    let echo = node.spawn_root("echo-v1", &[]).await.unwrap();
+    let caller = node.spawn_root("echo-caller-test", echo.as_bytes()).await.unwrap();
+    node.run_until_idle().await.unwrap();
+    let rows = node.open(&caller).await.unwrap().sql("SELECT msg FROM replies", ()).await.unwrap();
+    assert_eq!(rows.rows.len(), 1);
+    let envelope: serde_json::Value = serde_json::from_slice(&rows.rows[0].get::<Vec<u8>>(0).unwrap()).unwrap();
+    assert_eq!(envelope["msg"], serde_json::json!(b"echo witness".to_vec()));
+    let fork_error = node.fork(&id, 0).await.unwrap_err();
+    assert!(format!("{fork_error:#}").contains("historical snapshots require persistent I/O"));
+    let validation_error = node.validate(&id, "counter-v1", 3).await.unwrap_err();
+    assert!(format!("{validation_error:#}").contains("historical snapshots require persistent I/O"));
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let result = loom_actor::Node::new(
+            dir.path(),
+            loom_actor::Registry::new(),
+            Arc::new(loom_actor::DefaultEffects),
+            Config { io: loom_actor::Io::IoUring, ..Config::default() },
+        )
+        .await;
+        let error = match result {
+            Ok(_) => panic!("io_uring unexpectedly opened on this platform"),
+            Err(error) => error,
+        };
+        let message = format!("{error:#}");
+        assert!(message.contains(std::env::consts::OS), "{message}");
+        assert!(message.contains("io_uring"), "{message}");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
 }

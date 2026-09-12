@@ -3,13 +3,13 @@ use anyhow::{Context, Result, ensure};
 use std::path::Path;
 use turso::Connection;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct MonitorInfo {
     pub reference: String,
     pub target: ActorId,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct ActorInfo {
     pub status: Status,
     pub reason: String,
@@ -32,7 +32,7 @@ impl Node {
             let conn = actor.conn.lock().await;
             ensure_live(&conn).await?;
             let mut slot = self.names.lock().await;
-            let index = connection(&mut slot, &self.dir).await?;
+            let index = connection(&mut slot, &self.dir, self.config.io).await?;
             index.execute("INSERT INTO names(name,id) VALUES (?,?)", [name, id]).await?;
             Ok::<(), anyhow::Error>(())
         }
@@ -43,7 +43,7 @@ impl Node {
     pub async fn unregister(&self, name: &str) -> Result<()> {
         async {
             let mut slot = self.names.lock().await;
-            let index = connection(&mut slot, &self.dir).await?;
+            let index = connection(&mut slot, &self.dir, self.config.io).await?;
             index.execute("DELETE FROM names WHERE name=?", [name]).await?;
             Ok::<(), anyhow::Error>(())
         }
@@ -54,7 +54,7 @@ impl Node {
     pub async fn whereis(&self, name: &str) -> Result<Option<ActorId>> {
         async {
             let mut slot = self.names.lock().await;
-            let index = connection(&mut slot, &self.dir).await?;
+            let index = connection(&mut slot, &self.dir, self.config.io).await?;
             let rows = actor::query(index, "SELECT id FROM names WHERE name=?", [name]).await?;
             rows.rows.first().map(|row| row.get::<String>(0).map_err(anyhow::Error::from)).transpose()
         }
@@ -69,7 +69,7 @@ impl Node {
             let conn = actor.conn.lock().await;
             ensure_live(&conn).await?;
             let mut slot = self.names.lock().await;
-            let index = connection(&mut slot, &self.dir).await?;
+            let index = connection(&mut slot, &self.dir, self.config.io).await?;
             index.execute("INSERT OR IGNORE INTO groups(\"group\",id) VALUES (?,?)", [group, id]).await?;
             Ok::<(), anyhow::Error>(())
         }
@@ -80,7 +80,7 @@ impl Node {
     pub async fn leave(&self, group: &str, id: &str) -> Result<()> {
         async {
             let mut slot = self.names.lock().await;
-            let index = connection(&mut slot, &self.dir).await?;
+            let index = connection(&mut slot, &self.dir, self.config.io).await?;
             index.execute("DELETE FROM groups WHERE \"group\"=? AND id=?", [group, id]).await?;
             Ok::<(), anyhow::Error>(())
         }
@@ -91,7 +91,7 @@ impl Node {
     pub async fn members(&self, group: &str) -> Result<Vec<ActorId>> {
         async {
             let mut slot = self.names.lock().await;
-            let index = connection(&mut slot, &self.dir).await?;
+            let index = connection(&mut slot, &self.dir, self.config.io).await?;
             let rows = actor::query(index, "SELECT id FROM groups WHERE \"group\"=? ORDER BY id", [group]).await?;
             rows.rows.into_iter().map(|row| row.get::<String>(0).map_err(anyhow::Error::from)).collect::<Result<Vec<_>>>()
         }
@@ -108,7 +108,7 @@ impl Node {
             }
             let candidates = {
                 let mut slot = self.names.lock().await;
-                let index = connection(&mut slot, &self.dir).await?;
+                let index = connection(&mut slot, &self.dir, self.config.io).await?;
                 let rows = actor::query(index, "SELECT id FROM who_runs WHERE behavior_hash=? ORDER BY id", [old_hash]).await?;
                 rows.rows.into_iter().map(|row| row.get::<String>(0).map_err(anyhow::Error::from)).collect::<Result<Vec<_>>>()?
             };
@@ -194,7 +194,7 @@ impl Node {
             let stopped = actor::status(&conn).await? == Status::Stopped;
             let hash = actor::code(&conn).await?.hash;
             let mut slot = self.names.lock().await;
-            let index = connection(&mut slot, &self.dir).await?;
+            let index = connection(&mut slot, &self.dir, self.config.io).await?;
             let tx = index.transaction().await?;
             if stopped {
                 tx.execute("DELETE FROM names WHERE id=?", [id]).await?;
@@ -218,9 +218,9 @@ async fn ensure_live(conn: &Connection) -> Result<()> {
     Ok::<(), anyhow::Error>(())
 }
 
-async fn connection<'a>(slot: &'a mut Option<Connection>, dir: &Path) -> Result<&'a mut Connection> {
+async fn connection<'a>(slot: &'a mut Option<Connection>, dir: &Path, io: crate::Io) -> Result<&'a mut Connection> {
     if slot.is_none() {
-        let conn = actor::connect(&dir.join("_node.db")).await?;
+        let conn = actor::connect(&dir.join("_node.db"), io).await?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS names(name TEXT PRIMARY KEY,id TEXT NOT NULL);\n\
             CREATE TABLE IF NOT EXISTS groups(\"group\" TEXT NOT NULL,id TEXT NOT NULL,PRIMARY KEY(\"group\",id));\n\

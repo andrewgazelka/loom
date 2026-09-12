@@ -1,4 +1,4 @@
-# loom-ui
+# ui
 
 The Loom workspace is a static SvelteKit app. It uses only the `/v1` API and authenticates the event stream in its first WebSocket message.
 

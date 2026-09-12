@@ -17,8 +17,8 @@ trap cleanup EXIT INT TERM
 # and token instead tests an already running daemon.
 if [[ -z "${LOOM_URL:-}" ]]; then
   scratch=$(mktemp -d)
-  if (cd loom-checker && bun install --frozen-lockfile) &&
-     (cd loom-guest-ts && bun install --frozen-lockfile) &&
+  if (cd checker && bun install --frozen-lockfile) &&
+     (cd guest-ts && bun install --frozen-lockfile) &&
      cargo build --locked --release -p loomd; then
     cp "${CARGO_TARGET_DIR:-target}/release/loomd" "$scratch/loomd"
     export LOOMD_BINARY="$scratch/loomd"

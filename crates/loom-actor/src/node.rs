@@ -15,12 +15,13 @@ pub struct Node {
     pub(crate) effects: Arc<dyn EffectHandler>,
     pub(crate) config: Config,
     root_id: ActorId,
+    memory_ids: Arc<std::sync::Mutex<Vec<ActorId>>>,
     pub(crate) wake: Arc<tokio::sync::Notify>,
     pub(crate) shutdown_deadlines: Arc<Mutex<HashMap<String, crate::messaging::ShutdownTimer>>>,
     connections: Arc<Mutex<HashMap<ActorId, Arc<Mutex<Connection>>>>>,
     gates: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     run_gate: Arc<Mutex<()>>,
-    pub(crate) tasks: Arc<Mutex<HashMap<ActorId, tokio::task::AbortHandle>>>,
+    pub(crate) tasks: Arc<Mutex<HashMap<ActorId, Arc<tokio::sync::Notify>>>>,
     pub(crate) names: Arc<Mutex<Option<Connection>>>,
 }
 
@@ -34,7 +35,7 @@ impl Node {
     pub async fn pump(&self, id: &str) -> Result<bool> {
         self.pump_inner(id).await.with_context(|| format!("actor {} seq {}: pump", id, -1))
     }
-    pub async fn run_until_idle(&self) -> Result<()> {
+    pub async fn run_until_idle(&self) -> Result<usize> {
         let _run = self.run_gate.lock().await;
         self.run_until_idle_inner().await.with_context(|| format!("actor {} seq {}: run_until_idle", "<node>", -1))
     }
@@ -52,7 +53,9 @@ impl Node {
     }
 
     pub async fn new(dir: impl AsRef<Path>, mut registry: Registry, effects: Arc<dyn EffectHandler>, config: Config) -> Result<Self> {
-        registry.entry("supervisor-v1".into()).or_insert_with(|| Arc::new(crate::Supervisor));
+        crate::builtin::register(&mut registry);
+        config.io.name().context("actor <node> seq -1: I/O selection")?;
+        registry.entry(crate::supervisor::HASH.into()).or_insert_with(|| Arc::new(crate::Supervisor));
         ensure!(config.snapshot_every > 0, "actor <node> seq -1: snapshot_every must be positive");
         ensure!(u32::try_from(config.max_retries).is_ok(), "actor <node> seq -1: max_retries exceeds backoff range");
         for (hash, behavior) in &registry {
@@ -61,6 +64,7 @@ impl Node {
         std::fs::create_dir_all(dir.as_ref()).context("actor <node> seq -1: create directory")?;
         let mut node = Self {
             root_id: String::new(),
+            memory_ids: Arc::new(std::sync::Mutex::new(Vec::new())),
             wake: Arc::new(tokio::sync::Notify::new()),
             shutdown_deadlines: Arc::new(Mutex::new(HashMap::new())),
             dir: std::fs::canonicalize(dir.as_ref()).context("actor <node> seq -1: canonicalize directory")?,
@@ -84,7 +88,7 @@ impl Node {
         }
         if node.root_id.is_empty() {
             node.root_id = ids::root();
-            node.create(&node.root_id, "", "supervisor-v1", br#"{"type":"configure","strategy":"one_for_one"}"#).await?;
+            node.create(&node.root_id, "", crate::supervisor::HASH, br#"{"type":"configure","strategy":"one_for_one"}"#).await?;
         }
         node.sync_index(&node.root_id).await?;
         Ok(node)
@@ -104,6 +108,7 @@ impl Node {
     }
 
     async fn open_inner(&self, id: &str) -> Result<Actor> {
+        self.config.io.name()?;
         ids::check(id)?;
         let _opening = self.guard(&format!("open:{id}")).await;
         let cached = self.connections.lock().await.get(id).cloned();
@@ -111,17 +116,17 @@ impl Node {
             if self.path(id).with_extension("reset-publish").exists() {
                 let mut slot = conn.lock().await;
                 if self.path(id).with_extension("reset-publish").exists() {
-                    let old = std::mem::replace(&mut *slot, actor::connect(Path::new(":memory:")).await?);
+                    let old = std::mem::replace(&mut *slot, actor::connect(Path::new(":memory:"), crate::Io::Memory).await?);
                     drop(old);
                     crate::reset::recover(&self.path(id))?;
-                    *slot = actor::connect(&self.path(id)).await?;
+                    *slot = actor::connect(&self.path(id), self.config.io).await?;
                 }
             }
             return Ok(Actor { id: id.into(), conn });
         }
         crate::reset::recover(&self.path(id))?;
         ensure!(self.path(id).is_file(), "actor {id} seq -1: actor file does not exist");
-        let conn = actor::connect(&self.path(id)).await.with_context(|| format!("actor {id} seq -1: open"))?;
+        let conn = actor::connect(&self.path(id), self.config.io).await.with_context(|| format!("actor {id} seq -1: open"))?;
         ensure!(actor::meta(&conn, "id").await? == id, "actor {id} seq -1: file identity mismatch");
         let conn = Arc::new(Mutex::new(conn));
         self.connections.lock().await.insert(id.into(), conn.clone());
@@ -130,15 +135,19 @@ impl Node {
 
     pub(crate) async fn create(&self, id: &str, parent: &str, hash: &str, msg: &[u8]) -> Result<Actor> {
         let _creation = self.guard(&format!("create:{id}")).await;
-        if !self.path(id).exists() {
+        if !self.path(id).exists() && !self.connections.lock().await.contains_key(id) {
             let behavior = actor::behavior(&self.registry, hash)?;
-            actor::initialize(&self.path(id), id, parent, behavior.as_ref(), msg).await?;
+            let conn = actor::initialize(&self.path(id), id, parent, behavior.as_ref(), msg, self.config.io).await?;
+            self.connections.lock().await.insert(id.into(), Arc::new(Mutex::new(conn)));
+            if self.config.io == crate::Io::Memory {
+                self.memory_ids.lock().map_err(|_| anyhow!("memory actor registry poisoned"))?.push(id.into());
+            }
         }
         let actor = self.open(id).await?;
         let conn = actor.conn.lock().await;
         ensure!(actor::meta(&conn, "parent").await? == parent, "actor {id} seq 0: parent mismatch");
         // A retry after publication but before snapshot registration finishes creation.
-        if actor::cursor(&conn).await? == 0 {
+        if self.config.io != crate::Io::Memory && actor::cursor(&conn).await? == 0 {
             actor::snapshot(&conn, &self.snapshot_path(id, actor::meta(&conn, "generation").await?.parse()?, 0), 0).await?;
         }
         drop(conn);
@@ -149,7 +158,10 @@ impl Node {
         self.root_id.clone()
     }
 
-    pub(crate) fn actor_ids(&self) -> Result<Vec<ActorId>> {
+    pub fn actor_ids(&self) -> Result<Vec<ActorId>> {
+        if self.config.io == crate::Io::Memory {
+            return Ok(self.memory_ids.lock().map_err(|_| anyhow!("memory actor registry poisoned"))?.clone());
+        }
         let mut actors = Vec::new();
         for entry in std::fs::read_dir(&self.dir)? {
             let path = entry?.path();
@@ -169,30 +181,55 @@ impl Node {
 
     /// Host-created actors are temporary children of the node's durable supervisor.
     pub async fn spawn_root(&self, hash: &str, msg: &[u8]) -> Result<ActorId> {
+        let mut spec = crate::ChildSpec::new(hash, msg, self.behavior(hash)?.child_type());
+        spec.restart = crate::RestartPolicy::Temporary;
+        self.spawn(&self.root_id, &spec).await
+    }
+
+    pub async fn spawn(&self, parent: &str, spec: &crate::ChildSpec) -> Result<ActorId> {
+        self.spawn_inner(parent, spec).await.with_context(|| format!("actor {parent} seq -1: spawn"))
+    }
+
+    async fn spawn_inner(&self, parent: &str, spec: &crate::ChildSpec) -> Result<ActorId> {
         let _creation = self.guard("host-spawn").await;
-        actor::behavior(&self.registry, hash)?;
-        let root = self.open(&self.root_id).await?;
+        actor::behavior(&self.registry, &spec.behavior_hash)?;
+        let root = self.open(parent).await?;
         let mut conn = root.conn.lock().await;
         let tx = conn.transaction().await?;
-        ensure!(actor::status(&tx).await? == Status::Running, "actor {} seq -1: root is not running", self.root_id);
+        ensure!(actor::status(&tx).await? == Status::Running, "actor {} seq -1: root is not running", parent);
         let latest = actor::query(&tx, "SELECT COALESCE(MAX(seq),0) FROM outbox", ()).await?;
         let seq = actor::cursor(&tx).await?.max(latest.rows.first().context("missing outbox sequence")?.get::<i64>(0)?);
         let indices = actor::query(&tx, "SELECT COALESCE(MAX(idx),-1)+1 FROM outbox WHERE seq=?", [seq]).await?;
         let idx: i64 = indices.rows.first().context("missing outbox index")?.get(0)?;
         let generation: i64 = actor::meta(&tx, "generation").await?.parse()?;
-        let id = ids::child(&ids::incarnation(&self.root_id, generation), seq, idx);
-        let mut spec = crate::ChildSpec::new(hash, msg);
-        spec.restart = crate::RestartPolicy::Temporary;
+        let id = ids::child(&ids::incarnation(parent, generation), seq, idx);
+        let hash = spec.behavior_hash.as_str();
+        let msg = spec.init.as_slice();
         let shutdown = serde_json::to_string(&spec.shutdown)?;
-        tx.execute("INSERT INTO children(id,spawned_seq,behavior_hash,init,restart,shutdown,link,monitor,child_type) VALUES (?,?,?,?,'temporary',?,1,0,?)",
-            turso::params![id.as_str(),seq,hash,msg,shutdown.as_str(),serde_json::to_string(&spec.child_type)?]).await?;
-        crate::supervisor::record_child(&tx, &id, &spec).await?;
-        let spawn = Spawn::Child { id: id.clone(), spec, origin_seq: seq, origin_idx: idx };
+        tx.execute(
+            "INSERT INTO children(id,spawned_seq,behavior_hash,init,restart,shutdown,link,monitor,child_type) VALUES (?,?,?,?,?,?,?,?,?)",
+            turso::params![
+                id.as_str(),
+                seq,
+                hash,
+                msg,
+                serde_json::to_value(spec.restart)?.as_str().context("restart policy")?,
+                shutdown.as_str(),
+                spec.link,
+                spec.monitor,
+                serde_json::to_string(&spec.child_type)?
+            ],
+        )
+        .await?;
+        if self.behavior(&actor::code(&tx).await?.hash)?.child_type() == crate::ChildType::Supervisor {
+            crate::supervisor::record_child(&tx, &id, spec).await?;
+        }
+        let spawn = Spawn::Child { id: id.clone(), spec: spec.clone(), origin_seq: seq, origin_idx: idx };
         tx.execute("INSERT INTO outbox(seq,idx,target,msg) VALUES (?,?,'spawn',?)", turso::params![seq, idx, serde_json::to_vec(&spawn)?])
             .await?;
         tx.commit().await?;
         drop(conn);
-        self.pump_unlocked(&self.root_id).await?;
+        self.pump_unlocked(parent).await?;
         self.wake.notify_one();
         Ok(id)
     }
@@ -204,7 +241,7 @@ impl Node {
         Ok(())
     }
 
-    pub(crate) async fn step(&self, id: &str) -> Result<bool> {
+    pub(crate) async fn step(&self, id: &str, cancellation: &tokio::sync::Notify) -> Result<bool> {
         let admission = self.guard(&format!("lifecycle:{id}")).await;
         let actor = self.open(id).await?;
         let mut conn = actor.conn.lock().await;
@@ -214,7 +251,8 @@ impl Node {
         drop(admission);
         let generation: i64 = actor::meta(&conn, "generation").await?.parse()?;
         let cursor = actor::cursor(&conn).await?;
-        if cursor > 0
+        if self.config.io != crate::Io::Memory
+            && cursor > 0
             && cursor % self.config.snapshot_every == 0
             && actor::query(&conn, "SELECT seq FROM inbox WHERE state='done' AND seq>? LIMIT 1", [cursor]).await?.rows.is_empty()
         {
@@ -233,12 +271,15 @@ impl Node {
                 behavior.as_ref(),
                 code.revision,
                 &crate::effects::RuntimeEffects { node: self, external: self.effects.as_ref() },
+                Some(cancellation),
             )
             .await
             {
-                Ok(()) => {
+                Ok(false) => return Ok(false),
+                Ok(true) => {
                     let cursor = actor::cursor(&conn).await?;
-                    if cursor > 0
+                    if self.config.io != crate::Io::Memory
+                        && cursor > 0
                         && cursor % self.config.snapshot_every == 0
                         && actor::query(&conn, "SELECT seq FROM inbox WHERE state='done' AND seq>? LIMIT 1", [cursor])
                             .await?
@@ -296,5 +337,21 @@ impl Node {
         actor::set_meta(&tx, "status", "running").await?;
         tx.commit().await?;
         Ok(())
+    }
+}
+
+impl Node {
+    pub fn behavior(&self, hash: &str) -> Result<Arc<dyn crate::Behavior>> {
+        actor::behavior(&self.registry, hash)
+    }
+
+    pub fn behaviors(&self) -> Vec<crate::builtin::BehaviorInfo> {
+        let mut values: Vec<_> = self
+            .registry
+            .iter()
+            .map(|(hash, behavior)| crate::builtin::BehaviorInfo { hash: hash.clone(), description: behavior.description().into() })
+            .collect();
+        values.sort_by(|left, right| left.hash.cmp(&right.hash));
+        values
     }
 }

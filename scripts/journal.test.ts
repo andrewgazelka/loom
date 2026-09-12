@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { groupDefinitions, type JournalRow } from "../loom-ui/src/lib/journal";
+import { groupDefinitions, type JournalRow } from "../ui/src/lib/journal";
 function definition(seq: number, hash: string, title = "worker"): JournalRow {
   return {id:`event-${seq}`,seq,kind:"defined",title,language:"ts",value:{hash},metadata:{seq}};
 }

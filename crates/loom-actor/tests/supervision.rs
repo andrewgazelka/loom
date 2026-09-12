@@ -168,8 +168,9 @@ async fn link_cascades_stop() {
     for trap_exits in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let node = node(dir.path()).await;
-        let c_spec = ChildSpec::new("probe-v1", &bytes(json!({"type":"init"})));
-        let b_spec = ChildSpec::new("probe-v1", &bytes(json!({"type":"init","spec":c_spec})));
+        let c_spec = ChildSpec::new("probe-v1", &bytes(json!({"type":"init"})), node.behavior("probe-v1").unwrap().child_type());
+        let b_spec =
+            ChildSpec::new("probe-v1", &bytes(json!({"type":"init","spec":c_spec})), node.behavior("probe-v1").unwrap().child_type());
         let a = node.spawn_root("probe-v1", &bytes(json!({"type":"init","trap_exit":trap_exits,"spec":b_spec}))).await.unwrap();
         drain(&node).await;
         let parent = node.open(&a).await.unwrap();
@@ -205,7 +206,7 @@ async fn one_for_one_reset_then_intensity() {
     let dir = tempfile::tempdir().unwrap();
     let node = node(dir.path()).await;
     let config = bytes(json!({"type":"configure","strategy":"one_for_one","max_restarts":2,"max_seconds":60}));
-    let supervisor_spec = ChildSpec::new("supervisor-v1", &config);
+    let supervisor_spec = ChildSpec::new("supervisor-v1", &config, node.behavior("supervisor-v1").unwrap().child_type());
     let parent_id =
         node.spawn_root("probe-v1", &bytes(json!({"type":"init","trap_exit":true,"monitor":true,"spec":supervisor_spec}))).await.unwrap();
     drain(&node).await;
@@ -213,7 +214,7 @@ async fn one_for_one_reset_then_intensity() {
     let supervisor_ids = children(&parent).await;
     assert_eq!(supervisor_ids.len(), 1);
     let supervisor_id = &supervisor_ids[0];
-    let spec = ChildSpec::new("always-fails-v1", b"{}");
+    let spec = ChildSpec::new("always-fails-v1", b"{}", node.behavior("always-fails-v1").unwrap().child_type());
     node.send(supervisor_id, "start", &bytes(json!({"type":"start_child","spec":spec}))).await.unwrap();
     drain(&node).await;
 
@@ -244,7 +245,7 @@ async fn rest_for_one_order() {
         .await
         .unwrap();
     for name in ["A", "B", "C"] {
-        let spec = ChildSpec::new("probe-v1", &bytes(json!({"type":"init","name":name})));
+        let spec = ChildSpec::new("probe-v1", &bytes(json!({"type":"init","name":name})), node.behavior("probe-v1").unwrap().child_type());
         node.send(&supervisor_id, name, &bytes(json!({"type":"start_child","spec":spec}))).await.unwrap();
     }
     drain(&node).await;
@@ -304,8 +305,12 @@ async fn resume_keeps_tree_intact() {
     let dir = tempfile::tempdir().unwrap();
     let node = node(dir.path()).await;
     let supervisor_id = node.spawn_root("supervisor-v1", &bytes(json!({"type":"configure","max_restarts":0}))).await.unwrap();
-    let grandchild_spec = ChildSpec::new("probe-v1", &bytes(json!({"type":"init"})));
-    let child_spec = ChildSpec::new("probe-v1", &bytes(json!({"type":"init","spec":grandchild_spec,"monitor":true})));
+    let grandchild_spec = ChildSpec::new("probe-v1", &bytes(json!({"type":"init"})), node.behavior("probe-v1").unwrap().child_type());
+    let child_spec = ChildSpec::new(
+        "probe-v1",
+        &bytes(json!({"type":"init","spec":grandchild_spec,"monitor":true})),
+        node.behavior("probe-v1").unwrap().child_type(),
+    );
     node.send(&supervisor_id, "start", &bytes(json!({"type":"start_child","spec":child_spec}))).await.unwrap();
     drain(&node).await;
     let supervisor = node.open(&supervisor_id).await.unwrap();
@@ -356,4 +361,63 @@ async fn resume_keeps_tree_intact() {
     assert_eq!(supervisor.sql("SELECT * FROM restarts", ()).await.unwrap().rows, restarts);
     assert_eq!(supervisor.status().await.unwrap(), Status::Running);
     assert!(!dir.path().join(format!("{child_id}.reset.1.db")).exists());
+}
+
+struct AlternateSupervisor;
+
+#[async_trait]
+impl Behavior for AlternateSupervisor {
+    fn hash(&self) -> &str {
+        "alternate-supervisor"
+    }
+
+    fn child_type(&self) -> loom_actor::ChildType {
+        loom_actor::ChildType::Supervisor
+    }
+
+    fn schema(&self) -> &str {
+        loom_actor::Supervisor.schema()
+    }
+
+    async fn handle(&self, cx: &mut Ctx<'_>, msg: &[u8]) -> Result<(), Trap> {
+        let command: Value = serde_json::from_slice(msg).map_err(|error| Trap::new(error.to_string()))?;
+        if command["type"] == "exit" {
+            // A committed write proves the exit handler finished before shutdown.
+            cx.sql("INSERT INTO graceful_exit(msg) VALUES (?)", [msg]).await?;
+        }
+        loom_actor::Supervisor.handle(cx, msg).await
+    }
+}
+
+#[tokio::test]
+async fn supervisor_typed_child_gets_infinite_shutdown() {
+    use loom_actor::{ChildType, Shutdown};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut registry = Registry::new();
+    registry.insert(AlternateSupervisor.hash().into(), Arc::new(AlternateSupervisor));
+    let node = Node::new(dir.path(), registry, Arc::new(DefaultEffects), Config::default()).await.unwrap();
+    let parent = node.root();
+    let child = node.spawn_root(AlternateSupervisor.hash(), &bytes(json!({"type":"configure"}))).await.unwrap();
+    let spec_rows = node.open(&parent).await.unwrap().sql("SELECT msg FROM outbox WHERE target='spawn'", ()).await.unwrap();
+    let spawn: Value = serde_json::from_slice(&spec_rows.rows[0].get::<Vec<u8>>(0).unwrap()).unwrap();
+    let spec: ChildSpec = serde_json::from_value(spawn["spec"].clone()).unwrap();
+    assert_eq!(spec.child_type, ChildType::Supervisor);
+    assert_eq!(spec.shutdown, Shutdown::Infinity);
+    let actor = node.open(&child).await.unwrap();
+    actor.sql("CREATE TABLE graceful_exit(msg BLOB)", ()).await.unwrap();
+    drain(&node).await;
+
+    node.stop(&parent, "shutdown").await.unwrap();
+    drain(&node).await;
+
+    let exits = actor.sql("SELECT msg FROM graceful_exit", ()).await.unwrap();
+    assert_eq!(exits.rows.len(), 1);
+    let exit: Value = serde_json::from_slice(&exits.rows[0].get::<Vec<u8>>(0).unwrap()).unwrap();
+    assert_eq!(exit["type"], "exit");
+    assert_eq!(exit["reason"], "shutdown");
+    assert_eq!(actor.status().await.unwrap(), Status::Stopped);
+    assert_eq!(meta(&actor, "reason").await, "shutdown");
+    let error = node.spawn_root("unknown-supervisor", b"").await.unwrap_err();
+    assert!(format!("{error:#}").contains("unregistered behavior unknown-supervisor"));
 }

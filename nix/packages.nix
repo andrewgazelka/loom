@@ -6,12 +6,12 @@
     root = ../.;
     fileset =
       lib.fileset.difference
-      (lib.fileset.unions [../Cargo.toml ../Cargo.lock ../crates ../examples ../loom-wit ../loom-rustc ../loom-checker ../loom-guest-ts ../loom-ui])
-      (lib.fileset.unions (map lib.fileset.maybeMissing [../loom-checker/node_modules ../loom-guest-ts/node_modules ../loom-ui/node_modules ../loom-ui/.svelte-kit ../loom-ui/build]));
+      (lib.fileset.unions [../Cargo.toml ../Cargo.lock ../crates ../examples ../wit ../rustc ../checker ../guest-ts ../ui])
+      (lib.fileset.unions (map lib.fileset.maybeMissing [../checker/node_modules ../guest-ts/node_modules ../ui/node_modules ../ui/.svelte-kit ../ui/build]));
   };
   rustSource = lib.fileset.toSource {
     root = ../.;
-    fileset = lib.fileset.unions [../Cargo.toml ../Cargo.lock ../crates ../examples ../loom-wit ../loom-rustc/vendor-config.toml];
+    fileset = lib.fileset.unions [../Cargo.toml ../Cargo.lock ../crates ../examples ../wit ../rustc/vendor-config.toml];
   };
   toolchain = import ./toolchain.nix {inherit pkgs lib;};
   javascript = import ./javascript.nix {
@@ -40,11 +40,11 @@
   };
   sources = pkgs.runCommand "loom-runtime-sources" {} ''
     mkdir -p $out
-    cp -R ${src}/Cargo.toml ${src}/Cargo.lock ${src}/crates ${src}/examples ${src}/loom-wit ${src}/loom-rustc $out/
-    cp -R ${javascript.checker} $out/loom-checker
-    cp -R ${javascript.guest} $out/loom-guest-ts
-    mkdir -p $out/loom-ui
-    ln -s ${javascript.ui} $out/loom-ui/build
+    cp -R ${src}/Cargo.toml ${src}/Cargo.lock ${src}/crates ${src}/examples ${src}/wit ${src}/rustc $out/
+    cp -R ${javascript.checker} $out/checker
+    cp -R ${javascript.guest} $out/guest-ts
+    mkdir -p $out/ui
+    ln -s ${javascript.ui} $out/ui/build
   '';
   runtime = [toolchain pkgs.bun pkgs.cargo-component pkgs.binaryen pkgs.stdenv.cc pkgs.stdenv.cc.bintools pkgs.pkg-config pkgs.coreutils pkgs.findutils pkgs.gnused pkgs.gnugrep pkgs.gnutar pkgs.gzip pkgs.cacert] ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [pkgs.bubblewrap pkgs.util-linux];
   launcher = pkgs.replaceVars ./loom.sh {
@@ -72,7 +72,7 @@
     '';
     passthru = {inherit host toolchain sources;};
     meta = {
-      description = "Loom with TypeScript and Rust guest toolchains";
+      description = "Loom with Rust and TypeScript guest toolchains";
       license = lib.licenses.mit;
       mainProgram = "loom";
     };

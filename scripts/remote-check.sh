@@ -115,7 +115,7 @@ COMPILER
       [[ "$status" -ne 0 ]] || cargo run --locked -p loom-rt --example component_smoke -- "$base/sdk-rebuilt.wasm" rust itoa || status=$?
       ;;
     vendor_run) cargo run --locked -p loom-rt --example component_smoke -- "$base/itoa.wasm" rust itoa || status=$? ;;
-    sandbox) bash loom-rustc/test-sandbox.sh || status=$? ;;
+    sandbox) bash rustc/test-sandbox.sh || status=$? ;;
     nix)
       /run/wrappers/bin/sudo -n env NIX_REMOTE=local \
         NIX_CONFIG=$'max-jobs = 1\ncores = 8\nbuilders =\n' PATH="$PATH" \
@@ -133,8 +133,8 @@ COMPILER
       fi
       ;;
     dag)
-      (cd loom-checker && bun install --frozen-lockfile)
-      (cd loom-guest-ts && bun install --frozen-lockfile)
+      (cd checker && bun install --frozen-lockfile)
+      (cd guest-ts && bun install --frozen-lockfile)
       bash scripts/dag-cbor-check.sh || status=$?
       ;;
     acceptance)
@@ -143,8 +143,8 @@ COMPILER
       ;;
     m9)
       export LOOM_STATIC_BUSYBOX="$base/static-busybox/bin/busybox"
-      (cd loom-checker && bun install --frozen-lockfile)
-      (cd loom-guest-ts && bun install --frozen-lockfile)
+      (cd checker && bun install --frozen-lockfile)
+      (cd guest-ts && bun install --frozen-lockfile)
       bash scripts/milestones/m9.sh || status=$?
       ;;
     *) echo "Unknown action: $action"; status=64 ;;
@@ -161,8 +161,8 @@ host=dev-compute-4
 base="/home/andrew/loom-$session"
 unit="loom-check-$session"
 ssh "$host" "mkdir -p '$base'; if systemctl --user is-active --quiet '$unit'; then echo 'Linux verification already running' >&2; exit 75; fi; mkdir '$base/staging'"
-inputs=(Cargo.toml crates loom-wit scripts)
-for input in flake.nix flake.lock nix Cargo.lock Dockerfile .dockerignore deploy loom-checker loom-rustc loom-guest-ts loom-ui examples; do
+inputs=(Cargo.toml crates wit scripts)
+for input in flake.nix flake.lock nix Cargo.lock Dockerfile .dockerignore deploy checker rustc guest-ts ui examples; do
   [[ ! -e "$input" ]] || inputs+=("$input")
 done
 tar_flags=()

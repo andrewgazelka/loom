@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 mod actor;
+pub mod builtin;
 mod directory;
 mod effects;
 mod history;
@@ -30,8 +31,8 @@ pub use schema::SCHEMA;
 pub use supervisor::Supervisor;
 pub use turso::{IntoParams, Value};
 pub use types::{
-    ChildSpec, ChildState, ChildType, Config, RestartPolicy, RestartVerb, Rows, Shutdown, Status, TableDifference, TableHash, Trap,
-    TreeEntry, Verdict,
+    AssertionResult, ChildSpec, ChildState, ChildType, Config, Io, RestartPolicy, RestartVerb, Rows, Shutdown, Status, TableDifference,
+    TableHash, Trap, TreeEntry, ValidationResult, Verdict,
 };
 
 use anyhow::Result;
@@ -44,6 +45,12 @@ pub type Registry = HashMap<String, Arc<dyn Behavior>>;
 #[async_trait]
 pub trait Behavior: Send + Sync {
     fn hash(&self) -> &str;
+    fn child_type(&self) -> ChildType {
+        ChildType::Worker
+    }
+    fn description(&self) -> &str {
+        "Registered native behavior."
+    }
     fn schema(&self) -> &str;
     async fn handle(&self, cx: &mut Ctx<'_>, msg: &[u8]) -> Result<(), Trap>;
     async fn terminate(&self, _cx: &mut Ctx<'_>, _reason: &str) -> Result<(), Trap> {

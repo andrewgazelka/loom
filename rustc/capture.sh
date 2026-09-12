@@ -97,7 +97,7 @@ if [ -n "${LOOM_COMPILER_CACHE_OWNER:-}" ] && [ "${CARGO_PRIMARY_PACKAGE:-}" != 
   fi
 fi
 if [ "$cache_status" = 3 ]; then
-  printf '%s\n' loom-rustc-invocation >&2
+  printf '%s\n' rustc-invocation >&2
   if "$@" 2> "$capture.units/unit-$$.stderr"; then
     status=0
   else

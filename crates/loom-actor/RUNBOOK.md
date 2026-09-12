@@ -9,10 +9,10 @@ cargo test -p loom-actor --no-fail-fast
 cargo clippy -p loom-actor --all-targets -- -D warnings
 ```
 
-One integration target contains exactly 21 `#[tokio::test]` functions: 9 original properties, 4 Addendum A properties, 5 Addendum B properties, and 3 review regressions. The user lifted the write-only restriction for this gate. Local execution on 2026-09-11 produced:
+One integration target contains 22 `#[tokio::test]` functions, including `memory_io_is_wired`. The user lifted the write-only restriction for this gate. Local execution on 2026-09-11 after MCP integration produced:
 
 ```text
-test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.52s
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.19s
 clippy exit code: 0
 ```
 
@@ -39,7 +39,7 @@ Creation and fork publication use staged databases and `VACUUM INTO` before rena
 
 Long-effect handlers receive the same durable key on redelivery. Delivery errors return from `run_until_idle` with the row still pending; calling it again retries delivery. They cannot roll back an already committed handler transaction. Custom handlers must implement every external short-effect kind their behaviors use, including `now` when used; the runtime owns the recorded child-inspection effect and has no fallback for other kinds.
 
-The specification leaves SQL assertions to the caller. Callers can use `fork`, `promote`, and `Actor::sql` for inspection and assertions; `validate` implements the specified four verdicts and does not execute an implicit assertion list.
+`validate_assertions` evaluates explicitly supplied read-only SQL against the candidate replay, returning the validation verdict and a pass flag per assertion. Assertions pass only for a single numeric, nonzero scalar. `Actor::inspect_sql` parses one SELECT (or EXPLAIN SELECT) before execution and refuses write statement kinds and multiple statements.
 
 ## Turso 0.7.2 source observations
 
@@ -75,11 +75,12 @@ The specification leaves SQL assertions to the caller. Callers can use `fork`, `
 19. `validate_differs_and_multi_promotion`
 20. `resume_keeps_tree_intact`
 21. `shutdown_wait_does_not_stall_node`
+22. `memory_io_is_wired`
 
 
 ## Addendum A integration choices and deviations
 
-- `Ctx::spawn(&ChildSpec)` replaces the original two-argument API; the constructor and JSON defaults select permanent restart, brutal shutdown, and `link=true` because Rust has no default arguments.
+- `Ctx::spawn(&ChildSpec)` replaces the original two-argument API; the constructor takes the registry-resolved `Behavior::child_type()`. Constructor and JSON defaults select permanent restart and `link=true`, with infinite shutdown for supervisors and brutal shutdown for workers. An explicit `shutdown` overrides that default; behavior hashes do not determine child type.
 - `Node::stop(id, reason)` replaces the reasonless API; stopped live actors now leave through explicit `restart`, while replay forks remain ineligible for live restart.
 - Spawn rows use a tagged `child` or `restart` payload, keeping all creation and resume/skip/reset operations on the specified `spawn` target instead of introducing parallel restart targets.
 - Runtime delivery adds `down:<watcher>` and `exit:<peer>` targets so monitor retirement and automatic exit propagation are durable pump operations, not nontransactional post-stop callbacks.
@@ -96,7 +97,7 @@ The specification leaves SQL assertions to the caller. Callers can use `fork`, `
 - Supervisor children are monitored as well as optionally linked, and monitors are rearmed after reset so normal exits still apply permanent/transient/temporary policy.
 - Selected temporary siblings stop without restarting, honoring the explicit `temporary: never` rule when a group strategy selects them.
 - `Shutdown::TimeoutMs(n)` serializes as `{"timeout_ms":n}`; graceful shutdown delivers a trappable exit and persists a kill deadline. `Infinity` has no deadline, and `Brutal` bypasses termination hooks.
-- Native handlers must yield for Tokio cancellation to take effect; v1 does not run native code in a separately killable process.
+- Native handlers must yield for cooperative cancellation to take effect; v1 does not run native code in a separately killable process.
 - `tree` returns named `TreeEntry` records in breadth-first order, with siblings in spawn order; names are persisted in `_node.db`, and registering an occupied name fails clearly.
 - History and reset logic moved into `history.rs` and `reset.rs`, and lifecycle operations into `supervision.rs`, keeping every Rust source file below 400 lines while `supervisor.rs` remains the normal behavior implementation.
 
@@ -111,7 +112,7 @@ The supervision tests also cover both trap-exit modes, duplicate stop delivery, 
 - Forking at a sequence which never represented a complete contiguous mailbox boundary fails explicitly; historical execution order is retained for selective-receive replay. A candidate which defers a historically committed message returns `Trapped` rather than inventing a new replay schedule.
 - `timers` persists target, payload, deadline, kind, arming state, and initiator; timer alarm rows arm the node scheduler without sleeping inside delivery. Timer scanning runs independently of actor turns; cached shutdown deadlines can cancel a yielding but unfinished handler.
 - Calls persist first-winner receipts in metadata after removing their active rows, so redelivered replies, DOWNs, and timeouts cannot produce a second outcome.
-- `shutdown:<id>` is the pump operation for child-spec graceful shutdown; `stop:<id>` remains the explicit stop primitive. Native code must yield for Tokio task cancellation to take effect.
+- `shutdown:<id>` is the pump operation for child-spec graceful shutdown; `stop:<id>` remains the explicit stop primitive. Native code must yield for cooperative handler cancellation to take effect.
 - Lifecycle hooks use negative logical sequence numbers for recorded effects and dead letters, leaving inbox sequence numbers unchanged; deferring from a hook is a Trap because it has no current inbox message.
 - Outbox positions are monotonic in execution order: after selective receive or runtime notifications, a physical outbox position may differ from the logical inbox/effect position; `request` returns the physical result key. This preserves FIFO without changing effect identities.
 - Stopping an actor cancels its owned timers, preventing timer sends after its final lifecycle signals.
@@ -165,4 +166,18 @@ The mutation failed at the assertion expecting `Differs`, with an incorrect `Mat
 - Restart publication receipts preserve `ready=false` across interruption until monitor installation finishes, without a node-wide publication lock.
 - Lifecycle scheduling moved into `scheduler.rs` and `lifecycle.rs` to retain the 400-line limit after formatting.
 
-- Shutdown deadline cache insertion/removal is serialized with the actor connection and lifecycle transition; callbacks check the cache before aborting, so a stale deadline cannot cancel a replacement generation.
+- Shutdown deadline cache insertion/removal is serialized with the actor connection and lifecycle transition; callbacks check the cache before signalling cancellation, so a stale deadline cannot cancel a replacement generation.
+
+## MCP runtime
+
+Every node registers `counter-v1` (records messages), `forwarder-v1` (sends `forwarded` to the actor ID in the message), `echo-v1` (replies to call envelopes), and `supervisor-v1`. Additional registered native behaviors remain available through `Node::behaviors`. Empty initialization bytes mean no initial inbox message; reset preserves that choice. Nonempty initialization is the first inbox row.
+
+`Node::spawn(parent, spec)` persists the child specification and spawn outbox before delivery. `actor_ids` includes forks; `run_until_idle` returns the number of actor turns processed, excluding outbox-only delivery and timer scans. MCP shares the daemon's node and existing authenticated HTTP or stdio endpoint. Use `--actors-dir` to choose its storage directory.
+
+`Config.io` selects `Auto`, `Syscall`, `IoUring`, or `Memory` through Turso's named VFS. Auto selects io_uring on Linux (the target dependency unifies Turso's feature), syscall elsewhere. An explicit io_uring request fails with the platform name on other systems. Memory keeps actor and directory-index databases in live connections and creates no database files; it has no disk snapshots or persistence across node lifetimes. Historical fork/validation and reset currently require persistent I/O. The `memory_io_is_wired` test exercises three messages and checks that the directory remains empty.
+
+Kill and shutdown deadlines cancel only the native handler future, then await the message transaction rollback. They do not abort BEGIN, COMMIT, snapshot publication, or lifecycle transactions. Turso 0.7.2 marks `Transaction::in_progress` false only after awaited COMMIT returns; dropping the task between the engine commit and that assignment queues an invalid rollback on the next connection access. The io_uring parity run exposed this completion window; the corrected cooperative cancellation path passed the full 22-test actor suite on Linux with Auto selecting io_uring, as well as the local macOS suite.
+
+With an explicit syscall/io_uring VFS, Turso treats `:memory:` as a literal filename. Scratch connections used while replacing a cached connection therefore select `Io::Memory` explicitly, independently of the node’s persistent I/O selection. The reset regression passes without creating `:memory:` or `:memory:-wal` files.
+
+On Linux hosts with an 8 MiB locked-memory limit, concurrent io_uring-backed tests can fail with `io_uring_setup: out of memory` despite ample ordinary RAM. The 22 actor tests and 4 MCP tests pass with `RUST_TEST_THREADS=4 cargo test -p loom-actor -p loom-mcp` on such a host. Size test concurrency against ring-allocation headroom; keep the selected VFS unchanged.

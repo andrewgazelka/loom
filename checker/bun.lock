@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "loom-checker",
+      "name": "checker",
       "dependencies": {
         "@bytecodealliance/componentize-js": "0.21.0",
         "typescript": "5.9.3",

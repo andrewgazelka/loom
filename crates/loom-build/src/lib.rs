@@ -240,7 +240,7 @@ impl Builder {
         )
         .await?;
         let mut command = if isolated {
-            let mut command = Command::new(self.root.join("loom-rustc/sandbox.sh"));
+            let mut command = Command::new(self.root.join("rustc/sandbox.sh"));
             command
                 .arg("vendor")
                 .env("LOOM_RUST_TARGET", "wasm32-unknown-unknown")
@@ -364,7 +364,7 @@ impl Builder {
                 fs::write(directory.join("dependencies.js"), module).await?;
                 let mut command = Command::new("bun");
                 command
-                    .arg(self.root.join("loom-checker/build.ts"))
+                    .arg(self.root.join("checker/build.ts"))
                     .arg(&directory)
                     .arg(&self.root);
                 command
@@ -523,7 +523,7 @@ fn is_vendored(definition: &CheckedDef) -> bool {
     })
 }
 
-const VENDOR_CONFIG: &str = include_str!("../../../loom-rustc/vendor-config.toml");
+const VENDOR_CONFIG: &str = include_str!("../../../rustc/vendor-config.toml");
 
 fn build_fingerprint(root: &Path, lang: Lang) -> Result<String, BuildError> {
     fn collect(directory: &Path, files: &mut Vec<PathBuf>) -> Result<(), std::io::Error> {
@@ -546,13 +546,13 @@ fn build_fingerprint(root: &Path, lang: Lang) -> Result<String, BuildError> {
         }
         Ok(())
     }
-    let mut files = vec![root.join("loom-wit/handler.wit")];
+    let mut files = vec![root.join("wit/handler.wit")];
     match lang {
         Lang::Ts => {
-            collect(&root.join("loom-guest-ts"), &mut files)?;
+            collect(&root.join("guest-ts"), &mut files)?;
             files.extend([
-                root.join("loom-checker/build.ts"),
-                root.join("loom-checker/bun.lock"),
+                root.join("checker/build.ts"),
+                root.join("checker/bun.lock"),
             ]);
         }
         Lang::Rust => {
@@ -560,7 +560,7 @@ fn build_fingerprint(root: &Path, lang: Lang) -> Result<String, BuildError> {
                 "crates/loom-guest-rs",
                 "crates/loom-guest-macros",
                 "crates/loom-proto",
-                "loom-rustc",
+                "rustc",
             ] {
                 collect(&root.join(directory), &mut files)?;
             }
@@ -794,7 +794,7 @@ async fn materialize_rust(
             .and_then(|metadata| metadata.get("component"))
             .is_some()
     {
-        return Err(BuildError::Rejected("Workspace redirects and component metadata are host-owned; the guest boundary is loom-wit".into()));
+        return Err(BuildError::Rejected("Workspace redirects and component metadata are host-owned; the guest boundary is wit".into()));
     }
     if !isolated && (package.contains_key("build") || files.contains_key("build.rs")) {
         return Err(BuildError::Rejected(

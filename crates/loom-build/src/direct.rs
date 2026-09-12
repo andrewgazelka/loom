@@ -294,7 +294,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
             .trim(),
     );
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"loom-rustc-contract-v4-core-handlers-residual-rows");
+    hasher.update(b"rustc-contract-v4-core-handlers-residual-rows");
     let manifest_bytes = fs::read_to_string(directory.join("Cargo.toml"))
         .await?
         .replace(root.to_string_lossy().as_ref(), "$SDK")
@@ -377,7 +377,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
             recipe.relocate(directory, &target.join("root-output"), &root_incremental)?;
             let command = if isolated {
                 fs::write(target.join("direct.sh"), recipe.shell()).await?;
-                let mut command = Command::new(root.join("loom-rustc/sandbox.sh"));
+                let mut command = Command::new(root.join("rustc/sandbox.sh"));
                 command
                     .arg("rustc")
                     .arg(cache)
@@ -438,7 +438,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
         .map(PathBuf::from)
         .unwrap_or(std::env::current_exe()?);
     let mut command = if isolated {
-        let mut command = Command::new(root.join("loom-rustc/sandbox.sh"));
+        let mut command = Command::new(root.join("rustc/sandbox.sh"));
         // Sandbox target must be under its writable source root.
         command
             .arg("build")
@@ -448,7 +448,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
             .arg(root);
         command
     } else {
-        let mut command = Command::new(root.join("loom-rustc/build.sh"));
+        let mut command = Command::new(root.join("rustc/build.sh"));
         command.arg(directory).arg(&target);
         command
     };
@@ -471,7 +471,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
     let diagnostics = cargo_diagnostics(&stdout);
     let rustc_invocations = String::from_utf8_lossy(&output.stderr)
         .lines()
-        .filter(|line| *line == "loom-rustc-invocation")
+        .filter(|line| *line == "rustc-invocation")
         .count();
     if !output.status.success() {
         if diagnostics.is_empty() {
@@ -751,7 +751,7 @@ async fn repair_units(
         }
         let command = if context.isolated {
             fs::write(context.target.join("direct.sh"), unit.recipe.shell()).await?;
-            let mut command = Command::new(context.root.join("loom-rustc/sandbox.sh"));
+            let mut command = Command::new(context.root.join("rustc/sandbox.sh"));
             command
                 .arg("rustc")
                 .arg(context.cache)
@@ -1151,7 +1151,7 @@ async fn graph_shareable(
     compiler_sysroot: Option<&Path>,
 ) -> Result<bool, BuildError> {
     let mut command = if isolated {
-        let mut command = Command::new(root.join("loom-rustc/sandbox.sh"));
+        let mut command = Command::new(root.join("rustc/sandbox.sh"));
         command
             .arg("metadata")
             .arg(cache)

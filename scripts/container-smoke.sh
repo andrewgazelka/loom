@@ -52,6 +52,6 @@ if [[ ${LOOM_CONTAINER_SUITE:-all} != vendor ]]; then
 fi
 if [[ ${LOOM_CONTAINER_SUITE:-all} != site ]]; then
 if ! bun scripts/container-vendor-smoke.ts; then podman logs "$name"; exit 1; fi
-if ! podman exec --workdir /opt/loom "$name" bash loom-rustc/test-sandbox.sh; then podman logs "$name"; exit 1; fi
+if ! podman exec --workdir /opt/loom "$name" bash rustc/test-sandbox.sh; then podman logs "$name"; exit 1; fi
 fi
 printf 'Container %s smoke passed for %s\n' "${LOOM_CONTAINER_SUITE:-all}" "$image"

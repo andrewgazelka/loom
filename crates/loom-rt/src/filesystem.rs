@@ -116,7 +116,8 @@ impl PinnedRoot {
         let mut file = owned(unsafe {
             libc::openat(target.parent.as_raw_fd(), temporary.as_ptr(),
                 libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-                0o600 as libc::mode_t)
+                // mode_t is u16 on macOS; C varargs promote to int, so pass c_uint.
+                0o600 as libc::c_uint)
         })?;
         let result = (|| -> Result<()> {
             file.write_all(content)?;

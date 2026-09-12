@@ -26,6 +26,7 @@ impl Drop for Cleanup {
 
 impl Node {
     async fn fork_from(&self, source: &Connection, id: &str, at: i64) -> Result<Actor> {
+        ensure!(self.config.io != crate::Io::Memory, "actor {id} seq {at}: historical snapshots require persistent I/O");
         ensure!(at >= 0 && at <= actor::cursor(source).await?, "actor {id} seq {at}: fork sequence outside history");
         let target_epoch = boundary(source, id, at).await?;
         let rows = actor::query(source, "SELECT seq,path FROM snapshots WHERE seq<=? ORDER BY seq DESC LIMIT 1", [at]).await?;
@@ -38,7 +39,7 @@ impl Node {
         let mut cleanup = Cleanup(Vec::new());
         cleanup.track(staging.clone());
         cleanup.track(PathBuf::from(format!("{}-wal", staging.display())));
-        let mut conn = actor::connect(&staging).await?;
+        let mut conn = actor::connect(&staging, self.config.io).await?;
         let snapshot_cursor = actor::cursor(&conn).await?;
         let snapshot_epoch: i64 = actor::meta(&conn, "commit_epoch").await?.parse()?;
         ensure!(
@@ -148,14 +149,14 @@ impl Node {
             let behavior = actor::behavior(&self.registry, &code.hash)?;
             for retry in 0..=self.config.max_retries {
                 effects.begin(message.seq).await;
-                let result = actor::attempt(conn, &identity, &message, behavior.as_ref(), code.revision, effects).await;
+                let result = actor::attempt(conn, &identity, &message, behavior.as_ref(), code.revision, effects, None).await;
                 let completed = actor::meta(conn, "commit_epoch").await?.parse::<i64>()? == epoch;
                 if let Some(verdict) = effects.finish(message.seq, result.is_ok() && completed).await? {
                     return Ok(Some(verdict));
                 }
                 match result {
-                    Ok(()) if completed => break,
-                    Ok(()) => {
+                    Ok(_) if completed => break,
+                    Ok(_) => {
                         return Ok(Some(Verdict::Trapped {
                             seq: message.seq,
                             error: format!("actor {id} seq {}: replay deferred a historically committed message", message.seq),
@@ -181,6 +182,14 @@ impl Node {
     }
 
     pub(crate) async fn validate_inner(&self, id: &str, candidate: &str, k: i64) -> Result<Verdict> {
+        Ok(self.validate_assertions(id, candidate, k, &[]).await?.verdict)
+    }
+
+    pub async fn validate_assertions(&self, id: &str, candidate: &str, k: i64, assertions: &[String]) -> Result<crate::ValidationResult> {
+        self.validate_assertions_inner(id, candidate, k, assertions).await.with_context(|| format!("actor {id} seq -1: validation"))
+    }
+
+    async fn validate_assertions_inner(&self, id: &str, candidate: &str, k: i64, assertions: &[String]) -> Result<crate::ValidationResult> {
         let actor = self.open(id).await?;
         let source = actor.conn.lock().await;
         let cursor = actor::cursor(&source).await?;
@@ -190,10 +199,10 @@ impl Node {
         let mut conn = fork.conn.lock().await;
         let effects = ReplayEffects::load(&source).await?;
         if let Some(verdict) = promote_replay(&mut conn, behavior.as_ref(), "validation", "candidate", &effects).await? {
-            return Ok(verdict);
+            return Ok(crate::ValidationResult { verdict, assertions: Vec::new() });
         }
         if let Some(verdict) = self.replay(&source, &mut conn, id, cursor, &effects, false).await? {
-            return Ok(verdict);
+            return Ok(crate::ValidationResult { verdict, assertions: Vec::new() });
         }
         let original = table_hashes(&source).await?;
         let replayed = table_hashes(&conn).await?;
@@ -207,11 +216,26 @@ impl Node {
                 });
             }
         }
-        if differences.is_empty() {
-            Ok(Verdict::Matched { tables: original.into_iter().map(|(name, hash)| TableHash { name, hash }).collect() })
+        let verdict = if differences.is_empty() {
+            Verdict::Matched { tables: original.into_iter().map(|(name, hash)| TableHash { name, hash }).collect() }
         } else {
-            Ok(Verdict::Differs { tables: differences })
+            Verdict::Differs { tables: differences }
+        };
+        let mut results = Vec::new();
+        for query in assertions {
+            let rows = actor::inspect_query(&conn, query, Vec::new())
+                .await
+                .with_context(|| format!("actor {id} seq {cursor}: validation assertion"))?;
+            let passed = rows.rows.len() == 1
+                && rows.columns.len() == 1
+                && match rows.rows[0].get_value(0)? {
+                    Value::Integer(value) => value != 0,
+                    Value::Real(value) => value != 0.0,
+                    _ => false,
+                };
+            results.push(crate::AssertionResult { query: query.clone(), passed });
         }
+        Ok(crate::ValidationResult { verdict, assertions: results })
     }
 }
 

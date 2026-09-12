@@ -43,6 +43,8 @@ fn main() -> anyhow::Result<ExitCode> {
 struct Args {
     #[arg(long, default_value = "loom.sqlite")]
     db: PathBuf,
+    #[arg(long)]
+    actors_dir: Option<PathBuf>,
     #[arg(long, default_value = "127.0.0.1:8787")]
     bind: std::net::SocketAddr,
     #[arg(
@@ -83,13 +85,26 @@ async fn serve() -> anyhow::Result<()> {
             _ => Err(anyhow::anyhow!("unknown language {lang}")),
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
-    let ui = args.root.join("loom-ui/build");
+    let ui = args.root.join("ui/build");
     let backup_directory = args.backup_dir.unwrap_or_else(|| {
         args.db
             .parent()
             .unwrap_or(std::path::Path::new("."))
             .join("backups")
     });
+    let actors_dir = args.actors_dir.unwrap_or_else(|| {
+        args.db
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join("actors")
+    });
+    let node = loom_actor::Node::new(
+        actors_dir,
+        loom_actor::Registry::new(),
+        Arc::new(loom_actor::DefaultEffects),
+        loom_actor::Config::default(),
+    )
+    .await?;
     let service = Arc::new(
         loom_api::Service::new(
             loom_store::Store::open(args.db)?,
@@ -100,11 +115,11 @@ async fn serve() -> anyhow::Result<()> {
     );
     if args.stdio {
         return tokio::select! {
-            result = loom_mcp::stdio(service) => result,
+            result = loom_mcp::stdio(service, node) => result,
             _ = shutdown.wait() => Ok(()),
         };
     }
-    let mcp = loom_api::protect(loom_mcp::router(service.clone()), authorizer.clone());
+    let mcp = loom_api::protect(loom_mcp::router(service.clone(), node), authorizer.clone());
     let app = loom_api::router(service, authorizer)
         .merge(mcp)
         .fallback_service(static_files::router(ui));

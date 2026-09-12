@@ -389,3 +389,36 @@ optional in v1 except where marked "later" with its leaver.
     `start_child`; `count_children` replies 3; `terminate_child` one; `whereis` of a
     registered child returns its id before and `None` after it stops; `members` of a
     group drops it too.
+
+## MCP surface
+
+The existing stdio and authenticated HTTP MCP endpoint shares one actor node with
+Loom definitions. `loomd --actors-dir <path>` selects its directory; the default is
+`<db parent>/actors`. Tool results are JSON text. Errors include actor and sequence
+context when known. `init: null` spawns without an initial inbox message; other init
+and message values are encoded as JSON bytes.
+
+- `actor_list()` lists actor identities, status, behavior, cursor, inbox size, and parent.
+- `actor_tree(root?)` returns a nested tree, defaulting to the node root supervisor.
+- `actor_info(id)` returns lifecycle, mailbox, and relationship details.
+- `actor_send(id, key?, msg)` sends a keyed message, runs until idle, and returns the cursor.
+- `actor_spawn(behavior_hash, init, parent?, spec?)` spawns a child and returns its id.
+- `actor_stop(id, reason)` stops an actor with the supplied reason.
+- `actor_restart(id, verb)` applies `resume`, `skip`, or `reset`.
+- `actor_promote(id, behavior_hash, author, rationale)` returns the new code-change row.
+- `actor_promote_where(old_hash, new_hash, author, rationale)` returns promoted ids.
+- `actor_lineage(id)` returns code-change rows.
+- `actor_dead_letters(id)` returns failed-message rows.
+- `actor_fork(id, at_seq)` returns a historical fork id.
+- `actor_validate(id, candidate_hash, k, assertions?)` returns a verdict and SQL assertion results from the replayed candidate.
+- `actor_sql(id, query, params?)` returns read-only query rows and refuses writes by statement kind.
+- `actor_whereis(name)` resolves a registered name.
+- `actor_register(name, id)` registers a unique name.
+- `actor_members(group)` lists group members.
+- `actor_behaviors()` lists registered hashes and descriptions.
+- `actor_run()` runs until idle and returns the number of processed actor turns.
+
+JSON resources are `actor://tree`, `actor://<id>/inbox`, `actor://<id>/effects`,
+`actor://<id>/outbox`, and `actor://<id>/lineage`. Read tools and resources require
+read scope; mutation tools require execute scope, except promotions, which require
+define scope. A SQL assertion passes when it returns one nonzero numeric scalar.

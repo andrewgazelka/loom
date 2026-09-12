@@ -19,7 +19,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Config, Engine, StoreLimits, StoreLimitsBuilder};
 
-wasmtime::component::bindgen!({path: "../../loom-wit", world: "handler", imports: { default: async }, exports: { default: async }});
+wasmtime::component::bindgen!({path: "../../wit", world: "handler", imports: { default: async }, exports: { default: async }});
 
 #[derive(Clone)]
 pub struct Runtime {

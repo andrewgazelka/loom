@@ -8,7 +8,7 @@ scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
 cp examples/ts/largest.ts "$scratch/definition.ts"
 : > "$scratch/dependencies.js"
-bun loom-checker/build.ts "$scratch" "$PWD"
+bun checker/build.ts "$scratch" "$PWD"
 cargo run --locked --release -p loom-rt --example machine_smoke -- "$loom_target_dir"/wasm32-wasip2/release/loom_example_largest.wasm "$scratch/component.wasm"
 cargo test --locked -p loom-rt snapshots_are_content_keyed_and_observations_are_scoped
 if [[ $(uname -s) == Linux ]]; then

@@ -65,9 +65,9 @@ args+=(--ro-bind "$source_root" "$source_root" --bind "$target_dir" "$target_dir
 for guest in loom-guest-rs loom-guest-macros loom-proto; do
   args+=(--ro-bind "$repo_root/crates/$guest" "$repo_root/crates/$guest")
 done
-args+=(--ro-bind "$repo_root/loom-wit" "$repo_root/loom-wit"
-  --ro-bind "$repo_root/loom-rustc/build.sh" /opt/build.sh
-  --ro-bind "$repo_root/loom-rustc/capture.sh" /opt/capture.sh --chdir "$crate_dir")
+args+=(--ro-bind "$repo_root/wit" "$repo_root/wit"
+  --ro-bind "$repo_root/rustc/build.sh" /opt/build.sh
+  --ro-bind "$repo_root/rustc/capture.sh" /opt/capture.sh --chdir "$crate_dir")
 if [[ $mode == vendor ]]; then
   # Cargo vendor resolves/downloads packages but never executes their build scripts.
   # This is the sole network-capable phase; it has no application secrets.
@@ -103,7 +103,7 @@ else
   [[ -f $crate_dir/Cargo.lock && -f $crate_dir/.cargo/config.toml && -d $crate_dir/vendor ]] || {
     echo 'offline build requires locked, vendored sources' >&2; exit 65;
   }
-  expected_config=$(cat "$repo_root/loom-rustc/vendor-config.toml")
+  expected_config=$(cat "$repo_root/rustc/vendor-config.toml")
   [[ ! -e $crate_dir/.cargo/config && $(cat "$crate_dir/.cargo/config.toml") == "$expected_config" ]] || {
     echo 'offline Cargo configuration differs from the fixed vendor contract' >&2; exit 65;
   }
