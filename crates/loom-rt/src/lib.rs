@@ -1,6 +1,8 @@
 mod call;
+mod compilation_cache;
 mod filesystem;
 pub use call::{CallEffects, GuestFailure};
+pub use compilation_cache::{CompilationCacheStats, LoomCompilationCache};
 mod machine;
 mod root_handler;
 mod sharedcore;
@@ -40,6 +42,7 @@ struct Inner {
     store: Store,
     engine: Engine,
     core_engine: Engine,
+    compilation_cache: Arc<LoomCompilationCache>,
     core_executor: futures::executor::ThreadPool,
     core_modules: Mutex<HashMap<String, wasmtime::Module>>,
     components: Mutex<HashMap<String, HandlerPre<ContextData>>>,
@@ -236,10 +239,15 @@ impl Runtime {
     pub fn new(store: Store) -> Result<Self> {
         Self::create(store, None)
     }
+    /// Candidate cache hits and storage diagnostics from both native engines.
+    pub fn compilation_cache_stats(&self) -> CompilationCacheStats {
+        self.inner.compilation_cache.stats()
+    }
     pub fn with_resolver(store: Store, resolver: Arc<dyn ComponentResolver>) -> Result<Self> {
         Self::create(store, Some(resolver))
     }
     fn create(store: Store, resolver: Option<Arc<dyn ComponentResolver>>) -> Result<Self> {
+        let compilation_cache = Arc::new(LoomCompilationCache::new(store.clone())?);
         let mut config = Config::new();
         config
             .epoch_interruption(true)
@@ -249,7 +257,9 @@ impl Runtime {
         config.allocation_strategy(wasmtime::InstanceAllocationStrategy::Pooling(
             Default::default(),
         ));
+        compilation_cache.configure(&mut config)?;
         let engine = Engine::new(&config)?;
+        let core_engine = sharedcore::engine(compilation_cache.clone())?;
         let runtime = Self {
             inner: Arc::new(Inner {
                 model: loom_model::Model::from_env(store.clone())?,
@@ -257,7 +267,8 @@ impl Runtime {
                 resolver,
                 store,
                 engine,
-                core_engine: sharedcore::engine()?,
+                core_engine,
+                compilation_cache,
                 core_executor: futures::executor::ThreadPoolBuilder::new()
                     .pool_size(8)
                     .name_prefix("loom-guest-")
@@ -361,9 +372,12 @@ impl Runtime {
                 );
                 timing.load_ms = elapsed_ms(load_start);
                 let engine = self.inner.engine.clone();
+                let cache = self.inner.compilation_cache.clone();
                 let compile_start = Instant::now();
-                let c =
-                    tokio::task::spawn_blocking(move || Component::new(&engine, bytes)).await??;
+                let c = tokio::task::spawn_blocking(move || {
+                    cache.compile(|| Component::new(&engine, bytes).map_err(Into::into))
+                })
+                .await??;
                 timing.compile_ms = elapsed_ms(compile_start);
                 let link_start = Instant::now();
                 let mut linker = Linker::new(&self.inner.engine);

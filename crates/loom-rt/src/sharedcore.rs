@@ -22,12 +22,13 @@ const STACK_BYTES: u32 = 256 * 1024;
 const MAX_MEMORY: u64 = 256 * 1024 * 1024;
 const EXECUTION_SECONDS: u64 = 30;
 
-pub(super) fn engine() -> Result<Engine> {
+pub(super) fn engine(cache: Arc<LoomCompilationCache>) -> Result<Engine> {
     let mut config = Config::new();
     config
         .wasm_threads(true)
         .shared_memory(true)
         .epoch_interruption(true);
+    cache.configure(&mut config)?;
     Engine::new(&config).map_err(|e| anyhow::anyhow!("{e:#}"))
 }
 // Keep the classification while sharing a failure with cancelled sibling tasks.
@@ -835,9 +836,11 @@ impl Runtime {
                 return Ok(None);
             }
             let engine = self.inner.core_engine.clone();
-            let module =
-                tokio::task::spawn_blocking(move || Module::new(&engine, &bytes).map_err(error))
-                    .await??;
+            let cache = self.inner.compilation_cache.clone();
+            let module = tokio::task::spawn_blocking(move || {
+                cache.compile(|| Module::new(&engine, &bytes).map_err(error))
+            })
+            .await??;
             self.inner
                 .core_modules
                 .lock()
@@ -978,7 +981,10 @@ mod tests {
     }
     #[test]
     fn shared_copy_checks_ranges_and_preserves_concurrent_atomic_access() {
-        let engine = engine().unwrap();
+        let engine = engine(Arc::new(
+            LoomCompilationCache::new(Store::memory().unwrap()).unwrap(),
+        ))
+        .unwrap();
         let memory = SharedMemory::new(&engine, wasmtime::MemoryType::shared(1, 2)).unwrap();
         copy_in(&memory, 32, &[1, 2, 3]).unwrap();
         assert_eq!(copy_out(&memory, 32, 3).unwrap(), vec![1, 2, 3]);
@@ -1128,7 +1134,10 @@ mod tests {
     }
     #[test]
     fn separate_execution_memories_do_not_alias() {
-        let engine = engine().unwrap();
+        let engine = engine(Arc::new(
+            LoomCompilationCache::new(Store::memory().unwrap()).unwrap(),
+        ))
+        .unwrap();
         let first = SharedMemory::new(&engine, wasmtime::MemoryType::shared(1, 1)).unwrap();
         let second = SharedMemory::new(&engine, wasmtime::MemoryType::shared(1, 1)).unwrap();
         copy_in(&first, 64, &[42]).unwrap();

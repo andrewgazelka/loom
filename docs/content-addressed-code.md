@@ -98,29 +98,77 @@ Set `defs.behavior_hash` to the selected entry hash. Record the emitted Wasm's d
 
 The current `defs` schema has no `behavior_hash` column, and the actor `code_changes` schema has neither new column. Migration must preserve existing records, distinguish old artifact-based identities from verified HIR identities, recompile and verify existing definitions where source is available, and only then retire the old identity path. This driver does not perform that migration.
 
-## Seam for loom-rt: a CAS-backed function compilation cache
+## Implemented loom-rt seam: a CAS-backed function compilation cache
 
-This is a design for the lane that owns loom-rt; no runtime implementation is included here. The locally installed Wasmtime 48.0.1 source verifies `Config::enable_incremental_compilation(Arc<dyn CacheStore>) -> Result<&mut Config>` in `wasmtime-48.0.1/src/config.rs:418`. Enable both Cargo features `incremental-cache` and `cranelift`, keep the compiler enabled, select `Strategy::Cranelift`, and attach a shared store before constructing the engine. This caches native compilation results per Cranelift function across modules. Wasm validation, translation to Cranelift IR, and module assembly still occur.
+`loom_rt::LoomCompilationCache` implements Wasmtime 48.0.1's synchronous
+`CacheStore`. Both runtime engines select `Strategy::Cranelift` and install the
+same adapter with `Config::enable_incremental_compilation`; Cargo enables
+`incremental-cache` and `cranelift`. This caches native compilation per Cranelift
+function across modules. Validation, translation to Cranelift IR, and module
+assembly still occur. The whole-module cache is not enabled by this seam.
 
-Implement `wasmtime::CacheStore` on a named `LoomCompilationCache` struct holding the Loom store, a backend-build namespace, and thread-safe counters/error reporting. The trait requires `Send + Sync + Debug` and has synchronous methods `get(&self, key: &[u8]) -> Option<Cow<'_, [u8]>>` and `insert(&self, key: &[u8], value: Vec<u8>) -> bool`. Return `Cow::Owned` for CAS-loaded blobs. Wasmtime can invoke these methods from parallel compiler workers; use the store's synchronized access and keep database locks outside compilation calls. Loom's existing `Store::put(kind, bytes)` and `Store::get(hash)` are synchronous, so this adapter need not block an async executor to await storage.
+Cranelift supplies an opaque input key. Its function stencil, ISA, target and
+compiler flags determine that key; it is not a Loom definition hash or a hash of
+the cached output. `runtime_compilation_cache` maps
+`(backend_namespace, compiler_key)` to the digest returned by
+`Store::put("cranelift-function", bytes)`. Reads use `Store::get`, rehash the blob,
+and return `Cow::Owned`. Existing mappings are verified; conflicting values
+are reported rather than overwritten. Equivalent concurrent inserts converge.
+The adapter uses synchronized store access without holding database locks over
+compiler calls.
 
-The lookup key comes from Cranelift, not rustc's incremental cache or Loom's item hash. Wasmtime's `CraneliftCacheStore` forwards the supplied bytes unchanged. In Cranelift 0.135.1, `compute_cache_key` hashes the `FunctionStencil`, ISA name, target triple, shared flags, and ISA-specific flag hash key through Rust's `Hash` trait into SHA-256, producing 32 bytes. The stencil includes a Cranelift version marker, signature, IR instructions and layout, stack/global definitions, relative source locations, and debug metadata. The function's own name and separate `FunctionParameters`, including the base source location and user external-name bindings, are outside the stencil. Cached `CompiledCodeStencil` data is deserialized and then has the current function parameters applied. This separation allows reuse across modules; equal Rust bodies or equal HIR hashes alone do not guarantee an equal stencil or cache key.
+`crates/loom-rt/build.rs` creates the backend namespace from the resolved backend
+dependency sources, feature graph, rustc identity, target and build flags. Source
+files and directories are Cargo inputs, so same-version local backend patches
+invalidate the namespace. Package locations and guest/module identities are not
+namespace inputs; compiler flags remain verbatim, including path-bearing flags.
+Metadata is read offline from the locked workspace. Its default feature selection
+matches this workspace, where only loom-rt directly depends on Wasmtime; arbitrary
+downstream feature unification or dependency-feature CLI overrides are outside
+that build contract and require extending the namespace producer first. The
+upstream package version or `precompile_compatibility_hash` alone would not
+identify same-version patches.
 
-Treat the supplied key as opaque. Preserve its bytes in an index `(backend_build_namespace, cranelift_key) -> cas_blob_hash`. The namespace should identify the exact Wasmtime/Cranelift runtime build, including local patches and relevant feature configuration. It must not include the guest module hash, item name, or per-definition `toolchain_hash`, which would partition identical native function compilations. Cranelift already includes the target and compiler flags in its key. The runtime-build namespace additionally isolates patched builds that retain an upstream version number. Rustc's guest build remains represented by Loom's HIR/Wasm/toolchain records; those records do not replace this native cache key.
+The blob is published before its index row. An interrupted publication can leave
+an unreferenced object. The index's `ON DELETE RESTRICT` foreign key retains live
+CAS blobs; `LoomCompilationCache::clear` expires the current backend's mappings
+before those blobs may be collected. There is no automatic eviction or general
+CAS garbage collector in this implementation. Native index writes and compiled
+blobs remain trusted local compiler data: content verification is not proof that
+arbitrary bytes are valid machine code for a compiler input.
 
-On `insert`, store the opaque serialized value through the CAS, for example with kind `cranelift-function`, then publish the lookup row using the returned content digest. A Cranelift key hashes compiler inputs, not the cached output bytes: putting the blob directly under that key would violate the CAS invariant. Verify an existing mapping before reusing it, and report a conflicting value instead of overwriting it silently. Store the blob before publishing the index row; an interrupted publication can leave an unreferenced CAS object for the normal CAS garbage collector. Keep cache-index rows as GC roots while live, and expire the index entry before allowing its blob to be collected. Concurrent equivalent inserts should converge on the same mapping.
+`Runtime::compilation_cache_stats()` exposes candidate hits, misses, inserts,
+error counts and the last diagnostic. Missing index rows are ordinary misses.
+Storage failures, missing mapped blobs, corrupt blobs and conflicting inserts
+have separate counters and diagnostics naming the key/blob. Wasmtime's trait
+can return only `None` or `false` on failure, so both runtime compilation
+boundaries also check the error counter before publishing a compiled module.
+Any cache error during that window returns a retryable host error. Overlapping
+compiles conservatively share failures; a later retry starts a fresh window and
+can succeed after the underlying store is repaired. Diagnostics retain only
+the latest error, keeping their memory bounded.
 
-On `get`, resolve the index, read and verify the CAS blob, and return it unchanged. Keep both the index and executable blobs within Loom's trusted compilation-cache boundary: a content digest verifies bytes, not that they are valid compiler output for the input key. A missing row is an ordinary cache miss. Storage errors, broken mappings, and corrupt blobs should increment distinct error counters and retain a diagnostic naming the key/blob. The trait cannot return an error from `get`; it can only return `None`, and `insert` can only return `false`. Wasmtime's adapter currently discards the insert boolean, while Cranelift recompiles after a missing or rejected blob. If Loom requires cache failures to fail a build, capture a compile-scoped error and return it from the existing runtime compilation boundary after Wasmtime returns. The adapter alone cannot enforce that policy.
+Run the native cross-module check with:
 
-A test named `shared_function_hits_cas_across_modules` should use a fresh temporary Loom CAS and a recording adapter:
+```sh
+cargo test -p loom-rt --test compilation_cache -- --nocapture
+```
 
-1. Compile module A containing one exported function, such as `(func (export "f") (param i32) (result i32) local.get 0 i32.const 7 i32.add)`. Record lookup keys and inserts, and invoke `f(5)` to check that it returns 12.
-2. Drop the module and engine. Construct another engine with the same configuration and persisted adapter. Compile module B with the identical function and a different custom section appended after the code section. Assert that A and B have different Wasm digests. Leave Wasmtime's whole-module cache unconfigured so a module-cache hit cannot bypass the tested path.
-3. Require a B lookup for a function key inserted by A to return CAS bytes, with no replacement insert for that key, and invoke B's `f(5)` to check 12. Also capture Wasmtime's actual accepted-hit count: the internal Cranelift compiler logs `Incremental compilation cache stats` at trace level when the compiler is dropped. Drop all module/engine/config references that retain it before collecting that log. A `get` returning `Some` by itself is only a candidate hit because Cranelift can reject the blob.
-4. Exclude trampoline hits from the verdict. Compile a control module C with the same single-function ABI but `i32.const 8` in a separate empty recording cache. Identify the body-specific key among A's inserts that is absent from C's inserts, and require B's successful lookup to include that key. Shared ABI trampolines may still hit when a body changes. Require C's function to return 13; if no body-specific key can be identified, fail the test instrument rather than claim reuse.
-5. Add separate controls for an empty cache, changed target/compiler flags, corrupted CAS bytes, and an insert failure. Assert the documented miss/error policy and successful guest results where recompilation is allowed. Report candidate lookups, accepted compiler hits, inserts, and storage errors separately.
+`shared_function_hits_cas_across_modules` compiles A with `f(x) = x + 7`, closes
+its engine and store, then compiles B with the same body and a different custom
+section against the reopened CAS. A changed-body control C (`x + 8`) identifies
+body-specific keys. B serves cached bytes only for those keys, forcing shared
+ABI trampolines to miss. The test requires both a CAS candidate hit and a
+Wasmtime-accepted compiler hit, no replacement insert for the body, different
+A/B Wasm digests, and correct guest results (12, 12 and 13).
+A compiler-flags control reuses the persisted cache with a different optimization
+level and requires zero candidate or accepted hits with the same guest result.
 
-The API and key description above were checked against local registry sources: `wasmtime-environ-48.0.1/src/compile/mod.rs` (`CacheStore`), `wasmtime-internal-cranelift-48.0.1/src/compiler.rs` (forwarding, accepted-hit accounting, and drop-time statistics), and `cranelift-codegen-0.135.1/src/incremental_cache.rs` plus `src/ir/function.rs` (key, stencil, and parameter application). The cross-module test is a sketch, not an executed result. The loom-rt lane owns implementation and verification of this seam.
+The local run recorded one accepted body hit, two forced trampoline misses,
+and zero storage errors. The adapter unit tests also verify conflicting inserts,
+foreign-key retention and expiration, corrupt/missing blobs, and recovery after
+a failed publication. Candidate hits and Wasmtime-accepted hits are reported
+separately; returning `Some` from the adapter alone is not the success criterion.
 
 ## README summary
 

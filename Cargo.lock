@@ -2428,16 +2428,19 @@ dependencies = [
  "blake3",
  "futures",
  "libc",
+ "log",
  "loom-model",
  "loom-process",
  "loom-proto",
  "loom-store",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
  "uuid",
  "wasmtime",
+ "wat",
 ]
 
 [[package]]
