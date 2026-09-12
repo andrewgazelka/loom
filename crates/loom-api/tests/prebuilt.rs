@@ -63,7 +63,7 @@ async fn workflow() -> anyhow::Result<()> {
         .env(RUNTIME_ROOT, runtime.path())
         .env("LOOM_HASH_RUSTC", &driver)
         .env("PATH", path)
-        .env_remove("RUSTC")
+        .env("RUSTC", &toolchain.rustc)
         .env_remove("RUSTUP_TOOLCHAIN")
         .output()
         .await?;

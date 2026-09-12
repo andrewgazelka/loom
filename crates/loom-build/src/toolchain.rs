@@ -71,23 +71,35 @@ async fn prebuilt(
     override_rustc: Option<std::ffi::OsString>,
 ) -> Result<GuestToolchain, BuildError> {
     let owner = format!("hash-rustc driver {}", driver.display());
+    if !driver.is_absolute() {
+        return Err(rejected(format!(
+            "{owner}: LOOM_HASH_RUSTC must be an absolute path"
+        )));
+    }
+    let rustc = override_rustc.map(PathBuf::from).ok_or_else(|| {
+        rejected(format!(
+            "{owner}: prebuilt driver requires an absolute RUSTC path"
+        ))
+    })?;
+    if !rustc.is_absolute() {
+        return Err(rejected(format!(
+            "{owner}: RUSTC {} must be an absolute path",
+            rustc.display()
+        )));
+    }
     let version = output(Command::new(driver).arg("-vV"), &owner).await?;
-    let sysroot = PathBuf::from(
-        output(Command::new(driver).args(["--print", "sysroot"]), &owner)
-            .await?
-            .trim(),
-    );
-    let sysroot = std::fs::canonicalize(&sysroot)
-        .map_err(|error| rejected(format!("{owner} sysroot {}: {error}", sysroot.display())))?;
-    let rustc = override_rustc
-        .map(PathBuf::from)
-        .unwrap_or_else(|| sysroot.join("bin/rustc"));
     let guest_version = output(
         Command::new(&rustc).arg("-vV"),
         &format!("guest compiler {}", rustc.display()),
     )
     .await?;
-    let guest_sysroot = PathBuf::from(
+    if guest_version != version {
+        return Err(rejected(format!(
+            "guest compiler {} is incompatible with {owner}: driver {version}guest {guest_version}",
+            rustc.display()
+        )));
+    }
+    let sysroot = PathBuf::from(
         output(
             Command::new(&rustc).args(["--print", "sysroot"]),
             &format!("guest compiler {}", rustc.display()),
@@ -95,32 +107,19 @@ async fn prebuilt(
         .await?
         .trim(),
     );
-    let canonical_guest_sysroot = std::fs::canonicalize(&guest_sysroot).map_err(|error| {
+    let sysroot = std::fs::canonicalize(&sysroot).map_err(|error| {
         rejected(format!(
             "guest compiler {} sysroot {}: {error}",
             rustc.display(),
-            guest_sysroot.display()
+            sysroot.display()
         ))
     })?;
-    if guest_version != version || canonical_guest_sysroot != sysroot {
-        return Err(rejected(format!(
-            "guest compiler {} is incompatible with {owner}: driver sysroot {}, guest sysroot {}; driver {version}guest {guest_version}",
-            rustc.display(),
-            sysroot.display(),
-            guest_sysroot.display()
-        )));
-    }
-    let cargo = sysroot.join("bin/cargo");
-    if !cargo.is_file() {
-        return Err(rejected(format!(
-            "{owner} guest cargo unavailable: {}",
-            cargo.display()
-        )));
-    }
+    // Guest dependency operations still use Cargo; resolving a prebuilt driver
+    // neither discovers nor invokes Cargo, rustup, or source build machinery.
     Ok(GuestToolchain {
         channel: None,
         rustc,
-        cargo,
+        cargo: sysroot.join("bin/cargo"),
         sysroot,
         version,
     })
@@ -302,16 +301,19 @@ mod tests {
             std::fs::write(path, script).unwrap();
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let error = prebuilt(&driver, Some(compiler.clone().into_os_string()))
-            .await
-            .err()
-            .expect("incompatible prebuilt compiler accepted")
-            .to_string();
-        assert!(error.contains(driver.to_str().unwrap()), "{error}");
-        assert!(error.contains(compiler.to_str().unwrap()), "{error}");
-        assert!(error.contains("incompatible"), "{error}");
-        if !different_version {
-            assert!(error.contains(other.to_str().unwrap()), "{error}");
+        let result = prebuilt(&driver, Some(compiler.clone().into_os_string())).await;
+        if different_version {
+            let error = result
+                .err()
+                .expect("incompatible prebuilt compiler accepted")
+                .to_string();
+            assert!(error.contains(driver.to_str().unwrap()), "{error}");
+            assert!(error.contains(compiler.to_str().unwrap()), "{error}");
+            assert!(error.contains("incompatible"), "{error}");
+        } else {
+            let toolchain = result.unwrap();
+            assert_eq!(toolchain.sysroot, std::fs::canonicalize(&other).unwrap());
+            assert!(toolchain.channel.is_none());
         }
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -324,7 +326,34 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn prebuilt_rejects_guest_sysroot_mismatch() {
+    async fn prebuilt_accepts_matching_version_with_different_sysroot() {
         reject_prebuilt_override(false).await;
+    }
+    #[tokio::test]
+    async fn prebuilt_requires_absolute_driver_and_explicit_absolute_rustc() {
+        for driver in [
+            Path::new("relative-driver"),
+            Path::new("/nonexistent/driver"),
+        ] {
+            let error = prebuilt(driver, None)
+                .await
+                .err()
+                .expect("invalid contract accepted")
+                .to_string();
+            assert!(error.contains(driver.to_str().unwrap()), "{error}");
+            assert!(error.contains("absolute"), "{error}");
+        }
+        let error = prebuilt(
+            Path::new("/nonexistent/driver"),
+            Some("relative-rustc".into()),
+        )
+        .await
+        .err()
+        .expect("relative RUSTC accepted")
+        .to_string();
+        assert!(
+            error.contains("relative-rustc") && error.contains("absolute"),
+            "{error}"
+        );
     }
 }

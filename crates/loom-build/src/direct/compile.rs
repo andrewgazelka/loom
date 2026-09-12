@@ -2,6 +2,7 @@ use super::*;
 
 pub(crate) struct Request<'a> {
     pub root: &'a Path,
+    pub selected_driver: Option<&'a Path>,
     pub cache: &'a Path,
     pub directory: &'a Path,
     pub definition: &'a CheckedDef,
@@ -15,6 +16,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
     let started = std::time::Instant::now();
     let Request {
         root,
+        selected_driver,
         cache,
         directory,
         definition,
@@ -32,7 +34,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
     let cache = cache_path.as_path();
     let directory = directory_path.as_path();
     let target_name = "wasm32-unknown-unknown";
-    let toolchain = crate::resolve_guest_toolchain_with_driver(root, Some(&driver.path)).await?;
+    let toolchain = crate::resolve_guest_toolchain_with_driver(root, selected_driver).await?;
     let sysroot = toolchain.sysroot.clone();
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"rustc-contract-v7-dependency-artifact-digests");
@@ -209,7 +211,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
         &target,
         isolated,
         Some(&sysroot),
-        Some(&driver.path),
+        selected_driver,
     )
     .await?;
     if !shareable {

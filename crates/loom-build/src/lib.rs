@@ -220,7 +220,7 @@ impl Builder {
         })
         .await?;
         sdk::reconcile(sdk::Rebuild {
-            driver: Some(&driver.path),
+            driver: self.driver_path.as_deref(),
             store: &self.store,
             root: &self.root,
             cache: &self.cache,
@@ -231,6 +231,7 @@ impl Builder {
         .await?;
         let materialization_ms = started.elapsed().as_millis();
         let mut built = direct::build(direct::Request {
+            selected_driver: self.driver_path.as_deref(),
             root: &self.root,
             cache: &self.cache,
             directory: &directory,
