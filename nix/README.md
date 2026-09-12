@@ -100,18 +100,27 @@ links it with `-Wl,-rpath,<sysroot>/lib`, so `hash-rustc -vV` answers from the
 store with no toolchain on `PATH`.
 
 It is built with `rustPlatform.buildRustPackage`, not `cargoUnit`, and its
-cargo is **nixpkgs'**, not the pinned toolchain's. The reason is local
-buildability on macOS: the official `aarch64-apple-darwin` cargo from
-static.rust-lang.org links `/usr/lib/libcurl`, whose LibreSSL reads
-`/private/etc/ssl/openssl.cnf` at startup. A Nix build sandbox denies that
-path, LibreSSL reports `Auto configuration failed`, and the process exits 1
-before cargo does anything; `sandbox-paths` does not cover `/private/etc`, and
-`allowed-impure-host-deps` cannot be widened from inside a derivation. Every
-cargoUnit stage runs `rustToolchain`'s own cargo, so cargoUnit would need a
-toolchain whose cargo comes from nixpkgs. `rustc` is unaffected, and rustc is
-what decides compiler identity, so the driver is still built by, and pinned
-to, the guest nightly. (Reproduce: run the pinned toolchain's `cargo
---version` inside any `runCommand`.)
+cargo is **nixpkgs'**, not the pinned toolchain's. Through cargoUnit this
+crate's `cargo-unit-graph.json` stage fails on aarch64-darwin, with both
+pinned toolchains, and the build log is only this:
+
+```
+Auto configuration failed
+...:Operation not permitted:...fopen('/private/etc/ssl/openssl.cnf', 'rb')
+```
+
+That is Apple's LibreSSL, reached through the `/usr/lib/libcurl` the official
+static.rust-lang.org cargo links, aborting because the build sandbox denies
+`/private/etc` (`sandbox-paths` does not cover it, and a derivation cannot
+widen `allowed-impure-host-deps`). The same `cargo build --unit-graph`
+command succeeds outside the sandbox, and the host workspace's own graph
+stage, same cargo, builds fine; what this crate does differently to reach
+curl at all is unresolved, and the open question is
+[docs/future/cargo-unit-hash-rustc.md](../docs/future/cargo-unit-hash-rustc.md).
+
+nixpkgs' cargo links nixpkgs' curl and openssl and is unaffected. Cargo is
+only the build driver here: `rustc` decides compiler identity, and rustc is
+the pinned nightly either way.
 
 `crates/loom-rt` has no build script. Its compilation-cache namespace is
 computed at engine construction from `Engine::precompile_compatibility_hash`
