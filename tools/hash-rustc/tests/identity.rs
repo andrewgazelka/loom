@@ -137,3 +137,42 @@ fn cycle_hashes_together() {
     assert_eq!(before.item("a").cycle.as_ref().unwrap().len(), 2);
     assert_eq!(before.item("a").cycle, before.item("b").cycle);
 }
+
+#[test]
+fn associated_type_shorthand_resolves_in_signatures_and_bodies() {
+    let source = "pub trait Source { type Item; type Other: Copy; fn get(x: Self::Item); } pub fn take<T: Source>(x: T::Item) -> T::Item { let y: T::Item = x; y }";
+    let first = compile(source);
+    let renamed = compile(
+        &source
+            .replace("T", "Renamed")
+            .replace("x:", "value:")
+            .replace("= x;", "= value;"),
+    );
+    assert_eq!(first.item("take").hash, renamed.item("take").hash);
+    let changed = compile(&source.replace("T::Item", "T::Other"));
+    assert_ne!(first.item("take").hash, changed.item("take").hash);
+}
+
+#[test]
+fn associated_type_shorthand_in_impl_signature() {
+    let source = "trait Source { type Item; fn get(x: Self::Item) -> Self::Item; } struct Value; impl Source for Value { type Item = u32; fn get(x: Self::Item) -> Self::Item { x } } pub fn entry(x: u32) -> u32 { Value::get(x) }";
+    let first = compile(source);
+    let renamed = compile(&source.replace("x", "argument"));
+    assert_eq!(first.entry(), renamed.entry());
+    let changed = compile(&source.replace("u32", "u64"));
+    assert_ne!(first.entry(), changed.entry());
+}
+
+#[test]
+fn distinct_associated_slots_do_not_collapse() {
+    let source = "pub trait Source { type First; type Second; } pub fn entry<T: Source>(value: T::First) -> T::First { value }";
+    let first = compile(source);
+    assert_eq!(
+        first.entry(),
+        compile(&source.replace("First", "Renamed")).entry()
+    );
+    assert_ne!(
+        first.entry(),
+        compile(&source.replace("T::First", "T::Second")).entry()
+    );
+}

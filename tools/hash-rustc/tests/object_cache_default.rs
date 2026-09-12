@@ -83,7 +83,7 @@ fn unset_cache_performs_no_hashing_or_cache_io() {
 #[test]
 fn entirely_unsupported_crate_bypasses_before_hir_encoding() {
     let root = tempfile::tempdir().unwrap();
-    // This is the unsupported signature shape found in the real guest SDK.
+    // HIR and mono hashing support this shape; object admission still rejects the pointer body.
     std::fs::write(root.path().join("input.rs"), "pub trait Invocation { type Args; fn arguments(args: Self::Args) -> Vec<u8>; } #[no_mangle] pub fn entry(input: *mut u8) -> *mut u8 { input }").unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_hash-rustc"))
         .current_dir(root.path())

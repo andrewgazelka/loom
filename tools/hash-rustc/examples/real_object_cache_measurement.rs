@@ -114,7 +114,10 @@ fn main() {
         let args: Vec<_> = args.collect();
         if let Some(index) = args.iter().position(|arg| arg == "--crate-name") {
             let name = &args[index + 1];
-            if name == "loom_guest_rs" || name == "loom_example_preview" {
+            if matches!(
+                name.as_str(),
+                "loom_guest_rs" | "loom_example_preview" | "loom_actor"
+            ) {
                 let invocation = Invocation {
                     args: args.clone(),
                     env: std::env::vars()
@@ -143,6 +146,7 @@ fn main() {
     let root = std::fs::canonicalize(args.next().expect("persistent staging path")).unwrap();
     let mode = args.next();
     let smoke = mode.as_deref() == Some("smoke");
+    let coverage = matches!(mode.as_deref(), Some("coverage" | "audit"));
     if mode.as_deref() == Some("coverage") {
         assert!(
             !root.join("workspace").exists()
@@ -169,24 +173,27 @@ fn main() {
         .unwrap();
     let workspace = root.join("workspace");
     if !root.join("loom_example_preview.json").exists() {
-        for directory in [
+        let mut directories = vec![
             "crates/loom-guest-rs",
             "crates/loom-proto",
             "crates/loom-guest-macros",
             "examples/rust-preview",
-        ] {
+        ];
+        if coverage {
+            directories.push("crates/loom-actor");
+        }
+        for directory in directories {
             copy_tree(&repo.join(directory), &workspace.join(directory));
         }
         std::fs::copy(repo.join("Cargo.lock"), workspace.join("Cargo.lock")).unwrap();
         std::fs::write(workspace.join("Cargo.toml"), "[workspace]\nresolver = \"3\"\nmembers = [\"crates/*\", \"examples/*\"]\n[profile.release]\nopt-level = 2\ndebug = 0\nstrip = \"none\"\nlto = false\nincremental = false\n").unwrap();
-        let status = Command::new("cargo")
-            .args([
-                "+nightly-2026-08-24",
-                "build",
-                "--release",
-                "-j4",
-                "--manifest-path",
-            ])
+        let mut cargo = Command::new("cargo");
+        cargo.args(["+nightly-2026-08-24", "build"]);
+        if coverage {
+            cargo.args(["-p", "loom-actor"]);
+        }
+        let status = cargo
+            .args(["--release", "-j4", "--manifest-path"])
             .arg(workspace.join("Cargo.toml"))
             .args(["-p", "loom-example-preview"])
             .env("RUSTC_WRAPPER", std::env::current_exe().unwrap())
@@ -197,7 +204,7 @@ fn main() {
             .unwrap();
         assert!(status.success());
     }
-    for fixture in [
+    let mut fixtures = vec![
         Fixture {
             name: "loom_guest_rs",
             source: "crates/loom-guest-rs/src/lib.rs",
@@ -210,7 +217,16 @@ fn main() {
             before: "intermediate\\n",
             after: "intermediate changed\\n",
         },
-    ] {
+    ];
+    if coverage {
+        fixtures.push(Fixture {
+            name: "loom_actor",
+            source: "crates/loom-actor/src/lib.rs",
+            before: "",
+            after: "",
+        });
+    }
+    for fixture in fixtures {
         if std::env::var("LOOM_BENCH_CRATE").is_ok_and(|name| name != fixture.name) {
             continue;
         }
@@ -220,7 +236,7 @@ fn main() {
         .unwrap();
         let source = workspace.join(fixture.source);
         let original = std::fs::read_to_string(repo.join(fixture.source)).unwrap();
-        if mode.as_deref() == Some("coverage") {
+        if coverage {
             std::fs::write(&source, &original).unwrap();
             let output = root.join(format!("{}-coverage-output", fixture.name));
             std::fs::create_dir_all(&output).unwrap();

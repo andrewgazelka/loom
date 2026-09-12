@@ -188,10 +188,12 @@ fn frame(bytes: &mut Vec<u8>, value: &[u8]) {
     bytes.extend_from_slice(value);
 }
 
-fn external(tcx: TyCtxt<'_>, id: DefId) -> blake3::Hash {
+pub(crate) fn external(tcx: TyCtxt<'_>, id: DefId) -> blake3::Hash {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(tcx.crate_name(id.krate).as_str().as_bytes());
-    hasher.update(&tcx.stable_crate_id(id.krate).as_u64().to_le_bytes());
+    let name = tcx.crate_name(id.krate);
+    hasher.update(&(name.as_str().len() as u64).to_le_bytes());
+    hasher.update(name.as_str().as_bytes());
+    hasher.update(&tcx.crate_hash(id.krate).as_u128().to_le_bytes());
     hasher.update(&tcx.def_path_hash(id).to_raw_def_path_hash().0);
     hasher.finalize()
 }

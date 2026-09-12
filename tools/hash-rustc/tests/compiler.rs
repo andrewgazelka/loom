@@ -322,17 +322,71 @@ fn assembly_template_is_hashed_without_spans() {
 }
 
 #[test]
-fn unsupported_signature_path_fails_without_identity() {
+fn associated_signature_path_produces_identity() {
     let directory = tempfile::tempdir().unwrap();
     let output = run(
         directory.path(),
         "trait Value { type Output; } pub fn entry<T: Value>(x: T::Output) -> T::Output { x }",
         &[],
     );
-    assert_eq!(output.status.code(), Some(1));
     assert!(
+        output.status.success(),
+        "{}",
         String::from_utf8_lossy(&output.stderr)
-            .contains("hash-rustc: unsupported type-relative path outside body in entry")
     );
-    assert!(!directory.path().join("hashes.json").exists());
+    assert!(directory.path().join("hashes.json").exists());
+}
+
+#[test]
+fn external_crate_content_changes_identity_with_fixed_metadata() {
+    let directory = tempfile::tempdir().unwrap();
+    let dependency = directory.path().join("dependency.rs");
+    let build_dependency = |literal: u32| {
+        std::fs::write(
+            &dependency,
+            format!("pub fn value() -> u32 {{ {literal} }}"),
+        )
+        .unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_hash-rustc"))
+            .current_dir(directory.path())
+            .args([
+                "dependency.rs",
+                "--crate-type=rlib",
+                "--crate-name=dependency",
+                "-Cmetadata=fixed",
+            ])
+            .env_remove("LOOM_OBJECT_CACHE")
+            .env_remove("LOOM_ITEM_HASHES")
+            .env_remove("LOOM_ITEM_COVERAGE")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    let source = "pub fn entry() -> u32 { dependency::value() }";
+    build_dependency(7);
+    assert!(
+        run(
+            directory.path(),
+            source,
+            &["--extern=dependency=libdependency.rlib"]
+        )
+        .status
+        .success()
+    );
+    let before = json(directory.path());
+    build_dependency(9);
+    assert!(
+        run(
+            directory.path(),
+            source,
+            &["--extern=dependency=libdependency.rlib"]
+        )
+        .status
+        .success()
+    );
+    assert_ne!(before["entry"], json(directory.path())["entry"]);
 }

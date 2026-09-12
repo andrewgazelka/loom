@@ -26,6 +26,7 @@ struct MonoReport {
     refused_unique_items: usize,
     refused_placements: usize,
     items: BTreeMap<String, String>,
+    hashes: BTreeMap<String, String>,
 }
 
 pub fn write(tcx: TyCtxt<'_>, path: &Path) {
@@ -66,18 +67,25 @@ pub fn write(tcx: TyCtxt<'_>, path: &Path) {
             }
         }
     }
+    let document = (report.refused == 0).then(|| crate::graph::collect(tcx));
     let partitions = tcx.collect_and_partition_mono_items(());
     report.mono.cgus = partitions.codegen_units.len();
     let mut unique = HashSet::new();
     for cgu in partitions.codegen_units {
         for item in cgu.items().keys() {
             report.mono.placements += 1;
-            let result = crate::object_cache::audit_item(tcx, *item);
+            let result = crate::mono::identity(tcx, *item, document.as_ref());
             if result.is_err() {
                 report.mono.refused_placements += 1;
             }
             if unique.insert(*item) {
                 report.mono.unique_items += 1;
+                if let Ok(identity) = &result {
+                    report.mono.hashes.insert(
+                        format!("{item:?}"),
+                        blake3::hash(&identity.bytes).to_hex().to_string(),
+                    );
+                }
                 if let Err(reason) = result {
                     report.mono.refused_unique_items += 1;
                     report.mono.items.insert(format!("{item:?}"), reason);

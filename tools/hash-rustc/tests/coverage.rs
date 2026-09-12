@@ -1,7 +1,7 @@
 use std::process::Command;
 
 #[test]
-fn audits_each_item_without_hiding_normal_refusals() {
+fn audits_and_hashes_associated_types_and_pointer_instances() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(
         root.path().join("input.rs"),
@@ -28,19 +28,23 @@ fn audits_each_item_without_hiding_normal_refusals() {
     let report: serde_json::Value =
         serde_json::from_slice(&std::fs::read(root.path().join("coverage.json")).unwrap()).unwrap();
     assert_eq!(report["candidates"], 8);
-    assert_eq!(report["refused"], 2);
-    assert_eq!(report["encoded"], 6);
-    assert_eq!(report["reasons"]["type-relative path outside body"], 2);
+    assert_eq!(report["refused"], 0);
+    assert_eq!(report["encoded"], 8);
+    assert!(report["reasons"].as_object().unwrap().is_empty());
     assert_eq!(report["mono"]["unique_items"], 2);
-    assert_eq!(report["mono"]["refused_unique_items"], 1);
-    // Auditing must not turn a normal hashing refusal into a partial hash file.
+    assert_eq!(report["mono"]["refused_unique_items"], 0);
+    assert_eq!(report["mono"]["hashes"].as_object().unwrap().len(), 2);
+    // The audit and ordinary hashing must agree on this formerly refused surface.
     let output = command
         .env_remove("LOOM_ITEM_COVERAGE")
         .env("LOOM_ITEM_HASHES", root.path().join("hashes.json"))
         .env("LOOM_ITEM_PREIMAGES", root.path().join("preimages"))
         .output()
         .unwrap();
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("type-relative path outside body"));
-    assert!(!root.path().join("hashes.json").exists());
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(root.path().join("hashes.json").exists());
 }

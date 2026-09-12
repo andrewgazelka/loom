@@ -9,6 +9,17 @@ use super::Encoder;
 impl<'tcx> Encoder<'tcx> {
     pub(super) fn item(&mut self, id: LocalDefId) {
         let parent = self.tcx.local_parent(id);
+        if self.tcx.def_kind(id) == DefKind::AssocTy {
+            self.text("associated-type-slot");
+            let slot = self
+                .tcx
+                .associated_item_def_ids(parent)
+                .iter()
+                .filter(|member| self.tcx.def_kind(**member) == DefKind::AssocTy)
+                .position(|member| *member == id.to_def_id())
+                .expect("associated type belongs to its container");
+            self.scalar(slot);
+        }
         if matches!(self.tcx.def_kind(parent), DefKind::Impl { .. }) {
             let hir::Node::Item(parent) = self.tcx.hir_node_by_def_id(parent) else {
                 unreachable!()

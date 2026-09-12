@@ -21,7 +21,7 @@ LOOM_ITEM_HASHES=/tmp/items.json LOOM_ITEM_PREIMAGES=/tmp/item-preimages \
   --edition=2024 --crate-type=rlib /path/to/definition.rs
 ```
 
-From the repository root, the five required identity checks are `cargo +nightly-2026-08-24 test --manifest-path tools/hash-rustc/Cargo.toml --test identity`.
+From the repository root, the identity checks are `cargo +nightly-2026-08-24 test --manifest-path tools/hash-rustc/Cargo.toml --test identity`.
 
 Arguments go unchanged to `rustc_driver::run_compiler`. The driver's default sysroot is the compiler it was built against; an explicit `--sysroot` wins. The binary embeds an rpath to that compiler's libraries. Keep that toolchain installed while using the binary. Without `LOOM_ITEM_HASHES`, the callback does no hashing. With it, `LOOM_ITEM_PREIMAGES=<directory>` is also required. An old JSON output is removed before compilation; the driver writes preimages after successful compilation and then publishes the JSON. Version and help queries do not produce a document. A hashing or side-output error fails the command and names the problem. rustc's ordinary diagnostics and artifact production remain active.
 
@@ -44,19 +44,19 @@ Entries are public functions at the crate root and the original items annotated 
 
 ## Identity rules
 
-Each definition becomes an ordered, framed HIR stream, prefixed with `loom-hir-v1`. Node kinds, operators, literals, signatures, explicit generic arguments, bounds, pattern structure, and statement order are retained. Span offsets, hygiene numbers, HIR allocation IDs, local variable spellings, and the definition's own ordinary name are absent. Local uses encode the reverse position of their resolved binder in the lexical binding stack, so shadowed variables remain distinct. Generic parameters use declaration positions. Labels encode their resolved control-flow target's position. Generic bodies are hashed once, without monomorphization.
+Each definition becomes an ordered, framed HIR stream, prefixed with `loom-hir-v2`. Node kinds, operators, literals, signatures, explicit generic arguments, bounds, pattern structure, and statement order are retained. Span offsets, hygiene numbers, HIR allocation IDs, local variable spellings, and the definition's own ordinary name are absent. Local uses encode the reverse position of their resolved binder in the lexical binding stack, so shadowed variables remain distinct. Generic parameters use declaration positions. Labels encode their resolved control-flow target's position. Generic bodies are hashed once, without monomorphization.
 
 Named field and enum-variant spellings remain part of type structure. Representation options and resolved function attributes such as `track_caller`, target features, linkage, and instrumentation are included. Compiler optimization settings and the `inline`/`optimize` hints are not. Exported or imported symbol names are retained when the name is part of linkage. Inline assembly records its template, operands, options, and symbol referents without diagnostic spans.
 
 An ordinary local reference contributes the referent's 32-byte hash. Constructors and variants contribute their structural position and the enclosing type's hash. Hashing proceeds from dependency sinks toward callers. For a strongly connected component, members are sorted by def path; internal references become member indices. Concatenate the length-framed member streams and BLAKE3-hash that cycle. Each member gets `blake3(cycle_hash || u64_le(member_index))`. Member paths select the order but are not themselves hashed. Identically structured cycles with the same relative member order therefore have identical member hashes, even in different modules.
 
-An external reference is `blake3(crate_name_utf8 || u64_le(stable_crate_id) || DefPathHash_bytes)`. Here `stable_crate_id` is rustc's metadata-derived stable crate identity, not the dependency's source or rlib digest. Changing dependency bytes without changing that identity is outside this hash's guarantees. The build record must retain dependency and artifact identity separately.
+An external reference is `blake3(u64_le(crate_name_utf8.len) || crate_name_utf8 || u128_le(crate_hash) || DefPathHash_bytes)`. The crate hash is rustc's strict version hash from `tcx.crate_hash`, not its stable crate ID. The fixed-metadata dependency regression changes the dependency body while preserving its name and metadata argument, and verifies that the referring item changes.
 
 Dot calls resolve through the body's `tcx.typeck(owner).type_dependent_def_id(call_hir_id)`. Inherent calls refer to the one selected inherent method. Trait calls refer to the trait method DefId, including explicit UFCS calls that initially identify an implementation method. **The implementation selected at monomorphization is not part of identity.** Overloaded operators expose their type-dependent referents through the same table. This is the requested generic-definition identity, not a proof that all executable instantiations behave identically.
 
 ## Canonical encoding and checkable preimages
 
-The existing `loom-hir-v1` byte encoding is unchanged. Files have no extension, compression, text conversion, or trailing newline. Each distinct item hash names `<LOOM_ITEM_PREIMAGES>/<hash>`, and hashing the complete file with BLAKE3 must produce that lowercase hexadecimal filename. Definitions with the same hash share one file. Existing identical files are reused; conflicting bytes fail the build without overwriting them. The directory retains immutable objects from previous builds; the successful JSON selects the current set. No directory is deleted during cleanup. A normal write failure removes its newly created partial file; an interrupted process can leave an incomplete file that a later build rejects.
+The current stream is `loom-hir-v2`. It replaces v1 because external references now include dependency content hashes and associated types include their container slot. Recompute item identities from source when importing v1 data; existing immutable preimages remain valid historical objects and must not be relabeled as v2. The object-cache format also changes, so existing cache entries cannot match the new keys. Files have no extension, compression, text conversion, or trailing newline. Each distinct item hash names `<LOOM_ITEM_PREIMAGES>/<hash>`, and hashing the complete file with BLAKE3 must produce that lowercase hexadecimal filename. Definitions with the same hash share one file. Existing identical files are reused; conflicting bytes fail the build without overwriting them. The directory retains immutable objects from previous builds; the successful JSON selects the current set. No directory is deleted during cleanup. A normal write failure removes its newly created partial file; an interrupted process can leave an incomplete file that a later build rejects.
 
 All framing integers below are unsigned 64-bit little-endian, and all hash payloads are raw 32-byte BLAKE3 digests, never their hexadecimal spelling. An ordinary item is a sequence of tokens concatenated with no separator:
 
@@ -66,11 +66,11 @@ All framing integers below are unsigned 64-bit little-endian, and all hash paylo
 | `01` | `u64_le(member_index)` | Reference inside the current recursive component |
 | `02` | 32 digest bytes | Reference to an already-hashed local item or an external referent |
 
-The first token is atom `loom-hir-v1`: `00 0b 00 00 00 00 00 00 00` followed by its eleven UTF-8 bytes. Atoms are generated in the order specified by `tools/hash-rustc/src/encode.rs` and `src/encode/*.rs`. These source files are the normative v1 node schema. Structural traversal uses this pinned rustc's `rustc_hir::intravisit` walkers except where those encoders explicitly replace traversal. Another HIR producer must implement that schema, not use pretty-printed Rust or rustc's incremental hash.
+The first token is atom `loom-hir-v2`: `00 0b 00 00 00 00 00 00 00` followed by its eleven UTF-8 bytes. Atoms are generated in the order specified by `tools/hash-rustc/src/encode.rs` and `src/encode/*.rs`. These source files are the normative v2 node schema. Structural traversal uses this pinned rustc's `rustc_hir::intravisit` walkers except where those encoders explicitly replace traversal. Another HIR producer must implement that schema, not use pretty-printed Rust or rustc's incremental hash.
 
 In that schema, `text(value)` emits the UTF-8 bytes of `value`; `scalar(value)` emits its pinned Rust `Debug` representation as UTF-8; `tag(value)` emits two atoms, the pinned Rust `type_name` for the value's type and `Debug` of its enum discriminant, such as `Discriminant(0)`. `end()` is the atom `end`. Literal spellings and escapes therefore follow the pinned HIR literal `Debug` implementation. Lengths count bytes, not characters. This deliberately makes both the exact rustc version and encoder schema necessary to reproduce atoms from HIR. No locale-dependent formatting or source-span Debug output is used.
 
-Binder uses are atoms `local-debruijn` and the decimal reverse binding-stack position. Generic uses are atoms `generic-position` and the decimal declaration position. References replace their original name tokens using the binary `01` or `02` token above. Metadata, signatures, delimiters, and node-specific atoms follow the encoder modules' explicit order; the schema includes every emitted atom even when two Rust syntaxes could have equivalent behavior. Constructor/variant adapters emit their kind and disambiguator atom, plus a variant-position payload where applicable, before the enclosing type reference. In v1 that variant payload uses the pinned host's `usize::to_le_bytes()` width (eight bytes on the verified aarch64 host); cross-host compatibility is not claimed.
+Binder uses are atoms `local-debruijn` and the decimal reverse binding-stack position. Generic uses are atoms `generic-position` and the decimal declaration position. References replace their original name tokens using the binary `01` or `02` token above. Metadata, signatures, delimiters, and node-specific atoms follow the encoder modules' explicit order; the schema includes every emitted atom even when two Rust syntaxes could have equivalent behavior. Constructor/variant adapters emit their kind and disambiguator atom, plus a variant-position payload where applicable, before the enclosing type reference. In v2 that variant payload uses the pinned host's `usize::to_le_bytes()` width (eight bytes on the verified aarch64 host); cross-host compatibility is not claimed.
 
 Cycles require two levels because the original contract defines a member hash as `blake3(cycle_hash || index)`. Its item preimage is therefore exactly 40 bytes: the raw cycle digest followed by `u64_le(index)`. It cannot simultaneously be a standalone HIR stream while preserving that hash rule. The full normalized HIR is checkable through `<LOOM_ITEM_PREIMAGES>/cycles/<cycle_hash>`, whose bytes are `u64_le(length(member_0_stream)) || member_0_stream || ...`, in sorted def-path order, with no leading count or trailing bytes. Internal references in those streams use tag `01`; outgoing references use tag `02`. A self-recursive definition uses the same format with one member.
 
@@ -78,13 +78,13 @@ To verify a cyclic item independently, hash its 40-byte file, extract the first 
 
 ## What changes a hash
 
-Changing a literal, operator, signature, resolved callee, reachable helper, included representation, or included attribute changes that item's stream and propagates through its callers. Editing either member of a recursive cycle changes all its member hashes. Adding or editing an unreachable helper changes that helper's hash without changing an unrelated entry. Formatting, comments, local alpha-renaming, and declaration reordering do not change entry hashes.
+Changing a literal, operator, signature, resolved callee, reachable helper, included representation, or included attribute changes that item's stream and propagates through its callers. Editing either member of a recursive cycle changes all its member hashes. Adding or editing an unreachable helper changes that helper's hash without changing an unrelated entry. Formatting, comments, local alpha-renaming, and ordinary declaration reordering do not change entry hashes. Associated types carry their zero-based position among their container's associated types: renaming a slot is free, but reordering slots can change identity. This distinguishes two otherwise identical unbounded associated types.
 
 The remaining over-approximations are specific: every HIR branch contributes even when its condition is statically false; merely referring to a function value creates an edge even if it is never called; explicit bounds and generic argument syntax contribute even when inference could recover them; literal kinds, suffixes, and string styles are retained; referencing an ADT includes all its fields and variants; field and variant names remain significant; included linkage and instrumentation flags may change identity without changing a particular invocation's result. Cycle renaming that changes lexical member order may change member hashes.
 
 There are also exclusions, which must not be mistaken for over-approximations. Trait implementation selection, implicit drop glue, implicit coercion/adjustment machinery, linker inputs, global assembly, layout-randomization seeds, and runtime state are not transitively expanded. An actor marker selects its struct; trait-dispatched actor implementation bodies do not automatically become dependencies of that struct. Macro-expanded literals from `file!`, `line!`, or `include_str!` are real HIR content and can change hashes. These limits make the separate Wasm and toolchain identities necessary.
 
-The initial encoder fails explicitly on delegated type inference, unsupported local referent kinds, and type-relative paths that lack a body type-checking resolution, including some shorthand associated types in item signatures. It does not substitute source text, unresolved names, or a whole-crate hash. Other unhandled forms must receive an encoder and a fixture before the supported surface is widened. Changing the encoder schema requires a new stream version and rehashing stored definitions. Cross-nightly hash compatibility is not promised.
+The encoder fails explicitly on delegated type inference, unsupported local referent kinds, and missing compiler resolution states. Associated-type shorthand in signatures and bodies is supported as described below. It does not substitute source text, unresolved names, or a whole-crate hash. Other unhandled forms must receive an encoder and a fixture before the supported surface is widened. Changing the encoder schema requires a new stream version and rehashing stored definitions. Cross-nightly hash compatibility is not promised.
 
 ## Seam for loom-build
 
@@ -157,11 +157,11 @@ CGUs bypassed for unsupported inputs count as misses. Diagnostic lines begin `ob
 
 ### Key and supported code
 
-The format is `loom-object-v1-macho-scalar`. Every field uses an unsigned 64-bit little-endian length followed by its bytes. The CGU key is BLAKE3 over the format, the compiler settings described below, the sorted mono-item fingerprints, and a canonical binding map for referenced symbols. A fingerprint starts with the existing definition's HIR content hash; a generic instance adds BLAKE3 hashes of the substituted structural scalar types, with lifetimes erased. It also includes `inline`/`optimize` attributes and the lowered MIR's scalar local types, statements, control flow, and resolved direct callees. A callee contributes its actual monomorphized implementation's fingerprint, including trait implementation bodies. CGU membership records linkage, visibility, and local-copy status. Spans, local variable names, crate names, and ordinary function symbol names do not enter this object identity.
+The current format is `loom-object-v2-macho-mono`. Every field uses an unsigned 64-bit little-endian length followed by its bytes. The CGU key is BLAKE3 over the format, the compiler settings described below, the sorted mono-item fingerprints, and a canonical binding map for referenced symbols. A fingerprint starts with the existing definition's HIR content hash; a generic instance appends the canonical structural argument encoding described below, with lifetimes erased. It also includes `inline`/`optimize` attributes and the lowered MIR's scalar local types, statements, control flow, and resolved direct callees. A callee contributes its actual monomorphized implementation's fingerprint, including trait implementation bodies. CGU membership records linkage, visibility, and local-copy status. Spans, local variable names, and ordinary local function symbol names do not enter this object identity. External referents include their owning crate name and content hash. External object refinements also include the instantiating crate's stable identity, which fixes its unmapped relocation namespace.
 
-The lowered-code refinement is necessary: the HIR identity above deliberately omits selected trait implementations, implicit adjustments, and optimization hints. Reusing objects under that identity alone could execute stale code. The existing HIR identity and JSON format are unchanged. Compiler-private debug representations used for lowered scalar operations and settings are covered by the exact compiler version in the key; they are not a cross-nightly interchange format.
+The lowered-code refinement is necessary: the HIR identity above deliberately omits selected trait implementations, implicit adjustments, and optimization hints. Reusing objects under that identity alone could execute stale code. The HIR stream is v2; the item-document JSON shape is unchanged. Compiler-private debug representations used for lowered scalar operations and settings are covered by the exact compiler version in the key; they are not a cross-nightly interchange format.
 
-Admission currently covers local ordinary functions with primitive scalar values or unit, primitive type instantiations, branches, and acyclic resolved direct calls to other admitted local functions. A CGU is cached only if every mono item has a supported identity. Static objects, global assembly, external monomorphizations, compiler shims, const generics, aggregate/reference/pointer layouts, indirect calls, recursive mono call graphs, implicit drop, inline assembly, and source-location-dependent panic or `track_caller` calls bypass with an explicit reason. Calls that MIR has already inlined are covered by the resulting lowered code. This is a conservative object-cache implementation, not a claim that a generic HIR hash identifies every Rust executable realization.
+Admission covers local ordinary functions with primitive scalar values or unit, primitive type instantiations, branches, and acyclic resolved direct calls to admitted functions. It also covers external instances and shims whose substitutions refer only to external definitions. A CGU is cached only if every mono item passes codegen admission. Static objects, global assembly, external instances with local substitutions, local compiler shims, local const generics, aggregate/reference/pointer local MIR, indirect calls, recursive mono call graphs, implicit local drop, inline assembly, and source-location-dependent local panic or `track_caller` calls bypass with an explicit reason. Calls that MIR has already inlined are covered by the resulting lowered code. This is a conservative object-cache implementation, not a claim that a generic HIR hash identifies every Rust executable realization.
 
 The settings include the exact pinned `rustc -vV` output, built-in target triple and complete target configuration, effective optimization/debug-assertion/overflow/panic settings, edition, path remapping, and `MACOSX_DEPLOYMENT_TARGET`, `SDKROOT`, and `SOURCE_DATE_EPOCH`. The supported explicit `-C` flags are:
 
@@ -179,7 +179,7 @@ Every accepted flag's actual session value, including its default, enters the ke
 
 ### Symbols, publication, and the compiler boundary
 
-Rust symbols normally include the crate identity. Before publication, the pinned toolchain's `llvm-objcopy` renames definitions and admitted local call references to canonical names derived from the cache key and binding position. On a hit it maps those names to the current compilation's symbols. Both the cache object and the original executable linkage therefore survive changing the crate name. The cross-crate tests use ordinary Rust-mangled public functions, not `no_mangle` fixtures. Functions are placed in distinct modules to obtain distinct CGUs; `#[inline(never)]` and the CGU count alone do not promise one CGU per function.
+Rust symbols normally include the crate identity. Before publication, the pinned toolchain's `llvm-objcopy` renames definitions and admitted local call references to canonical names derived from the cache key and binding position. On a hit it maps those names to the current compilation's symbols. Admitted local scalar objects can therefore survive changing the crate name. External objects retain unmapped generic-call relocations, so their keys include the instantiating crate's stable identity, including its metadata discriminator. They can reuse after a one-function edit within that namespace; a crate rename makes them miss. A renamed-crate external aggregate regression first reproduced undefined linker symbols without this field and now links and executes successfully. The cross-crate tests use ordinary Rust-mangled public functions, not `no_mangle` fixtures. Functions are placed in distinct modules to obtain distinct CGUs; `#[inline(never)]` and the CGU count alone do not promise one CGU per function.
 
 The directory contains `<key>.o`, `<key>.json` with the object digest/size and canonical symbol list, and `<key>.index.jsonl` with one JSON line containing `key`, `item_count`, `bytes`, and a Unix-seconds `created` timestamp. Per-entry index shards avoid concurrent appends to a shared index. Readers validate the full object digest, size, and symbol mapping. Invalid entries fail compilation. No global lock is used.
 
@@ -238,7 +238,7 @@ The SDK smoke test exposed eager HIR hashing of unsupported `Invocation::argumen
 
 ## Coverage gap
 
-The HIR item encoder and the cache's monomorphized-item encoder have different admission rules. `LOOM_ITEM_COVERAGE=<report.json>` audits both explicitly and continues ordinary compilation. It records every directly refused item and its first refusal reason, instead of stopping at the first rejected CGU. The ordinary hashing path still fails on unsupported input; the audit does not publish incomplete item hashes or cache objects.
+The following inventory and counts describe the pre-coverage baseline. The current encoder and cache admission rules follow in “Coverage closure”. At baseline, the HIR item encoder and the cache's monomorphized-item encoder had different admission rules. `LOOM_ITEM_COVERAGE=<report.json>` audits both explicitly and continues ordinary compilation. It records every directly refused item and its first refusal reason, instead of stopping at the first rejected CGU. The ordinary hashing path still fails on unsupported input; the audit does not publish incomplete item hashes or cache objects.
 
 The HIR encoder's complete explicit refusal inventory (`encode.rs`, `encode/{items,types,expressions,visitor}.rs`, and `graph.rs`) is:
 
@@ -284,3 +284,74 @@ target/debug/examples/real_object_cache_measurement \
 ```
 
 This builds dependencies once, captures Cargo's real root-crate compiler invocations, and audits both root crates without enabling the object cache. Reusing a staging directory in coverage mode is rejected to prevent mixing source snapshots. Each `<crate>-coverage.json` contains the individual refused item names and reasons; `<crate>-coverage-output/stderr.log` preserves compiler diagnostics. Diagnostic runs are separate from the timing samples.
+
+
+## Coverage closure
+
+The diagnostic now constructs actual mono identities through `src/mono.rs`, the same canonical encoder used by the object cache. Its `mono.hashes` map contains BLAKE3 digests of successful preimages. Hashability and object-cache eligibility are separate: a complete mono identity does not by itself describe all selected implementations, relocations, or source-location-sensitive generated code. The earlier baseline mono numbers measured cache admission, before there was a structural mono encoder.
+
+### Canonical additions
+
+- Associated-type shorthand such as `Self::Args` and `T::Item` emits the resolved associated definition, the structural receiver type, and explicit generic arguments. Body resolution uses rustc's type-dependent table where it has an entry; type nodes without that entry use `rustc_hir_analysis::lower_ty` and its resolved alias definition. This covers signatures and Serde-generated body annotations. No unresolved spelling or source-text hash is substituted. Associated-type definitions include their positional slot as described above.
+- An ordinary function instance hashes as `blake3(generic_definition_hash_bytes || canonical_generic_args)`. The definition digest is raw 32-byte BLAKE3. External definitions use the framed crate name, strict crate hash, and DefPathHash encoding above. Constructors, closures, coroutines, and other nested definitions without an independent HIR owner use a tagged nested-definition digest containing their kind, lexical disambiguator, enclosing definition's content hash, and a variant index where applicable. Their enclosing HIR contains the nested body.
+- Every mono argument stream starts with the framed atom `generic-args-v1` and the framed decimal argument count. Each argument carries a kind atom. Lifetimes emit `erased-region`; types recursively encode their variant and fields; constants encode their evaluated type and value tree. All atoms use an unsigned 64-bit little-endian byte length followed by payload bytes. Enum discriminants and scalar metadata use the pinned compiler's Debug representation; names, allocator IDs, and diagnostic spans are absent.
+- Structural type encoding covers primitives, references and raw pointers with mutability, arrays with their evaluated length, slices, strings, tuples, ADTs with referent hashes and recursive arguments, function items, function pointers with signature/ABI/safety and binder kinds, trait objects with trait/projection referents and arguments, closures, coroutines and witnesses, foreign types, and unsafe binders. Parameter and bound-variable positions are structural. ADTs refer to their definition hash instead of recursively expanding fields, so recursive types terminate. Higher-ranked binder spellings are discarded.
+- Const values use typed value trees. A leaf records its byte width and 128-bit little-endian scalar bits. A branch records its child count and recursively encoded typed children. Unevaluated consts remain refusals.
+- Compiler-generated instances use a synthetic generic-definition digest containing their referent, instance/shim kind, and every kind-specific field: virtual slot, reification reason, callable/drop/clone type, closure referent, track-caller bit, coroutine receiver mode, or future-drop types. Their substitutions then use the same argument encoder. Static mono items use a `static` tag and the HIR referent digest.
+
+The remaining explicit HIR refusals are delegated inference, error nodes, unresolved paths/methods/locals/control-flow targets, unsupported owner or referent kinds, type-relative non-type paths without body resolution, and type-relative type paths without a resolved projection. Remaining mono refusals are global assembly without an independent HIR identity, missing local referent identity, unevaluated consts, alias/inference/error/placeholder types, and pattern types. **Each category has count zero in all three audited crates.** These states require a defined canonical representation before admission; the encoder returns the named refusal and publishes no substitute hash.
+
+### Before and after
+
+The baseline used a preserved copy of the original driver. Both runs replayed the same Cargo invocations and staged source at native `aarch64-apple-darwin`, `-C opt-level=2 -C lto=off -C embed-bitcode=no`. The actor dependencies were built with the pinned nightly on this Mac. Its existing `recursion_depth_exceeding_limit` warning is preserved in stderr; compilation and both audits exited successfully.
+
+Before:
+
+```text
+loom_guest_rs item-coverage: candidates=209 encoded=164 refused=45
+loom_guest_rs mono-coverage: cgus=16 unique_items=1438 refused_unique_items=1438 placements=1853 refused_placements=1853
+loom_example_preview item-coverage: candidates=16 encoded=16 refused=0
+loom_example_preview mono-coverage: cgus=10 unique_items=1055 refused_unique_items=1055 placements=1322 refused_placements=1322
+loom_actor item-coverage: candidates=1195 encoded=906 refused=289
+loom_actor mono-coverage: cgus=16 unique_items=11087 refused_unique_items=11087 placements=19707 refused_placements=19707
+```
+
+After:
+
+```text
+loom_guest_rs item-coverage: candidates=209 encoded=209 refused=0
+loom_guest_rs mono-coverage: cgus=16 unique_items=1438 refused_unique_items=0 placements=1853 refused_placements=0
+loom_example_preview item-coverage: candidates=16 encoded=16 refused=0
+loom_example_preview mono-coverage: cgus=10 unique_items=1055 refused_unique_items=0 placements=1322 refused_placements=0
+loom_actor item-coverage: candidates=1195 encoded=1195 refused=0
+loom_actor mono-coverage: cgus=16 unique_items=11087 refused_unique_items=0 placements=19707 refused_placements=0
+```
+
+Fresh coverage mode now stages and audits all three crates. `audit` mode reuses a captured stage for encoder-only changes without rebuilding dependencies:
+
+```sh
+cd tools/hash-rustc
+cargo build --release --bin hash-rustc --example real_object_cache_measurement
+coverage_stage=$(mktemp -d "$PWD/target/item-coverage.XXXXXX")
+target/release/examples/real_object_cache_measurement target/release/hash-rustc "$coverage_stage" coverage
+target/release/examples/real_object_cache_measurement target/release/hash-rustc "$coverage_stage" audit
+```
+
+Reuse `audit` only while the staged source and dependency artifacts are unchanged. Source changes require a fresh stage. The optional `LOOM_BENCH_CRATE` filter selects one captured crate.
+
+### Object-cache eligibility and measurements
+
+External instances, including shims, are eligible when their entire canonical identity refers only to external definitions. Their dependency crate hashes cover the compiled definitions; substitutions containing local types or closures remain ineligible because they can select local implementations. Their object refinements also include the instantiating crate's stable identity to protect unmapped external generic-call relocations. This restriction is only in the object key, not the canonical mono hash. Local functions retain the explicit scalar-MIR and resolved-callee admission checks. Static/global-assembly units, aggregate local MIR, unresolved/indirect calls, recursive call graphs, track-caller calls, and unsupported terminators still bypass with a reason. A mono hash is never treated as sufficient evidence to admit those objects.
+
+The native regressions execute code from reused external aggregate objects after a one-function edit and verify that a changed local Drop implementation cannot restore stale external generic code. Existing cross-crate symbol relocation and selected-trait-implementation regressions still pass. The default remains opt-in.
+
+The five-trial measurements below use the same one-function edits and alternating trial order as the earlier measurements, with the release driver:
+
+```text
+object-cache real measurement: crate=loom_guest_rs opt_level=2 trials=5 cgus=16 hits=6 misses=10 bytes_reused=156080 median_with_cache_ms=883.364 median_without_cache_ms=1120.808 hashing_ms=21.644 llvm_ms=2153.142 lookup_ms=2.171 object_copy_ms=206.083
+object-cache real measurement: crate=loom_example_preview opt_level=2 trials=5 cgus=10 hits=6 misses=4 bytes_reused=194192 median_with_cache_ms=590.386 median_without_cache_ms=709.234 hashing_ms=12.558 llvm_ms=735.839 lookup_ms=1.932 object_copy_ms=172.896
+```
+
+Both second builds reused six CGUs in every trial: 6/16 for the SDK and 6/10 for preview. These medians are about 21% and 17% lower with caching, respectively. Other workloads were active on this Mac, and earlier trials varied substantially; the result establishes real object reuse and these observed medians, not a general speedup. The cache remains disabled by default.
+
+The final suite has 62 passing tests, including structural mono substitutions, associated-type slots, external dependency content invalidation, and native relocation/drop regressions. `cargo fmt --all --check` and `cargo clippy --all-targets -- -D warnings` also pass.
