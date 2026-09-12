@@ -73,7 +73,9 @@ impl Driver {
             .unwrap_or_else(|| target.join("release/hash-rustc"));
         if selected.is_none() {
             // Cargo's freshness check covers changes in the independently pinned driver.
-            let output = Command::new(&toolchain.cargo)
+            let mut build = Command::new(&toolchain.cargo);
+            crate::direct::host_linker(&mut build);
+            let output = build
                 .current_dir(&source)
                 .env("RUSTC", toolchain.sysroot.join("bin/rustc"))
                 .env_remove("RUSTC_WRAPPER")
@@ -87,7 +89,6 @@ impl Driver {
                 .env_remove("RUSTFLAGS")
                 .env_remove("CARGO_ENCODED_RUSTFLAGS")
                 .env("CARGO_TARGET_DIR", &target)
-                .env("CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER", "/usr/bin/cc")
                 .args(["build", "--release", "--locked", "--bin", "hash-rustc"])
                 .output()
                 .await
