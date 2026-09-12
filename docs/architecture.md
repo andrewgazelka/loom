@@ -161,6 +161,8 @@ Lineage is `SELECT * FROM code_changes ORDER BY seq` on the actor's own file: it
 
 ## 9. Roadmap
 
+Open items with triggers and done-when checks live in [docs/future/](future/README.md), one file each.
+
 - **Round 1 (landed, `58bee73`).** Shared execution (core wasm, fibers, safe-code admission), guest-defined algebraic effect handlers, content-addressed handler linking. Done-when: `bun scripts/bench/effects-handlers.ts` at 13/13, `bun scripts/bench/shared-execution.ts` at 7/7.
 - **Round 2.** MCP surface consolidation, README rewrite (Rust-first, under 200 lines), repository rename follow-through. Done-when: README is the single onboarding doc under 200 lines and the four current MCP tools are its documented entrypoint.
 - **Round 3 (this doc's "in progress" items).** `hash-rustc` item-level behavior hashing, `code_changes.behavior_hash`/`wasm_hash`/`toolchain_hash`, memoized validation, clippy-clean workspace, always-up durability (object store, leases). Guest-language and interface removal is complete: Rust guests execute only as core wasm. Remaining done-when: `tools/hash-rustc` exists and is the source of `code_changes.behavior_hash`; `cargo clippy --workspace` is clean; a `local`/`remote` durability tier exists and is tested against machine loss.
