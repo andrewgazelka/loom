@@ -6,6 +6,46 @@ Loom executes Rust core WebAssembly definitions in `loom-rt`. Definitions, core 
 
 The long-term goal is a formally verified guest language, compiler, and runtime contract. If their checked guarantees cover direct memory interaction, we can revisit the isolation design on that basis. Until then, separate Wasm memories and DAG-CBOR remain the execution model.
 
+## Try it
+
+Start the browser REPL, HTTP API, and MCP endpoint on `127.0.0.1:8787`:
+
+```sh
+nix run --builders '' .#repl
+```
+
+The launcher prints `Token file: <path>` and opens `http://127.0.0.1:8787/#token=<token>`. Export `LOOM_TOKEN` from that file and `LOOM_URL=http://127.0.0.1:8787` in your CLI terminal. Follow the [README command sequence](../README.md#try-it) to add, view, run, update, and replay the guests in `examples/unison/`.
+
+The proof checks these results in order:
+
+1. `loom add examples/unison/greet.rs` returns a definition hash and an empty inferred effect row.
+2. `loom view <hash>` returns the exact stored source and two items after the input file has been moved away.
+3. `loom run greet '"loom"'` returns `"hello, loom"` with an empty effects list.
+4. Updating with `greet-v2.rs` only renames a local and keeps the hash. Updating with `greet-v3.rs` changes the greeting constant and moves the hash. The old hash still runs; `history greet` contains both hashes.
+5. Adding `sleeper.rs` infers exactly `["sleep"]` through a trait method on a generic. The source has no effect declaration.
+6. Adding `counter.rs`, spawning it, and sending three messages leaves its cursor at 3.
+7. Adding `counter-v2.rs` preserves the effect row. Validating three messages under that candidate returns `Differs` and unequal original/fork hashes for the `counter` table.
+8. Promotion with rationale `e2e` puts both behavior hashes in lineage. One more message moves the cursor to 4.
+9. The HTTP MCP companion repeats checks 1–8 under separate names and actors, then checks discovery of the eight definition tools and 19 actor tools. It prints its own `N/9`.
+
+Stop the interactive daemon before running the automated version:
+
+```sh
+./scripts/e2e-unison.sh
+```
+
+Install `nix`, `bun`, `curl`, and the contract `loom` CLI on `PATH` first. The shell refuses an occupied port, creates a fresh `LOOM_DATA_DIR` and build directory, starts `nix run --builders '' .#repl`, reads the printed token file, and uses disposable fixture copies. It stops its daemon on exit and retains state and logs at the printed path. The final stdout line is `N/9`; success requires `9/9` and exit status zero. Prerequisite failures mark dependent checks as blocked. The initial build timeout defaults to 3600 seconds (`LOOM_E2E_START_TIMEOUT`); each client operation defaults to 600000 milliseconds (`LOOM_E2E_OPERATION_TIMEOUT_MS`).
+
+The TypeScript companion shares semantic assertions between the CLI and MCP paths and reuses `scripts/mcp-client.ts` for authenticated Streamable HTTP. This avoids adding a Rust test binary just to drive JSON transports. To run the MCP companion against an already running daemon, copy the fixtures into a disposable directory and pass that directory:
+
+```sh
+fixtures=$(mktemp -d)
+cp examples/unison/*.rs "$fixtures/"
+bun scripts/e2e-unison-mcp.ts --mcp "$fixtures"
+```
+
+MCP is also available over stdio with `nix run --builders '' .#repl -- --stdio`; the automated proof uses HTTP. The proof is written but has not been executed against the incoming contract. The definition wire fields remain phase-2 assumptions: `{hash,effects}` for add/update, `{source,items}` for view, `{value,effects}` for run, and an array of `{hash}` entries for history, inside the existing response envelope. MCP view/run use `target`; add/update send source text. The companion keeps these assumptions at its call and assertion sites so they can be reconciled with the landed interface without changing the required results. Product failures should be reported as `PRODUCT <step> <what>` after separating them from script/schema mistakes.
+
 ## Run locally
 
 On Apple Silicon macOS or x86-64 Linux, Nix supplies the daemon, Svelte app, and Rust guest toolchain:

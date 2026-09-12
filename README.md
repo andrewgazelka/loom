@@ -10,13 +10,51 @@ transaction, OTP-parity supervision trees.
 ## Try it
 
 ```sh
-nix run .                 # starts loomd, prints the token file path
-nix run . -- --stdio      # same daemon, MCP over stdio for a coding agent
-cargo test -p loom-actor  # 22 tests: the actor engine, standalone
+nix run --builders '' .#repl
 ```
 
-Open `http://127.0.0.1:8787` and paste the printed token for the browser REPL.
-See [docs/guide.md](docs/guide.md) for running without Nix and for the HTTP API.
+The launcher prints `Token file: <path>` and opens `http://127.0.0.1:8787/#token=<token>`. In another terminal, set `LOOM_TOKEN` from that file and use the `loom` CLI:
+
+```sh
+export LOOM_TOKEN="$(cat /path/printed/by/launcher)"
+export LOOM_URL=http://127.0.0.1:8787
+loom add examples/unison/greet.rs
+# Copy the returned definition hash into OLD.
+OLD='paste-definition-hash'
+loom view "$OLD"                       # stored source and two items
+loom run greet '"loom"'                 # "hello, loom"; effects []
+loom update greet examples/unison/greet-v2.rs  # same hash: local renamed
+loom update greet examples/unison/greet-v3.rs  # new hash: constant changed
+loom run "$OLD" '"loom"'                # still "hello, loom"
+loom history greet                     # both hashes
+loom add examples/unison/sleeper.rs     # inferred effects ["sleep"]
+loom add examples/unison/counter.rs
+loom spawn counter
+ID='paste-actor-id'
+loom send "$ID" 1
+loom send "$ID" 1
+loom send "$ID" 1
+loom info "$ID"                        # cursor 3
+loom add examples/unison/counter-v2.rs
+V2='paste-counter-v2-definition-hash'
+loom validate "$ID" "$V2" 3            # Differs, with table hashes
+loom promote "$ID" "$V2" --rationale e2e
+loom lineage "$ID"                     # both behavior hashes
+loom send "$ID" 1
+loom info "$ID"                        # cursor 4
+```
+
+The guests use plain root-level `pub fn` entries, no macros or effect declarations. The counter declares its SQL schema with `pub const LOOM_SCHEMA: &str`; `add` infers effect rows, including the sleeper's generic trait call.
+
+For the executable proof, stop the interactive daemon, ensure `nix`, `bun`, `curl`, and the contract `loom` CLI are on `PATH`, then run:
+
+```sh
+./scripts/e2e-unison.sh
+```
+
+The script starts `nix run --builders '' .#repl` with a fresh state directory on this machine. It checks the sequence above, moves its disposable source file before `view`, then repeats the workflow through authenticated HTTP MCP. Each check prints `ok <n> <name>` or `FAIL <n> <name>: <reason>`. MCP prints its own `N/9`; the final line is the overall `N/9`. A full pass is `9/9` with exit status zero. State and logs remain at the printed directory for inspection. This proof is written against the incoming interface contract; execution is pending.
+
+See [the guide's Try it section](docs/guide.md#try-it) for transport details and the proof's wire assumptions.
 
 ## Effects
 
