@@ -28,6 +28,7 @@ async fn host_execution_is_admitted_before_build_scripts_run() {
             &directory.join("target"),
             false,
             None,
+            None,
         )
         .await
         .unwrap()
@@ -44,6 +45,7 @@ async fn host_execution_is_admitted_before_build_scripts_run() {
             &directory,
             &directory.join("target"),
             false,
+            None,
             None,
         )
         .await
@@ -85,6 +87,7 @@ async fn host_execution_is_admitted_before_build_scripts_run() {
         &directory,
         &directory.join("target"),
         false,
+        None,
         None,
     )
     .await
