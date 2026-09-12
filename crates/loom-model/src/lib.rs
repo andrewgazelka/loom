@@ -5,7 +5,7 @@ use loom_store::Store;
 use serde_json::json;
 use std::time::Duration;
 
-pub const MODEL_ACTOR: &str = "builtin:model";
+pub const MODEL_PROVIDER: &str = "builtin:model";
 
 /// Intentionally does not implement Debug: configuration contains credentials.
 pub struct Config {
@@ -34,10 +34,10 @@ pub struct ModelState {
     pub last_seq: i64,
 }
 impl Model {
-    /// Fold persisted provider events; pending calls remain visible after restart.
+    /// Read persisted provider events; pending calls remain visible after restart.
     pub fn state(&self) -> Result<ModelState> {
         let mut state = ModelState {
-            id: MODEL_ACTOR.into(),
+            id: MODEL_PROVIDER.into(),
             configured: self.provider.is_some(),
             requests: 0,
             completed: 0,
@@ -46,13 +46,13 @@ impl Model {
         };
         let mut after = 0;
         loop {
-            let events = self.store.events(Some("system"), after, 1000)?;
+            let events = self.store.definition_events(after, 1000)?;
             if events.is_empty() {
                 break;
             }
             for event in events {
                 after = event.seq;
-                if event.event["model_actor"] != MODEL_ACTOR {
+                if event.event["model_provider"] != MODEL_PROVIDER {
                     continue;
                 }
                 state.last_seq = event.seq;
@@ -137,18 +137,16 @@ impl Model {
                 .is_none_or(|value| value.is_finite() && (0.0..=2.0).contains(&value)),
             "temperature must be between 0 and 2"
         );
-        let request_seq = self.store.append(
-            "system",
-            &json!({"model_actor": MODEL_ACTOR, "type":"model.request", "args":args}),
-            0,
+        let request_seq = self.store.record_definition_event(
+            &json!({"model_provider": MODEL_PROVIDER, "type":"model.request", "args":args}),
         )?;
         let result = provider.complete(&args).await;
         match &result {
             Ok(output) => {
-                self.store.append("system", &json!({"model_actor": MODEL_ACTOR, "type":"model.result","request_seq":request_seq,"result":output}), request_seq)?;
+                self.store.record_definition_event(&json!({"model_provider": MODEL_PROVIDER, "type":"model.result","request_seq":request_seq,"result":output}))?;
             }
             Err(error) => {
-                self.store.append("system", &json!({"model_actor": MODEL_ACTOR, "type":"model.error","request_seq":request_seq,"error":error.to_string()}), request_seq)?;
+                self.store.record_definition_event(&json!({"model_provider": MODEL_PROVIDER, "type":"model.error","request_seq":request_seq,"error":error.to_string()}))?;
             }
         }
         result
@@ -277,7 +275,7 @@ mod tests {
         assert_eq!(state.failed, 0);
         let restored = Model::new(store.clone(), None).unwrap().state().unwrap();
         assert_eq!(restored.completed, 1);
-        let events = store.events(None, 0, 100).unwrap();
+        let events = store.definition_events(0, 100).unwrap();
         assert!(
             events
                 .iter()

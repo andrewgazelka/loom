@@ -25,7 +25,7 @@ async fn main() -> Result<()> {
             result["name"] == "largest" && result["size"] == 9,
             "largest file mismatch {result}"
         );
-        println!("{} largest-file machine actor pass", fixture.lang.as_str());
+        println!("{} largest-file machine root pass", fixture.lang.as_str());
     }
     Ok(())
 }

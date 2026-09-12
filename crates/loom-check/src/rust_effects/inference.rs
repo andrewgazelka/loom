@@ -209,13 +209,7 @@ pub(crate) fn aggregate(
         declared: if exports.len() == 1 {
             exports[0].effects.declared.clone()
         } else {
-            file.items.iter().find_map(|item| {
-                if let syn::Item::Struct(item) = item {
-                    declared_attributes(&item.attrs)
-                } else {
-                    None
-                }
-            })
+            None
         },
     }
 }

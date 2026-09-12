@@ -195,7 +195,7 @@ impl Supervisor {
                                 } else {
                                     if chunk.stderr { stderr_bytes.extend_from_slice(&chunk.bytes); state.stderr = String::from_utf8_lossy(&stderr_bytes).into_owned(); }
                                     else { stdout_bytes.extend_from_slice(&chunk.bytes); state.stdout = String::from_utf8_lossy(&stdout_bytes).into_owned(); }
-                                    if let Err(error) = store.append("system", &serde_json::json!({"type":"process_output","process":state.id,"stderr":chunk.stderr,"bytes":chunk.bytes}), 0) {
+                                    if let Err(error) = store.record_definition_event(&serde_json::json!({"type":"process_output","process":state.id,"stderr":chunk.stderr,"bytes":chunk.bytes})) {
                                         state.phase = Phase::Failed;
                                         state.error = Some(error.to_string());
                                         _guard.kill();
@@ -340,11 +340,7 @@ impl Drop for ProcessGroup {
     }
 }
 fn record(store: &Store, state: &ProcessState) -> Result<()> {
-    store.append(
-        "system",
-        &serde_json::json!({"type":"process_state","state":state}),
-        0,
-    )?;
+    store.record_definition_event(&serde_json::json!({"type":"process_state","state":state}))?;
     Ok(())
 }
 fn replay(store: &Store) -> Result<BTreeMap<String, ProcessState>> {
@@ -357,7 +353,7 @@ fn replay(store: &Store) -> Result<BTreeMap<String, ProcessState>> {
     let mut outputs: BTreeMap<String, Output> = BTreeMap::new();
     let mut after = 0;
     loop {
-        let events = store.events(Some("system"), after, 1000)?;
+        let events = store.definition_events(after, 1000)?;
         if events.is_empty() {
             break;
         }
@@ -465,7 +461,7 @@ mod tests {
         assert_eq!(state.phase, Phase::Completed);
         assert!(
             store
-                .events(Some("system"), 0, 1000)?
+                .definition_events(0, 1000)?
                 .iter()
                 .any(|e| e.event["type"] == "process_output")
         );

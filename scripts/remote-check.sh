@@ -57,7 +57,7 @@ if [[ ${1:-} == --worker ]]; then
     tools) nix build --max-jobs 1 --cores 8 --out-link "$base/tools" nixpkgs#binaryen nixpkgs#podman nixpkgs#bubblewrap || status=$? ;;
     machine)
       nix build --max-jobs 1 --cores 8 --out-link "$base/static-busybox" nixpkgs#pkgsStatic.busybox
-      LOOM_STATIC_BUSYBOX="$base/static-busybox/bin/busybox" cargo test --locked -p loom-rt machine::tests::hermetic_exec_uses_snapshot_and_caches_across_actors -- --ignored --exact || status=$?
+      LOOM_STATIC_BUSYBOX="$base/static-busybox/bin/busybox" cargo test --locked -p loom-rt machine::tests::hermetic_exec_uses_snapshot_and_caches_across_calls -- --ignored --exact || status=$?
       ;;
     targets)
       mkdir -p "$base/official" "$base/downloads" "$base/bin"

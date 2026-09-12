@@ -30,7 +30,7 @@ impl Store {
         def.observed_effects.clear();
         let source_hash = put(&tx, "source_bundle", source.as_bytes())?;
         let event = serde_json::json!({"type":"defined","def":def,"name":name,"source_hash":source_hash,"deps":deps});
-        let seq = append(&tx, "system", &event, 0)?;
+        let seq = record_definition_event(&tx, &event)?;
         tx.execute("INSERT INTO defs(hash,lang,name_hint,type_sig,component_hash,source_hash,allowed_effects) VALUES (?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(hash) DO UPDATE SET component_hash=coalesce(excluded.component_hash,defs.component_hash)",params![def.hash,def.lang.as_str(),name,serde_json::to_string(&def.sig)?,def.component_hash,source_hash,def.allowed_effects.as_ref().map(serde_json::to_string).transpose()?])?;
         for hash in deps.values() {
             tx.execute(
@@ -115,7 +115,7 @@ impl Store {
     }
     pub fn definition_deps(&self, hash: &str) -> Result<BTreeMap<String, String>> {
         let c = self.lock()?;
-        let bytes:Vec<u8>=c.query_row("SELECT bytes FROM events WHERE actor='system' AND json_extract(bytes,'$.type')='defined' AND json_extract(bytes,'$.def.hash')=? ORDER BY seq DESC LIMIT 1",[hash],|r|r.get(0))?;
+        let bytes:Vec<u8>=c.query_row("SELECT bytes FROM definition_events WHERE json_extract(bytes,'$.type')='defined' AND json_extract(bytes,'$.def.hash')=? ORDER BY seq DESC LIMIT 1",[hash],|r|r.get(0))?;
         let event: Value = serde_json::from_slice(&bytes)?;
         Ok(serde_json::from_value(event["deps"].clone())?)
     }

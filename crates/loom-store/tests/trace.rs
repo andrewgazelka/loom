@@ -147,7 +147,7 @@ fn legacy_failure_without_result_migrates_into_recovery_trace() -> Result<()> {
     let path = directory.path().join("failure.sqlite");
     let store = Store::open(&path)?;
     let descriptor = store.put_value("desc", &json!({"op":"fs.read","args":{}}))?;
-    store.append("system", &json!({"type":"effect_completed","scope":"failed/child","occurrence":2,"desc_hash":descriptor,"error":"permission denied"}),0)?;
+    store.record_definition_event( &json!({"type":"effect_completed","scope":"failed/child","occurrence":2,"desc_hash":descriptor,"error":"permission denied"}))?;
     store.with_connection(|connection| {
         connection.execute(
             "DELETE FROM store_migrations WHERE name='call_trace_v2'",
@@ -222,7 +222,8 @@ fn invalid_trace_rolls_back_all_blobs_and_completion_event() -> Result<()> {
     );
     let connection = rusqlite::Connection::open(&path)?;
     assert_eq!(
-        connection.query_row("SELECT count(*) FROM log", [], |row| row.get::<_, i64>(0))?,
+        connection.query_row("SELECT count(*) FROM definition_records", [], |row| row
+            .get::<_, i64>(0))?,
         0
     );
     assert_eq!(

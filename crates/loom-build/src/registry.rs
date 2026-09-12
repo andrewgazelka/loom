@@ -158,11 +158,8 @@ impl CrateRegistry {
             checksum: checksum.into(),
             features_available,
         };
-        self.store.append(
-            "system",
-            &serde_json::json!({"type":"crate_added","crate":info}),
-            0,
-        )?;
+        self.store
+            .record_definition_event(&serde_json::json!({"type":"crate_added","crate":info}))?;
         Ok(info)
     }
     pub fn materialize(&self, hash: &str, path: &Path) -> Result<()> {

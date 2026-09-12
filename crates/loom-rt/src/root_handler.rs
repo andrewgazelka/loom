@@ -129,9 +129,6 @@ impl RootHandler for Recording {
                 .await
             };
             let recorded = guard.map(|guard| guard.finish(&outcome)).transpose();
-            if effects.actor_id.is_some() && tracked {
-                execution.checkpoint(&runtime.inner.store)?;
-            }
             recorded?;
             outcome
         })
@@ -148,11 +145,6 @@ impl RootHandler for Scheduling {
             let effects = &request.effects;
             let op = effect_name(&request.desc)?;
             let args = request.desc.get("args").cloned().unwrap_or(Value::Null);
-            let hash = if matches!(op, "actor.send" | "actor.spawn") {
-                blake3::hash(&encode(&request.desc)?).to_hex().to_string()
-            } else {
-                String::new()
-            };
             match op {
                 "call" => {
                     runtime
@@ -163,30 +155,6 @@ impl RootHandler for Scheduling {
                             effects.clone(),
                         )
                         .await
-                }
-                "actor.send" => {
-                    let key = format!("{scope}:{occurrence}:{hash}");
-                    let message = runtime.inner.store.enqueue_once(
-                        required_str(&args, "actor")?,
-                        &args.get("msg").cloned().unwrap_or(Value::Null),
-                        &key,
-                    )?;
-                    runtime
-                        .schedule_message(message)
-                        .and_then(|result| EffectOutput::value(&result))
-                }
-                "actor.spawn" => {
-                    let key = format!("spawn:{scope}:{occurrence}:{hash}");
-                    let actor_id = blake3::hash(key.as_bytes()).to_hex().to_string();
-                    let actor = runtime
-                        .spawn_identified(
-                            required_str(&args, "def")?,
-                            args.get("state").cloned().unwrap_or(Value::Null),
-                            actor_id,
-                        )
-                        .await?;
-                    let result = serde_json::to_value(actor)?;
-                    EffectOutput::value(&result)
                 }
                 _ => next.run(request).await,
             }

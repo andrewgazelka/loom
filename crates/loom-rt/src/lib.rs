@@ -2,7 +2,6 @@ mod call;
 mod compilation_cache;
 pub use call::{CallEffects, GuestFailure};
 pub use compilation_cache::{CompilationCacheStats, LoomCompilationCache};
-mod actors;
 mod calls;
 mod commands;
 mod filesystem;
@@ -11,7 +10,7 @@ mod root_handler;
 mod sharedcore;
 mod trace;
 use anyhow::{Context, Result, bail};
-use loom_proto::{Actor, Value};
+use loom_proto::Value;
 use loom_store::Store;
 use serde_json::json;
 use std::{
@@ -45,7 +44,6 @@ struct Inner {
     core_executor: futures::executor::ThreadPool,
     core_modules: Mutex<HashMap<String, wasmtime::Module>>,
     component_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
-    actor_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     effect_locks: Mutex<HashMap<String, Weak<AsyncMutex<()>>>>,
     handler_round_trip_us: Mutex<HandlerMeasurements>,
     effect_wire_bytes: AtomicU64,
@@ -61,7 +59,6 @@ struct HandlerMeasurements {
 struct EffectContext {
     root: Option<tokio::sync::mpsc::Sender<call::Request>>,
     def_hash: Option<String>,
-    actor_id: Option<String>,
     allowed: Option<BTreeSet<String>>,
     trace: Option<Arc<trace::ExecutionTrace>>,
 }
@@ -76,7 +73,6 @@ impl EffectContext {
         Self {
             root: self.root.clone(),
             def_hash: Some(def_hash.into()),
-            actor_id: self.actor_id.clone(),
             allowed,
             trace: self.trace.clone(),
         }
@@ -113,9 +109,6 @@ impl EffectOutput {
 }
 fn encode(value: &Value) -> Result<Vec<u8>> {
     loom_proto::encode(value).map_err(anyhow::Error::msg)
-}
-fn decode(bytes: &[u8]) -> Result<Value> {
-    loom_proto::decode(bytes).map_err(anyhow::Error::msg)
 }
 #[derive(Debug, Default, serde::Serialize)]
 pub struct RuntimeTiming {
@@ -207,7 +200,6 @@ impl Runtime {
                     .create()?,
                 core_modules: Mutex::new(HashMap::new()),
                 component_locks: Mutex::new(HashMap::new()),
-                actor_locks: Mutex::new(HashMap::new()),
                 effect_locks: Mutex::new(HashMap::new()),
                 handler_round_trip_us: Mutex::new(HandlerMeasurements::default()),
                 effect_wire_bytes: AtomicU64::new(0),
@@ -284,7 +276,7 @@ fn required_str<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
 }
 
 fn resolve_self(value: &mut Value, hash: &str) {
-    if let Some("call" | "actor.spawn") = value.get("op").and_then(Value::as_str)
+    if let Some("call") = value.get("op").and_then(Value::as_str)
         && value.pointer("/args/def").and_then(Value::as_str) == Some("$self")
     {
         value["args"]["def"] = json!(hash);

@@ -97,7 +97,7 @@ impl Service {
                 return Response {
                     ok: false,
                     seq: 0,
-                    result: json!({"error":format!("log sequence unavailable: {error:#}"),"code":"store_unavailable"}),
+                    result: json!({"error":format!("definition sequence unavailable: {error:#}"),"code":"store_unavailable"}),
                     diagnostics: vec![],
                 };
             }
@@ -117,20 +117,10 @@ impl Service {
             },
         }
     }
-    fn command_actor(&self, request: &CommandRequest) -> Result<String> {
-        if let Some(actor) = request.args["actor"].as_str() {
-            return Ok(actor.to_owned());
-        }
-        let session = request.args["session"]
-            .as_str()
-            .or(request.session.as_deref())
-            .context("actor or session required")?;
-        self.store.session(session)?.context("session not found")
-    }
     pub fn build_record(&self, hash: &str) -> Result<Value> {
         let mut after = 0;
         loop {
-            let events = self.store.events(Some("system"), after, 1000)?;
+            let events = self.store.definition_events(after, 1000)?;
             if events.is_empty() {
                 bail!("build not found")
             };

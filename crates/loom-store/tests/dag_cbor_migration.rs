@@ -19,55 +19,13 @@ fn put(c: &Connection, kind: &str, value: &Value) -> Result<String> {
     )?;
     Ok(hash)
 }
-fn event(c: &Connection, actor: &str, value: &Value) -> Result<i64> {
+fn event(c: &Connection, value: &Value) -> Result<i64> {
     let hash = put(c, "event", value)?;
     c.execute(
-        "INSERT INTO log(actor,event_hash,handler_seq,ts) VALUES (?,?,0,0)",
-        params![actor, hash],
+        "INSERT INTO definition_records(event_hash,ts) VALUES (?,0)",
+        params![hash],
     )?;
     Ok(c.last_insert_rowid())
-}
-#[test]
-fn legacy_state_refs_and_log_migrate_reopen_and_compact() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let path = temp.path().join("legacy.sqlite");
-    let c = legacy(&path)?;
-    let leaf = put(&c, "result", &json!({"answer":42}))?;
-    let state = put(&c, "state", &json!({"leaf":{"$ref":leaf}}))?;
-    let actor = json!({"id":"a","behavior_hash":"behavior","lang":"rust","component_hash":"old-component","last_seq":0,"created_seq":0,"parent":null});
-    event(&c, "system", &json!({"type":"actor_created","actor":actor}))?;
-    let seq = event(&c, "a", &json!({"state":{"$ref":state}}))?;
-    event(
-        &c,
-        "system",
-        &json!({"type":"session_created","id":"session","actor":"a","owner":"owner"}),
-    )?;
-    c.execute(
-        "INSERT INTO actors VALUES ('a','behavior','rust','old-component',?,1,NULL)",
-        [seq],
-    )?;
-    c.execute(
-        "INSERT INTO snapshots VALUES ('a','fold',?,?)",
-        params![seq, state],
-    )?;
-    c.execute("INSERT INTO sessions VALUES ('session','a','owner')", [])?;
-    drop(c);
-    let store = Store::open(&path)?;
-    let snapshot = store.latest_snapshot("a", "fold")?.unwrap();
-    let cid = snapshot.state["leaf"]["$ref"].as_str().unwrap();
-    assert_eq!(store.get_value::<Value>(cid)?, Some(json!({"answer":42})));
-    assert!(store.actor("a")?.unwrap().component_hash.is_none());
-    assert_eq!(store.events(Some("a"), 0, 100)?.first().unwrap().seq, seq);
-    store.rebuild_views()?;
-    assert_eq!(store.session("session")?.as_deref(), Some("a"));
-    assert!(store.actor("a")?.unwrap().component_hash.is_none());
-    store.compact_log(store.latest_seq()?, 1000)?;
-    drop(store);
-    let store = Store::open(&path)?;
-    assert_eq!(store.events(Some("a"), 0, 100)?.len(), 1);
-    store.rebuild_views()?;
-    assert!(store.actor("a")?.unwrap().component_hash.is_none());
-    Ok(())
 }
 #[test]
 fn effects_fail_closed_without_schema_or_data_changes() -> Result<()> {
@@ -76,7 +34,6 @@ fn effects_fail_closed_without_schema_or_data_changes() -> Result<()> {
     let c = legacy(&path)?;
     event(
         &c,
-        "system",
         &json!({"type":"effect_recorded","desc_hash":"unknown","scope":"global","occurrence":0,"result_hash":"unknown"}),
     )?;
     let before: Vec<u8> = c.query_row("SELECT bytes FROM cas", [], |r| r.get(0))?;
@@ -118,7 +75,7 @@ fn cid_codec_and_raw_value_admission_are_checked() -> Result<()> {
 }
 
 #[test]
-fn legacy_archives_and_tree_links_convert_to_dag_cbor() -> Result<()> {
+fn legacy_tree_links_convert_to_dag_cbor() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("archive.sqlite");
     let c = legacy(&path)?;
@@ -133,36 +90,17 @@ fn legacy_archives_and_tree_links_convert_to_dag_cbor() -> Result<()> {
         &json!({"entries":[{"name":"file","hash":raw,"directory":false,"executable":false}]}),
     )?;
     let value = json!({"tree":{"$ref":tree}});
-    let seq = event(&c, "system", &value)?;
-    let record = loom_proto::Event {
-        seq,
-        actor: "system".into(),
-        event: value,
-        handler_seq: 0,
-        ts: 0,
-    };
-    let bytes = zstd::stream::encode_all(serde_json::to_vec(&vec![record])?.as_slice(), 3)?;
-    let archive = blake3::hash(&bytes).to_hex().to_string();
-    c.execute(
-        "INSERT INTO cas VALUES (?,'event_archive',?,0)",
-        params![archive, bytes],
-    )?;
-    c.execute("INSERT INTO archive_segments VALUES (?,1,1,1)", [&archive])?;
-    c.execute(
-        "UPDATE log SET event_hash=?,actor='',handler_seq=0,ts=0",
-        [archive],
-    )?;
+    event(&c, &value)?;
     drop(c);
     let store = Store::open(&path)?;
-    let events = store.events(None, 0, 100)?;
+    let events = store.definition_events(0, 100)?;
     let cid = events[0].event["tree"]["$ref"].as_str().unwrap();
     let tree: Value = store.get_value(cid)?.unwrap();
     assert!(tree["entries"][0].get("hash").is_none());
     let file = tree["entries"][0]["reference"]["$ref"].as_str().unwrap();
     assert_eq!(store.get(file)?, Some(b"raw file".to_vec()));
     assert_eq!(store.codec(file)?, Some(85));
-    store.compact_log(store.latest_seq()?, 1000)?;
-    assert_eq!(store.events(None, 0, 100)?.len(), events.len());
+    assert_eq!(store.definition_events(0, 100)?.len(), events.len());
     Ok(())
 }
 

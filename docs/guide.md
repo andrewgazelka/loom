@@ -1,6 +1,6 @@
 # Loom
 
-Loom runs Rust core WebAssembly modules behind one Rust actor host. Definitions, core wasm bytes, event payloads, and effect results are content-addressed with BLAKE3. SQLite WAL holds the append-only event history and rebuildable indexes.
+Loom executes Rust core WebAssembly definitions in `loom-rt`. Definitions, core wasm bytes, and effect results are content-addressed with BLAKE3 in `loom-store`. Actors run in `loom-actor`, with one Turso file per actor; `loom-behavior` runs Loom definitions inside their transactions.
 
 **Memory isolation is a security requirement. Rust safety checks are not a formally proven boundary against adversarial code.** Compiler and library soundness bugs can expose undefined behavior through safe Rust; denying `unsafe` does not close that class of bug. Loom keeps separate Wasm memories and exchanges DAG-CBOR values instead of sharing guest pointers. Wasm validation, the engine, and checked host interfaces remain trusted, and the complete system has no end-to-end formal proof. See the [memory isolation decision](plan-unified-memory.md#memory-isolation-decision) for the concrete Rust soundness issue and supporting sources.
 
@@ -54,7 +54,7 @@ The returned definition hash identifies the callable. Invoke `POST /v1/command` 
 pub fn add(a: i64, b: i64) -> i64 { a + b }
 ```
 
-Guest actors implement `loom::Actor` under `#[loom::actor]`. `examples/` contains executable fixtures. Guest actor effects use `loom::actor::send(actor, msg)` and `loom::actor::spawn(DEF, state)`. Their effect labels are `actor.send` and `actor.spawn`. Actor commands include `spawn`, `send`, `state`, `fork`, and `actor.upgrade`.
+Actors use the `actor_*` MCP tools and `actor://` resources. Each actor owns its domain tables, inbox, effects, and outbox in one Turso file. See [Actors on Turso](actors-turso.md) for transactions, supervision, and behavior changes.
 
 Client responses contain `ok`, `seq`, `result`, and `diagnostics`. Results above 8 KB become CAS references. Use the `resolve` command to retrieve a reference. WebSocket clients connect to `/v1/stream` and send `{ "token": "...", "after": 0 }` as their first message; the server streams durable events after that cursor.
 
@@ -68,25 +68,26 @@ Filesystem results have typed Rust SDK values. `DirEntry` has named `name`, `siz
 
 Compiled core modules carry an effect-protocol version. Modules built against the earlier map-shaped filesystem results must be rebuilt before execution; their historical source and CAS records remain readable. This prevents an old guest decoder from silently interpreting the new result shape.
 
-Opening an older database performs a transactional migration of structured values and links and invalidates compiled guests that used the old codec. The migration preserves event sequence numbers and verifies references before committing. Older databases with recorded effects whose requests were never stored, or pending handlers, require explicit recovery before migration: opening fails without changing the database rather than risking duplicate external effects. Back up the database before upgrading.
+Stores containing retired actor tables are rejected at open with an error naming the table. There is no migration of those stores.
 
 ## Crate ownership
 
 | Crate | Responsibility |
 | --- | --- |
 | `loom-proto` | Shared values, signatures, protocol and DAG-CBOR |
-| `loom-store` | CAS, SQLite event history, projections, names, snapshots, effects |
+| `loom-store` | CAS, definitions, names, call traces, effect results |
 | `loom-check` | Language checking and definition identity |
 | `loom-build` | Rust compiler sidecars and build cache |
 | `loom-guest-rs`, `loom-guest-macros` | Synchronous Rust guest API and exports |
-| `loom-rt` | Wasmtime fibers, actors, effects, machines |
+| `loom-rt` | Wasmtime fibers, definition calls, effects, machine filesystem roots |
+| `loom-actor`, `loom-behavior` | Turso actors and transactional Loom definitions |
 | `loom-maintenance` | Backups, bounded index and build-cache maintenance |
 | `loom-process`, `loom-model` | Supervised process execution and configurable model requests |
 | `loom-api` | Shared service and HTTP/WebSocket transport |
 | `loom-mcp` | MCP tools, prompts and resources |
 | `loom-cli`, `loomd` | Terminal client and server entrypoint |
 
-Rust definitions built through `loom_define` use the [shared-core ABI](shared-core-abi.md), with `loom.perform` dispatching through guest handlers to the outermost host handler. Folds can handle effects locally, but an effect reaching the host is refused.
+Rust definitions built through `loom_define` use the [shared-core ABI](shared-core-abi.md), with `loom.perform` dispatching through guest handlers to the outermost host handler.
 
 ## Verify
 
@@ -150,9 +151,9 @@ Definition signatures distinguish inferred effects, the host-enforced `allowed_e
 
 The Effects view shows individual invocations and their outcomes. To capture file content changes from a process, pass `capture_paths: ["note.txt"]` to `exec` or `process.start`. Paths are resolved within the process root; the capture records actual before/after bytes in CAS and displays created, modified, and deleted files as diffs. Capture is limited to 64 explicitly selected regular files, at most 1 MiB each. Symlinks, unsupported files, and unavailable reads are reported explicitly.
 
-A completed call records one content-addressed trace and a `call_completed` event. Each trace occurrence identifies its job scope, effect and outcome; result blobs deduplicate across calls. Actors retain recovery checkpoints. The Effects view expands trace pages and keeps historical per-effect events readable. Opening an older store migrates recoverable effect records transactionally and refuses ambiguous records without partially applying the migration.
+A completed call records one content-addressed trace and a `call_completed` event. Each trace occurrence identifies its job scope, effect and outcome; result blobs deduplicate across calls. The Effects view expands trace pages into individual recorded invocations.
 
-Use `call.replay` with the original definition `hash`, `args`, and recorded call `scope` to replay a completed successful or failed call. Replay checks the definition and argument identity, consumes the recorded occurrences, and verifies the final outcome, including recorded errors. Cancelled calls cannot be resumed through `call.replay`; actor recovery uses its saved checkpoint. A fresh call executes its external effects again unless an effect has a valid global memoization key.
+Use `call.replay` with the original definition `hash`, `args`, and recorded call `scope` to replay a completed successful or failed call. Replay checks the definition and argument identity, consumes the recorded occurrences, and verifies the final outcome, including recorded errors. Cancelled calls cannot be resumed through `call.replay`. A fresh call executes its external effects again unless an effect has a valid global memoization key.
 
 Machine filesystem effects resolve from a pinned root directory handle. Parent traversal and symlinks cannot redirect resolution outside that root. `fs.list` supports guest-driven traversal; `fs.walk` performs a bounded traversal in the host. Both return the same typed entry values. Persisted root identity prevents a restart from silently accepting a replacement directory.
 
@@ -165,7 +166,7 @@ Crate intake uses `loom --token "$LOOM_TOKEN" crate add serde@1.0.210` or the MC
 serde = { hash = "<returned 64-digit hash>", features = ["derive"] }
 ```
 
-Updating a definition name leaves existing dependency hashes intact. Run `loom --token "$LOOM_TOKEN" upgrade <old-hash> <new-hash>` or MCP `loom_upgrade` to rewrite named dependents explicitly. Both definition hashes and crate source hashes use this command; its result lists the changed identities. Actor behavior changes remain a separate `actor.upgrade` command with `{actor, hash}`.
+Updating a definition name leaves existing dependency hashes intact. Run `loom --token "$LOOM_TOKEN" upgrade <old-hash> <new-hash>` or MCP `loom_upgrade` to rewrite named dependents explicitly. Both definition hashes and crate source hashes use this command; its result lists the changed identities. Actor behavior changes use `actor_promote`.
 
 ## Guest-defined effect handlers
 
@@ -213,8 +214,6 @@ is guest computation and creates no root-effect record. If that handler reads
 a real file, the read reaches the host and is recorded. Replay reruns the guest
 handlers and supplies their recorded root-effect results. Root recording and
 replay are implemented by the same host handler chain used for execution.
-Pure actor folds may install handlers, but any effect reaching the root
-still fails.
 
 For content-addressed reuse, see [stored handler definitions](content-addressed-handlers.md).
 
@@ -225,7 +224,7 @@ supply. `loom-check` rejects known residual effects outside that set. A total
 `handle` removes its selected effects from the body's inferred row;
 effects performed by the handler itself remain in the outer row. Unknown
 dispatch requires an explicit declaration, which the runtime enforces at the
-root. Actor definitions use `#[loom::actor(effects = [...])]`.
+root.
 
 This is Loom's conservative source analysis and runtime capability check, not
 an effect type system inside rustc. A declaration does not grant additional

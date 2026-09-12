@@ -173,7 +173,6 @@ impl<'ast> Visit<'ast> for Analysis<'_> {
             "sleep",
             "exec",
             "llm",
-            "actor.send",
             "fs.list",
             "fs.stat",
             "fs.read",
@@ -190,7 +189,7 @@ impl<'ast> Visit<'ast> for Analysis<'_> {
             self.summary
                 .labels
                 .insert(name.trim_start_matches("loom::").replace("::", "."));
-        } else if matches!(name.as_str(), "loom::call" | "loom::actor::spawn") {
+        } else if name == "loom::call" {
             self.summary
                 .labels
                 .insert(name.trim_start_matches("loom::").replace("::", "."));
@@ -202,7 +201,7 @@ impl<'ast> Visit<'ast> for Analysis<'_> {
             })) = call.args.first()
             {
                 let label = label.value();
-                self.summary.unknown |= matches!(label.as_str(), "call" | "actor.spawn");
+                self.summary.unknown |= label == "call";
                 self.summary.labels.insert(label);
             } else {
                 self.summary.unknown = true;
@@ -269,8 +268,8 @@ fn literal_labels(expression: &syn::Expr) -> Option<BTreeSet<String>> {
 mod inference;
 pub(crate) use inference::{aggregate, infer};
 mod declarations;
-pub(crate) use declarations::{actor_declaration_diagnostics, declaration_diagnostics};
-use declarations::{declared_attributes, declared_labels};
+pub(crate) use declarations::declaration_diagnostics;
+use declarations::declared_labels;
 mod admission;
 pub(crate) use admission::{unsafe_source_diagnostics, unsupported_mode_diagnostics};
 #[cfg(test)]

@@ -34,7 +34,7 @@ pub struct CallTrace {
     pub args_hash: Option<String>,
     pub scope: String,
     pub entries: Vec<TraceEntry>,
-    /// None is a recoverable actor checkpoint; Some is a completed call.
+    /// None denotes an unfinished call; Some records its final outcome.
     pub outcome: Option<TraceOutcome>,
 }
 

@@ -1,6 +1,6 @@
 <script lang="ts">
   import {onDestroy} from "svelte";
-  import { record, casInspection, short, type LogEvent, type Client } from "./api";
+  import { record, casInspection, type LogEvent, type Client } from "./api";
   import ProcessResult from "./ProcessResult.svelte";
   import FilesystemChanges from "./FilesystemChanges.svelte";
   import { effectRows } from "./effects";
@@ -13,7 +13,6 @@
   export let client: Client;
   export let events: LogEvent[];
   export let inspect: (hash: string) => void;
-  export let actor: (id: string) => void;
   let query = "", filter = "all", scope = "";
   let results: Record<string,unknown> = {}, resultErrors: Record<string,string> = {};
   const requested=new Set<string>();
@@ -58,7 +57,7 @@
 <div class="section-heading"><div><h1>Effects</h1><p>Host operations and recorded results in the loaded event log.</p></div></div>
 <div class="toolbar">
   <Select label="Filter effects" bind:value={filter} options={[{value:"all",label:"All effects"},{value:"files",label:"Filesystem modifications"},{value:"denied",label:"Denied operations"},{value:"failed",label:"Failed operations"},{value:"cancelled",label:"Cancelled operations"}]} />
-  <input class="browser-search" aria-label="Find effects" placeholder="Operation, actor, invocation…" bind:value={query} />
+  <input class="browser-search" aria-label="Find effects" placeholder="Operation, invocation…" bind:value={query} />
 </div>
 {#if scope}<button class="text-button" on:click={() => scope = ""}>Invocation: {scope} ×</button>{/if}
 {#each loadedCalls as call (String(call.data.scope))}
@@ -73,7 +72,6 @@
     <summary><span class="operation">{typeof data.op === "string" ? data.op : "Cached result recorded"}</span><span class="status">{row.status}</span><span class="sequence">seq {event.seq}{typeof data.occurrence === "number" ? ` · effect ${data.occurrence}` : ""}</span></summary>
     <div class="effect-detail">
       <div class="links">
-        {#if typeof data.actor_id === "string"}<button class="text-button" on:click={() => actor(String(data.actor_id))} title={data.actor_id}>Actor {short(data.actor_id,16)} ↗</button>{/if}
         {#if typeof data.scope === "string"}<button class="text-button" on:click={() => scope = String(data.scope)} title={data.scope}>Invocation ↗</button>{/if}
         {#if typeof data.def_hash === "string"}<ReferenceLink hash={data.def_hash} {inspect} />{/if}
       </div>

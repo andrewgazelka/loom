@@ -139,9 +139,6 @@ impl Execution {
 }
 enum Invocation {
     Call { args: Vec<u8> },
-    Run { state: Vec<u8>, message: Vec<u8> },
-    Fold { state: Vec<u8>, event: Vec<u8> },
-    Validate,
     Schema,
 }
 impl Entry<'_> {
@@ -150,15 +147,6 @@ impl Entry<'_> {
             Self::Call { args } => Invocation::Call {
                 args: encode(args)?,
             },
-            Self::Run { state, message } => Invocation::Run {
-                state: encode(state)?,
-                message: encode(message)?,
-            },
-            Self::Fold { state, event } => Invocation::Fold {
-                state: encode(state)?,
-                event: encode(event)?,
-            },
-            Self::Validate => Invocation::Validate,
             Self::Schema => Invocation::Schema,
         })
     }
@@ -247,18 +235,7 @@ async fn respond(caller: &mut Caller<'_, Guest>, bytes: Vec<u8>) -> Result<i64> 
     Ok(((bytes.len() as u64) << 32 | pointer as u64) as i64)
 }
 pub(super) enum Entry<'a> {
-    Call {
-        args: &'a Value,
-    },
-    Run {
-        state: &'a Value,
-        message: &'a Value,
-    },
-    Fold {
-        state: &'a Value,
-        event: &'a Value,
-    },
-    Validate,
+    Call { args: &'a Value },
     Schema,
 }
 

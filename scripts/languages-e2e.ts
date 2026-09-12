@@ -6,9 +6,8 @@ if(!token)throw new Error('LOOM_TOKEN is required');
 interface Diagnostic {code:string;message:string}
 interface Reply {ok:boolean;result:unknown;diagnostics:Diagnostic[]}
 interface Definition {def:{hash:string};build:{ms:number;size:number}}
-interface SpawnedActor {id:string}
 let passed=0;
-const total=3;
+const total=2;
 function assert(condition:unknown,message:string):asserts condition {if(!condition)throw new Error(message);}
 async function operation<T>(name:string,body:unknown):Promise<T>{
   const response=await fetch(`${endpoint}/v1/${name}`,{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify(body)});
@@ -18,45 +17,8 @@ async function operation<T>(name:string,body:unknown):Promise<T>{
 }
 async function define(name:string,lang:'rust',source:string,deps:Record<string,string>={}):Promise<Definition>{return operation('define',{name,lang,source,deps});}
 async function call<T>(hash:string,args:unknown):Promise<T>{return operation('command',{command:'call',args:{hash,args}});}
-async function spawn(hash:string):Promise<SpawnedActor>{return operation('command',{command:'spawn',args:{hash,initial:0}});}
-async function send(actor:string,msg:unknown):Promise<unknown>{return operation('command',{command:'send',args:{actor,msg}});}
-async function state(actor:string):Promise<number>{return operation('command',{command:'state',args:{actor}});}
-async function statesAfterDelivery(peerActor:string,rustActor:string,expected:number):Promise<void>{
-  const deadline=performance.now()+10000;
-  let observed={peer:await state(peerActor),rust:await state(rustActor)};
-  while(observed.peer!==expected||observed.rust!==expected){
-    if(performance.now()>=deadline){
-      const failures=await operation('command',{command:'events',args:{actor:'system',limit:20}});
-      throw new Error(JSON.stringify({message:'actor delivery/fold deadline',expected,observed,peerActor,rustActor,failures}));
-    }
-    await Bun.sleep(20);
-    observed={peer:await state(peerActor),rust:await state(rustActor)};
-  }
-}
 async function check(name:string,test:()=>Promise<void>){await test();passed++;console.log(`PASS ${name}`);}
 try {
-  await check('Rust actors exchange messages in both directions',async()=>{
-    const rustSource=`#[loom::actor(effects=["actor.send"])]
-pub struct Messenger;
-impl loom::Actor for Messenger {
- type State=i64;type Event=i64;type Msg=serde_json::Value;
- fn init()->i64{0}
- fn fold(state:i64,event:&i64)->i64{state+event}
- fn handle(_state:&i64,message:serde_json::Value)->Vec<i64>{
-  if let Some(value)=message.as_i64(){return vec![value];}
-  let actor=message["actor"].as_str().expect("actor");
-  let value=message["value"].as_i64().expect("value");
-  loom::actor::send(actor,serde_json::json!(value)).expect("actor.send");
-  vec![value]
- }
-}`;
-    const peer=await spawn((await define('m6-rust-peer','rust',rustSource)).def.hash);
-    const rust=await spawn((await define('m6-rust-messenger','rust',rustSource)).def.hash);
-    await send(peer.id,{actor:rust.id,value:7});
-    await statesAfterDelivery(peer.id,rust.id,7);
-    await send(rust.id,{actor:peer.id,value:11});
-    await statesAfterDelivery(peer.id,rust.id,18);
-  });
   await check('Rust recurses through synchronous definition calls',async()=>{
     const definition=await define('m6-recursive','rust',await readFile(new URL('../examples/rust-recursive/src/lib.rs',import.meta.url),'utf8'));
     assert(await call<number>(definition.def.hash,[4])===4,'recursive definition call failed');

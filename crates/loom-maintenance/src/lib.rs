@@ -1,4 +1,4 @@
-//! Maintenance preserves CAS and event-log truth. Only derived indexes are collected.
+//! Maintenance preserves CAS and definition history. Only derived indexes are collected.
 use anyhow::{Result, ensure};
 use loom_store::Store;
 use rusqlite::{Connection, params};
@@ -14,11 +14,8 @@ pub struct Stats {
     pub cas_bytes: u64,
     pub events: u64,
     pub latest_seq: i64,
-    pub actors: u64,
     pub definitions: u64,
     pub effect_index_entries: u64,
-    pub archived_segments: u64,
-    pub archived_events: u64,
     pub database_bytes: u64,
     pub reusable_database_bytes: u64,
 }
@@ -31,29 +28,18 @@ pub fn stats(store: &Store) -> Result<Stats> {
         Ok(Stats {
             cas_objects: scalar("SELECT count(*) FROM cas")?,
             cas_bytes: scalar("SELECT coalesce(sum(length(bytes)),0) FROM cas")?,
-            events: scalar("SELECT count(*) FROM log")?,
+            events: scalar("SELECT count(*) FROM definition_records")?,
             latest_seq: connection.query_row(
-                "SELECT coalesce(max(seq),0) FROM log",
+                "SELECT coalesce(max(seq),0) FROM definition_records",
                 [],
                 |row| row.get(0),
             )?,
-            actors: scalar("SELECT count(*) FROM actors")?,
             definitions: scalar("SELECT count(*) FROM defs")?,
             effect_index_entries: scalar("SELECT count(*) FROM effect_results")?,
-            archived_segments: scalar("SELECT count(*) FROM archive_segments")?,
-            archived_events: scalar("SELECT coalesce(sum(event_count),0) FROM archive_segments")?,
             database_bytes: scalar("PRAGMA page_count")? * page_size,
             reusable_database_bytes: scalar("PRAGMA freelist_count")? * page_size,
         })
     })
-}
-
-pub fn compact_log(
-    store: &Store,
-    through_seq: i64,
-    limit: usize,
-) -> Result<loom_store::Compaction> {
-    store.compact_log(through_seq, limit)
 }
 
 #[derive(Debug, Serialize)]
@@ -112,8 +98,11 @@ pub fn backup(store: &Store, destination: &Path) -> Result<Backup> {
         integrity == "ok",
         "backup integrity check failed: {integrity}"
     );
-    let latest_seq =
-        snapshot.query_row("SELECT coalesce(max(seq),0) FROM log", [], |row| row.get(0))?;
+    let latest_seq = snapshot.query_row(
+        "SELECT coalesce(max(seq),0) FROM definition_records",
+        [],
+        |row| row.get(0),
+    )?;
     Ok(Backup {
         bytes: destination.metadata()?.len(),
         latest_seq,
@@ -167,7 +156,7 @@ mod tests {
     }
 
     #[test]
-    fn compacted_backup_preserves_effect_replay_after_index_collection() -> Result<()> {
+    fn backup_preserves_effect_replay_after_index_collection() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let store = Store::memory()?;
         for occurrence in 0..20 {
@@ -178,20 +167,11 @@ mod tests {
                 &json!({"padding": "repeated data ".repeat(100), "occurrence": occurrence}),
             )?;
         }
-        let before = stats(&store)?;
-        let result = compact_log(&store, before.latest_seq, 10)?;
-        assert_eq!(result.events, 10);
-        assert!(result.after_bytes < result.before_bytes);
-        let after = stats(&store)?;
-        assert_eq!(after.events, before.events);
-        assert_eq!(after.latest_seq, before.latest_seq);
-        assert_eq!(after.archived_segments, 1);
-        assert_eq!(after.archived_events, 10);
         collect_effect_index(&store, 1000)?;
-        let destination = directory.path().join("compacted.sqlite");
+        let destination = directory.path().join("effects.sqlite");
         backup(&store, &destination)?;
         let restored = Store::open(&destination)?;
-        assert_eq!(restored.events(None, 0, 1000)?.len(), 20);
+        assert_eq!(restored.definition_events(0, 1000)?.len(), 20);
         for occurrence in 0..20 {
             assert_eq!(
                 restored

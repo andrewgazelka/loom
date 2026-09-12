@@ -13,15 +13,10 @@ fn main() -> Result<()> {
             "CAS identity mismatch"
         );
     }
-    let actors = serde_json::to_value(store.actors()?)?;
-    let events = serde_json::to_value(store.events(None, 0, 1000)?)?;
+    let events = serde_json::to_value(store.definition_events(0, 1000)?)?;
     store.rebuild_views()?;
     ensure!(
-        serde_json::to_value(store.actors()?)? == actors,
-        "actor projection changed"
-    );
-    ensure!(
-        serde_json::to_value(store.events(None, 0, 1000)?)? == events,
+        serde_json::to_value(store.definition_events(0, 1000)?)? == events,
         "historical events changed"
     );
     ensure!(
@@ -29,7 +24,7 @@ fn main() -> Result<()> {
         "definition count changed"
     );
     println!(
-        "{} definitions migrated; actor projections and immutable events verified",
+        "{} definitions migrated; definition projections and immutable events verified",
         defs.len()
     );
     Ok(())
