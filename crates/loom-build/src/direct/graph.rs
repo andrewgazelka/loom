@@ -74,6 +74,8 @@ pub(super) async fn repair_units(
                 .arg(context.directory)
                 .arg(context.target)
                 .arg(context.root);
+            compiler_environment(&mut command);
+            command.env("RUSTC", &unit.recipe.compiler);
             command
         } else {
             let mut command = Command::new(&unit.recipe.compiler);
