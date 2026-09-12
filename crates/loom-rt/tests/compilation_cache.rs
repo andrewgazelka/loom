@@ -5,7 +5,7 @@ use std::{
     collections::BTreeSet,
     sync::{Arc, Mutex},
 };
-use wasmtime::{CacheStore, Config, Engine, Instance, Module, OptLevel, Strategy};
+use wasmtime::{CacheStore, Config, Instance, Module, OptLevel, Strategy};
 
 #[derive(Clone, Debug, Default)]
 struct CacheTraffic {
@@ -169,7 +169,7 @@ fn compile_and_invoke(
             .enable_incremental_compilation(cache.clone())
             .unwrap();
         // Whole-module caching is deliberately unconfigured.
-        let engine = Engine::new(&config).unwrap();
+        let engine = loom_rt::wasm_engine::create(&config).unwrap();
         let module = Module::new(&engine, wasm).unwrap();
         let mut store = wasmtime::Store::new(&engine, ());
         let instance = Instance::new(&mut store, &module, &[]).unwrap();

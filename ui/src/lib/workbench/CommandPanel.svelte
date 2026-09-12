@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { V } from "./commands";
   import { onMount, onDestroy } from "svelte";
   import { Play, RefreshCw } from "lucide-svelte";
   import { commandById, parseFields, type Command } from "./commands";
@@ -67,15 +68,11 @@
     );
   }
   onMount(() => {
-    if (command.id === "update" && !values.source && values.expected_hash) {
+    if (command.id === V.update && !values.source && values.name) {
       busy = true;
       void slot.run(
         (signal) =>
-          client.call(
-            commandById("view"),
-            { hash: values.expected_hash! },
-            signal,
-          ),
+          client.call(commandById(V.view), { target: values.name! }, signal),
         (result) =>
           (values = { ...values, source: definitionView(result).source }),
         (message) => (error = message),
@@ -129,7 +126,8 @@
             class:wide={field.kind === "source" || field.kind === "json"}
           >
             <span
-              >{field.label}{#if field.optional}<small>optional</small
+              >{field.label}{#if field.optional || field.default !== undefined}<small
+                  >optional</small
                 >{/if}</span
             >
             {#if field.options}<select bind:value={values[field.key]}
@@ -140,7 +138,7 @@
             {:else if field.kind === "source" || field.kind === "json"}<CodeEditor
                 bind:value={values[field.key]}
                 language={field.key === "query"
-                  ? "sql"
+                  ? V.sql
                   : field.kind === "source"
                     ? "rust"
                     : "json"}

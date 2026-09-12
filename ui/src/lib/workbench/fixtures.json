@@ -1,48 +1,463 @@
 {
   "definitions": [
-    {"name":"counter","hash":"a41e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9001","entry_item_hash":"b982bc716dfd8204aafe48dc994a6b4d329403d07e81e5f7f047908af900cc02","updated":"2026-09-11T18:42:10Z","source":"pub fn counter(value: i64) -> i64 {\n    increment(value)\n}\n\nfn increment(value: i64) -> i64 {\n    value + 1\n}\n","items":[{"name":"counter","hash":"b982bc716dfd8204aafe48dc994a6b4d329403d07e81e5f7f047908af900cc02","preimage_size":384,"refs":["increment"]},{"name":"increment","hash":"c371bc716dfd8204aafe48dc994a6b4d329403d07e81e5f7f047908af900cc03","preimage_size":216,"refs":[]}]},
-    {"name":"forwarder","hash":"d14e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9004","entry_item_hash":"e582bc716dfd8204aafe48dc994a6b4d329403d07e81e5f7f047908af900cc05","updated":"2026-09-11T18:31:05Z","source":"pub fn forwarder(value: i64) -> i64 {\n    value\n}\n","items":[{"name":"forwarder","hash":"e582bc716dfd8204aafe48dc994a6b4d329403d07e81e5f7f047908af900cc05","preimage_size":192,"refs":[]}]},
-    {"name":"counter_candidate","hash":"f61e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9006","entry_item_hash":"a782bc716dfd8204aafe48dc994a6b4d329403d07e81e5f7f047908af900cc07","updated":"2026-09-11T18:39:22Z","source":"pub fn counter(value: i64) -> i64 {\n    value + 2\n}\n","items":[{"name":"counter","hash":"a782bc716dfd8204aafe48dc994a6b4d329403d07e81e5f7f047908af900cc07","preimage_size":240,"refs":[]}]}
+    {
+      "name": "counter",
+      "hash": "a41e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9001",
+      "source": "pub fn counter(value: i64) -> i64 {\n    increment(value)\n}\n\nfn increment(value: i64) -> i64 {\n    value + 1\n}\n",
+      "items": {
+        "counter": "b982bc716dfd8204aafe48dc994a6b4d329403d07e81e5f7f047908af900cc02",
+        "increment": "c371bc716dfd8204aafe48dc994a6b4d329403d07e81e5f7f047908af900cc03"
+      },
+      "behavior_hash": "a41e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9001",
+      "wasm_hash": "a41e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9001",
+      "toolchain_hash": "a41e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9001",
+      "entries": {
+        "counter": {
+          "effects": {
+            "labels": [],
+            "unknown": false
+          }
+        }
+      },
+      "def": {
+        "hash": "a41e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9001",
+        "lang": "rust",
+        "component_hash": "a41e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9001",
+        "sig": {
+          "exports": [
+            {
+              "name": "counter",
+              "params": [
+                {
+                  "name": "value",
+                  "shape": {
+                    "type": "number"
+                  }
+                }
+              ],
+              "returns": {
+                "type": "number"
+              },
+              "effects": {
+                "labels": [],
+                "unknown": false
+              }
+            }
+          ],
+          "effects": {
+            "labels": [],
+            "unknown": false
+          }
+        },
+        "allowed_effects": null,
+        "observed_effects": []
+      }
+    },
+    {
+      "name": "forwarder",
+      "hash": "d14e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9004",
+      "source": "pub fn forwarder(value: i64) -> i64 {\n    loom::sleep(1).unwrap();\n    value\n}\n",
+      "items": {
+        "forwarder": "e582bc716dfd8204aafe48dc994a6b4d329403d07e81e5f7f047908af900cc05"
+      },
+      "behavior_hash": "d14e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9004",
+      "wasm_hash": "d14e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9004",
+      "toolchain_hash": "d14e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9004",
+      "entries": {
+        "forwarder": {
+          "effects": {
+            "labels": ["sleep"],
+            "unknown": false
+          }
+        }
+      },
+      "def": {
+        "hash": "d14e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9004",
+        "lang": "rust",
+        "component_hash": "d14e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9004",
+        "sig": {
+          "exports": [
+            {
+              "name": "forwarder",
+              "params": [
+                {
+                  "name": "value",
+                  "shape": {
+                    "type": "number"
+                  }
+                }
+              ],
+              "returns": {
+                "type": "number"
+              },
+              "effects": {
+                "labels": ["sleep"],
+                "unknown": false
+              }
+            }
+          ],
+          "effects": {
+            "labels": ["sleep"],
+            "unknown": false
+          }
+        },
+        "allowed_effects": null,
+        "observed_effects": ["sleep"]
+      }
+    },
+    {
+      "name": "counter_candidate",
+      "hash": "f61e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9006",
+      "source": "pub fn counter(value: i64) -> i64 {\n    value + 2\n}\n",
+      "items": {
+        "counter": "a782bc716dfd8204aafe48dc994a6b4d329403d07e81e5f7f047908af900cc07"
+      },
+      "behavior_hash": "f61e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9006",
+      "wasm_hash": "f61e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9006",
+      "toolchain_hash": "f61e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9006",
+      "entries": {
+        "counter": {
+          "effects": {
+            "labels": [],
+            "unknown": false
+          }
+        }
+      },
+      "def": {
+        "hash": "f61e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9006",
+        "lang": "rust",
+        "component_hash": "f61e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9006",
+        "sig": {
+          "exports": [
+            {
+              "name": "counter",
+              "params": [
+                {
+                  "name": "value",
+                  "shape": {
+                    "type": "number"
+                  }
+                }
+              ],
+              "returns": {
+                "type": "number"
+              },
+              "effects": {
+                "labels": [],
+                "unknown": false
+              }
+            }
+          ],
+          "effects": {
+            "labels": [],
+            "unknown": false
+          }
+        },
+        "allowed_effects": null,
+        "observed_effects": []
+      }
+    }
   ],
   "history": [
-    {"hash":"a41e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9001","parent_hash":"f61e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9006","updated":"2026-09-11T18:42:10Z","changed_items":[{"name":"counter","before":"a782bc716dfd8204aafe48dc994a6b4d329403d07e81e5f7f047908af900cc07","after":"b982bc716dfd8204aafe48dc994a6b4d329403d07e81e5f7f047908af900cc02"},{"name":"increment","before":null,"after":"c371bc716dfd8204aafe48dc994a6b4d329403d07e81e5f7f047908af900cc03"}]},
-    {"hash":"f61e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9006","parent_hash":null,"updated":"2026-09-11T18:39:22Z","changed_items":[{"name":"counter","before":null,"after":"a782bc716dfd8204aafe48dc994a6b4d329403d07e81e5f7f047908af900cc07"}]}
+    {
+      "name": "counter",
+      "hash": "f61e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9006",
+      "timestamp": 1789151962,
+      "changes": null
+    },
+    {
+      "name": "counter",
+      "hash": "a41e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9001",
+      "timestamp": 1789152130,
+      "changes": {
+        "old": "f61e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9006",
+        "new": "a41e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9001",
+        "added": [
+          {
+            "name": "increment",
+            "hash": "c371bc716dfd8204aafe48dc994a6b4d329403d07e81e5f7f047908af900cc03"
+          }
+        ],
+        "removed": [],
+        "changed": [
+          {
+            "name": "counter",
+            "old": "a782bc716dfd8204aafe48dc994a6b4d329403d07e81e5f7f047908af900cc07",
+            "new": "b982bc716dfd8204aafe48dc994a6b4d329403d07e81e5f7f047908af900cc02"
+          }
+        ]
+      }
+    }
   ],
   "actors": [
-    {"id":"a0-root","status":"running","behavior_hash":"supervisor-v1","cursor":18,"inbox_len":0,"parent":null},
-    {"id":"a0-counter","status":"running","behavior_hash":"a41e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9001","cursor":42,"inbox_len":2,"parent":"a0-root"},
-    {"id":"a0-forwarder","status":"parked","behavior_hash":"d14e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9004","cursor":11,"inbox_len":1,"parent":"a0-root"},
-    {"id":"a0-worker","status":"stopped","behavior_hash":"a41e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9001","cursor":8,"inbox_len":0,"parent":"a0-forwarder"}
+    {
+      "id": "a0-root",
+      "status": "running",
+      "behavior_hash": "supervisor-v1",
+      "cursor": 18,
+      "inbox_len": 0,
+      "parent": null
+    },
+    {
+      "id": "a0-counter",
+      "status": "running",
+      "behavior_hash": "a41e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9001",
+      "cursor": 42,
+      "inbox_len": 2,
+      "parent": "a0-root"
+    },
+    {
+      "id": "a0-forwarder",
+      "status": "parked",
+      "behavior_hash": "d14e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9004",
+      "cursor": 11,
+      "inbox_len": 1,
+      "parent": "a0-root"
+    },
+    {
+      "id": "a0-worker",
+      "status": "stopped",
+      "behavior_hash": "a41e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9001",
+      "cursor": 8,
+      "inbox_len": 0,
+      "parent": "a0-forwarder"
+    }
   ],
-  "tree": {"id":"a0-root","status":"running","behavior_hash":"supervisor-v1","cursor":18,"children":[{"id":"a0-counter","status":"running","behavior_hash":"a41e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9001","cursor":42,"children":[]},{"id":"a0-forwarder","status":"parked","behavior_hash":"d14e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9004","cursor":11,"children":[{"id":"a0-worker","status":"stopped","behavior_hash":"a41e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9001","cursor":8,"children":[]}]}]},
+  "tree": {
+    "id": "a0-root",
+    "status": "running",
+    "behavior_hash": "supervisor-v1",
+    "cursor": 18,
+    "children": [
+      {
+        "id": "a0-counter",
+        "status": "running",
+        "behavior_hash": "a41e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9001",
+        "cursor": 42,
+        "children": []
+      },
+      {
+        "id": "a0-forwarder",
+        "status": "parked",
+        "behavior_hash": "d14e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9004",
+        "cursor": 11,
+        "children": [
+          {
+            "id": "a0-worker",
+            "status": "stopped",
+            "behavior_hash": "a41e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9001",
+            "cursor": 8,
+            "children": []
+          }
+        ]
+      }
+    ]
+  },
   "inbox": [
-    {"seq":41,"key":"req:40:0","sender":null,"msg":[123,34,118,97,108,117,101,34,58,52,49,125],"received_at":1789152000,"state":"committed"},
-    {"seq":42,"key":"external:42","sender":null,"msg":[123,34,118,97,108,117,101,34,58,52,50,125],"received_at":1789152001,"state":"committed"},
-    {"seq":43,"key":"external:43","sender":"a0-forwarder","msg":[123,34,118,97,108,117,101,34,58,52,51,125],"received_at":1789152002,"state":"pending"}
+    {
+      "seq": 41,
+      "key": "req:40:0",
+      "sender": null,
+      "msg": [123, 34, 118, 97, 108, 117, 101, 34, 58, 52, 49, 125],
+      "received_at": 1789152000,
+      "state": "committed",
+      "defer_epoch": -1,
+      "defer_count": 0
+    },
+    {
+      "seq": 42,
+      "key": "external:42",
+      "sender": null,
+      "msg": [123, 34, 118, 97, 108, 117, 101, 34, 58, 52, 50, 125],
+      "received_at": 1789152001,
+      "state": "committed",
+      "defer_epoch": -1,
+      "defer_count": 0
+    },
+    {
+      "seq": 43,
+      "key": "external:43",
+      "sender": "a0-forwarder",
+      "msg": [123, 34, 118, 97, 108, 117, 101, 34, 58, 52, 51, 125],
+      "received_at": 1789152002,
+      "state": "pending",
+      "defer_epoch": -1,
+      "defer_count": 0
+    }
   ],
   "outbox": [
-    {"seq":41,"idx":0,"target":"a0-forwarder","msg":[52,49],"delivered":1},
-    {"seq":42,"idx":0,"target":"a0-forwarder","msg":[52,50],"delivered":0}
+    {
+      "seq": 41,
+      "idx": 0,
+      "target": "a0-forwarder",
+      "msg": [52, 49],
+      "delivered": 1
+    },
+    {
+      "seq": 42,
+      "idx": 0,
+      "target": "a0-forwarder",
+      "msg": [52, 50],
+      "delivered": 0
+    }
   ],
   "effects": [
-    {"seq":41,"idx":0,"kind":"now","request":[],"result":[49,55,56,57,49,53,50,48,48,48]},
-    {"seq":42,"idx":0,"kind":"echo","request":[52,50],"result":[52,50]}
+    {
+      "seq": 41,
+      "idx": 0,
+      "kind": "now",
+      "request": [],
+      "result": [49, 55, 56, 57, 49, 53, 50, 48, 48, 48]
+    },
+    {
+      "seq": 42,
+      "idx": 0,
+      "kind": "echo",
+      "request": [52, 50],
+      "result": [52, 50]
+    }
   ],
   "lineage": [
-    {"seq":0,"behavior_hash":"f61e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9006","parent_hash":null,"author":"operator","rationale":"Initial counter","schema_sql":"CREATE TABLE counter(value INTEGER);"},
-    {"seq":32,"behavior_hash":"a41e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9001","parent_hash":"f61e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9006","author":"operator","rationale":"Extract increment helper","schema_sql":""}
+    {
+      "seq": 0,
+      "behavior_hash": "f61e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9006",
+      "parent_hash": null,
+      "author": "operator",
+      "rationale": "Initial counter",
+      "schema_sql": "CREATE TABLE counter(value INTEGER);"
+    },
+    {
+      "seq": 32,
+      "behavior_hash": "a41e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9001",
+      "parent_hash": "f61e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9006",
+      "author": "operator",
+      "rationale": "Extract increment helper",
+      "schema_sql": ""
+    }
   ],
-  "dead_letters": [{"seq":12,"msg":[123,125],"error":"missing target at seq 12","at":1789152000}],
+  "dead_letters": [
+    {
+      "seq": 12,
+      "msg": [123, 125],
+      "error": "missing target at seq 12",
+      "at": 1789152000
+    }
+  ],
   "verdicts": {
-    "Matched":{"verdict":{"Matched":{"tables":[{"name":"counter","hash":"c371bc716dfd8204aafe48dc994a6b4d329403d07e81e5f7f047908af900cc03"}]}},"assertions":[{"query":"SELECT count(*) = 1 FROM counter","passed":true}]},
-    "DivergedAt":{"verdict":{"DivergedAt":{"seq":41,"idx":0,"expected":[110,111,119],"got":[101,99,104,111]}},"assertions":[]},
-    "Differs":{"verdict":{"Differs":{"tables":[{"name":"counter","original_hash":"c371bc716dfd8204aafe48dc994a6b4d329403d07e81e5f7f047908af900cc03","fork_hash":"a782bc716dfd8204aafe48dc994a6b4d329403d07e81e5f7f047908af900cc07"}]}},"assertions":[{"query":"SELECT value = 42 FROM counter","passed":false}]},
-    "Trapped":{"verdict":{"Trapped":{"seq":41,"error":"counter overflow at sequence 41"}},"assertions":[]}
+    "Matched": {
+      "verdict": {
+        "Matched": {
+          "tables": [
+            {
+              "name": "counter",
+              "hash": "c371bc716dfd8204aafe48dc994a6b4d329403d07e81e5f7f047908af900cc03"
+            }
+          ]
+        }
+      },
+      "assertions": [
+        {
+          "query": "SELECT count(*) = 1 FROM counter",
+          "passed": true
+        }
+      ]
+    },
+    "DivergedAt": {
+      "verdict": {
+        "DivergedAt": {
+          "seq": 41,
+          "idx": 0,
+          "expected": [110, 111, 119],
+          "got": [101, 99, 104, 111]
+        }
+      },
+      "assertions": []
+    },
+    "Differs": {
+      "verdict": {
+        "Differs": {
+          "tables": [
+            {
+              "name": "counter",
+              "original_hash": "c371bc716dfd8204aafe48dc994a6b4d329403d07e81e5f7f047908af900cc03",
+              "fork_hash": "a782bc716dfd8204aafe48dc994a6b4d329403d07e81e5f7f047908af900cc07"
+            }
+          ]
+        }
+      },
+      "assertions": [
+        {
+          "query": "SELECT value = 42 FROM counter",
+          "passed": false
+        }
+      ]
+    },
+    "Trapped": {
+      "verdict": {
+        "Trapped": {
+          "seq": 41,
+          "error": "counter overflow at sequence 41"
+        }
+      },
+      "assertions": []
+    }
   },
-  "run": {"output":43,"effects":[{"kind":"echo","request":42,"result":42,"status":"performed"}]},
+  "run": {
+    "hash": "a41e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9001",
+    "output": 43,
+    "scope": "call:fixture",
+    "effects": []
+  },
   "responses": {
-    "actor_send":{"cursor":43},"actor_spawn":{"id":"a0-spawned"},"actor_stop":{"id":"a0-counter"},"actor_restart":{"id":"a0-counter"},
-    "actor_promote_where":["a0-counter"],"actor_fork":{"id":"a0-fork-40"},"actor_whereis":"a0-counter","actor_register":{"id":"a0-counter","name":"counter"},
-    "actor_members":["a0-counter","a0-forwarder"],"actor_behaviors":[{"hash":"supervisor-v1","description":"OTP supervisor"},{"hash":"a41e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9001","description":"Counter behavior"}],"actor_run":{"processed":2}
+    "messageSent": {
+      "id": "a0-counter",
+      "seq": 43,
+      "cursor": 43
+    },
+    "spawned": {
+      "id": "a0-spawned"
+    },
+    "stopped": {
+      "id": "a0-counter"
+    },
+    "restarted": {
+      "id": "a0-counter"
+    },
+    "promotedActors": ["a0-counter"],
+    "forked": {
+      "id": "a0-fork-40"
+    },
+    "registeredActor": "a0-counter",
+    "registration": {
+      "id": "a0-counter",
+      "name": "counter"
+    },
+    "groupMembers": ["a0-counter", "a0-forwarder"],
+    "knownBehaviors": [
+      {
+        "hash": "supervisor-v1",
+        "description": "OTP supervisor"
+      },
+      {
+        "hash": "a41e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9001",
+        "description": "Counter behavior"
+      }
+    ],
+    "drained": {
+      "processed": 2
+    }
+  },
+  "responseEnvelope": {
+    "ok": true,
+    "seq": 0,
+    "result": null,
+    "diagnostics": []
+  },
+  "build": {
+    "ms": 12,
+    "component_hash": "a41e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9001",
+    "size": 512,
+    "logs_ref": "a41e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9001",
+    "rustc_invocations": 1
   }
 }

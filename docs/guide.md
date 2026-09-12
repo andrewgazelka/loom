@@ -8,7 +8,7 @@ The long-term goal is a formally verified guest language, compiler, and runtime 
 
 ## Run locally
 
-On Apple Silicon macOS or x86-64 Linux, Nix supplies the daemon, Svelte app, and Rust guest toolchain:
+On Apple Silicon macOS or x86-64 Linux, Nix supplies the daemon, Svelte app, the pinned Rust compiler that guest definitions are built with, and the content-hashing rustc driver, prebuilt:
 
 ```sh
 nix run .#repl
@@ -31,15 +31,21 @@ The package installs two programs. `loomd` is the daemon with its state director
 
 ### Development without Nix
 
-Install Rust 1.97, its `rust-src` component, and Bun 1.3.13. Linux machine execution also needs Bubblewrap. The builder rebuilds the standard library for `wasm32-unknown-unknown` with atomics enabled.
+Install Bun 1.3.13 and the pinned guest compiler, `nightly-2026-08-24`: definitions are built by that compiler and identified by the `tools/hash-rustc` driver, which is a rustc plugin and therefore only links against the compiler that runs it. The daemon compares `hash-rustc -vV` with `$RUSTC -vV` and refuses a mismatch. Linux machine execution also needs Bubblewrap. The builder rebuilds the standard library for `wasm32-unknown-unknown` with atomics enabled.
 
 ```sh
-rustup component add rust-src
-rustup target add wasm32-unknown-unknown
+rustup toolchain install nightly-2026-08-24 \
+  --component rustc-dev --component llvm-tools --component rust-src \
+  --target wasm32-unknown-unknown
+cargo +nightly-2026-08-24 build --release --manifest-path tools/hash-rustc/Cargo.toml
+export RUSTC="$(rustup which --toolchain nightly-2026-08-24 rustc)"
+export LOOM_HASH_RUSTC="$PWD/tools/hash-rustc/target/release/hash-rustc"
 (cd ui && bun install --frozen-lockfile && bun run build)
 export LOOM_TOKEN='replace-with-your-token'
 cargo run --release -p loomd -- --db loom.sqlite
 ```
+
+`loomd` itself builds with any recent Rust; only the two variables above decide what guests are compiled by. Under Nix, `nix/loom.sh` exports the same two, pointing at store paths.
 
 Open <http://127.0.0.1:8787> and enter the same token. The daemon serves the built Svelte application, HTTP API, WebSocket event stream, and MCP endpoint. The token authorizes the single owner; keep the listener on loopback unless network access is intended.
 

@@ -57,6 +57,7 @@ pub(super) async fn compile(request: Request<'_>) -> Result<(), BuildError> {
         command
     };
     compiler_environment(&mut command);
+    command.env("RUSTC", &recipe.compiler);
     if !isolated {
         command.envs(&recipe.environment);
     }

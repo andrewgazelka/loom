@@ -24,3 +24,6 @@ libc = "0.2"
 [dev-dependencies]
 log = "0.4"
 wat = "1"
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+mach2 = "0.6"

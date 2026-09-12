@@ -9,6 +9,7 @@ mod machine;
 mod root_handler;
 mod sharedcore;
 mod trace;
+pub mod wasm_engine;
 use anyhow::{Context, Result, bail};
 use loom_proto::Value;
 use loom_store::Store;

@@ -14,7 +14,12 @@
     root = ../.;
     fileset = lib.fileset.unions [../Cargo.toml ../Cargo.lock ../crates ../examples ../rustc/vendor-config.toml];
   };
-  toolchain = import ./toolchain.nix {inherit pkgs lib;};
+  toolchains = import ./toolchain.nix {inherit pkgs lib;};
+  # `buildToolchain` compiles this repo's two binaries and appears in no
+  # runtime closure; `toolchain` is what the daemon compiles guests with, and
+  # what the hash-rustc driver is built against.
+  buildToolchain = toolchains.host;
+  toolchain = toolchains.guest;
   javascript = import ./javascript.nix {
     inherit pkgs lib;
     src = ../.;
@@ -26,17 +31,21 @@
     }.${
       pkgs.stdenv.hostPlatform.system
     } or (throw "loom.host: unsupported host platform");
+  # The daemon runs this prebuilt driver for every guest build; it is built
+  # from, and pinned to, the same nightly it compiles guests with.
+  driver = import ./hash-rustc.nix {inherit pkgs lib toolchain;};
   # One rustc invocation per Cargo unit, so a change in one crate rebuilds that
-  # crate and its dependents, not the workspace. The guest toolchain is the same
-  # pinned compiler the daemon ships to guests, so host and guests never diverge.
-  # The gates (clippy, tests, audit) belong to this repo's own checks, not to
-  # packaging: this workspace exists to produce two binaries.
+  # crate and its dependents, not the workspace. This is the host build: what it
+  # compiles with is invisible to guests, which get ./toolchain.nix's `guest`
+  # entry and the driver built from it. The gates (clippy, tests, audit) belong
+  # to this repo's own checks, not to packaging: this workspace exists to
+  # produce two binaries.
   workspace = cargoUnit.buildWorkspace {
     pname = "loom-host";
     src = rustSource;
     workspaceRoot = rustSource;
     cargoLock = ../Cargo.lock;
-    rustToolchain = toolchain;
+    rustToolchain = buildToolchain;
     cargoTargetNames = ["host"];
     cargoTargets = [["-p" "loomd" "-p" "loom-cli" "--target" hostTarget]];
     profile = "release";
@@ -76,13 +85,14 @@
     mkdir -p $out/ui
     ln -s ${javascript.ui} $out/ui/build
   '';
-  runtime = [toolchain pkgs.bun pkgs.binaryen pkgs.stdenv.cc pkgs.stdenv.cc.bintools pkgs.pkg-config pkgs.coreutils pkgs.findutils pkgs.gnused pkgs.gnugrep pkgs.gnutar pkgs.gzip pkgs.cacert] ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [pkgs.bubblewrap pkgs.util-linux];
+  runtime = [toolchain driver pkgs.bun pkgs.binaryen pkgs.stdenv.cc pkgs.stdenv.cc.bintools pkgs.pkg-config pkgs.coreutils pkgs.findutils pkgs.gnused pkgs.gnugrep pkgs.gnutar pkgs.gzip pkgs.cacert] ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [pkgs.bubblewrap pkgs.util-linux];
   launcher = pkgs.replaceVars ./loom.sh {
     bash = lib.getExe pkgs.bash;
     runtimePath = lib.makeBinPath runtime;
     inherit sources;
     daemon = lib.getExe daemon;
     rustc = lib.getExe' toolchain "rustc";
+    hashRustc = lib.getExe driver;
     certificates = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
   };
   # `loomd` is the daemon with its state directory, token, and guest toolchain
@@ -103,7 +113,7 @@
       shellcheck $out/bin/loomd
       runHook postInstall
     '';
-    passthru = {inherit host daemon cli toolchain sources workspace;};
+    passthru = {inherit host daemon cli toolchain buildToolchain driver sources workspace;};
     meta = {
       description = "Loom with the Rust guest toolchain";
       license = lib.licenses.mit;
@@ -137,5 +147,5 @@
   };
 in {
   default = package;
-  inherit host daemon cli toolchain sources repl;
+  inherit host daemon cli toolchain buildToolchain driver sources repl;
 }

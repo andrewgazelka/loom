@@ -3,7 +3,7 @@ use anyhow::{Context, Result, ensure};
 use loom_store::Store;
 use rusqlite::{OptionalExtension, params};
 use std::{borrow::Cow, sync::Mutex};
-use wasmtime::{CacheStore, Config, Engine};
+use wasmtime::{CacheStore, Config};
 
 /// Candidate hits count CAS reads; Cranelift can still reject a serialized value.
 #[derive(Clone, Debug, Default)]
@@ -84,8 +84,7 @@ impl std::hash::Hasher for NamespaceHasher {
 /// Patch them only with a version bump.
 fn namespace(config: &Config) -> Result<String> {
     use std::hash::Hash;
-    let engine = Engine::new(config)
-        .map_err(|error| anyhow::anyhow!("{error:#}"))
+    let engine = crate::wasm_engine::create(config)
         .context("probe the compilation backend for its cache namespace")?;
     let mut hasher = NamespaceHasher(blake3::Hasher::new());
     engine.precompile_compatibility_hash().hash(&mut hasher);
