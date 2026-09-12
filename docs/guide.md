@@ -91,20 +91,26 @@ HTTP clients post `{ "command": "run", "args": { "target": "sum", "args": [20,22
 
 Item hashes describe compiler-resolved definitions. Renaming a local variable or reformatting source leaves them unchanged. A changed helper can change its callers' hashes too. The definition hash is a BLAKE3 Merkle root over the sorted entry name/hash pairs from the driver. Every public entry contributes, so changing a secondary entry changes the definition hash while unchanged entries retain their own resolved-HIR hashes. Alpha-renaming a local leaves both the definition hash and history unchanged; changing a constant changes the hash. Source revisions have their own BLAKE3 hashes. A published definition pins its executable and schema; a conflicting publication is rejected. The Wasm and toolchain hashes identify its executable build. Builds require the `hash-rustc` driver and reject missing identity outputs. Stores without `defs.behavior_hash` are rejected by column name.
 
-Compiler and driver resolution is shared by all guest build operations:
+### Compiler resolution
 
-1. **Prebuilt driver:** set `LOOM_HASH_RUSTC` to the driver’s absolute executable path. The Rust API’s `with_driver_path` overrides that selection. Loom uses this binary as-is: it runs `-vV` and `--print sysroot`, then selects `<sysroot>/bin/rustc` and `<sysroot>/bin/cargo`. An explicit `RUSTC` overrides the guest compiler only if its complete `-vV` output and canonical `--print sysroot` match the driver. Missing binaries, mismatched versions, and mismatched sysroots fail with named paths. This path does not read `tools/hash-rustc`, its Cargo manifest, or its toolchain pin, does not run rustup, and does not rebuild the driver.
-2. **Source-built driver:** with no driver override, Loom reads `<root>/tools/hash-rustc/rust-toolchain.toml` and resolves its channel using `rustup which --toolchain <channel> rustc` and `cargo`. An explicit `RUSTC` must match the pinned compiler’s complete `-vV` output. Loom builds `<root>/tools/hash-rustc/Cargo.toml` using the pinned Cargo/compiler, in `<build-dir>/hash-rustc/<blake3(rustc -vV)>/release/hash-rustc`; Cargo checks freshness on subsequent builds. Both the driver sources and pin are required in this mode.
+Loom uses one compiler resolver for every guest operation. There are two modes:
 
-`<root>` is the service source root (`LOOM_ROOT` in the packaged launcher). `<build-dir>` is `LOOM_BUILD_DIR`, defaulting to `<root>/.loom-build`. There is no automatic driver search on `PATH` and no fallback to plain rustc. Guest builds use the selected sysroot’s tools ahead of the ambient `PATH`. The source-built mode uses the pinned rustup channel; prebuilt mode clears an ambient `RUSTUP_TOOLCHAIN`.
+- **`LOOM_HASH_RUSTC` is set:** provide absolute executable paths in both `LOOM_HASH_RUSTC` (the prebuilt driver) and `RUSTC` (the guest compiler). Loom requires the driver’s reported rustc version to equal the complete output of `$RUSTC -vV`. It uses the supplied driver as-is: driver resolution never looks for `tools/hash-rustc`, reads a source pin, runs rustup, or invokes Cargo. Missing overrides, relative paths, unavailable executables, and version mismatches fail with named errors. The guest sysroot comes from `$RUSTC --print sysroot`; guest Cargo comes from `<guest-sysroot>/bin/cargo`.
+- **`LOOM_HASH_RUSTC` is unset:** no environment setup is needed. Loom reads `<root>/tools/hash-rustc/rust-toolchain.toml`, resolves that channel’s rustc and Cargo through `rustup which --toolchain <channel>`, and builds the driver from `tools/hash-rustc/Cargo.toml` with that pinned compiler. `RUSTC` defaults to the pinned rustc; an explicit override must report the same version. Cargo checks the cached driver’s freshness on subsequent builds.
 
-For a Nix package, ship a driver compiled against the packaged nightly sysroot, including its runtime compiler libraries, `bin/rustc`, `bin/cargo`, and `rust-src`. The package may omit `tools/` entirely when it sets `LOOM_HASH_RUSTC`. It must still ship the runtime SDK sources and build scripts. Set `RUSTC` to that same sysroot’s compiler or leave it unset; a launcher override pointing at stable Rust is rejected.
+The Rust API’s `with_driver_path` selects the same prebuilt mode and takes precedence over `LOOM_HASH_RUSTC`. There is no automatic driver search on `PATH` and no fallback to plain rustc. Prebuilt mode clears ambient `RUSTUP_TOOLCHAIN`; guest commands put the selected sysroot’s binaries first on `PATH`.
+
+`<root>` is the service source root (`LOOM_ROOT` in the packaged launcher). `<build-dir>` is `LOOM_BUILD_DIR`, defaulting to `<root>/.loom-build`. Source-built drivers are cached at `<build-dir>/hash-rustc/<blake3(rustc -vV)>/release/hash-rustc`.
+
+A Nix package may omit `tools/` and rustup when supplying both overrides. Ship the prebuilt driver’s runtime libraries, the matching guest compiler with Cargo and `rust-src`, and the runtime SDK sources/build scripts. Cargo is still used for guest dependency preparation and compilation; the prebuilt mode never invokes Cargo to build or resolve the driver.
 
 ```sh
 export LOOM_HASH_RUSTC="/nix/store/<driver>/bin/hash-rustc"
 export RUSTC="/nix/store/<matching-nightly-sysroot>/bin/rustc"
 loomd
 ```
+
+### Actor commands
 
 Actor commands use the same names, argument schemas, admission checks, and response envelope on CLI, HTTP, and MCP:
 
