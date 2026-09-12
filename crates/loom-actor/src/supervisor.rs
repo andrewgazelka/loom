@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 /// Default supervision policy; configuration and restart history live in its file.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Supervisor;
+pub(crate) const HASH: &str = "supervisor-v1";
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS spec(child_id TEXT PRIMARY KEY, "order" INTEGER, behavior_hash TEXT, init BLOB, restart TEXT, shutdown TEXT, link INTEGER, type TEXT, monitor INTEGER);
@@ -359,8 +360,14 @@ async fn failure(cx: &mut Ctx<'_>, failure: Failure) -> Result<(), Trap> {
 
 #[async_trait]
 impl Behavior for Supervisor {
+    fn child_type(&self) -> crate::ChildType {
+        crate::ChildType::Supervisor
+    }
+    fn description(&self) -> &str {
+        "Supervises children using configured restart strategies."
+    }
     fn hash(&self) -> &str {
-        "supervisor-v1"
+        HASH
     }
     fn schema(&self) -> &str {
         SCHEMA

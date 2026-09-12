@@ -6,12 +6,13 @@ use turso::Connection;
 
 impl Node {
     pub(crate) async fn reset(&self, conn: &mut Connection, id: &str, key: &str) -> Result<()> {
+        anyhow::ensure!(self.config.io != crate::Io::Memory, "actor {id} seq -1: reset requires persistent I/O");
         let generation = actor::meta(conn, "generation").await?.parse::<i64>()?.checked_add(1).context("generation overflow")?;
         let archive = self.dir.join(format!("{id}.reset.{generation}.db"));
         vacuum(conn, &archive).await?;
         let build = self.dir.join(format!("{id}.reset-building"));
         remove_database(&build)?;
-        let mut fresh = actor::connect(&build).await?;
+        let mut fresh = actor::connect(&build, self.config.io).await?;
         let tx = fresh.transaction().await?;
         tx.execute_batch(crate::SCHEMA).await?;
         actor::set_meta(&tx, "id", id).await?;
@@ -58,7 +59,9 @@ impl Node {
             }
         }
         let init: Vec<u8> = serde_json::from_str(&actor::meta(conn, "init").await?)?;
-        actor::inject(&tx, "init", &actor::meta(conn, "parent").await?, &init).await?;
+        if !init.is_empty() {
+            actor::inject(&tx, "init", &actor::meta(conn, "parent").await?, &init).await?;
+        }
         tx.commit().await?;
         actor::snapshot(&fresh, &self.snapshot_path(id, generation, 0), 0).await?;
         let ready = self.dir.join(format!("{id}.reset-publish"));
@@ -67,10 +70,10 @@ impl Node {
         remove_database(&build)?;
         // Drop the original connection while holding the shared actor mutex. Every
         // Actor handle subsequently observes the replacement connection in this slot.
-        let old = std::mem::replace(conn, actor::connect(Path::new(":memory:")).await?);
+        let old = std::mem::replace(conn, actor::connect(Path::new(":memory:"), crate::Io::Memory).await?);
         drop(old);
         recover(&self.path(id))?;
-        *conn = actor::connect(&self.path(id)).await?;
+        *conn = actor::connect(&self.path(id), self.config.io).await?;
         Ok(())
     }
 }

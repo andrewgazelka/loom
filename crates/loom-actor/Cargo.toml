@@ -7,6 +7,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 turso = "0.7.2"
+turso_parser = "0.7.2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 async-trait = "0.1"
 anyhow = "1"
@@ -22,3 +23,6 @@ tempfile = "3"
 [[test]]
 name = "integration"
 path = "tests/integration.rs"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+turso_core = { version = "0.7.2", features = ["io_uring"] }

@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { Client, AuthenticationError, casListing } from "../loom-ui/src/lib/api";
+import { Client, AuthenticationError, casListing } from "../ui/src/lib/api";
 
 test("every HTTP path reports typed authentication failure, then valid CAS reconnect works", async () => {
  const server=Bun.serve({port:0,fetch(request){

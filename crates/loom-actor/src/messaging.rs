@@ -284,7 +284,7 @@ impl Node {
                         progress.progressed |= self.complete_call(&id, &id, &timer.reference, &msg).await?;
                     }
                     "shutdown" => {
-                        // Abort before waiting for the target connection. The lifecycle
+                        // Cancel the handler before waiting for its transaction. The lifecycle
                         // helper verifies the durable timer under that connection lock.
                         progress.progressed |= self.kill_from_timer(&timer.target, &timer.initiator, &timer.reference).await?;
                         continue;

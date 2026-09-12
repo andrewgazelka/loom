@@ -3,19 +3,19 @@
 #[doc(hidden)]
 pub mod core;
 #[cfg(any(loom_core, not(target_arch = "wasm32")))]
-mod scoped;
-#[cfg(any(loom_core, not(target_arch = "wasm32")))]
 mod detached;
 #[cfg(any(loom_core, not(target_arch = "wasm32")))]
-pub use detached::{spawn, JoinHandle};
+mod scoped;
 #[cfg(any(loom_core, not(target_arch = "wasm32")))]
-pub use scoped::{scope, Scope, ScopedJoinHandle};
+pub use detached::{JoinHandle, spawn};
+#[cfg(any(loom_core, not(target_arch = "wasm32")))]
+pub use scoped::{Scope, ScopedJoinHandle, scope};
 #[cfg(any(loom_core, not(target_arch = "wasm32")))]
 mod handlers;
 #[cfg(any(loom_core, not(target_arch = "wasm32")))]
 pub mod preview;
 #[cfg(any(loom_core, not(target_arch = "wasm32")))]
-pub use handlers::{handle, handle_any, Continuation, Effect, Reply};
+pub use handlers::{Continuation, Effect, Reply, handle, handle_any};
 pub use loom_guest_macros::{actor, def, schema};
 pub use serde;
 use serde::{Serialize, de::DeserializeOwned};
@@ -24,7 +24,7 @@ use std::marker::PhantomData;
 
 #[cfg(not(loom_core))]
 pub mod bindings {
-    wit_bindgen::generate!({ path: "../../loom-wit", world: "handler", pub_export_macro: true, default_bindings_module: "::loom::bindings" });
+    wit_bindgen::generate!({ path: "../../wit", world: "handler", pub_export_macro: true, default_bindings_module: "::loom::bindings" });
 }
 
 #[cfg(loom_core)]
@@ -47,7 +47,9 @@ pub fn perform<T: DeserializeOwned>(name: &str, args: impl Serialize) -> Result<
         decode_host(&result)
     }
     #[cfg(loom_core)]
-    { core::perform(&bytes) }
+    {
+        core::perform(&bytes)
+    }
 }
 
 pub struct Def<F> {
@@ -79,7 +81,10 @@ impl<A: Serialize, R: DeserializeOwned> Invocation for fn(A) -> R {
 }
 /// Call another definition synchronously with typed positional arguments.
 pub fn call<F: Invocation>(def: Def<F>, args: F::Args) -> Result<F::Output, EffectError> {
-    perform("call", serde_json::json!({"def":def.hash,"args":F::arguments(args)?}))
+    perform(
+        "call",
+        serde_json::json!({"def":def.hash,"args":F::arguments(args)?}),
+    )
 }
 
 pub trait Actor {
@@ -114,33 +119,62 @@ pub mod actor {
     }
 
     pub fn spawn<F: Invocation>(def: Def<F>, state: Value) -> Result<Value, EffectError> {
-        perform("actor.spawn", serde_json::json!({"def":def.hash,"state":state}))
+        perform(
+            "actor.spawn",
+            serde_json::json!({"def":def.hash,"state":state}),
+        )
     }
 }
 pub mod fs {
     use super::*;
     pub fn list(machine: &str, path: &str) -> Result<Vec<DirEntry>, EffectError> {
-        perform("fs.list", serde_json::json!({"machine":machine,"path":path}))
+        perform(
+            "fs.list",
+            serde_json::json!({"machine":machine,"path":path}),
+        )
     }
     pub fn stat(machine: &str, path: &str) -> Result<DirEntry, EffectError> {
-        perform("fs.stat", serde_json::json!({"machine":machine,"path":path}))
+        perform(
+            "fs.stat",
+            serde_json::json!({"machine":machine,"path":path}),
+        )
     }
-    pub fn walk(machine: &str, path: &str, max_depth: u32, max_entries: u32) -> Result<Vec<DirEntry>, EffectError> {
-        perform("fs.walk", serde_json::json!({"machine":machine,"path":path,"max_depth":max_depth,"max_entries":max_entries}))
+    pub fn walk(
+        machine: &str,
+        path: &str,
+        max_depth: u32,
+        max_entries: u32,
+    ) -> Result<Vec<DirEntry>, EffectError> {
+        perform(
+            "fs.walk",
+            serde_json::json!({"machine":machine,"path":path,"max_depth":max_depth,"max_entries":max_entries}),
+        )
     }
     pub fn read(machine: &str, path: &str) -> Result<String, EffectError> {
-        perform("fs.read", serde_json::json!({"machine":machine,"path":path}))
+        perform(
+            "fs.read",
+            serde_json::json!({"machine":machine,"path":path}),
+        )
     }
     /// Read a UTF-8 file, returning None only when the final path is absent.
     pub fn read_optional(machine: &str, path: &str) -> Result<Option<String>, EffectError> {
-        perform("fs.read_optional", serde_json::json!({"machine":machine,"path":path}))
+        perform(
+            "fs.read_optional",
+            serde_json::json!({"machine":machine,"path":path}),
+        )
     }
     /// Replace a UTF-8 file relative to a machine's pinned filesystem root.
     pub fn write(machine: &str, path: &str, content: &str) -> Result<(), EffectError> {
-        perform("fs.write", serde_json::json!({"machine":machine,"path":path,"content":content}))
+        perform(
+            "fs.write",
+            serde_json::json!({"machine":machine,"path":path,"content":content}),
+        )
     }
     pub fn snapshot(machine: Value, path: &str) -> Result<Value, EffectError> {
-        perform("fs.snapshot", serde_json::json!({"machine":machine,"path":path}))
+        perform(
+            "fs.snapshot",
+            serde_json::json!({"machine":machine,"path":path}),
+        )
     }
 }
 

@@ -1,8 +1,27 @@
 # Loom
 
-**Concurrent I/O in ordinary Rust functions. No `async`, no `.await`.**
+Loom is a Rust execution runtime. Ordinary Rust functions perform algebraic effects
+(`loom::sleep`, filesystem reads, model calls) on WebAssembly fibers: a call suspends
+the fiber, a host handler does the work, the fiber resumes with the result, and
+signatures stay ordinary Rust throughout. Actors (`loom-actor`) add durable,
+supervised state: one Turso (SQLite-in-Rust) file per actor, one message per
+transaction, OTP-parity supervision trees.
 
-Loom is a Rust execution runtime and REPL with an algebraic-effect model implemented using WebAssembly fibers. Your code performs an effect; a fiber suspends while a host handler does the work, then resumes with the result. Effectful calls keep ordinary Rust function signatures throughout the call chain.
+## Try it
+
+```sh
+nix run .                 # starts loomd, prints the token file path
+nix run . -- --stdio      # same daemon, MCP over stdio for a coding agent
+cargo test -p loom-actor  # 22 tests: the actor engine, standalone
+```
+
+Open `http://127.0.0.1:8787` and paste the printed token for the browser REPL.
+See [docs/guide.md](docs/guide.md) for running without Nix and for the HTTP API.
+
+## Effects
+
+Calling an effect performs it. A handler can supply a value, forward to an outer
+handler, or keep a one-shot continuation to resume later:
 
 ```rust
 use loom::sleep;
@@ -18,83 +37,143 @@ pub fn main() {
 }
 ```
 
-Calling `sleep` starts a timer and suspends that child until it finishes. The two scoped children run concurrently, so their waits overlap. The host owns the timers; each WebAssembly fiber preserves its suspended Rust execution.
+The two scoped children run concurrently, so their sleeps overlap; `scope` waits for
+both before returning. The guest-handler round trip (install, dispatch, resume,
+remove) measured **13.811 µs median, 24.356 µs p99** over 10,000 warm calls on Linux,
+September 10, 2026. Reproduce with `bun scripts/bench/effects-handlers.ts`. See
+[docs/guide.md](docs/guide.md) for handler installation and
+[content-addressed handlers](docs/content-addressed-handlers.md).
 
-This applies to Loom's effect APIs. It does not make arbitrary blocking Rust libraries asynchronous.
+## Actors
 
-## Try it
+An actor is one file: a mailbox (`inbox`), a behavior (content-hashed, in
+`code_changes`), and domain tables the behavior owns. Handling one inbox message
+runs inside one transaction that commits domain writes, effect records, and outbox
+rows together; nothing is delivered until that transaction commits.
 
-```sh
-nix run .
+```mermaid
+sequenceDiagram
+    participant A as A.handle
+    participant FA as A.db
+    participant Pump
+    participant FB as B.db
+    A->>FA: sql() writes + cx.send(B, msg)
+    FA->>FA: COMMIT (domain rows, outbox row, cursor)
+    Pump->>FA: read undelivered outbox
+    Pump->>FB: INSERT OR IGNORE inbox (keyed, exactly once)
+    FB->>FB: COMMIT, mark outbox row delivered
+    Note over FB: B.handle runs on the next pass
 ```
 
-Open **http://localhost:8787** for the browser REPL. The launcher prints the token file location, and Nix supplies the guest toolchains. Rust and TypeScript definitions are currently supported.
+A handler error (or panic) is a `Trap`: the message rolls back, a `dead_letters` row
+is written, and the actor parks. A supervisor restarts it by `resume` (retry the same
+message, after a code change), `skip`, or `reset` (fresh file, same id):
 
-Connect Codex to the same runtime:
+```mermaid
+graph TD
+    S[Supervisor] --> A[Worker A running]
+    S --> B0[Worker B running]
+    B0 -->|trap at seq 5| B1[Worker B parked]
+    B1 -->|promote new_hash| B2[Worker B parked, new code]
+    B2 -->|restart resume| B3[Worker B running, retries seq 5]
+```
+
+A `Behavior` is a plain Rust value:
+
+```rust
+use async_trait::async_trait;
+use loom_actor::{Behavior, Ctx, Trap};
+
+pub struct Counter;
+
+#[async_trait]
+impl Behavior for Counter {
+    fn hash(&self) -> &str {
+        "counter-v1"
+    }
+
+    fn schema(&self) -> &str {
+        "CREATE TABLE IF NOT EXISTS entries(seq INTEGER, body BLOB)"
+    }
+
+    async fn handle(&self, cx: &mut Ctx<'_>, msg: &[u8]) -> Result<(), Trap> {
+        if msg == b"poison" {
+            return Err(Trap::new("counter rejects poison"));
+        }
+        cx.sql("INSERT INTO entries(seq, body) VALUES (?1, ?2)", turso::params![cx.seq(), msg]).await?;
+        Ok(())
+    }
+}
+```
+
+Strategies (`one_for_one`, `one_for_all`, `rest_for_one`, `dynamic`), links, monitors,
+forking a live actor at a past `seq` for validation, and `node.promote_where` for a
+hot-load sweep across every actor on a hash are in
+[docs/actors-turso.md](docs/actors-turso.md).
+
+## Hook in over MCP
+
+`loomd` also serves actors as MCP tools, so a coding agent can inspect and drive the
+supervision tree directly:
+
+| tool | does |
+| --- | --- |
+| `actor_list()` | every actor: id, status, behavior hash, cursor, inbox length, parent |
+| `actor_tree(root?)` | nested tree from a root (default the node's root supervisor) |
+| `actor_info(id)` | status, reason, cursor, deferred/inbox length, links, monitors, children |
+| `actor_send(id, key?, msg)` | inject a keyed message, run to idle, return the new cursor |
+| `actor_spawn(behavior_hash, init, parent?, spec?)` | spawn under a parent, return its id |
+| `actor_stop(id, reason)` | stop with a reason |
+| `actor_restart(id, verb)` | `resume` \| `skip` \| `reset` |
+| `actor_promote(id, behavior_hash, author, rationale)` | append a `code_changes` row |
+| `actor_promote_where(old_hash, new_hash, author, rationale)` | promote every actor on `old_hash` |
+| `actor_lineage(id)` | the actor's `code_changes` rows |
+| `actor_dead_letters(id)` | its trapped messages |
+| `actor_fork(id, at_seq)` | copy the actor's state as of `at_seq` into a new, undeliverable fork |
+| `actor_validate(id, candidate_hash, k, assertions?)` | replay the last `k` messages under `candidate_hash` on a fork, report `Matched`/`DivergedAt`/`Differs`/`Trapped` |
+| `actor_sql(id, query, params?)` | read-only inspection; a write statement is refused |
+| `actor_whereis` / `actor_register` / `actor_members` | name and group lookup |
+| `actor_behaviors()` | registered behavior hashes, one line each |
+| `actor_run()` | run every actor to idle, return messages processed |
+
+Resources: `actor://<id>/inbox`, `.../effects`, `.../outbox`, `.../lineage`, and
+`actor://tree`.
 
 ```sh
 bun scripts/configure-codex-mcp.ts --token-file /path/to/loom/token
 ```
 
-See the [setup and API guide](docs/guide.md) and [MCP setup](docs/guide.md#codex-over-mcp).
+## Layout
 
-## Effects, handlers, and fibers
+| crate | is |
+| --- | --- |
+| `loom-actor` | one Turso file per actor, the pump, supervision |
+| `loom-api` | HTTP/WebSocket service: auth, CAS browsing, the REPL API |
+| `loom-build` | component builders |
+| `loom-check` | effect/language checking before a definition becomes executable |
+| `loom-cli` | command-line client for a running `loomd` |
+| `loom-guest-macros` | `#[loom::def]` / `#[loom::actor]` proc macros |
+| `loom-guest-rs` | synchronous guest interface to the host, for Rust definitions |
+| `loom-maintenance` | garbage collection over derived indexes only; CAS and event log untouched |
+| `loom-mcp` | MCP server exposing the API as tools |
+| `loom-model` | OpenAI-compatible model provider boundary |
+| `loom-process` | durable process lifecycle for sandboxed machine commands |
+| `loom-proto` | shared protocol types |
+| `loom-rt` | the effect host runtime: filesystem, machine execution, shared core |
+| `loom-store` | SQLite-backed event log and content-addressed store |
+| `loomd` | the daemon binary: UI, API, and MCP endpoints |
 
-Calling an effect performs it. Use plain effect functions such as `loom::sleep(100)` or the general `loom::perform::<T>(label, args)` function. The host handles effects such as filesystem reads, timers, and model calls. WebAssembly fibers supply suspension and resumption; the handlers supply the effect's meaning.
+Top level: `crates/` (above), `docs/`, `examples/`, `scripts/`, `deploy/`, `nix/`,
+`checker/` (language/effect checker), `ui/` (Svelte browser REPL), `rustc/` (Rust
+guest toolchain build).
 
-Rust users can install and nest handlers with `loom::handle_any` or select a total set of effect names with `loom::handle`. A handler can supply a value, forward to an outer handler, or retain a one-shot continuation to resume later. The callback's own effects run in the outer context. The host is the outermost handler and implements external effects.
+Also in the tree: `guest-ts/` and `wit/` hold the TypeScript guest and WIT component
+support; Rust is the primary, actively developed path.
 
-```rust
-#[loom::def(effects = [])]
-pub fn main() {
-    loom::handle(["sleep"], |_, _| {
-        loom::Reply::Resume(loom::Value::Null)
-    }, || loom::sleep(200).expect("sleep failed"))
-    .expect("handler failed");
-}
-```
+## Docs
 
-Total handlers remove their selected effects from the body's inferred residual row. Unknown dispatch requires a declaration such as `#[loom::def(effects = ["sleep"])]`, and the runtime enforces it when an effect reaches the host. This is Loom's source checker and runtime policy, not rustc effect typing.
-
-[Stored handler definitions](docs/content-addressed-handlers.md) can be linked by literal content hash using `loom::handle_with`. [`loom::preview::writes`](examples/rust-preview/src/lib.rs) is a guest handler that returns file diffs without applying those writes. The REPL renders those diffs. Recording and replay wrap only effects reaching the root handler; guest-handled effects are guest computation.
-
-The compiler is unmodified Rust 1.97.0. Loom enables unstable build options through `RUSTC_BOOTSTRAP` to rebuild atomics-enabled standard libraries and configure immediate-abort panics. Guest code uses ordinary Rust syntax; this is not a stable-only compiler setup. See the [handler guide](docs/guide.md#guest-defined-effect-handlers) for continuation lifetime, inheritance, and effect-row rules.
-
-The complete guest-handler round trip measured **13.811 µs median, 24.356 µs p99** over 10,000 warm calls on Linux on September 10, 2026, within an 8-CPU, 24-GiB allocation. The interval includes installing the handler, typed guest encoding, dispatch, resumption, and removing the handler. Before the bounded instance cache, the fixture measured 31.738 µs median. Reproduce with `bun scripts/bench/effects-handlers.ts`; the gate requires a median below 20 µs and also checks handler semantics, stored handlers, replay, and previews.
-
-`loom::scope` provides concurrency with borrowed closures through `scope.spawn` and typed results through `job.join`. The scope waits for every child before its borrows end, including children whose handles were forgotten. `loom::spawn` accepts `'static` closures for fire-and-forget work or handles moved across tasks; detached tasks still running when the definition entry returns are cancelled without an implicit wait. `loom::call(DEF, args)` synchronously calls a separately stored definition; place the call inside a scoped child to overlap it with other work. Rust WIT component definitions and TypeScript definitions execute effect calls sequentially and have no concurrency API. Rust concurrency is available on the shared-core path used by `loom_define`.
-
-## A useful example: recursive text search
-
-The [complete Rust example](docs/social/spawn-join-example.rs) finds files containing a string. It spawns a search for each child directory, reads files while those searches run, then joins and sorts the matching paths. Children borrow the machine name and search string; each owns its directory path.
-
-`fs::read` returns a `String`, so matching uses ordinary Rust `contains`. The machine argument identifies a host filesystem rooted at a directory you choose. The example skips symlinks and fails on unreadable or invalid UTF-8 files. It reads each file into memory and implements literal search, without ripgrep's regex engine, ignore-file handling, or streaming.
-
-Definitions and results persist between REPL sessions. You can inspect recorded effects, replay a call, and reuse a definition by its content hash. The browser REPL and coding agents over MCP use the same runtime. Actors add persistent state and event history for work that outlives a call.
-
-## Performance
-
-The text-search example has correctness checks but no published timing. Our benchmark finds the largest file by **metadata**, without reading file contents.
-
-September 10, 2026: seven-round warm medians on Linux with an 8-CPU, 24-GiB runtime allocation, using the shared Rust backend:
-
-| Largest-file scan | Median |
-| --- | ---: |
-| Native Rust, sequential traversal | 11.21 ms |
-| Loom Rust, borrowed scoped jobs | 28.63 ms |
-
-Loom timings include the MCP round trip, guest execution, filesystem effects, and recording. Compilation and first-call initialization are excluded. Native timing excludes process launch. Loom uses parallel, batched filesystem effects; the native reference traverses sequentially. These numbers do not isolate WebAssembly overhead against equally optimized native code.
-
-The fixture begins with 10,000 files in 256 directories. Each timed round changes a nested winning file, giving 10,001 files in 257 directories, and checks the new result. Filesystem caches and compiled definitions are warm.
-
-The scoped variant missed the 15 ms latency target. These measurements predate the effect API change; the current seven-gate scan has not been rerun. Historical variants and their results remain in the [implementation plan](docs/plan-unified-memory.md).
-
-[Reproduce the benchmark](scripts/bench/README.md#reproduce) using scoped jobs. See the [benchmark source](scripts/bench/largest.ts) and [shared execution checks](docs/plan-shared-execution.md).
-
-## Isolation and recorded effects
-
-Each Rust execution owns a shared WebAssembly memory; its scoped jobs borrow values in that memory. Separate executions have separate memories. Host effects cross a typed DAG-CBOR boundary, and recorded results live in a content-addressed store. HTTP and MCP envelopes use JSON; guest values and structured CAS payloads use DAG-CBOR.
-
-Loom enforces safe-code admission for user code and untrusted dependencies, including macro bodies. It rejects untrusted build scripts and procedural macros, and the compiler rejects non-`Send` captures and escaping borrows. Pinned SDK, standard-library and compiler dependencies contain trusted unsafe internals. Stack bounds, job and memory limits, and cancellation draining are enforced separately by the runtime.
-
-Safe Rust can still expose compiler or library soundness bugs. Sibling jobs are one trust domain; these checks are not a proven security boundary between mutually hostile jobs. Neither Rust nor the complete Loom sandbox has an end-to-end formal proof. A formally verified language and toolchain remain a longer-term goal. See the [shared execution contract and checks](docs/plan-shared-execution.md) and [supporting isolation reasoning](docs/plan-unified-memory.md#memory-isolation-decision).
+[docs/guide.md](docs/guide.md) covers the HTTP API, non-Nix setup, and isolation
+model. [docs/actors-turso.md](docs/actors-turso.md) is the actor spec in full,
+including OTP parity. [docs/content-addressed-handlers.md](docs/content-addressed-handlers.md)
+covers stored handler definitions. [scripts/bench/README.md](scripts/bench/README.md#reproduce)
+reproduces the largest-file-scan benchmark described there.

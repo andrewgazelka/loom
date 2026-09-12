@@ -1,6 +1,6 @@
 import {test,expect} from "bun:test";
-import {effectRows} from "../loom-ui/src/lib/effects";
-import type {LogEvent} from "../loom-ui/src/lib/api";
+import {effectRows} from "../ui/src/lib/effects";
+import type {LogEvent} from "../ui/src/lib/api";
 const event=(seq:number,type:string,extra:Record<string,unknown>={}):LogEvent=>({seq,actor:"system",ts:0,event:{type,scope:"call/a",occurrence:1,desc_hash:"hash",...extra}});
 test("completion joins invocation, preserving pending and denied effects",()=>{
  const rows=effectRows([event(1,"effect_invoked"),event(2,"effect_completed",{cached:true,result_hash:"result"}),event(3,"effect_invoked",{occurrence:2}),event(4,"effect_denied",{occurrence:3})]);
@@ -35,7 +35,7 @@ test("page-cut completion remains separate from subsequent same-key retry",()=>{
  expect(rows.map(row=>row.status)).toEqual(["Cached","Invoked"]);
 });
 
-import {appendTracePage,parseTraceEffectPage,traceEvents,type TraceEffectPage} from "../loom-ui/src/lib/trace-effects";
+import {appendTracePage,parseTraceEffectPage,traceEvents,type TraceEffectPage} from "../ui/src/lib/trace-effects";
 const tracePage=(hash:string,entries:TraceEffectPage['entries'],next_offset:number|null=null):TraceEffectPage=>({trace_hash:hash,scope:'call/trace',definition_hash:'definition',entries,next_offset});
 const traceEntry=(occurrence:number,outcome:TraceEffectPage['entries'][number]['outcome']):TraceEffectPage['entries'][number]=>({key:{scope:'call/trace/spawn:0',occurrence},descriptor_hash:`descriptor${occurrence}`,op:'fs.list',outcome});
 const traceEvent=(seq:number,hash:string,type='call_completed'):LogEvent=>event(seq,type,{scope:'call/trace',trace_hash:hash});
@@ -83,8 +83,8 @@ test('trace pagination appends only matching pages with distinct occurrence keys
  expect(()=>appendTracePage(first,tracePage('trace',first.entries))).toThrow('Duplicate');
 });
 
-import {Client,type Reply} from '../loom-ui/src/lib/api';
-import {TraceEffectsReader,type TraceReadState} from '../loom-ui/src/lib/trace-effects';
+import {Client,type Reply} from '../ui/src/lib/api';
+import {TraceEffectsReader,type TraceReadState} from '../ui/src/lib/trace-effects';
 interface PendingRead {args:Record<string,unknown>;resolve:(value:Reply)=>void}
 class ControlledTraceClient extends Client {
  pending:PendingRead[]=[];

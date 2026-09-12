@@ -34,8 +34,12 @@ mod tests {
         let args = <super::AddInvocation as loom::Invocation>::arguments(super::AddArgs {
             right: 30,
             left: 12,
-        }).unwrap();
-        assert_eq!(args, vec![loom::serde_json::json!(12), loom::serde_json::json!(30)]);
+        })
+        .unwrap();
+        assert_eq!(
+            args,
+            vec![loom::serde_json::json!(12), loom::serde_json::json!(30)]
+        );
         let result = super::__LoomDefinition::call(vec![], loom::encode(&args).unwrap()).unwrap();
         assert_eq!(loom::decode::<i64>(&result).unwrap(), 42);
         let _call = loom::call::<super::AddInvocation>;

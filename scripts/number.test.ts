@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { displayNumber } from "../loom-ui/src/lib/number";
+import { displayNumber } from "../ui/src/lib/number";
 test("grouped integers and fractions retain JS precision", () => {
   const expected = new Intl.NumberFormat(undefined, {maximumSignificantDigits:21});
   for (const value of [918315, -918315, 1.2345678901234567, 0, -0]) expect(displayNumber(value)).toBe(expected.format(value));

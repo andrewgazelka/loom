@@ -1,3 +1,5 @@
+mod actors;
+pub use actors::ActorMcp;
 use loom_api::{Access, Service};
 use loom_proto::{CommandRequest, DefineRequest, EvalRequest};
 use rmcp::service::RequestContext;
@@ -14,6 +16,7 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct LoomMcp {
     service: Arc<Service>,
+    actors: ActorMcp,
     session: String,
     default_access: Access,
     tool_router: ToolRouter<Self>,
@@ -59,12 +62,13 @@ pub struct UpgradeArgs {
 }
 #[tool_router]
 impl LoomMcp {
-    pub fn new(service: Arc<Service>, default_access: Access) -> Self {
+    pub fn new(service: Arc<Service>, default_access: Access, node: loom_actor::Node) -> Self {
         Self {
             service,
+            actors: ActorMcp::new(node),
             default_access,
             session: uuid::Uuid::new_v4().to_string(),
-            tool_router: Self::tool_router(),
+            tool_router: Self::tool_router() + Self::actor_tool_router(),
         }
     }
     #[tool(
@@ -215,7 +219,7 @@ impl LoomMcp {
 #[tool_handler]
 impl ServerHandler for LoomMcp {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo{instructions:Some("Loom runs pure TS and Rust WASM guests. All I/O goes through loom effects. Define checks and builds; call/spawn use definition hashes.".into()),capabilities:ServerCapabilities::builder().enable_tools().enable_resources().enable_prompts().build(),..Default::default()}
+        ServerInfo{instructions:Some("Loom runs pure TS and Rust WASM guests. All I/O goes through loom effects. Define checks and builds; call/spawn use definition hashes. The actor_* tools inspect and drive the native actor network; actor_behaviors lists spawnable hashes and actor_tree shows the root supervisor.".into()),capabilities:ServerCapabilities::builder().enable_tools().enable_resources().enable_prompts().build(),..Default::default()}
     }
     async fn list_prompts(
         &self,
@@ -257,6 +261,14 @@ impl ServerHandler for LoomMcp {
             messages: vec![PromptMessage::new_text(PromptMessageRole::User, text)],
         })
     }
+    async fn list_resources(
+        &self,
+        _: Option<PaginatedRequestParams>,
+        context: RequestContext<rmcp::RoleServer>,
+    ) -> Result<ListResourcesResult, rmcp::ErrorData> {
+        self.actor_access(&context, loom_api::Scope::Read)?;
+        Ok(ListResourcesResult { resources: vec![serde_json::from_value(serde_json::json!({"uri":"actor://tree","name":"Actor supervision tree","mimeType":"application/json"})).map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?], ..Default::default() })
+    }
     async fn list_resource_templates(
         &self,
         _: Option<PaginatedRequestParams>,
@@ -264,6 +276,10 @@ impl ServerHandler for LoomMcp {
     ) -> Result<ListResourceTemplatesResult, rmcp::ErrorData> {
         let mut templates = Vec::new();
         for uri in [
+            "actor://{id}/inbox",
+            "actor://{id}/effects",
+            "actor://{id}/outbox",
+            "actor://{id}/lineage",
             "loom://def/{name}",
             "loom://actor/{id}/state",
             "loom://actor/{id}/log",
@@ -287,6 +303,10 @@ impl ServerHandler for LoomMcp {
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<ReadResourceResult, rmcp::ErrorData> {
         let uri = &request.uri;
+        if uri.starts_with("actor://") {
+            self.actor_access(&context, loom_api::Scope::Read)?;
+            return self.actors.resource(uri).await;
+        }
         let response = if let Some(name) = uri.strip_prefix("loom://def/") {
             self.service_for(&context)
                 .command(CommandRequest {
@@ -342,19 +362,25 @@ impl ServerHandler for LoomMcp {
     }
 }
 
-pub async fn stdio(service: Arc<Service>) -> anyhow::Result<()> {
-    let running = LoomMcp::new(service, Access::owner())
+pub async fn stdio(service: Arc<Service>, node: loom_actor::Node) -> anyhow::Result<()> {
+    let running = LoomMcp::new(service, Access::owner(), node)
         .serve(rmcp::transport::stdio())
         .await?;
     running.waiting().await?;
     Ok(())
 }
-pub fn router(service: Arc<Service>) -> axum::Router {
+pub fn router(service: Arc<Service>, node: loom_actor::Node) -> axum::Router {
     use rmcp::transport::streamable_http_server::{
         StreamableHttpService, session::local::LocalSessionManager,
     };
     let transport = StreamableHttpService::new(
-        move || Ok(LoomMcp::new(service.clone(), Access::default())),
+        move || {
+            Ok(LoomMcp::new(
+                service.clone(),
+                Access::default(),
+                node.clone(),
+            ))
+        },
         Arc::new(LocalSessionManager::default()),
         Default::default(),
     );

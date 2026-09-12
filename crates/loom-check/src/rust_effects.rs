@@ -82,7 +82,10 @@ impl Analysis<'_> {
         if let syn::Expr::Path(path) = expression {
             let name = self.path(&path.path);
             if self.functions.contains(&name) {
-                self.summary.calls.insert(Call { name, handled: BTreeSet::new() });
+                self.summary.calls.insert(Call {
+                    name,
+                    handled: BTreeSet::new(),
+                });
             } else if let Some((alias, export)) = name.split_once("::")
                 && let Some(signature) = self.signatures.get(alias)
             {
@@ -111,7 +114,10 @@ impl Analysis<'_> {
             .iter()
             .find(|function| format!("{}_DEF", function.to_uppercase()) == name)
         {
-            self.summary.calls.insert(Call { name: function.clone(), handled: BTreeSet::new() });
+            self.summary.calls.insert(Call {
+                name: function.clone(),
+                handled: BTreeSet::new(),
+            });
             return;
         }
         self.summary.unknown = true;
@@ -134,10 +140,14 @@ impl<'ast> Visit<'ast> for Analysis<'_> {
                 self.callable(&call.args[2]);
                 let mut body = std::mem::take(&mut self.summary);
                 body.labels.retain(|label| !labels.contains(label));
-                body.calls = body.calls.into_iter().map(|mut call| {
-                    call.handled.extend(labels.iter().cloned());
-                    call
-                }).collect();
+                body.calls = body
+                    .calls
+                    .into_iter()
+                    .map(|mut call| {
+                        call.handled.extend(labels.iter().cloned());
+                        call
+                    })
+                    .collect();
                 self.summary = outer;
                 self.summary.merge(&body);
                 self.summary.calls.extend(body.calls);
@@ -153,32 +163,44 @@ impl<'ast> Visit<'ast> for Analysis<'_> {
             self.callable(&call.args[0]);
             return;
         } else if self.functions.contains(&name) {
-            self.summary.calls.insert(Call { name: name.clone(), handled: BTreeSet::new() });
+            self.summary.calls.insert(Call {
+                name: name.clone(),
+                handled: BTreeSet::new(),
+            });
         } else if [
-                "now",
-                "random",
-                "sleep",
-                "exec",
-                "llm",
-                "actor.send",
-                "fs.list",
-                "fs.stat",
-                "fs.read",
-                "fs.read_optional",
-                "fs.write",
-                "fs.walk",
-                "fs.snapshot",
-                "cas.get",
-                "cas.put",
-            ].iter().any(|effect| name == format!("loom::{}", effect.replace(".", "::"))) {
-            self.summary.labels.insert(name.trim_start_matches("loom::").replace("::", "."));
+            "now",
+            "random",
+            "sleep",
+            "exec",
+            "llm",
+            "actor.send",
+            "fs.list",
+            "fs.stat",
+            "fs.read",
+            "fs.read_optional",
+            "fs.write",
+            "fs.walk",
+            "fs.snapshot",
+            "cas.get",
+            "cas.put",
+        ]
+        .iter()
+        .any(|effect| name == format!("loom::{}", effect.replace(".", "::")))
+        {
+            self.summary
+                .labels
+                .insert(name.trim_start_matches("loom::").replace("::", "."));
         } else if matches!(name.as_str(), "loom::call" | "loom::actor::spawn") {
             self.summary
                 .labels
                 .insert(name.trim_start_matches("loom::").replace("::", "."));
             self.target(call.args.first());
         } else if name == "loom::perform" {
-            if let Some(syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(label), .. })) = call.args.first() {
+            if let Some(syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(label),
+                ..
+            })) = call.args.first()
+            {
                 let label = label.value();
                 self.summary.unknown |= matches!(label.as_str(), "call" | "actor.spawn");
                 self.summary.labels.insert(label);
@@ -226,12 +248,20 @@ fn literal_labels(expression: &syn::Expr) -> Option<BTreeSet<String>> {
         syn::Expr::Reference(reference) => reference.expr.as_ref(),
         other => other,
     };
-    let syn::Expr::Array(array) = expression else { return None; };
-    array.elems.iter().map(|element| match element {
-        syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(label), .. })
-            if !label.value().is_empty() && label.value() != "*" => Some(label.value()),
-        _ => None,
-    }).collect()
+    let syn::Expr::Array(array) = expression else {
+        return None;
+    };
+    array
+        .elems
+        .iter()
+        .map(|element| match element {
+            syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(label),
+                ..
+            }) if !label.value().is_empty() && label.value() != "*" => Some(label.value()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Declared rows constrain the effects the outer host must supply. They are
@@ -242,13 +272,22 @@ pub(crate) fn declaration_diagnostics(
 ) -> Vec<loom_proto::Diagnostic> {
     let mut diagnostics = Vec::new();
     for item in &file.items {
-        let syn::Item::Fn(function) = item else { continue; };
+        let syn::Item::Fn(function) = item else {
+            continue;
+        };
         for attribute in &function.attrs {
-            if !attribute.path().segments.last().is_some_and(|segment| segment.ident == "def") {
+            if !attribute
+                .path()
+                .segments
+                .last()
+                .is_some_and(|segment| segment.ident == "def")
+            {
                 continue;
             }
             let mut declared = None;
-            let parsed = if matches!(attribute.meta, syn::Meta::Path(_)) { Ok(()) } else {
+            let parsed = if matches!(attribute.meta, syn::Meta::Path(_)) {
+                Ok(())
+            } else {
                 attribute.parse_nested_meta(|meta| {
                     if meta.path.is_ident("effects") {
                         if declared.is_some() { return Err(meta.error("duplicate effects declaration")); }
@@ -261,14 +300,33 @@ pub(crate) fn declaration_diagnostics(
                 })
             };
             if let Err(error) = parsed {
-                diagnostics.push(super::diagnostic(loom_proto::Lang::Rust, "LOOM_EFFECT_ROW", &error.to_string()));
+                diagnostics.push(super::diagnostic(
+                    loom_proto::Lang::Rust,
+                    "LOOM_EFFECT_ROW",
+                    &error.to_string(),
+                ));
                 continue;
             }
-            let Some(row) = inferred.get(&function.sig.ident.to_string()) else { continue; };
+            let Some(row) = inferred.get(&function.sig.ident.to_string()) else {
+                continue;
+            };
             if let Some(declared) = declared {
-                let residual: Vec<_> = row.labels.iter().filter(|label| !declared.contains(*label)).cloned().collect();
+                let residual: Vec<_> = row
+                    .labels
+                    .iter()
+                    .filter(|label| !declared.contains(*label))
+                    .cloned()
+                    .collect();
                 if !residual.is_empty() {
-                    diagnostics.push(super::diagnostic(loom_proto::Lang::Rust, "LOOM_EFFECT_ROW", &format!("{} requires residual host effects [{}] outside its declared row", function.sig.ident, residual.join(", "))));
+                    diagnostics.push(super::diagnostic(
+                        loom_proto::Lang::Rust,
+                        "LOOM_EFFECT_ROW",
+                        &format!(
+                            "{} requires residual host effects [{}] outside its declared row",
+                            function.sig.ident,
+                            residual.join(", ")
+                        ),
+                    ));
                 }
             } else if row.unknown {
                 diagnostics.push(super::diagnostic(loom_proto::Lang::Rust, "LOOM_EFFECT_ROW", &format!("{} has unknown effect dispatch; declare the residual host row with #[loom::def(effects = [\"label\"])]", function.sig.ident)));
@@ -388,7 +446,9 @@ pub(crate) fn infer(
         for summary in summaries.values_mut() {
             for call in summary.calls.clone() {
                 if let Some(called) = previous.get(&call.name) {
-                    summary.labels.extend(called.labels.difference(&call.handled).cloned());
+                    summary
+                        .labels
+                        .extend(called.labels.difference(&call.handled).cloned());
                     summary.unknown |= called.unknown;
                 } else {
                     summary.unknown = true;
@@ -411,10 +471,10 @@ pub(crate) fn infer(
         );
     }
     for item in &file.items {
-        if let syn::Item::Fn(function) = item {
-            if let Some(row) = effects.get_mut(&function.sig.ident.to_string()) {
-                row.declared = declared_labels(function);
-            }
+        if let syn::Item::Fn(function) = item
+            && let Some(row) = effects.get_mut(&function.sig.ident.to_string())
+        {
+            row.declared = declared_labels(function);
         }
     }
     effects
@@ -427,7 +487,14 @@ fn declared_labels(function: &syn::ItemFn) -> Option<Vec<String>> {
 fn declared_attributes(attributes: &[syn::Attribute]) -> Option<Vec<String>> {
     let mut declared = None;
     for attribute in attributes {
-        if !attribute.path().segments.last().is_some_and(|part| part.ident == "def" || part.ident == "actor") { continue; }
+        if !attribute
+            .path()
+            .segments
+            .last()
+            .is_some_and(|part| part.ident == "def" || part.ident == "actor")
+        {
+            continue;
+        }
         let _ = attribute.parse_nested_meta(|meta| {
             if meta.path.is_ident("effects") {
                 let expression: syn::Expr = meta.value()?.parse()?;
@@ -484,7 +551,13 @@ pub(crate) fn aggregate(
             analysis.visit_block(&method.block);
             for called in analysis.summary.calls.clone() {
                 if let Some(effects) = inferred.get(&called.name) {
-                    analysis.summary.labels.extend(effects.labels.iter().filter(|label| !called.handled.contains(*label)).cloned());
+                    analysis.summary.labels.extend(
+                        effects
+                            .labels
+                            .iter()
+                            .filter(|label| !called.handled.contains(*label))
+                            .cloned(),
+                    );
                     analysis.summary.unknown |= effects.unknown;
                 } else {
                     analysis.summary.unknown = true;
@@ -497,39 +570,78 @@ pub(crate) fn aggregate(
     EffectSet {
         labels: summary.labels.into_iter().collect(),
         unknown: summary.unknown,
-        declared: if exports.len() == 1 { exports[0].effects.declared.clone() } else {
-            file.items.iter().find_map(|item| if let syn::Item::Struct(item) = item {
-                declared_attributes(&item.attrs)
-            } else { None })
+        declared: if exports.len() == 1 {
+            exports[0].effects.declared.clone()
+        } else {
+            file.items.iter().find_map(|item| {
+                if let syn::Item::Struct(item) = item {
+                    declared_attributes(&item.attrs)
+                } else {
+                    None
+                }
+            })
         },
     }
 }
 
 /// Actors use the same root-row contract; fold remains pure at runtime even if
 /// handle/init declare root effects. Guest-handled effects never reach that root.
-pub(crate) fn actor_declaration_diagnostics(file: &syn::File, row: &EffectSet) -> Vec<loom_proto::Diagnostic> {
+pub(crate) fn actor_declaration_diagnostics(
+    file: &syn::File,
+    row: &EffectSet,
+) -> Vec<loom_proto::Diagnostic> {
     let mut diagnostics = Vec::new();
     for item in &file.items {
-        let syn::Item::Struct(item) = item else { continue; };
+        let syn::Item::Struct(item) = item else {
+            continue;
+        };
         for attribute in &item.attrs {
-            if !attribute.path().segments.last().is_some_and(|part| part.ident == "actor") { continue; }
+            if !attribute
+                .path()
+                .segments
+                .last()
+                .is_some_and(|part| part.ident == "actor")
+            {
+                continue;
+            }
             let mut labels = None;
-            let parsed = if matches!(attribute.meta, syn::Meta::Path(_)) { Ok(()) } else {
+            let parsed = if matches!(attribute.meta, syn::Meta::Path(_)) {
+                Ok(())
+            } else {
                 attribute.parse_nested_meta(|meta| {
                     if !meta.path.is_ident("effects") || labels.is_some() {
                         return Err(meta.error("expected one effects = [\"label\"] declaration"));
                     }
                     let expression: syn::Expr = meta.value()?.parse()?;
-                    labels = Some(literal_labels(&expression).ok_or_else(|| meta.error("effects must be literal labels without wildcard"))?);
+                    labels = Some(literal_labels(&expression).ok_or_else(|| {
+                        meta.error("effects must be literal labels without wildcard")
+                    })?);
                     Ok(())
                 })
             };
             if let Err(error) = parsed {
-                diagnostics.push(super::diagnostic(loom_proto::Lang::Rust, "LOOM_EFFECT_ROW", &error.to_string()));
+                diagnostics.push(super::diagnostic(
+                    loom_proto::Lang::Rust,
+                    "LOOM_EFFECT_ROW",
+                    &error.to_string(),
+                ));
             } else if let Some(labels) = labels {
-                let residual: Vec<_> = row.labels.iter().filter(|label| !labels.contains(*label)).cloned().collect();
+                let residual: Vec<_> = row
+                    .labels
+                    .iter()
+                    .filter(|label| !labels.contains(*label))
+                    .cloned()
+                    .collect();
                 if !residual.is_empty() {
-                    diagnostics.push(super::diagnostic(loom_proto::Lang::Rust, "LOOM_EFFECT_ROW", &format!("{} requires residual host effects [{}] outside its declared row", item.ident, residual.join(", "))));
+                    diagnostics.push(super::diagnostic(
+                        loom_proto::Lang::Rust,
+                        "LOOM_EFFECT_ROW",
+                        &format!(
+                            "{} requires residual host effects [{}] outside its declared row",
+                            item.ident,
+                            residual.join(", ")
+                        ),
+                    ));
                 }
             } else if row.unknown {
                 diagnostics.push(super::diagnostic(loom_proto::Lang::Rust, "LOOM_EFFECT_ROW", "actor has unknown effect dispatch; declare #[loom::actor(effects = [\"label\"])]"));
@@ -544,10 +656,14 @@ mod tests {
     use super::*;
     #[test]
     fn detached_spawn_closure_effects_flow_into_caller() {
-        let row = infer_source("#[loom::def] fn main() { loom::spawn(|| { loom::sleep(1); loom::now(); }); }");
+        let row = infer_source(
+            "#[loom::def] fn main() { loom::spawn(|| { loom::sleep(1); loom::now(); }); }",
+        );
         assert_eq!(row.labels, vec!["now", "sleep"]);
         assert!(!row.unknown);
-        let alias = infer_source("use loom::spawn as start; #[loom::def] fn main() { start(|| loom::sleep(1)); }");
+        let alias = infer_source(
+            "use loom::spawn as start; #[loom::def] fn main() { start(|| loom::sleep(1)); }",
+        );
         assert_eq!(alias.labels, vec!["sleep"]);
         assert!(!alias.unknown);
     }
@@ -558,28 +674,34 @@ mod tests {
     }
     #[test]
     fn labeled_handlers_discharge_body_helpers_but_not_handler_effects() {
-        let row = infer_source(r#"
+        let row = infer_source(
+            r#"
             fn read() { loom::fs::read("local", "."); }
             fn main() {
                 loom::sleep(1);
                 loom::handle(["fs.read"], |op, k| { loom::now(); }, || read());
             }
-        "#);
+        "#,
+        );
         assert_eq!(row.labels, vec!["now", "sleep"]);
         assert!(!row.unknown);
-        let row = infer_source(r#"fn main() {
+        let row = infer_source(
+            r#"fn main() {
             loom::handle_any(|op,k| {}, || loom::fs::read("local", "."));
-        }"#);
+        }"#,
+        );
         assert_eq!(row.labels, vec!["fs.read"]);
     }
 
     #[test]
     fn handler_function_values_contribute_outer_effects() {
-        let row = infer_source(r#"
+        let row = infer_source(
+            r#"
             fn handler() { loom::now(); }
             fn body() { loom::sleep(1); }
             fn main() { loom::handle(["sleep"], handler, body); }
-        "#);
+        "#,
+        );
         assert_eq!(row.labels, vec!["now"]);
         assert!(!row.unknown);
         assert!(infer_source("fn main() { loom::handle_any(external::handler, || 1); }").unknown);
@@ -587,22 +709,32 @@ mod tests {
 
     #[test]
     fn residual_declaration_names_unhandled_labels() {
-        let bad = syn::parse_file(r#"#[loom::def(effects=["sleep"])] fn main() {
+        let bad = syn::parse_file(
+            r#"#[loom::def(effects=["sleep"])] fn main() {
             loom::sleep(1); loom::fs::read("local", ".");
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
         let diagnostics = declaration_diagnostics(&bad, &infer(&bad, &BTreeMap::new()));
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].code, "LOOM_EFFECT_ROW");
-        let good = syn::parse_file(r#"#[loom::def(effects=["sleep"])] fn main() {
+        let good = syn::parse_file(
+            r#"#[loom::def(effects=["sleep"])] fn main() {
             loom::sleep(1);
             loom::handle(["fs.read"], |op,k| {}, || loom::fs::read("local", "."));
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
         let rows = infer(&good, &BTreeMap::new());
         assert!(declaration_diagnostics(&good, &rows).is_empty());
         assert_eq!(rows["main"].declared, Some(vec!["sleep".into()]));
         let dynamic = syn::parse_file("#[loom::def] fn main() { callback(); }").unwrap();
-        assert_eq!(declaration_diagnostics(&dynamic, &infer(&dynamic, &BTreeMap::new())).len(), 1);
-        let explicit = syn::parse_file("#[loom::def(effects=[])] fn main() { callback(); }").unwrap();
+        assert_eq!(
+            declaration_diagnostics(&dynamic, &infer(&dynamic, &BTreeMap::new())).len(),
+            1
+        );
+        let explicit =
+            syn::parse_file("#[loom::def(effects=[])] fn main() { callback(); }").unwrap();
         let rows = infer(&explicit, &BTreeMap::new());
         assert!(rows["main"].unknown);
         assert!(declaration_diagnostics(&explicit, &rows).is_empty());
@@ -610,19 +742,25 @@ mod tests {
 
     #[test]
     fn nested_handler_rows_and_unknown_dispatch_stay_conservative() {
-        let row = infer_source(r#"fn work() { loom::fs::read("local", "."); }
+        let row = infer_source(
+            r#"fn work() { loom::fs::read("local", "."); }
             fn main() {
                 work();
                 loom::handle(["fs.read"], |op,k| {}, || work());
-            }"#);
+            }"#,
+        );
         assert_eq!(row.labels, vec!["fs.read"]);
-        let row = infer_source(r#"fn main() {
+        let row = infer_source(
+            r#"fn main() {
             loom::handle(["fs.read"], |op,k| {}, || callback());
-        }"#);
+        }"#,
+        );
         assert!(row.unknown);
-        let row = infer_source(r#"fn main() {
+        let row = infer_source(
+            r#"fn main() {
             loom::handle(labels, |op,k| {}, || loom::fs::read("local", "."));
-        }"#);
+        }"#,
+        );
         assert_eq!(row.labels, vec!["fs.read"]);
         assert!(row.unknown);
     }
@@ -637,9 +775,8 @@ mod tests {
                 declared: None
             }
         );
-        let effects = infer_source(
-            "use loom::now as clock; fn helper(){clock();} fn main(){helper();}",
-        );
+        let effects =
+            infer_source("use loom::now as clock; fn helper(){clock();} fn main(){helper();}");
         assert_eq!(
             effects,
             EffectSet {
@@ -664,8 +801,7 @@ mod tests {
     }
     #[test]
     fn shadowed_names_custom_traits_and_macros_are_not_claimed_pure() {
-        let effects =
-            infer_source("use loom::now as clock; fn main(clock:fn()){clock();}");
+        let effects = infer_source("use loom::now as clock; fn main(clock:fn()){clock();}");
         assert!(effects.unknown);
         assert!(effects.labels.is_empty());
         assert!(infer_source("struct S; impl Drop for S {fn drop(&mut self){loom::random();}} fn main(){let _x=S;}").unknown);
@@ -681,7 +817,10 @@ mod tests {
         for effect in ["call", "actor.spawn"] {
             let function = effect.replace(".", "::");
             let effects = infer(
-                &syn::parse_file(&format!("fn main(){{loom::{function}(worker::WORK_DEF,0);}}")).unwrap(),
+                &syn::parse_file(&format!(
+                    "fn main(){{loom::{function}(worker::WORK_DEF,0);}}"
+                ))
+                .unwrap(),
                 &signatures,
             )
             .remove("main")
@@ -698,32 +837,42 @@ mod tests {
     }
     #[test]
     fn actor_declaration_tracks_root_requirements_without_claiming_fold_permission() {
-        let file = syn::parse_file(r#"
+        let file = syn::parse_file(
+            r#"
             #[loom::actor(effects=[])] struct Counter;
             impl Counter { fn fold() {
                 loom::handle(["sleep"], |op,k| {}, || loom::sleep(1));
             } }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         let inferred = infer(&file, &BTreeMap::new());
         let row = aggregate(&file, &BTreeMap::new(), &inferred, &[]);
         assert_eq!(row.declared, Some(vec![]));
         assert!(row.labels.is_empty());
         assert!(row.unknown);
         assert!(actor_declaration_diagnostics(&file, &row).is_empty());
-        let file = syn::parse_file(r#"
+        let file = syn::parse_file(
+            r#"
             #[loom::actor(effects=[])] struct Counter;
             impl Counter { fn fold() { loom::sleep(1); } }
-        "#).unwrap();
-        let row = aggregate(&file, &BTreeMap::new(), &infer(&file, &BTreeMap::new()), &[]);
+        "#,
+        )
+        .unwrap();
+        let row = aggregate(
+            &file,
+            &BTreeMap::new(),
+            &infer(&file, &BTreeMap::new()),
+            &[],
+        );
         assert_eq!(actor_declaration_diagnostics(&file, &row).len(), 1);
     }
 
     #[test]
     fn actor_summary_keeps_actor_send_without_inventing_free_exports() {
-        let file = syn::parse_file(
-            "struct Counter; impl Counter {fn handle(){loom::actor::send(0,0);}} ",
-        )
-        .unwrap();
+        let file =
+            syn::parse_file("struct Counter; impl Counter {fn handle(){loom::actor::send(0,0);}} ")
+                .unwrap();
         let inferred = infer(&file, &BTreeMap::new());
         assert!(inferred.is_empty());
         let effects = aggregate(&file, &BTreeMap::new(), &inferred, &[]);
@@ -849,10 +998,10 @@ pub(crate) fn unsafe_source_diagnostics(file: &syn::File) -> Vec<loom_proto::Dia
                             for attribute in nested.iter().skip(1) {inspect(attribute,checker);}
                         } else {checker.reject("unparseable conditional attribute");}
                     }
-                    if name == "allow" || name == "expect" {
-                        if list.tokens.clone().into_iter().any(|token|matches!(token,proc_macro2::TokenTree::Ident(name) if name=="unsafe_code" || name=="unsafe_op_in_unsafe_fn")) {
-                            checker.reject("unsafe lint override");
-                        }
+                    if (name == "allow" || name == "expect")
+                        && list.tokens.clone().into_iter().any(|token|matches!(token,proc_macro2::TokenTree::Ident(name) if name=="unsafe_code" || name=="unsafe_op_in_unsafe_fn"))
+                    {
+                        checker.reject("unsafe lint override");
                     }
                 }
             }

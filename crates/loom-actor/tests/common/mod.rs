@@ -3,95 +3,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use loom_actor::{Actor, Behavior, Ctx, EffectError, EffectHandler, EffectKey, Registry, Trap};
+use loom_actor::{Actor, Behavior, EffectError, EffectHandler, EffectKey, Registry};
 use turso::Value;
 
 pub const H1: &str = "counter-v1";
 pub const H2: &str = "counter-v2";
 pub const EXTRA: &str = "counter-extra-effect";
 
-pub struct Counter {
-    pub hash: &'static str,
-    pub upgraded: bool,
-    pub extra_effect: bool,
-    pub target: Option<String>,
-    pub swallow_effect_errors: bool,
-}
-
-impl Counter {
-    pub fn plain() -> Self {
-        Self { hash: H1, upgraded: false, extra_effect: false, target: None, swallow_effect_errors: false }
-    }
-}
-
-#[async_trait]
-impl Behavior for Counter {
-    fn hash(&self) -> &str {
-        self.hash
-    }
-
-    fn schema(&self) -> &str {
-        if self.upgraded {
-            "ALTER TABLE entries ADD COLUMN revision TEXT"
-        } else {
-            "CREATE TABLE IF NOT EXISTS entries(seq INTEGER, body BLOB, implementation TEXT)"
-        }
-    }
-
-    async fn handle(&self, cx: &mut Ctx<'_>, msg: &[u8]) -> Result<(), Trap> {
-        if msg == b"poison" && !self.upgraded {
-            return Err(Trap::new("counter rejects poison"));
-        }
-        let seq = cx.seq();
-        if self.upgraded {
-            cx.sql(
-                "INSERT INTO entries(seq, body, implementation, revision) VALUES (?1, ?2, ?3, 'added')",
-                turso::params![seq, msg, self.hash],
-            )
-            .await?;
-        } else {
-            cx.sql("INSERT INTO entries(seq, body, implementation) VALUES (?1, ?2, ?3)", turso::params![seq, msg, self.hash]).await?;
-        }
-        if let Some(target) = &self.target {
-            cx.send(target, msg).await?;
-        }
-        if msg == b"effect" || self.extra_effect {
-            if self.swallow_effect_errors {
-                let _ = cx.effect("echo", b"recorded").await;
-            } else {
-                cx.effect("echo", b"recorded").await?;
-            }
-        }
-        if msg == b"request" {
-            cx.request("echo", b"x").await?;
-        }
-        Ok(())
-    }
-}
-
-pub struct Forwarder {
-    pub trap: bool,
-}
-
-#[async_trait]
-impl Behavior for Forwarder {
-    fn hash(&self) -> &str {
-        if self.trap { "forwarder-trap" } else { "forwarder" }
-    }
-
-    fn schema(&self) -> &str {
-        ""
-    }
-
-    async fn handle(&self, cx: &mut Ctx<'_>, msg: &[u8]) -> Result<(), Trap> {
-        let target = std::str::from_utf8(msg).map_err(|error| Trap::new(error.to_string()))?;
-        cx.send(target, b"forwarded").await?;
-        if self.trap {
-            return Err(Trap::new("trap after send"));
-        }
-        Ok(())
-    }
-}
+pub use loom_actor::builtin::{Counter, Forwarder};
 
 #[derive(Clone, Debug)]
 pub struct RecordedCall {

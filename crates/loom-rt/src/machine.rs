@@ -187,7 +187,9 @@ impl Runtime {
         let root = self.machine_handle(required_str(args, "machine")?)?;
         let path = required_str(args, "path")?.to_owned();
         let bytes = tokio::task::spawn_blocking(move || root.read_optional(&path)).await??;
-        let content = bytes.map(String::from_utf8).transpose()
+        let content = bytes
+            .map(String::from_utf8)
+            .transpose()
             .context("file is not UTF8; use snapshot for binary data")?;
         Ok(json!(content))
     }
@@ -464,22 +466,44 @@ mod tests {
         let runtime = Runtime::new(loom_store::Store::memory()?)?;
         let machine = runtime.create_machine(&path)?;
         let args = json!({"machine":machine.id,"path":"new.txt","content":"héllo"});
-        assert_eq!(runtime.read_optional_machine_file(&args).await?, Value::Null);
-        assert!(!path.join("new.txt").exists(), "preview must not create files");
+        assert_eq!(
+            runtime.read_optional_machine_file(&args).await?,
+            Value::Null
+        );
+        assert!(
+            !path.join("new.txt").exists(),
+            "preview must not create files"
+        );
         assert_eq!(runtime.write_machine_file(&args).await?, Value::Null);
-        assert_eq!(runtime.read_optional_machine_file(&args).await?, json!("héllo"));
+        assert_eq!(
+            runtime.read_optional_machine_file(&args).await?,
+            json!("héllo")
+        );
         let mut replacement = args.clone();
         replacement["content"] = json!("short");
         runtime.write_machine_file(&replacement).await?;
         assert_eq!(runtime.read_machine_file(&args).await?, json!("short"));
         std::fs::create_dir(path.join("nested"))?;
-        runtime.write_machine_file(&json!({"machine":machine.id,"path":"nested/file","content":"nested"})).await?;
+        runtime
+            .write_machine_file(
+                &json!({"machine":machine.id,"path":"nested/file","content":"nested"}),
+            )
+            .await?;
         assert_eq!(std::fs::read_to_string(path.join("nested/file"))?, "nested");
-        assert!(!std::fs::read_dir(&path)?.any(|entry| entry.unwrap().file_name().to_string_lossy().starts_with(".loom-write-")));
+        assert!(!std::fs::read_dir(&path)?.any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".loom-write-")
+        }));
         std::fs::rename(&path, workspace.path().join("moved"))?;
         std::fs::create_dir(&path)?;
         runtime.write_machine_file(&args).await?;
-        assert_eq!(std::fs::read_to_string(workspace.path().join("moved/new.txt"))?, "héllo");
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("moved/new.txt"))?,
+            "héllo"
+        );
         assert!(!path.join("new.txt").exists());
         Ok(())
     }
@@ -498,16 +522,47 @@ mod tests {
         std::fs::hard_link(outside.path().join("data"), root.path().join("hardlink"))?;
         let runtime = Runtime::new(loom_store::Store::memory()?)?;
         let machine = runtime.create_machine(root.path())?;
-        for path in ["../escape", "link-dir/data", "link-file", "dangling", "directory", "missing/child", "."] {
+        for path in [
+            "../escape",
+            "link-dir/data",
+            "link-file",
+            "dangling",
+            "directory",
+            "missing/child",
+            ".",
+        ] {
             let args = json!({"machine":machine.id,"path":path,"content":"changed"});
-            assert!(runtime.read_optional_machine_file(&args).await.is_err(), "{path}");
+            assert!(
+                runtime.read_optional_machine_file(&args).await.is_err(),
+                "{path}"
+            );
             assert!(runtime.write_machine_file(&args).await.is_err(), "{path}");
         }
-        assert!(runtime.read_optional_machine_file(&json!({"machine":machine.id,"path":"binary"})).await.is_err());
-        runtime.write_machine_file(&json!({"machine":machine.id,"path":"hardlink","content":"changed"})).await?;
-        assert_eq!(std::fs::read_to_string(outside.path().join("data"))?, "untouched");
-        assert_eq!(std::fs::read_to_string(root.path().join("hardlink"))?, "changed");
-        assert!(runtime.write_machine_file(&json!({"machine":"unknown","path":"new","content":"bad"})).await.is_err());
+        assert!(
+            runtime
+                .read_optional_machine_file(&json!({"machine":machine.id,"path":"binary"}))
+                .await
+                .is_err()
+        );
+        runtime
+            .write_machine_file(
+                &json!({"machine":machine.id,"path":"hardlink","content":"changed"}),
+            )
+            .await?;
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("data"))?,
+            "untouched"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("hardlink"))?,
+            "changed"
+        );
+        assert!(
+            runtime
+                .write_machine_file(&json!({"machine":"unknown","path":"new","content":"bad"}))
+                .await
+                .is_err()
+        );
         Ok(())
     }
 

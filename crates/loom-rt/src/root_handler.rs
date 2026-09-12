@@ -28,7 +28,9 @@ impl<'a> Next<'a> {
         match self.handlers.split_first() {
             Some((handler, rest)) => handler.handle(request, Next { handlers: rest }),
             None => {
-                Box::pin(async move { bail!("unsupported effect: {}", effect_name(&request.desc)?) })
+                Box::pin(
+                    async move { bail!("unsupported effect: {}", effect_name(&request.desc)?) },
+                )
             }
         }
     }
@@ -169,9 +171,9 @@ impl RootHandler for Scheduling {
                         &args.get("msg").cloned().unwrap_or(Value::Null),
                         &key,
                     )?;
-                    return runtime
+                    runtime
                         .schedule_message(message)
-                        .and_then(|result| EffectOutput::value(&result));
+                        .and_then(|result| EffectOutput::value(&result))
                 }
                 "actor.spawn" => {
                     let key = format!("spawn:{scope}:{occurrence}:{hash}");
@@ -184,7 +186,7 @@ impl RootHandler for Scheduling {
                         )
                         .await?;
                     let result = serde_json::to_value(actor)?;
-                    return EffectOutput::value(&result);
+                    EffectOutput::value(&result)
                 }
                 _ => return next.run(request).await,
             }
@@ -216,10 +218,8 @@ impl RootHandler for Memo {
                 Some(lock) => Some(lock.lock().await),
                 None => None,
             };
-            if memoized {
-                if let Some(result) = runtime.inner.store.effect_get(&hash, "global", 0)? {
-                    return EffectOutput::value(&result);
-                }
+            if memoized && let Some(result) = runtime.inner.store.effect_get(&hash, "global", 0)? {
+                return EffectOutput::value(&result);
             }
 
             let output = next.run(request).await?;
@@ -386,12 +386,21 @@ mod tests {
     #[tokio::test]
     async fn recording_skips_permitted_call_but_records_denied_call() -> Result<()> {
         let runtime = Runtime::new(Store::memory()?)?;
-        let answer = Answer { calls: AtomicU64::new(0) };
+        let answer = Answer {
+            calls: AtomicU64::new(0),
+        };
         let handlers: [&dyn RootHandler; 2] = [&RECORDING, &answer];
         for permitted in [true, false] {
             let execution = trace::ExecutionTrace::fresh("root");
-            let labels = if permitted { vec!["call".into()] } else { vec![] };
-            let outcome = Next { handlers: &handlers }.run(Request {
+            let labels = if permitted {
+                vec!["call".into()]
+            } else {
+                vec![]
+            };
+            let outcome = Next {
+                handlers: &handlers,
+            }
+            .run(Request {
                 runtime: &runtime,
                 desc: json!({"op":"call","args":{"def":"child","args":[]}}),
                 scope: "root",
@@ -400,7 +409,8 @@ mod tests {
                     trace: Some(execution.clone()),
                     ..EffectContext::default().delegated("parent", Some(&labels))
                 },
-            }).await;
+            })
+            .await;
             assert_eq!(outcome.is_ok(), permitted);
             let bundle = execution.snapshot(Some(&outcome), true)?;
             assert_eq!(bundle.trace.entries.len(), if permitted { 0 } else { 1 });

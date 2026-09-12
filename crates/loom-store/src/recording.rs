@@ -94,7 +94,7 @@ enum Record {
 }
 enum Message {
     Record {
-        record: Record,
+        record: Box<Record>,
     },
     Barrier {
         durable: bool,
@@ -171,7 +171,9 @@ impl Writer {
         self.sender
             .as_ref()
             .ok_or_else(|| anyhow!("recording writer stopped"))?
-            .send(Message::Record { record })
+            .send(Message::Record {
+                record: Box::new(record),
+            })
             .map_err(|_| anyhow!("recording writer disconnected"))?;
         self.check()
     }
@@ -349,15 +351,15 @@ impl Writer {
 impl Drop for Writer {
     fn drop(&mut self) {
         self.sender.take();
-        if let Some(thread) = self.thread.take() {
-            if thread.join().is_err() {
-                eprintln!("recording writer panicked during shutdown");
-            }
+        if let Some(thread) = self.thread.take()
+            && thread.join().is_err()
+        {
+            eprintln!("recording writer panicked during shutdown");
         }
-        if let Ok(error) = self.shared.error.lock() {
-            if let Some(error) = error.as_ref() {
-                eprintln!("recording writer shutdown failed: {error}");
-            }
+        if let Ok(error) = self.shared.error.lock()
+            && let Some(error) = error.as_ref()
+        {
+            eprintln!("recording writer shutdown failed: {error}");
         }
     }
 }
@@ -489,7 +491,7 @@ fn run(
                 if records.is_empty() {
                     deadline = Instant::now() + Duration::from_millis(100);
                 }
-                records.push(record);
+                records.push(*record);
                 if records.len() < 4096 {
                     continue;
                 }

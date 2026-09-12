@@ -319,7 +319,7 @@ pub(crate) async fn reconcile(job: Rebuild<'_>) -> Result<(), BuildError> {
         fs::write(crate_dir.join("Cargo.lock"), &updated_bytes).await?;
         let output = tokio::time::timeout(
             Duration::from_secs(300),
-            Command::new(job.root.join("loom-rustc/sandbox.sh"))
+            Command::new(job.root.join("rustc/sandbox.sh"))
                 .arg("vendor")
                 .env("LOOM_RUST_TARGET", "wasm32-unknown-unknown")
                 .arg(job.cache)

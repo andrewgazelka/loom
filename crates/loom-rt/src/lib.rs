@@ -1,5 +1,5 @@
-mod filesystem;
 mod call;
+mod filesystem;
 pub use call::{CallEffects, GuestFailure};
 mod machine;
 mod root_handler;
@@ -21,7 +21,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Config, Engine, StoreLimits, StoreLimitsBuilder};
 
-wasmtime::component::bindgen!({path: "../../loom-wit", world: "handler", imports: { default: async }, exports: { default: async }});
+wasmtime::component::bindgen!({path: "../../wit", world: "handler", imports: { default: async }, exports: { default: async }});
 
 #[derive(Clone)]
 pub struct Runtime {
@@ -52,7 +52,10 @@ struct Inner {
     machine_roots: Mutex<HashMap<String, Arc<filesystem::PinnedRoot>>>,
 }
 #[derive(Default)]
-struct HandlerMeasurements { scope: String, samples: Vec<f64> }
+struct HandlerMeasurements {
+    scope: String,
+    samples: Vec<f64>,
+}
 #[derive(Clone, Default)]
 struct EffectContext {
     root: Option<tokio::sync::mpsc::Sender<call::Request>>,
@@ -221,7 +224,9 @@ impl Runtime {
         let measurements = self.inner.handler_round_trip_us.lock().unwrap();
         let mut samples = measurements.samples.clone();
         samples.sort_by(f64::total_cmp);
-        if samples.is_empty() { return json!({"scope": measurements.scope, "measurement": "host_dispatch", "samples": 0, "median": null, "p99": null}); }
+        if samples.is_empty() {
+            return json!({"scope": measurements.scope, "measurement": "host_dispatch", "samples": 0, "median": null, "p99": null});
+        }
         json!({"scope": measurements.scope, "measurement": "host_dispatch", "samples": samples.len(), "median": samples[samples.len() / 2],
             "p99": samples[(samples.len() * 99 / 100).min(samples.len() - 1)]})
     }
@@ -253,7 +258,10 @@ impl Runtime {
                 store,
                 engine,
                 core_engine: sharedcore::engine()?,
-                core_executor: futures::executor::ThreadPoolBuilder::new().pool_size(8).name_prefix("loom-guest-").create()?,
+                core_executor: futures::executor::ThreadPoolBuilder::new()
+                    .pool_size(8)
+                    .name_prefix("loom-guest-")
+                    .create()?,
                 core_modules: Mutex::new(HashMap::new()),
                 components: Mutex::new(HashMap::new()),
                 component_locks: Mutex::new(HashMap::new()),
@@ -293,7 +301,8 @@ impl Runtime {
             .store
             .executable_definition(hash)?
             .context("definition not found")?;
-        let effects = parent.delegated(hash, def.allowed_effects.as_deref())
+        let effects = parent
+            .delegated(hash, def.allowed_effects.as_deref())
             .with_declared(def.sig.effects.declared.as_deref());
         let component_hash = match def.component_hash {
             Some(hash) => hash,
@@ -497,7 +506,8 @@ impl Runtime {
             .bindings
             .call_call(&mut instance.store, &encode(&json!(hash))?, &encode(&args)?)
             .await;
-        let result = result.map_err(call::wasm_error)?
+        let result = result
+            .map_err(call::wasm_error)?
             .map_err(|error| anyhow::Error::new(GuestFailure::new(error)))?;
         let output = EffectOutput::from_guest(result)
             .map_err(|error| anyhow::Error::new(GuestFailure::new(format!("{error:#}"))))?;
@@ -518,7 +528,13 @@ impl Runtime {
         }
         // Instantiate before publishing an actor so missing imports/components fail immediately.
         if self
-            .core_execute(hash, "actor.spawn", &EffectContext::default(), true, sharedcore::Entry::Validate)
+            .core_execute(
+                hash,
+                "actor.spawn",
+                &EffectContext::default(),
+                true,
+                sharedcore::Entry::Validate,
+            )
             .await?
             .is_none()
         {
@@ -568,7 +584,10 @@ impl Runtime {
                         "fold",
                         &EffectContext::default(),
                         true,
-                        sharedcore::Entry::Fold { state: &state, event: &event.event },
+                        sharedcore::Entry::Fold {
+                            state: &state,
+                            event: &event.event,
+                        },
                     )
                     .await?
                 {
@@ -666,7 +685,10 @@ impl Runtime {
                 &scope,
                 &effects,
                 false,
-                sharedcore::Entry::Run { state: &state, message: &message.msg },
+                sharedcore::Entry::Run {
+                    state: &state,
+                    message: &message.msg,
+                },
             )
             .await
         {
@@ -675,11 +697,15 @@ impl Runtime {
                 let mut instance = self
                     .instance_delegated(&metadata.behavior_hash, &scope, false, &effects)
                     .await?;
-                instance.bindings.call_run(
-                    &mut instance.store,
-                    &encode(&state)?,
-                    &encode(&message.msg)?,
-                ).await.map_err(anyhow::Error::from)
+                instance
+                    .bindings
+                    .call_run(
+                        &mut instance.store,
+                        &encode(&state)?,
+                        &encode(&message.msg)?,
+                    )
+                    .await
+                    .map_err(anyhow::Error::from)
                     .and_then(|result| result.map_err(anyhow::Error::msg))
             }
             Err(error) => Err(error),
@@ -770,7 +796,13 @@ impl Runtime {
             bail!("cross-language upgrade requires a migration");
         }
         if self
-            .core_execute(hash, "upgrade", &EffectContext::default(), true, sharedcore::Entry::Validate)
+            .core_execute(
+                hash,
+                "upgrade",
+                &EffectContext::default(),
+                true,
+                sharedcore::Entry::Validate,
+            )
             .await?
             .is_none()
         {
@@ -805,19 +837,21 @@ impl Runtime {
                 trace: Some(execution),
                 ..EffectContext::default()
             };
-            let outcome = self
-                .dispatch_root(desc, scope, occurrence, effects)
-                .await;
+            let outcome = self.dispatch_root(desc, scope, occurrence, effects).await;
             session.finish(&outcome)?;
             outcome?.decode()
         })
     }
     fn dispatch_root<'a>(
-        &'a self, desc: Value, scope: &'a str, occurrence: i64, effects: EffectContext,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<EffectOutput>> + Send + 'a>> {
+        &'a self,
+        desc: Value,
+        scope: &'a str,
+        occurrence: i64,
+        effects: EffectContext,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<EffectOutput>> + Send + 'a>>
+    {
         root_handler::dispatch(self, desc, scope, occurrence, effects)
     }
-
 }
 fn capture_paths(args: &Value) -> Result<Vec<std::path::PathBuf>> {
     match args.get("capture_paths") {
@@ -843,13 +877,12 @@ fn required_str<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
 }
 
 fn resolve_self(value: &mut Value, hash: &str) {
-    match value.get("op").and_then(Value::as_str) {
-        Some("call" | "actor.spawn") => {
-            if value.pointer("/args/def").and_then(Value::as_str) == Some("$self") {
-                value["args"]["def"] = json!(hash);
-            }
-        }
-        _ => {}
+    if matches!(
+        value.get("op").and_then(Value::as_str),
+        Some("call" | "actor.spawn")
+    ) && value.pointer("/args/def").and_then(Value::as_str) == Some("$self")
+    {
+        value["args"]["def"] = json!(hash);
     }
 }
 
@@ -990,12 +1023,18 @@ mod tests {
     async fn scoped_children_record_independently_and_replay_in_reverse_order() -> Result<()> {
         let runtime = Runtime::new(Store::memory()?)?;
         let execution = trace::ExecutionTrace::fresh("root");
-        let effects = EffectContext { trace: Some(execution.clone()), ..Default::default() };
+        let effects = EffectContext {
+            trace: Some(execution.clone()),
+            ..Default::default()
+        };
         let descriptor = json!({"op":"random"});
         let first = runtime.dispatch_root(descriptor.clone(), "root/spawn:0", 0, effects.clone());
         let second = runtime.dispatch_root(descriptor.clone(), "root/spawn:1", 0, effects);
         let outputs = futures::future::try_join_all([first, second]).await?;
-        let values = outputs.iter().map(EffectOutput::decode).collect::<Result<Vec<_>>>()?;
+        let values = outputs
+            .iter()
+            .map(EffectOutput::decode)
+            .collect::<Result<Vec<_>>>()?;
         let result = EffectOutput::value(&json!(values));
         let bundle = execution.snapshot(Some(&result), true)?;
         assert_eq!(bundle.trace.entries.len(), 2);
@@ -1003,10 +1042,17 @@ mod tests {
         assert_eq!(bundle.trace.entries[1].key.scope, "root/spawn:1");
         let replay = trace::ExecutionTrace::loaded(bundle)?;
         for index in [1, 0] {
-            let output = runtime.dispatch_root(
-                descriptor.clone(), &format!("root/spawn:{index}"), 0,
-                EffectContext { trace: Some(replay.clone()), ..Default::default() },
-            ).await?;
+            let output = runtime
+                .dispatch_root(
+                    descriptor.clone(),
+                    &format!("root/spawn:{index}"),
+                    0,
+                    EffectContext {
+                        trace: Some(replay.clone()),
+                        ..Default::default()
+                    },
+                )
+                .await?;
             assert_eq!(output.decode()?, values[index]);
         }
         replay.snapshot(Some(&result), true)?;

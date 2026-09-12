@@ -1,6 +1,6 @@
 # Loom
 
-Loom runs TypeScript and Rust WebAssembly components behind one Rust actor host. Definitions, component bytes, event payloads, and effect results are content-addressed with BLAKE3. SQLite WAL holds the append-only event history and rebuildable indexes.
+Loom runs Rust WebAssembly components behind one Rust actor host; a TypeScript guest toolchain is also supported. Definitions, component bytes, event payloads, and effect results are content-addressed with BLAKE3. SQLite WAL holds the append-only event history and rebuildable indexes.
 
 **Memory isolation is a security requirement. Rust safety checks are not a formally proven boundary against adversarial code.** Compiler and library soundness bugs can expose undefined behavior through safe Rust; denying `unsafe` does not close that class of bug. Loom keeps separate Wasm memories and exchanges DAG-CBOR values instead of sharing guest pointers. Wasm validation, the engine, and checked host interfaces remain trusted, and the complete system has no end-to-end formal proof. See the [memory isolation decision](plan-unified-memory.md#memory-isolation-decision) for the concrete Rust soundness issue and supporting sources.
 
@@ -25,9 +25,9 @@ Install Rust 1.97 or newer, Bun 1.3.13, `cargo-component` 0.21.1, and the `wasm3
 ```sh
 rustup target add wasm32-wasip1 wasm32-wasip2
 cargo install --locked cargo-component --version 0.21.1
-(cd loom-checker && bun install --frozen-lockfile)
-(cd loom-guest-ts && bun install --frozen-lockfile)
-(cd loom-ui && bun install --frozen-lockfile && bun run build)
+(cd checker && bun install --frozen-lockfile)
+(cd guest-ts && bun install --frozen-lockfile)
+(cd ui && bun install --frozen-lockfile && bun run build)
 export LOOM_TOKEN='replace-with-your-token'
 cargo run --release -p loomd -- --db loom.sqlite
 ```
@@ -88,15 +88,15 @@ Opening an older database performs a transactional migration of structured value
 | `loom-mcp` | MCP tools, prompts and resources |
 | `loom-cli`, `loomd` | Terminal client and server entrypoint |
 
-Rust definitions built through `loom_define` use the [shared-core ABI](shared-core-abi.md), with `loom.perform` dispatching through guest handlers to the outermost host handler. Component definitions use `loom-wit/handler.wit` and `loom:host/effects.perform`; ambient WASI imports trap. Folds can handle effects locally, but an effect reaching the host is refused.
+Rust definitions built through `loom_define` use the [shared-core ABI](shared-core-abi.md), with `loom.perform` dispatching through guest handlers to the outermost host handler. Component definitions use `wit/handler.wit` and `loom:host/effects.perform`; ambient WASI imports trap. Folds can handle effects locally, but an effect reaching the host is refused.
 
 ## Verify
 
 ```sh
 cargo test --workspace --locked
-(cd loom-checker && bun test)
-(cd loom-guest-ts && bun test)
-(cd loom-ui && bun run check && bun run build)
+(cd checker && bun test)
+(cd guest-ts && bun test)
+(cd ui && bun run check && bun run build)
 LOOM_TOKEN="$LOOM_TOKEN" bun scripts/e2e.ts
 LOOM_TOKEN="$LOOM_TOKEN" bun scripts/mcp-e2e.ts
 ./scripts/acceptance.sh
