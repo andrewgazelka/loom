@@ -2,6 +2,39 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{FnArg, ItemFn, ItemStruct, Pat, parse_macro_input};
 
+/// Export a zero-argument SQL function as `loom_schema() -> u64` in the core
+/// guest ABI. The result is a packed pointer/length to a Loom CBOR envelope.
+#[proc_macro_attribute]
+pub fn schema(attr: TokenStream, item: TokenStream) -> TokenStream {
+    if !attr.is_empty() {
+        return syn::Error::new(proc_macro2::Span::call_site(), "schema takes no attributes")
+            .to_compile_error().into();
+    }
+    let function = parse_macro_input!(item as ItemFn);
+    let signature = &function.sig;
+    let valid_return = matches!(&signature.output,
+        syn::ReturnType::Type(_, ty) if matches!(ty.as_ref(), syn::Type::Reference(reference)
+            if reference.mutability.is_none()
+                && reference.lifetime.as_ref().is_some_and(|lifetime| lifetime.ident == "static")
+                && matches!(reference.elem.as_ref(), syn::Type::Path(path) if path.path.is_ident("str"))));
+    if !signature.inputs.is_empty() || !signature.generics.params.is_empty()
+        || signature.generics.where_clause.is_some() || signature.asyncness.is_some()
+        || signature.unsafety.is_some() || signature.abi.is_some() || !valid_return
+    {
+        return syn::Error::new_spanned(signature, "schema requires fn() -> &'static str")
+            .to_compile_error().into();
+    }
+    let name = &signature.ident;
+    quote! {
+        #function
+        #[cfg(all(loom_core, not(feature = "loom-dependency")))]
+        #[unsafe(export_name = "loom_schema")]
+        pub extern "C" fn __loom_schema_export() -> u64 {
+            ::loom::core::response(Ok(#name()))
+        }
+    }.into()
+}
+
 /// Export one free function as the component's callable definition.
 #[proc_macro_attribute]
 pub fn def(attr: TokenStream, item: TokenStream) -> TokenStream {

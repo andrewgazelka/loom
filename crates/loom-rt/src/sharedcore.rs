@@ -30,11 +30,26 @@ pub(super) fn engine() -> Result<Engine> {
         .epoch_interruption(true);
     Engine::new(&config).map_err(|e| anyhow::anyhow!("{e:#}"))
 }
+// Keep the classification while sharing a failure with cancelled sibling tasks.
+#[derive(Clone)]
+struct ExecutionFailure {
+    message: String,
+    guest: bool,
+}
+impl ExecutionFailure {
+    fn new(error: anyhow::Error) -> Self {
+        Self { guest: error.is::<GuestFailure>(), message: format!("{error:#}") }
+    }
+    fn into_error(self) -> anyhow::Error {
+        if self.guest { GuestFailure::new(self.message).into() }
+        else { anyhow::anyhow!(self.message) }
+    }
+}
 struct Job {
     handlers: Vec<u64>,
     parent: String,
     detached: bool,
-    result: Mutex<Option<std::result::Result<(), String>>>,
+    result: Mutex<Option<std::result::Result<(), ExecutionFailure>>>,
     done: Notify,
 }
 struct ScheduledTask {
@@ -47,7 +62,7 @@ struct Execution {
     handler_round_trip_us: Mutex<Vec<f64>>,
     handlers_next: AtomicU64,
     continuations: Mutex<HashMap<u64, Arc<ContinuationState>>>,
-    handler_failure: Mutex<Option<String>>,
+    handler_failure: Mutex<Option<ExecutionFailure>>,
     runtime: Runtime,
     module: Module,
     memory: SharedMemory,
@@ -95,6 +110,14 @@ impl Drop for Cleanup {
     }
 }
 impl Execution {
+    fn original_failure(&self) -> Option<ExecutionFailure> {
+        self.handler_failure.lock().unwrap().clone().or_else(|| {
+            self.jobs.lock().unwrap().values().find_map(|job| {
+                if job.detached { return None; }
+                job.result.lock().unwrap().as_ref().and_then(|result| result.as_ref().err()).cloned()
+            })
+        })
+    }
     fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
         // Parked Stores are not executing. Drop them synchronously to break
@@ -269,6 +292,7 @@ enum Invocation {
     Run { state: Vec<u8>, message: Vec<u8> },
     Fold { state: Vec<u8>, event: Vec<u8> },
     Validate,
+    Schema,
 }
 impl Entry<'_> {
     fn prepare(self) -> Result<Invocation> {
@@ -285,6 +309,7 @@ impl Entry<'_> {
                 event: encode(event)?,
             },
             Self::Validate => Invocation::Validate,
+            Self::Schema => Invocation::Schema,
         })
     }
 }
@@ -298,6 +323,14 @@ impl Execution {
         let is_run = matches!(invocation, Invocation::Run { .. });
         let packed = match invocation {
             Invocation::Validate => return EffectOutput::value(&Value::Null),
+            Invocation::Schema => {
+                if running.instance.get_export(&mut running.store, "loom_schema").is_none() {
+                    return EffectOutput::value(&json!(""));
+                }
+                running.instance.get_typed_func::<(), i64>(&mut running.store, "loom_schema")
+                    .map_err(error)?.call_async(&mut running.store, ()).await
+                    .map_err(|cause| running.error_context(cause))? as u64
+            }
             Invocation::Call { args } => {
                 let buffer = running.input_encoded(&args).await?;
                 running
@@ -328,17 +361,17 @@ impl Execution {
                     .map_err(|cause| running.error_context(cause))? as u64
             }
         };
-        let bytes = copy_out(&self.memory, packed as u32, (packed >> 32) as u32)?;
-        let envelope: Value = loom_proto::decode(&bytes).map_err(anyhow::Error::msg)?;
-        anyhow::ensure!(
-            envelope.as_object().is_some_and(|object| object.len() == 1),
-            "invalid core result envelope"
-        );
+        let bytes = copy_out(&self.memory, packed as u32, (packed >> 32) as u32)
+            .map_err(|error| GuestFailure::new(format!("{error:#}")))?;
+        let envelope: Value = loom_proto::decode(&bytes).map_err(GuestFailure::new)?;
+        if !envelope.as_object().is_some_and(|object| object.len() == 1) {
+            return Err(GuestFailure::new("invalid core result envelope").into());
+        }
         if let Some(error) = envelope.get("error").and_then(Value::as_str) {
-            bail!("{error}");
+            return Err(GuestFailure::new(error).into());
         }
         self.check()?;
-        let output = envelope.get("ok").context("invalid core result envelope")?;
+        let output = envelope.get("ok").ok_or_else(|| GuestFailure::new("invalid core result envelope"))?;
         anyhow::ensure!(
             self.jobs
                 .lock()
@@ -351,10 +384,10 @@ impl Execution {
     }
 }
 fn error(error: wasmtime::Error) -> anyhow::Error {
-    anyhow::anyhow!("{error:#}")
+    call::wasm_error(error)
 }
 fn host_error(error: anyhow::Error) -> wasmtime::Error {
-    wasmtime::Error::msg(format!("{error:#}"))
+    wasmtime::Error::from_anyhow(error)
 }
 
 fn copy_out(memory: &SharedMemory, pointer: u32, length: u32) -> Result<Vec<u8>> {
@@ -523,7 +556,7 @@ fn linker(
                     match result {
                         Ok(()) => break 0,
                         Err(_) if job.detached => break 1,
-                        Err(message) => bail!("{message}"),
+                        Err(failure) => return Err(failure.into_error()),
                     }
                 }
                 tokio::select! { _ = notification => {}, _ = cancelled => bail!("shared execution cancelled"), _ = tokio::time::sleep_until(execution.deadline.into()) => bail!("shared execution deadline exceeded") }
@@ -539,7 +572,7 @@ fn linker(
                 .get(&(id as u64)).cloned().context("unknown shared job")?;
             anyhow::ensure!(job.detached, "join_error requires a detached job");
             let message = match job.result.lock().unwrap().as_ref() {
-                Some(Err(message)) => message.clone(),
+                Some(Err(failure)) => failure.message.clone(),
                 _ => bail!("shared job has no error"),
             };
             respond(&mut caller, message.into_bytes()).await
@@ -631,17 +664,22 @@ async fn spawn(caller: &mut Caller<'_, Guest>, function: i32, data: i32, detache
             Ok(())
         }
         .await;
-        if result.is_err() && !child_job.detached {
+        let result = result.map_err(|error| child.original_failure().unwrap_or_else(|| {
+            ExecutionFailure::new(error.context(format!("shared job {scope}")))
+        }));
+        let cancel = result.is_err() && !child_job.detached;
+        // Publish the cause before waking siblings through cancellation.
+        *child_job.result.lock().unwrap() = Some(result);
+        if cancel {
             child.cancel();
         }
-        *child_job.result.lock().unwrap() =
-            Some(result.map_err(|error| format!("shared job {scope}: {error:#}")));
         child_job.done.notify_waiters();
     })?;
     Ok(id as i64)
 }
 
 pub(super) enum Entry<'a> {
+    Schema,
     Call {
         args: &'a Value,
     },
@@ -813,19 +851,9 @@ impl Runtime {
             samples: std::mem::take(&mut *execution.handler_round_trip_us.lock().unwrap()),
         };
         let result = result.map_err(|error| {
-            let failure = execution.handler_failure.lock().unwrap().clone().or_else(|| execution.jobs.lock().unwrap().values().find_map(|job| {
-                // Detached failures belong to their join handles, not to an
-                // unrelated failure of the definition's entry.
-                if job.detached { return None; }
-                job.result
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .and_then(|result| result.as_ref().err())
-                    .cloned()
-            }));
+            let failure = execution.original_failure();
             match failure {
-                Some(failure) => error.context(failure),
+                Some(failure) => failure.into_error(),
                 None => error.context(format!("shared execution {scope}")),
             }
         });

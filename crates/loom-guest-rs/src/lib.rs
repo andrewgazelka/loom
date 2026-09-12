@@ -16,7 +16,7 @@ mod handlers;
 pub mod preview;
 #[cfg(any(loom_core, not(target_arch = "wasm32")))]
 pub use handlers::{handle, handle_any, Continuation, Effect, Reply};
-pub use loom_guest_macros::{actor, def};
+pub use loom_guest_macros::{actor, def, schema};
 pub use serde;
 use serde::{Serialize, de::DeserializeOwned};
 pub use serde_json;

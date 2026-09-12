@@ -2165,6 +2165,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "loom-behavior"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "blake3",
+ "loom-actor",
+ "loom-build",
+ "loom-check",
+ "loom-proto",
+ "loom-rt",
+ "loom-store",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "loom-build"
 version = "0.1.0"
 dependencies = [

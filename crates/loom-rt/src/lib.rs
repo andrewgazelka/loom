@@ -1,4 +1,6 @@
 mod filesystem;
+mod call;
+pub use call::{CallEffects, GuestFailure};
 mod machine;
 mod root_handler;
 mod sharedcore;
@@ -53,6 +55,7 @@ struct Inner {
 struct HandlerMeasurements { scope: String, samples: Vec<f64> }
 #[derive(Clone, Default)]
 struct EffectContext {
+    root: Option<tokio::sync::mpsc::Sender<call::Request>>,
     def_hash: Option<String>,
     actor_id: Option<String>,
     allowed: Option<BTreeSet<String>>,
@@ -67,6 +70,7 @@ impl EffectContext {
             (None, child) => child,
         };
         Self {
+            root: self.root.clone(),
             def_hash: Some(def_hash.into()),
             actor_id: self.actor_id.clone(),
             allowed,
@@ -493,8 +497,10 @@ impl Runtime {
             .bindings
             .call_call(&mut instance.store, &encode(&json!(hash))?, &encode(&args)?)
             .await;
-        let result = result?.map_err(anyhow::Error::msg)?;
-        let output = EffectOutput::from_guest(result)?;
+        let result = result.map_err(call::wasm_error)?
+            .map_err(|error| anyhow::Error::new(GuestFailure::new(error)))?;
+        let output = EffectOutput::from_guest(result)
+            .map_err(|error| anyhow::Error::new(GuestFailure::new(format!("{error:#}"))))?;
         instance.timing.run_ms = elapsed_ms(run_start);
         instance.timing.total_ms = elapsed_ms(call_start);
         Ok(EncodedCall {
