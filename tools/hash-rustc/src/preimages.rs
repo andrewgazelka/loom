@@ -32,12 +32,19 @@ fn write_objects(directory: &Path, objects: &BTreeMap<String, Vec<u8>>) -> io::R
             Ok(mut file) => {
                 let result = file.write_all(bytes);
                 if result.is_err() {
-                    std::fs::remove_file(&path)?;
+                    std::fs::remove_file(&path).map_err(|error| {
+                        io::Error::other(format!(
+                            "cannot remove partial preimage {}: {error}",
+                            path.display()
+                        ))
+                    })?;
                 }
                 result
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                let existing = std::fs::read(&path)?;
+                let existing = std::fs::read(&path).map_err(|error| {
+                    io::Error::other(format!("cannot read preimage {}: {error}", path.display()))
+                })?;
                 if existing == *bytes {
                     Ok(())
                 } else {
