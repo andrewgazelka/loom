@@ -1,6 +1,6 @@
 {
   "ui": {
-    "lockHash": "1d1d7d8be7a5b9ef330bbc6553f03d096ca38b5fd745bc6b2de8983bda0d51a0",
+    "lockHash": "45460abf9af5136198e093571aa8b85d0d0700ebdf867f225e8b8520bf49f96d",
     "packages": [
       {
         "name": "@codemirror/autocomplete",
@@ -46,6 +46,18 @@
         "binDirectory": "node_modules/.bin",
         "url": "https://registry.npmjs.org/@codemirror/lang-rust/-/lang-rust-6.0.2.tgz",
         "hash": "sha512-EZaGjCUegtiU7kSMvOfEZpaCReowEf3yNidYu7+vfuGTm9ow4mthAparY5hisJqOHmJowVH3Upu+eJlUji6qqA==",
+        "os": [],
+        "cpu": [],
+        "bins": {}
+      },
+      {
+        "name": "@codemirror/lang-sql",
+        "version": "6.10.0",
+        "path": "node_modules/@codemirror/lang-sql",
+        "installedName": "@codemirror/lang-sql",
+        "binDirectory": "node_modules/.bin",
+        "url": "https://registry.npmjs.org/@codemirror/lang-sql/-/lang-sql-6.10.0.tgz",
+        "hash": "sha512-6ayPkEd/yRw0XKBx5uAiToSgGECo/GY2NoJIHXIIQh1EVwLuKoU8BP/qK0qH5NLXAbtJRLuT73hx7P9X34iO4w==",
         "os": [],
         "cpu": [],
         "bins": {}
@@ -396,6 +408,18 @@
         "hash": "sha512-alJC0uCZpTFrSL0CCDjcgleBXPnCrEAhTBILpeAp7M/OFgoqtAetfBzX0xM00MUsVVPpVjlPuMbREqnZCXaTnA==",
         "os": "win32",
         "cpu": "x64",
+        "bins": {}
+      },
+      {
+        "name": "@fontsource/inter",
+        "version": "5.2.8",
+        "path": "node_modules/@fontsource/inter",
+        "installedName": "@fontsource/inter",
+        "binDirectory": "node_modules/.bin",
+        "url": "https://registry.npmjs.org/@fontsource/inter/-/inter-5.2.8.tgz",
+        "hash": "sha512-P6r5WnJoKiNVV+zvW2xM13gNdFhAEpQ9dQJHt3naLvfg+LkF2ldgSLiF4T41lf1SQCM9QmkqPTn4TH568IRagg==",
+        "os": [],
+        "cpu": [],
         "bins": {}
       },
       {
@@ -1037,6 +1061,18 @@
         "bins": {}
       },
       {
+        "name": "@types/bun",
+        "version": "1.3.13",
+        "path": "node_modules/@types/bun",
+        "installedName": "@types/bun",
+        "binDirectory": "node_modules/.bin",
+        "url": "https://registry.npmjs.org/@types/bun/-/bun-1.3.13.tgz",
+        "hash": "sha512-9fqXWk5YIHGGnUau9TEi+qdlTYDAnOj+xLCmSTwXfAIqXr2x4tytJb43E9uCvt09zJURKXwAtkoH4nLQfzeTXw==",
+        "os": [],
+        "cpu": [],
+        "bins": {}
+      },
+      {
         "name": "@types/cookie",
         "version": "0.6.0",
         "path": "node_modules/@types/cookie",
@@ -1080,6 +1116,18 @@
         "binDirectory": "node_modules/.bin",
         "url": "https://registry.npmjs.org/@types/mdast/-/mdast-4.0.4.tgz",
         "hash": "sha512-kGaNbPh1k7AFzgpud/gMdvIm5xuECykRR+JnWKQno9TAXVa6WIVCGTPvYGekIDL4uwCZQSYbUxNBSb1aUo79oA==",
+        "os": [],
+        "cpu": [],
+        "bins": {}
+      },
+      {
+        "name": "@types/node",
+        "version": "22.20.2",
+        "path": "node_modules/@types/node",
+        "installedName": "@types/node",
+        "binDirectory": "node_modules/.bin",
+        "url": "https://registry.npmjs.org/@types/node/-/node-22.20.2.tgz",
+        "hash": "sha512-xlvWf4Vs9n1PEVYwP1n4vvG07M6y8WgvJ2t0vbrWTmijsIHp1cS+uJ2kMIRdY3nHZK0nCYKrPeD171+SzF4/zw==",
         "os": [],
         "cpu": [],
         "bins": {}
@@ -1142,6 +1190,18 @@
         "binDirectory": "node_modules/.bin",
         "url": "https://registry.npmjs.org/axobject-query/-/axobject-query-4.1.0.tgz",
         "hash": "sha512-qIj0G9wZbMGNLjLmg1PT6v2mE9AH2zlnADJD/2tC6E00hgmhUOfEB6greHPAfLRSufHqROIUTkw6E+M3lH0PTQ==",
+        "os": [],
+        "cpu": [],
+        "bins": {}
+      },
+      {
+        "name": "bun-types",
+        "version": "1.3.13",
+        "path": "node_modules/bun-types",
+        "installedName": "bun-types",
+        "binDirectory": "node_modules/.bin",
+        "url": "https://registry.npmjs.org/bun-types/-/bun-types-1.3.13.tgz",
+        "hash": "sha512-QXKeHLlOLqQX9LgYaHJfzdBaV21T63HhFJnvuRCcjZiaUDpbs5ED1MgxbMra71CsryN/1dAoXuJJJwIv/2drVA==",
         "os": [],
         "cpu": [],
         "bins": {}
@@ -1655,6 +1715,32 @@
         "bins": {}
       },
       {
+        "name": "prettier",
+        "version": "3.6.2",
+        "path": "node_modules/prettier",
+        "installedName": "prettier",
+        "binDirectory": "node_modules/.bin",
+        "url": "https://registry.npmjs.org/prettier/-/prettier-3.6.2.tgz",
+        "hash": "sha512-I7AIg5boAr5R0FFtJ6rCfD+LFsWHp81dolrFD8S79U9tb8Az2nGrJncnMSnys+bpQJfRUzqs9hnA81OAA3hCuQ==",
+        "os": [],
+        "cpu": [],
+        "bins": {
+          "prettier": "bin/prettier.cjs"
+        }
+      },
+      {
+        "name": "prettier-plugin-svelte",
+        "version": "3.4.0",
+        "path": "node_modules/prettier-plugin-svelte",
+        "installedName": "prettier-plugin-svelte",
+        "binDirectory": "node_modules/.bin",
+        "url": "https://registry.npmjs.org/prettier-plugin-svelte/-/prettier-plugin-svelte-3.4.0.tgz",
+        "hash": "sha512-pn1ra/0mPObzqoIQn/vUTR3ZZI6UuZ0sHqMK5x2jMLGrs53h0sXhkVuDcrlssHwIMk7FYrMjHBPoUSyyEEDlBQ==",
+        "os": [],
+        "cpu": [],
+        "bins": {}
+      },
+      {
         "name": "property-information",
         "version": "7.2.0",
         "path": "node_modules/property-information",
@@ -1900,6 +1986,18 @@
           "tsc": "bin/tsc",
           "tsserver": "bin/tsserver"
         }
+      },
+      {
+        "name": "undici-types",
+        "version": "6.21.0",
+        "path": "node_modules/undici-types",
+        "installedName": "undici-types",
+        "binDirectory": "node_modules/.bin",
+        "url": "https://registry.npmjs.org/undici-types/-/undici-types-6.21.0.tgz",
+        "hash": "sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ==",
+        "os": [],
+        "cpu": [],
+        "bins": {}
       },
       {
         "name": "unist-util-is",
