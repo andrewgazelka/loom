@@ -1,5 +1,7 @@
 #[path = "support/response_policy.rs"]
 mod response_policy;
+#[path = "support/source_roundtrip.rs"]
+mod source_roundtrip;
 use loom_api::{Authorizer, Service};
 use loom_proto::{Lang, Response};
 use loom_store::Store;
@@ -231,7 +233,7 @@ async fn definition_commands_reach_shared_service() {
     let server = Server::with_registry(true).await;
     let file = tempfile::NamedTempFile::new().unwrap();
     let path = file.path().to_str().unwrap();
-    let first = "pub fn main() -> i32 { let value = 41; value }";
+    let first = "fn value() -> i32 { 41 }\r\n\r\npub fn main() -> i32 { value() }\r\n// Submitted trailing comment.\r\n";
     std::fs::write(file.path(), first).unwrap();
     let added = server.invoke(&["add", path, "--name", "answer"]).await;
     assert!(added.ok, "{added:?}");
@@ -242,7 +244,7 @@ async fn definition_commands_reach_shared_service() {
     std::fs::remove_file(file.path()).unwrap();
     let viewed = server.invoke(&["view", old]).await;
     assert!(viewed.ok, "{viewed:?}");
-    assert!(viewed.result["source"].as_str().unwrap().contains("41"));
+    source_roundtrip::assert_verbatim(&server, old, first, &viewed).await;
     assert!(!viewed.result["items"].as_object().unwrap().is_empty());
     std::fs::write(file.path(), "pub fn main() -> i32 { answer::main() }").unwrap();
     let pins = serde_json::json!({"answer":old}).to_string();
