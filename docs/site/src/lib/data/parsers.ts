@@ -64,8 +64,8 @@ export function parseMcpTools(source: string, raw: string): McpTool[] {
   for (const line of lines.slice(start + 1)) { const heading = line.match(/^(#+)\s/); if (heading && heading[1].length <= depth) break; section.push(line); }
   const tools: McpTool[] = []; const names = new Set<string>();
   for (const line of section) {
-    const table = line.match(/^\s*\|\s*`?([a-z][a-z0-9_.-]+)`?\s*\|\s*(.*?)\s*\|\s*$/i);
-    const bullet = line.match(/^\s*[-*]\s+`([a-z][a-z0-9_.-]+)`\s*(?:[:—–-]\s*)?(.+)$/i);
+    const table = line.match(/^\s*\|\s*`?([a-z][a-z0-9_.-]+)(?:\([^)]*\))?`?\s*\|\s*(.*?)\s*\|\s*$/i);
+    const bullet = line.match(/^\s*[-*]\s+`([a-z][a-z0-9_.-]+)(?:\([^)]*\))?`\s*(?:[:—–-]\s*)?(.+)$/i);
     const match = table ?? bullet;
     if (!match) {
       const separator = /^\s*\|(?:\s*:?-{3,}:?\s*\|)+\s*$/.test(line);

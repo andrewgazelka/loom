@@ -1,8 +1,6 @@
 # Actors
 ## MCP surface
-| Tool | Description |
-| --- | --- |
-| `actor_spawn` | Spawn an actor. |
-| `actor_send` | Send a **message**. |
+- `actor_spawn(behavior_hash, init, parent?, spec?)` Spawn an actor.
+- `actor_send(id, key?, msg)` Send a **message**.
 ## Other section
-- `unrelated` — Not a tool.
+- `unrelated` Not a tool.
