@@ -1,15 +1,28 @@
 #![feature(rustc_private)]
 
 extern crate rustc_ast;
+extern crate rustc_codegen_llvm;
+extern crate rustc_codegen_ssa;
+extern crate rustc_data_structures;
 extern crate rustc_driver;
+extern crate rustc_errors;
 extern crate rustc_hir;
 extern crate rustc_interface;
+extern crate rustc_metadata;
 extern crate rustc_middle;
+extern crate rustc_session;
 extern crate rustc_span;
+extern crate rustc_structures;
+extern crate rustc_target;
 
+mod cache_backend;
+mod cache_flags;
+mod cache_metrics;
 mod encode;
 mod entries;
 mod graph;
+mod object_cache;
+mod object_store;
 mod preimages;
 
 use std::path::PathBuf;
@@ -29,6 +42,10 @@ impl Callbacks for HashCallbacks {
         // An installed rustc finds its sysroot relative to its executable. This
         // driver lives elsewhere; explicit --sysroot always takes precedence.
         config.opts.sysroot.default = PathBuf::from(env!("HASH_RUSTC_SYSROOT"));
+        if std::env::var_os("LOOM_OBJECT_CACHE").is_some() {
+            config.make_codegen_backend =
+                Some(Box::new(|_| Box::new(cache_backend::CachingBackend::new())));
+        }
     }
 
     fn after_analysis<'tcx>(&mut self, _: &interface::Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
@@ -40,7 +57,7 @@ impl Callbacks for HashCallbacks {
 }
 
 fn main() -> ExitCode {
-    rustc_driver::catch_with_exit_code(|| {
+    let result = rustc_driver::catch_with_exit_code(|| {
         let mut callbacks = HashCallbacks {
             destination: std::env::var_os("LOOM_ITEM_HASHES").map(PathBuf::from),
             document: None,
@@ -87,5 +104,8 @@ fn main() -> ExitCode {
             }
         }
         ExitCode::SUCCESS
-    })
+    });
+    object_cache::print_stats();
+    cache_metrics::print();
+    result
 }
