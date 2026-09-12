@@ -211,32 +211,11 @@ fn real_guest_definition_commands() {
             .block_on(definition_commands_reach_shared_service());
         return;
     }
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let pin_path = root.join("tools/hash-rustc/rust-toolchain.toml");
-    let pin = std::fs::read_to_string(&pin_path).unwrap();
-    let channel = pin
-        .lines()
-        .find_map(|line| {
-            let (key, value) = line.split_once('=')?;
-            (key.trim() == "channel").then(|| value.trim().trim_matches('"'))
-        })
-        .expect("driver toolchain pin must name channel");
-    let rustc = std::process::Command::new("rustup")
-        .args(["which", "--toolchain", channel, "rustc"])
-        .output()
-        .expect("resolve pinned guest rustc using rustup");
-    assert!(
-        rustc.status.success(),
-        "{}: {}",
-        pin_path.display(),
-        String::from_utf8_lossy(&rustc.stderr)
-    );
-    let rustc_path = String::from_utf8(rustc.stdout).unwrap();
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "real_guest_definition_commands", "--nocapture"])
         .env(CHILD, "1")
-        .env("RUSTUP_TOOLCHAIN", channel)
-        .env("RUSTC", rustc_path.trim())
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .env_remove("RUSTC")
         .env("LOOM_COMPILER_CACHE_OWNER", env!("CARGO_BIN_EXE_loom"))
         .output()
         .unwrap();

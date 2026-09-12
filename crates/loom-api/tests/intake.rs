@@ -1,3 +1,6 @@
+#[path = "support/guest.rs"]
+mod guest;
+
 use loom_api::Service;
 use loom_proto::{CommandRequest, Lang};
 use loom_store::Store;
@@ -60,12 +63,15 @@ async fn missing_driver_add_preserves_all_store_rows() -> anyhow::Result<()> {
     .await
 }
 
-#[tokio::test]
-async fn compile_error_add_preserves_all_store_rows() -> anyhow::Result<()> {
-    assert_unchanged(
-        service()?,
-        "pub fn main() -> i32 { true }",
-        "mismatched types",
-    )
-    .await
+#[test]
+fn compile_error_add_preserves_all_store_rows() {
+    guest::run("compile_error_add_preserves_all_store_rows", || async {
+        assert_unchanged(
+            service().unwrap(),
+            "pub fn main() -> i32 { true }",
+            "mismatched types",
+        )
+        .await
+        .unwrap();
+    });
 }

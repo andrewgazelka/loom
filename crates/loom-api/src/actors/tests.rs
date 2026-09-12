@@ -1,3 +1,6 @@
+#[path = "../../tests/support/guest.rs"]
+mod guest;
+
 use super::*;
 
 async fn service(directory: &std::path::Path) -> anyhow::Result<crate::Service> {
@@ -28,8 +31,17 @@ async fn dynamic_actor_unknown_name_is_named() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::test]
-async fn dynamic_actor_add_then_spawn_on_running_node() -> anyhow::Result<()> {
+#[test]
+fn dynamic_actor_add_then_spawn_on_running_node() {
+    guest::run(
+        "actors::tests::dynamic_actor_add_then_spawn_on_running_node",
+        || async {
+            dynamic_actor_workflow().await.unwrap();
+        },
+    );
+}
+
+async fn dynamic_actor_workflow() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let service = service(directory.path()).await?;
     let source = r#"

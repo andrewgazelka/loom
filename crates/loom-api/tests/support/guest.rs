@@ -11,28 +11,12 @@ pub fn run<F: Future<Output = ()>>(test: &str, workflow: impl FnOnce() -> F) {
         return;
     }
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let pin_path = root.join("tools/hash-rustc/rust-toolchain.toml");
-    let pin: toml::Value = toml::from_str(&std::fs::read_to_string(&pin_path).unwrap()).unwrap();
-    let channel = pin["toolchain"]["channel"]
-        .as_str()
-        .expect("driver toolchain pin must name channel");
-    let rustc = Command::new("rustup")
-        .args(["which", "--toolchain", channel, "rustc"])
-        .output()
-        .expect("resolve pinned guest rustc using rustup");
-    assert!(
-        rustc.status.success(),
-        "{}: {}",
-        pin_path.display(),
-        String::from_utf8_lossy(&rustc.stderr)
-    );
-    let rustc = String::from_utf8(rustc.stdout).unwrap();
     let owner = cache_owner(&root);
     let output = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", test, "--nocapture"])
         .env(CHILD, test)
-        .env("RUSTUP_TOOLCHAIN", channel)
-        .env("RUSTC", rustc.trim())
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .env_remove("RUSTC")
         .env("LOOM_COMPILER_CACHE_OWNER", owner)
         .output()
         .expect("run pinned guest test subprocess");
@@ -42,6 +26,7 @@ pub fn run<F: Future<Output = ()>>(test: &str, workflow: impl FnOnce() -> F) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    print!("{}", String::from_utf8_lossy(&output.stdout));
 }
 
 fn cache_owner(root: &Path) -> PathBuf {
