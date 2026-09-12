@@ -26,7 +26,6 @@ handler, or keep a one-shot continuation to resume later:
 ```rust
 use loom::sleep;
 
-#[loom::def(effects = ["sleep"])]
 pub fn main() {
     loom::scope(|s| {
         let a = s.spawn(|| sleep(100)).expect("spawn");
@@ -38,7 +37,12 @@ pub fn main() {
 ```
 
 The two scoped children run concurrently, so their sleeps overlap; `scope` waits for
-both before returning. The guest-handler round trip (install, dispatch, resume,
+both before returning. Guest code has no macros and no effect declarations: an entry is
+any `pub fn` at the crate root, and the set of host effects a definition can reach (its
+effect row, here `["sleep"]`) is inferred from the resolved call graph by the same rustc
+driver that computes its content hash, shown by `add` and `view`, and enforced by the
+host at run time. A `perform` whose label is not a literal or a const is a compile error
+at that line. The guest-handler round trip (install, dispatch, resume,
 remove) measured **13.811 µs median, 24.356 µs p99** over 10,000 warm calls on Linux,
 September 10, 2026. Reproduce with `bun scripts/bench/effects-handlers.ts`. See
 [docs/guide.md](docs/guide.md) for handler installation and
@@ -166,7 +170,6 @@ Details: [docs/content-addressed-code.md](docs/content-addressed-code.md).
 | `loom-build` | core wasm builder |
 | `loom-check` | effect/language checking before a definition becomes executable |
 | `loom-cli` | command-line client for a running `loomd` |
-| `loom-guest-macros` | `#[loom::def]` / `#[loom::actor]` proc macros |
 | `loom-guest-rs` | synchronous guest interface to the host, for Rust definitions |
 | `loom-maintenance` | garbage collection over derived indexes only; CAS and event log untouched |
 | `loom-mcp` | MCP server exposing the API as tools |
