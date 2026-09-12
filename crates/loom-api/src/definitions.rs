@@ -107,7 +107,7 @@ impl Service {
             loom_store::IntakePublication {
                 def: &def,
                 name: Some(&request.name),
-                source: &checked.source,
+                source: &request.source,
                 deps: &checked.deps,
                 identity: Some(identity),
                 build_event: &build_event,
