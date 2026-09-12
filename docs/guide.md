@@ -19,7 +19,7 @@ The launcher prints `Token file: <path>` and opens `http://127.0.0.1:8793/#token
 The proof checks these results in order:
 
 1. `loom add examples/unison/greet.rs --name greet` returns a definition hash and an empty inferred effect row.
-2. `loom view <hash>` returns the exact stored source and two items after the input file has been moved away.
+2. `loom view <hash>` returns the exact stored source reported by `add` and two items after the input file has been moved away. The checker formats Rust before storing it, so this compares stored bytes rather than the input file's whitespace.
 3. `loom run greet '"loom"'` returns `"hello, loom"` with an empty effects list.
 4. Updating with `greet-v2.rs` only renames a local and keeps the hash. Updating with `greet-v3.rs` changes the greeting constant and moves the hash. The old hash still runs; `history greet` contains both hashes.
 5. Adding `sleeper.rs` infers exactly `["sleep"]` through a trait method on a generic. The source has no effect declaration.

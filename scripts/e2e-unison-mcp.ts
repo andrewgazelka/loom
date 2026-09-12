@@ -20,6 +20,7 @@ const names = ['add', 'view', 'run', 'update-history', 'inferred-sleep', 'actor-
 let passed = 0;
 let firstFailure: number | undefined;
 let greetHash = '';
+let storedGreetSource = '';
 let counterHash = '';
 let candidateHash = '';
 let actorId = '';
@@ -112,15 +113,15 @@ const checks: Array<() => Promise<void>> = [
   async () => {
     const result = await add('greet.rs', `${prefix}greet`);
     greetHash = hash(result.hash);
+    storedGreetSource = text(result.source);
     equal(effects(result, 'greet'), { labels: [], unknown: false }, 'inferred effect row');
   },
   async () => {
     const path = join(directory, 'greet.rs');
-    const source = await readFile(path, 'utf8');
     await rename(path, `${path}.removed`);
     try {
       const result = object(await call(['view', greetHash], 'view', { target: greetHash }));
-      equal(result.source, source, 'stored source after input removal');
+      equal(result.source, storedGreetSource, 'stored source after input removal');
       equal(Object.keys(object(result.items)).length, 2, 'item table count');
     } finally { await rename(`${path}.removed`, path); }
   },
