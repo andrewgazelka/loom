@@ -217,8 +217,10 @@ impl Builder {
                 return Err(BuildError::Rejected("invalid dependency hash".into()));
             }
             materialize_rust(
-                &self.store,
-                &self.root,
+                &RustBuildEnv {
+                    store: &self.store,
+                    root: &self.root,
+                },
                 &staging,
                 &staging.join("sources").join(&dependency.hash),
                 dependency,
@@ -229,8 +231,10 @@ impl Builder {
             .await?;
         }
         materialize_rust(
-            &self.store,
-            &self.root,
+            &RustBuildEnv {
+                store: &self.store,
+                root: &self.root,
+            },
             &staging,
             &crate_dir,
             definition,
@@ -383,8 +387,10 @@ impl Builder {
                         return Err(BuildError::Rejected("invalid dependency hash".into()));
                     }
                     materialize_rust(
-                        &self.store,
-                        &self.root,
+                        &RustBuildEnv {
+                            store: &self.store,
+                            root: &self.root,
+                        },
                         &self.cache,
                         &self.cache.join("sources").join(&dependency.hash),
                         dependency,
@@ -396,8 +402,10 @@ impl Builder {
                 }
                 let isolated = is_vendored(definition);
                 materialize_rust(
-                    &self.store,
-                    &self.root,
+                    &RustBuildEnv {
+                        store: &self.store,
+                        root: &self.root,
+                    },
                     &self.cache,
                     &directory,
                     definition,
@@ -550,10 +558,7 @@ fn build_fingerprint(root: &Path, lang: Lang) -> Result<String, BuildError> {
     match lang {
         Lang::Ts => {
             collect(&root.join("guest-ts"), &mut files)?;
-            files.extend([
-                root.join("checker/build.ts"),
-                root.join("checker/bun.lock"),
-            ]);
+            files.extend([root.join("checker/build.ts"), root.join("checker/bun.lock")]);
         }
         Lang::Rust => {
             for directory in [
@@ -592,9 +597,13 @@ fn build_fingerprint(root: &Path, lang: Lang) -> Result<String, BuildError> {
     Ok(hash.finalize().to_hex().to_string())
 }
 
+struct RustBuildEnv<'a> {
+    store: &'a loom_store::Store,
+    root: &'a Path,
+}
+
 async fn materialize_rust(
-    store: &loom_store::Store,
-    root: &Path,
+    env: &RustBuildEnv<'_>,
     cache: &Path,
     directory: &Path,
     definition: &CheckedDef,
@@ -602,6 +611,7 @@ async fn materialize_rust(
     dependency: bool,
     isolated: bool,
 ) -> Result<(), BuildError> {
+    let RustBuildEnv { store, root } = *env;
     handler_dependencies::validate(definition, dependencies)?;
     let mut files = if definition.source.trim_start().starts_with('{') {
         let bundle: loom_check::SourceBundle = serde_json::from_str(&definition.source)
@@ -794,7 +804,10 @@ async fn materialize_rust(
             .and_then(|metadata| metadata.get("component"))
             .is_some()
     {
-        return Err(BuildError::Rejected("Workspace redirects and component metadata are host-owned; the guest boundary is wit".into()));
+        return Err(BuildError::Rejected(
+            "Workspace redirects and component metadata are host-owned; the guest boundary is wit"
+                .into(),
+        ));
     }
     if !isolated && (package.contains_key("build") || files.contains_key("build.rs")) {
         return Err(BuildError::Rejected(
@@ -938,10 +951,17 @@ async fn materialize_rust(
                             let parsed = if matches!(&attribute.meta, syn::Meta::Path(_)) {
                                 syn::punctuated::Punctuated::<syn::MetaNameValue, syn::Token![,]>::new()
                             } else {
-                                attribute.parse_args_with(syn::punctuated::Punctuated::<syn::MetaNameValue, syn::Token![,]>::parse_terminated)
+                                attribute
+                                    .parse_args_with(
+                                        syn::punctuated::Punctuated::<
+                                            syn::MetaNameValue,
+                                            syn::Token![,],
+                                        >::parse_terminated,
+                                    )
                                     .map_err(|error| BuildError::Rejected(error.to_string()))?
                             };
-                            let mut arguments = parsed.into_iter()
+                            let mut arguments = parsed
+                                .into_iter()
                                 .filter(|argument| !argument.path.is_ident("hash"))
                                 .collect::<Vec<_>>();
                             arguments.push(syn::parse_quote!(hash = #hash));
@@ -1087,6 +1107,16 @@ impl Builder {
         operation(&self.cache)
     }
 }
+
+/// Internal native compiler-cache protocol, shared by the daemon and build tools.
+pub fn compiler_cache_main(
+    operation: &str,
+    recipe: &std::path::Path,
+    mirror: &std::path::Path,
+) -> Result<bool, BuildError> {
+    direct::compiler_cache::main(operation, recipe, mirror)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1133,8 +1163,10 @@ mod tests {
             fs::remove_dir_all(&directory).await.unwrap();
         }
         materialize_rust(
-            &store,
-            &root,
+            &RustBuildEnv {
+                store: &store,
+                root: &root,
+            },
             &directory,
             &directory,
             &definition,
@@ -1171,8 +1203,10 @@ mod tests {
         definition.source = serde_json::to_string(&bundle).unwrap();
         assert!(
             materialize_rust(
-                &store,
-                &root,
+                &RustBuildEnv {
+                    store: &store,
+                    root: &root
+                },
                 &directory,
                 &directory,
                 &definition,
@@ -1192,8 +1226,10 @@ mod tests {
         definition.source = serde_json::to_string(&bundle).unwrap();
         assert!(
             materialize_rust(
-                &store,
-                &root,
+                &RustBuildEnv {
+                    store: &store,
+                    root: &root
+                },
                 &directory,
                 &directory,
                 &definition,
@@ -1210,8 +1246,10 @@ mod tests {
         definition.source = serde_json::to_string(&bundle).unwrap();
         assert!(
             materialize_rust(
-                &store,
-                &root,
+                &RustBuildEnv {
+                    store: &store,
+                    root: &root
+                },
                 &directory,
                 &directory,
                 &definition,
@@ -1287,13 +1325,4 @@ mod tests {
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].code, "E0308");
     }
-}
-
-/// Internal native compiler-cache protocol, shared by the daemon and build tools.
-pub fn compiler_cache_main(
-    operation: &str,
-    recipe: &std::path::Path,
-    mirror: &std::path::Path,
-) -> Result<bool, BuildError> {
-    direct::compiler_cache::main(operation, recipe, mirror)
 }

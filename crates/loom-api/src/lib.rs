@@ -1385,7 +1385,8 @@ mod tests {
                 .unwrap()
                 .contains("Rust source bundle not found")
         );
-        let source = "#[loom::def(effects=[])] pub fn main() { std::fs::read(\"secret\").unwrap(); }";
+        let source =
+            "#[loom::def(effects=[])] pub fn main() { std::fs::read(\"secret\").unwrap(); }";
         let checked = service
             .define(DefineRequest {
                 allowed_effects: None,

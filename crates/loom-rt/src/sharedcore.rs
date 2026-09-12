@@ -13,9 +13,9 @@ use wasmtime::{
 };
 
 mod cancellation;
-mod timing;
 mod handlers;
-use handlers::{HandlerFrame, ContinuationState, HandlerInstance};
+mod timing;
+use handlers::{ContinuationState, HandlerFrame, HandlerInstance};
 
 const MAX_JOBS: usize = 512;
 const STACK_BYTES: u32 = 256 * 1024;
@@ -137,10 +137,10 @@ impl Execution {
                     .await;
                 // Destruction precedes completion publication, including abort paths.
                 drop(abortable);
-                if outcome.is_err() {
-                    if let Some(execution) = execution.upgrade() {
-                        execution.cancel();
-                    }
+                if outcome.is_err()
+                    && let Some(execution) = execution.upgrade()
+                {
+                    execution.cancel();
                 }
             })?;
         if self.cancelled.load(Ordering::Acquire) {
@@ -397,8 +397,13 @@ fn copy_in(memory: &SharedMemory, pointer: u32, bytes: &[u8]) -> Result<()> {
 /// Wasm exports alignment zero when there is no TLS block. No allocation is
 /// made in that case; use alignment one for bookkeeping and checked arithmetic.
 fn tls_alignment(size: u32, alignment: u32) -> Result<u32> {
-    if size == 0 { return Ok(1); }
-    anyhow::ensure!(alignment.is_power_of_two() && alignment <= 65536, "invalid guest TLS alignment");
+    if size == 0 {
+        return Ok(1);
+    }
+    anyhow::ensure!(
+        alignment.is_power_of_two() && alignment <= 65536,
+        "invalid guest TLS alignment"
+    );
     Ok(alignment)
 }
 async fn allocate(caller: &mut Caller<'_, Guest>, size: u32, align: u32) -> Result<u32> {
@@ -414,7 +419,7 @@ async fn allocate(caller: &mut Caller<'_, Guest>, size: u32, align: u32) -> Resu
         .map_err(error)? as u32;
     anyhow::ensure!(size == 0 || pointer != 0, "guest allocation failed");
     anyhow::ensure!(
-        align.is_power_of_two() && pointer % align == 0,
+        align.is_power_of_two() && pointer.is_multiple_of(align),
         "guest allocation has invalid alignment"
     );
     anyhow::ensure!(
@@ -454,25 +459,27 @@ fn linker(
                         }
                         let occurrence = caller.data().occurrence;
                         caller.data_mut().occurrence += 1;
-                        if let Some(bytes) = handlers::dispatch(&mut caller, &descriptor, occurrence).await? {
+                        if let Some(bytes) =
+                            handlers::dispatch(&mut caller, &descriptor, occurrence).await?
+                        {
                             let response = respond(&mut caller, bytes).await?;
                             let mut samples = execution.handler_round_trip_us.lock().unwrap();
-                            if samples.len() == 100_000 { samples.drain(..50_000); }
+                            if samples.len() == 100_000 {
+                                samples.drain(..50_000);
+                            }
                             samples.push(started.elapsed().as_secs_f64() * 1_000_000.0);
                             return Ok(response);
                         }
-                        anyhow::ensure!(!execution.pure, "effects forbidden in pure core execution");
+                        anyhow::ensure!(
+                            !execution.pure,
+                            "effects forbidden in pure core execution"
+                        );
                         let scope = caller.data().scope.clone();
                         let effects = execution.effects.clone();
                         caller.data_mut().permit.take();
                         let output = execution
                             .runtime
-                            .dispatch_root(
-                                descriptor,
-                                &scope,
-                                occurrence,
-                                effects,
-                            )
+                            .dispatch_root(descriptor, &scope, occurrence, effects)
                             .await;
                         caller.data_mut().permit.take();
                         caller.data_mut().permit = Some(execution.permit().await?);
@@ -504,7 +511,11 @@ fn linker(
             "loom",
             "spawn",
             |mut caller: Caller<'_, Guest>, (function, data, detached): (i32, i32, i32)| {
-                Box::new(async move { spawn(&mut caller, function, data, detached).await.map_err(host_error) })
+                Box::new(async move {
+                    spawn(&mut caller, function, data, detached)
+                        .await
+                        .map_err(host_error)
+                })
             },
         )
         .map_err(error)?;
@@ -533,24 +544,48 @@ fn linker(
         }.await;
         result.map_err(host_error)
     })).map_err(error)?;
-    linker.func_wrap_async("loom", "join_error", |mut caller: Caller<'_, Guest>, (id,): (i64,)| Box::new(async move {
-        let result: Result<i64> = async {
-            let job = caller.data().execution.jobs.lock().unwrap()
-                .get(&(id as u64)).cloned().context("unknown shared job")?;
-            anyhow::ensure!(job.detached, "join_error requires a detached job");
-            let message = match job.result.lock().unwrap().as_ref() {
-                Some(Err(message)) => message.clone(),
-                _ => bail!("shared job has no error"),
-            };
-            respond(&mut caller, message.into_bytes()).await
-        }.await;
-        result.map_err(host_error)
-    })).map_err(error)?;
+    linker
+        .func_wrap_async(
+            "loom",
+            "join_error",
+            |mut caller: Caller<'_, Guest>, (id,): (i64,)| {
+                Box::new(async move {
+                    let result: Result<i64> = async {
+                        let job = caller
+                            .data()
+                            .execution
+                            .jobs
+                            .lock()
+                            .unwrap()
+                            .get(&(id as u64))
+                            .cloned()
+                            .context("unknown shared job")?;
+                        anyhow::ensure!(job.detached, "join_error requires a detached job");
+                        let message = match job.result.lock().unwrap().as_ref() {
+                            Some(Err(message)) => message.clone(),
+                            _ => bail!("shared job has no error"),
+                        };
+                        respond(&mut caller, message.into_bytes()).await
+                    }
+                    .await;
+                    result.map_err(host_error)
+                })
+            },
+        )
+        .map_err(error)?;
     handlers::link(&mut linker)?;
     Ok(linker)
 }
-async fn spawn(caller: &mut Caller<'_, Guest>, function: i32, data: i32, detached: i32) -> Result<i64> {
-    anyhow::ensure!(matches!(detached, 0 | 1), "invalid shared job detached flag");
+async fn spawn(
+    caller: &mut Caller<'_, Guest>,
+    function: i32,
+    data: i32,
+    detached: i32,
+) -> Result<i64> {
+    anyhow::ensure!(
+        matches!(detached, 0 | 1),
+        "invalid shared job detached flag"
+    );
     let detached = detached == 1;
     let execution = caller.data().execution.clone();
     execution.check()?;
@@ -595,7 +630,11 @@ async fn spawn(caller: &mut Caller<'_, Guest>, function: i32, data: i32, detache
         .i32()
         .context("invalid TLS alignment")? as u32;
     let tls_align = tls_alignment(tls_size, tls_align)?;
-    let tls = if tls_size == 0 { 0 } else { allocate(caller, tls_size, tls_align).await? };
+    let tls = if tls_size == 0 {
+        0
+    } else {
+        allocate(caller, tls_size, tls_align).await?
+    };
     // Handler frames can borrow the spawning stack. handle_pop drains every
     // inheriting job, including detached jobs, before freeing the frame data.
     let handlers = caller.data().handlers.clone();
@@ -777,7 +816,9 @@ impl Runtime {
             runtime: self.clone(),
             module,
             memory,
-            effects: effects.delegated(hash, definition.allowed_effects.as_deref()).with_declared(definition.sig.effects.declared.as_deref()),
+            effects: effects
+                .delegated(hash, definition.allowed_effects.as_deref())
+                .with_declared(definition.sig.effects.declared.as_deref()),
             pure,
             jobs: Mutex::new(HashMap::new()),
             tasks: Mutex::new(Vec::new()),
@@ -813,17 +854,26 @@ impl Runtime {
             samples: std::mem::take(&mut *execution.handler_round_trip_us.lock().unwrap()),
         };
         let result = result.map_err(|error| {
-            let failure = execution.handler_failure.lock().unwrap().clone().or_else(|| execution.jobs.lock().unwrap().values().find_map(|job| {
-                // Detached failures belong to their join handles, not to an
-                // unrelated failure of the definition's entry.
-                if job.detached { return None; }
-                job.result
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .and_then(|result| result.as_ref().err())
-                    .cloned()
-            }));
+            let failure = execution
+                .handler_failure
+                .lock()
+                .unwrap()
+                .clone()
+                .or_else(|| {
+                    execution.jobs.lock().unwrap().values().find_map(|job| {
+                        // Detached failures belong to their join handles, not to an
+                        // unrelated failure of the definition's entry.
+                        if job.detached {
+                            return None;
+                        }
+                        job.result
+                            .lock()
+                            .unwrap()
+                            .as_ref()
+                            .and_then(|result| result.as_ref().err())
+                            .cloned()
+                    })
+                });
             match failure {
                 Some(failure) => error.context(failure),
                 None => error.context(format!("shared execution {scope}")),
@@ -862,7 +912,10 @@ impl Running {
             .call_async(&mut self.store, (length, 1))
             .await
             .map_err(error)?;
-        anyhow::ensure!(bytes.is_empty() || pointer != 0, "guest input allocation failed");
+        anyhow::ensure!(
+            bytes.is_empty() || pointer != 0,
+            "guest input allocation failed"
+        );
         copy_in(&self.store.data().execution.memory, pointer as u32, bytes)?;
         Ok(Buffer { pointer, length })
     }
