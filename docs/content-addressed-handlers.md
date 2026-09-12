@@ -1,10 +1,9 @@
 # Reuse a handler by its definition hash
 
 A stored Rust definition can export an ordinary public handler function alongside
-its `#[loom::def]` entrypoint:
+its root public entrypoint:
 
 ```rust
-#[loom::def(effects = [])]
 pub fn main() {}
 
 pub fn handle(effect: loom::Effect, _continuation: loom::Continuation) -> loom::Reply {
@@ -24,11 +23,9 @@ loom::handle_with("<64-character definition hash>", || {
 })
 ```
 
-The caller declares the residual host-effect row explicitly when a stored
-handler's callback cannot be inferred. The checker conservatively marks such a
-callback unknown; its entrypoint's row is not a substitute for the callback row.
+The driver combines the pinned handler's stored residual row with the caller's body row. Labels covered by a total handler are removed from the body row; effects performed by the handler itself remain in the outer row. Runtime-selected effect labels are rejected with their call sites.
 
-The checker resolves this syntax into an ordinary `loom::handle_any` call to the
+The checker resolves this syntax into an ordinary `loom::handle_pinned` call to the
 pinned dependency's `pub fn handle`. The dependency edge is part of the caller's
 content identity. Changing the pin creates a different caller definition;
 existing callers retain their old handler. A missing hash fails definition

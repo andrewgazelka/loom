@@ -1,1 +1,1 @@
-{"files":{"Cargo.toml":"[package]\nname = \"loom-definition\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[dependencies]\nitoa = \"=1.0.18\"\n","src/lib.rs":"#[loom::def]\npub fn render(value: i64) -> String {\n    let mut buffer = itoa::Buffer::new();\n    buffer.format(value).to_owned()\n}\n"}}
+{"files":{"Cargo.toml":"[package]\nname = \"loom-definition\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[dependencies]\nitoa = \"=1.0.18\"\n","src/lib.rs":"pub fn render(value: i64) -> String {\n    let mut buffer = itoa::Buffer::new();\n    buffer.format(value).to_owned()\n}\n"}}

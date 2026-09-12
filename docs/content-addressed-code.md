@@ -23,7 +23,7 @@ LOOM_ITEM_HASHES=/tmp/items.json LOOM_ITEM_PREIMAGES=/tmp/item-preimages \
 
 From the repository root, the identity checks are `cargo +nightly-2026-08-24 test --manifest-path tools/hash-rustc/Cargo.toml --test identity`.
 
-Arguments go unchanged to `rustc_driver::run_compiler`. The driver's default sysroot is the compiler it was built against; an explicit `--sysroot` wins. The binary embeds an rpath to that compiler's libraries. Keep that toolchain installed while using the binary. Without `LOOM_ITEM_HASHES`, the callback does no hashing. With it, `LOOM_ITEM_PREIMAGES=<directory>` is also required. An old JSON output is removed before compilation; the driver writes preimages after successful compilation and then publishes the JSON. Version and help queries do not produce a document. A hashing or side-output error fails the command and names the problem. rustc's ordinary diagnostics and artifact production remain active.
+The driver forwards compiler arguments to `rustc_driver::run_compiler` and enables `-Zalways-encode-mir`. The driver's default sysroot is the compiler it was built against; an explicit `--sysroot` wins. The binary embeds an rpath to that compiler's libraries. Keep that toolchain installed while using the binary. Without `LOOM_ITEM_HASHES`, the callback does no hashing. With it, `LOOM_ITEM_PREIMAGES=<directory>` is also required. An old JSON output is removed before compilation; the driver writes preimages after successful compilation and then publishes the JSON. Version and help queries do not produce a document. A hashing or side-output error fails the command and names the problem. rustc's ordinary diagnostics and artifact production remain active.
 
 The document has exactly these top-level fields:
 
@@ -34,13 +34,18 @@ The document has exactly these top-level fields:
     "entry": { "hash": "64 lowercase hex digits", "refs": ["helper"], "cycle": null },
     "helper": { "hash": "64 lowercase hex digits", "refs": [], "cycle": null }
   },
-  "entry": { "entry": "same hash as items.entry.hash" }
+  "entry": { "entry": "same hash as items.entry.hash" },
+  "effects": {
+    "entries": { "entry": { "labels": [], "unknown": [] } },
+    "instances": { "entry": { "labels": [], "unknown": [] } }
+  },
+  "schema": null
 }
 ```
 
 Paths use rustc's verbose disambiguated definition path, without a leading `::`, and with a crate prefix for external referents. Impl blocks and anonymous constants therefore retain their declaration disambiguators instead of overwriting another item's entry. A local root item can be named simply `entry`. `refs` is a sorted, deduplicated list of direct referents, including external referents. A cycle lists representative local paths in canonical content-class order; its current item's slot carries that item's own path. A self-recursive item has a one-member cycle. All supported definitions appear in `items`, including unreachable helpers. Closure bodies and anonymous constants are encoded inside their enclosing definition, rather than receiving artificial standalone entry identities.
 
-Entries are public functions at the crate root and the original items annotated with Loom's `def` or `actor` attribute. Those procedural macros live in `crates/loom-guest-macros/src/lib.rs`. They consume the attributes, so discovery uses rustc's expansion provenance and the resolved macro DefId. Retained identifier spans distinguish the original item from generated wrappers. Qualified imports of the macro are supported. Source spans are used only for this entry selection, never as hash input.
+Entries are ordinary public functions at the crate root, including `main`. Multiple root `pub fn` items are allowed. Private functions, nested public functions, and types are not entries. Guest source uses no macros or procedural attributes; the SDK has no guest macro crate. Entry discovery reads rustc's resolved item kind, parent, and visibility.
 
 ## Identity rules
 
@@ -87,7 +92,7 @@ Changing a literal, operator, signature, resolved callee, reachable helper, incl
 
 The remaining over-approximations are specific: every HIR branch contributes even when its condition is statically false; merely referring to a function value creates an edge even if it is never called; explicit bounds and generic argument syntax contribute even when inference could recover them; literal kinds, suffixes, and string styles are retained; referencing an ADT includes all its fields and variants; field and variant names remain significant; included linkage and instrumentation flags may change identity without changing a particular invocation's result. Function renaming does not change recursive class order or member hashes.
 
-There are also exclusions, which must not be mistaken for over-approximations. Trait implementation selection, implicit drop glue, implicit coercion/adjustment machinery, linker inputs, global assembly, layout-randomization seeds, and runtime state are not transitively expanded. An actor marker selects its struct, including local impl blocks whose self type resolves directly to that struct. Blanket impl selection and impls for reference or wrapper self types are not expanded into the struct identity. Macro-expanded literals from `file!`, `line!`, or `include_str!` are real HIR content and can change hashes. These limits make the separate Wasm and toolchain identities necessary.
+There are also exclusions, which must not be mistaken for over-approximations. Trait implementation selection, implicit drop glue, implicit coercion/adjustment machinery, linker inputs, global assembly, layout-randomization seeds, and runtime state are not transitively expanded. Struct identities include local impl blocks whose self type resolves directly to that struct. Blanket impl selection and impls for reference or wrapper self types are not expanded into the struct identity. Macro-expanded literals from `file!`, `line!`, or `include_str!` are real HIR content and can change hashes. These limits make the separate Wasm and toolchain identities necessary.
 
 The encoder fails explicitly on delegated type inference, unsupported local referent kinds, and missing compiler resolution states. Associated-type shorthand in signatures and bodies is supported as described below. It does not substitute source text, unresolved names, or a whole-crate hash. Other unhandled forms must receive an encoder and a fixture before the supported surface is widened. Changing the encoder schema requires a new stream version and rehashing stored definitions. Cross-nightly hash compatibility is not promised.
 
@@ -449,3 +454,56 @@ object-cache real measurement: crate=loom_example_preview opt_level=2 trials=5 c
 ```
 
 Every second build reused six CGUs: 6/16 for the SDK and 6/10 for preview. The SDK's cached median was higher; preview's was lower. Concurrent workloads were active on this Mac and trial times varied substantially, so these results establish successful reuse and the observed medians, not a general speedup or an isolated encoder performance comparison. No test or build from this lane ran concurrently with the timing samples. The admission gate and opt-in default remain unchanged.
+
+
+## Effect rows
+
+The compiler driver emits residual host effects from the resolved call graph. A row contains the labels that can reach the host, which is the outermost handler. Concrete trait and generic calls contribute only their selected callees. The driver unions the entry's concrete instance rows to produce its entry row.
+
+The driver maps resolved SDK definitions to labels through the fixed path table in `tools/hash-rustc/src/effects/sdk.rs`. It recognizes the original `loom_guest_rs` crate identity and paths such as `sleep`, `fs::read`, `cas::put`, and `handlers::handle`. Import aliases and SDK re-exports retain the original definition identity, so renaming an import preserves its effect meaning. The driver and SDK are pinned together; changing an SDK effect path requires updating this table.
+
+The driver enables `-Zalways-encode-mir` on every crate it compiles so callers can analyze external non-generic function bodies. Dependencies compiled with stock rustc must also enable this flag, for example through the build lane's `RUSTFLAGS`. Missing MIR for a user dependency is an explicit compiler error; it cannot establish an empty effect row.
+
+The driver's JSON adds `effects` and `schema` without changing the existing identity keys. The effect contract is:
+
+```json
+{
+  "effects": {
+    "entries": {
+      "guest::main": { "labels": ["sleep"], "unknown": [] }
+    },
+    "instances": {
+      "guest::main": { "labels": ["sleep"], "unknown": [] }
+    }
+  }
+}
+```
+
+`entries` keys name entry items; `instances` keys identify concrete instances. Each row has `labels` and `unknown`. A literal or rustc-evaluated const passed to `perform` adds its label. A dynamic label adds an unknown call site such as `{"item":"guest::dispatch","span":"src/lib.rs:12:5"}`, which the checker rejects.
+
+A total `handle([labels], handler, body)` subtracts those labels from the body's row and includes the handler callback's own residual effects. `handle_any` can forward, so it subtracts nothing. For a pinned `handle_with("<hash>", body)`, the build supplies CAS handler metadata through `LOOM_HANDLER_ROWS`:
+
+```json
+{
+  "<64-character handler hash>": {
+    "labels": ["fs.read"],
+    "unknown": [],
+    "handled": ["sleep"]
+  }
+}
+```
+
+`labels` and `unknown` are the stored handler's residual row. Optional `handled` labels describe its total-handling contract; omission subtracts nothing from the body's row. The driver includes the stored residual row and subtracts `handled` from the callback row. Missing metadata for a referenced hash is a compiler error. Source lowering records the pinned dependency and emits the internal `handle_pinned("<hash>", dependency::handle, body)` helper to preserve the hash through resolution.
+
+`loom-check` has one effect-analysis path. Source checking discovers root public functions and leaves effect rows pending with `unknown = true`. It does not infer rows or evaluate constants from Rust syntax. The build integration must pass the complete driver JSON to `CheckedDef::apply_driver_effects_json` before admitting executable code. The method requires an entry row for every export and rejects missing or ambiguous rows. It accepts an exact entry name or a unique qualified name ending in that export's name. Driver invocation belongs to the build lane and remains a required integration step.
+
+Each entry hash includes a tagged reference to the exported `LOOM_SCHEMA` constant when present. Changing the schema changes the entry identity; unrelated constants remain outside that identity.
+
+Finalization installs exactly the inferred row. Each unknown call site produces `perform label must be a string literal or a const`, naming its item and file and line. Sandboxing is omission: total handlers remove labels from the residual row, and the existing host enforcement refuses effects outside that row.
+
+
+### Behavior schema constant
+
+A crate-root `pub const LOOM_SCHEMA: &str = "...";` declares the behavior schema. Rustc evaluates the constant and the driver emits its string value in the new top-level `schema` field. The field is `null` when no schema constant is present. The build lane generates the existing `loom_schema` ABI wrapper from that value, and behavior loading reads the wrapper. A Rust constant alone does not create a Wasm export.
+
+The build lane must remove the deleted `loom-guest-macros` package from its SDK fingerprint and trusted-source lists (`artifact.rs`, `direct/compile.rs`, `direct/trusted_sources.rs`, and `sdk.rs`). It must generate the entry ABI from root public functions and the existing `loom_schema` ABI from the evaluated `schema` field. `loom-behavior` reads that generated export; guest constants require no attributes or macro expansion.

@@ -51,7 +51,7 @@ async fn explicit_effect_policy_persists_and_changes_identity() {
     let request = DefineRequest {
         lang: Lang::Rust,
         name: "policy".into(),
-        source: "#[loom::def] pub fn main() -> i32 { 42 }".into(),
+        source: "pub fn main() -> i32 { 42 }".into(),
         deps: BTreeMap::new(),
         allowed_effects: Some(Vec::new()),
     };
@@ -93,7 +93,7 @@ async fn explicit_upgrade_rehashes_dependents_and_redefinition_preserves_pins() 
             allowed_effects: None,
             lang: Lang::Rust,
             name: "add".into(),
-            source: "#[loom::def] pub fn main(x:i32)->i32 { x+1 }".into(),
+            source: "pub fn main(x:i32)->i32 { x+1 }".into(),
             deps: BTreeMap::new(),
         })
         .await;
@@ -105,7 +105,7 @@ async fn explicit_upgrade_rehashes_dependents_and_redefinition_preserves_pins() 
         allowed_effects: None,
         lang: Lang::Rust,
         name: "caller".into(),
-        source: "#[loom::def] pub fn main()->i32 { add::main(41) }".into(),
+        source: "pub fn main()->i32 { add::main(41) }".into(),
         deps,
     };
     let before = service.define(dependent.clone()).await;
@@ -119,7 +119,7 @@ async fn explicit_upgrade_rehashes_dependents_and_redefinition_preserves_pins() 
             allowed_effects: None,
             lang: Lang::Rust,
             name: "add".into(),
-            source: "#[loom::def] pub fn main(x:i32)->i32 { x+2 }".into(),
+            source: "pub fn main(x:i32)->i32 { x+2 }".into(),
             deps: BTreeMap::new(),
         })
         .await;
@@ -146,10 +146,7 @@ async fn explicit_upgrade_rehashes_dependents_and_redefinition_preserves_pins() 
 }
 #[test]
 fn rust_macro_source_is_not_a_bundle_reference() {
-    assert_eq!(
-        source_reference("#[loom::def(effects=[])] pub fn add(x:i32)->i32{x+1}"),
-        None
-    );
+    assert_eq!(source_reference("pub fn add(x:i32)->i32{x+1}"), None);
     assert_eq!(
         source_reference("#![allow(dead_code)]\npub fn main() {}"),
         None
@@ -181,7 +178,7 @@ async fn missing_source_archive_reports_missing_reference() {
             .unwrap()
             .contains("Rust source bundle not found")
     );
-    let source = "#[loom::def(effects=[])] pub fn main() { std::fs::read(\"secret\").unwrap(); }";
+    let source = "pub fn main() { std::fs::read(\"secret\").unwrap(); }";
     let checked = service
         .define(DefineRequest {
             allowed_effects: None,

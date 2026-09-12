@@ -25,10 +25,11 @@ impl LoomBehavior {
             .executable_definition(def_hash)?
             .with_context(|| format!("definition {def_hash} not found"))?;
         let runtime = Runtime::new(store)?;
+        // The build exports the evaluated root LOOM_SCHEMA through loom_schema.
         let schema = runtime
             .definition_schema(def_hash)
             .await
-            .with_context(|| format!("definition {def_hash}: schema export"))?;
+            .with_context(|| format!("definition {def_hash}: LOOM_SCHEMA export"))?;
         Ok(Self {
             hash: definition.hash,
             schema,

@@ -5,28 +5,27 @@ definition, reads its schema, and registers a `LoomBehavior` under `defs.hash`.
 Pass that registry to `loom_actor::Node::new`. The same hash is the
 `behavior_hash` accepted by actor spawning and promotion.
 
-Each message invokes a `#[loom::def]` function with one `Vec<u8>` argument.
+Each message invokes a crate-root `pub fn` entry with one `Vec<u8>` argument.
 The bytes are unchanged, including non-UTF-8 messages. The function's return
 value is discarded; durable state belongs in the actor's SQL tables. Guest
 handlers and scoped tasks retain their normal Loom semantics. Only effects
 that escape guest handlers reach the actor context.
 
 ```rust,ignore
-#[loom::def]
+pub const LOOM_SCHEMA: &str = "CREATE TABLE messages(body BLOB NOT NULL)";
+
 pub fn message(msg: Vec<u8>) {
-    loom::perform::<loom::Value>("sql", loom::serde_json::json!({
-        "sql": "INSERT INTO messages(body) VALUES (?)",
-        "params": [{"type":"blob", "value":msg}]
-    })).unwrap();
+    let mut cell = loom::serde_json::Map::new();
+    cell.insert("type".into(), loom::Value::from("blob"));
+    cell.insert("value".into(), loom::serde_json::to_value(msg).unwrap());
+    let mut args = loom::serde_json::Map::new();
+    args.insert("sql".into(), loom::Value::from("INSERT INTO messages(body) VALUES (?)"));
+    args.insert("params".into(), loom::Value::Array([loom::Value::Object(cell)].into()));
+    loom::perform::<loom::Value>("sql", args).unwrap();
 }
 ```
 
-Schema uses `#[loom::schema] pub fn schema() -> &'static str`. Its generated
-`loom_schema() -> u64` core export returns the ordinary Loom CBOR result
-envelope containing SQL text. Registration invokes it in a pure execution;
-an absent export means empty SQL. The actor runtime runs that SQL during
-creation and promotion. Schema extraction does not create a legacy actor or
-invoke `run`, `fold`, `spawn`, `send`, or `state` on `loom_rt::Runtime`.
+Schema is the optional crate-root `pub const LOOM_SCHEMA: &str`. The compiler driver evaluates the constant and emits its SQL text in the top-level `schema` JSON field. The build emits a `loom_schema() -> u64` core export with the ordinary Loom CBOR result envelope containing that text. Registration reads this export in a pure execution; an absent export means empty SQL. The actor runtime runs the SQL during creation and promotion. The guest needs no attribute or proc macro.
 
 ## Effect wire contract
 
@@ -110,9 +109,10 @@ Host effect `mode` is `"short"` by default. `"request"` selects the actor's
 two-phase outbox path; completion arrives as a later inbox message. For example:
 
 ```rust,ignore
-let request_id: String = loom::perform("echo", loom::serde_json::json!({
-    "request": [104, 105], "mode": "request"
-})).unwrap();
+let mut args = loom::serde_json::Map::new();
+args.insert("request".into(), loom::serde_json::to_value(b"hi").unwrap());
+args.insert("mode".into(), loom::Value::from("request"));
+let request_id: String = loom::perform("echo", args).unwrap();
 ```
 
 Host handlers consume and return opaque bytes. A short effect is called through
@@ -130,7 +130,7 @@ task owns or retains the borrowed `Ctx`.
 
 ## Verification
 
-`cargo test -p loom-behavior --test behavior` runs ten behavior tests, including
+`cargo test -p loom-behavior --test behavior` runs the behavior tests, including
 `guest_without_cap_cannot_send`. The send test covers both accepted message
 capabilities and a spawn-result capability.
 The `loom-behavior-fixtures` helper uses `loom_build::Builder` for preparation

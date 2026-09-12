@@ -2455,20 +2455,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "loom-guest-macros"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "loom-guest-rs"
 version = "0.1.0"
 dependencies = [
  "dlmalloc",
- "loom-guest-macros",
  "loom-proto",
  "serde",
  "serde_json",

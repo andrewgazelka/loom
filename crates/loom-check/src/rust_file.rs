@@ -2,50 +2,25 @@ use super::*;
 
 pub(super) fn check_rust_file(
     request: &DefineRequest,
-    signatures: &BTreeMap<String, TypeSig>,
+    _signatures: &BTreeMap<String, TypeSig>,
+    require_entry: bool,
 ) -> CheckedDef {
     let source = request.source.replace("\r\n", "\n");
     let mut diagnostics = Vec::new();
     let mut deps = request.deps.clone();
     let mut exports = Vec::new();
-    let mut aggregate_effects = loom_proto::EffectSet::default();
+    let aggregate_effects = loom_proto::EffectSet {
+        unknown: true,
+        ..Default::default()
+    };
     let source = match syn::parse_file(&source) {
         Ok(mut file) => {
             handler_references::lower(&mut file, &mut deps, &mut diagnostics);
-            struct EntryVisitor {
-                count: usize,
-            }
-            impl<'ast> syn::visit::Visit<'ast> for EntryVisitor {
-                fn visit_attribute(&mut self, attribute: &'ast syn::Attribute) {
-                    if attribute
-                        .path()
-                        .segments
-                        .last()
-                        .is_some_and(|segment| segment.ident == "def")
-                    {
-                        self.count += 1;
-                    }
-                    syn::visit::visit_attribute(self, attribute);
-                }
-            }
-            let mut entries = EntryVisitor { count: 0 };
-            syn::visit::Visit::visit_file(&mut entries, &file);
-            if entries.count > 1 {
-                diagnostics.push(diagnostic(Lang::Rust,"LOOM_ENTRYPOINT","A definition crate must have one #[loom::def] entrypoint; place reusable functions in separate hashed definitions."));
-            }
             diagnostics.extend(rust_effects::unsafe_source_diagnostics(&file));
-            diagnostics.extend(rust_effects::unsupported_mode_diagnostics(&file));
-            let effects = rust_effects::infer(&file, signatures);
-            diagnostics.extend(rust_effects::declaration_diagnostics(&file, &effects));
+            diagnostics.extend(rust_effects::macro_diagnostics(&file));
             for item in &file.items {
                 if let syn::Item::Fn(function) = item
-                    && function.attrs.iter().any(|attribute| {
-                        attribute
-                            .path()
-                            .segments
-                            .last()
-                            .is_some_and(|segment| segment.ident == "def")
-                    })
+                    && matches!(function.vis, syn::Visibility::Public(_))
                 {
                     let params: Vec<ParamSig> = function
                         .sig
@@ -74,14 +49,21 @@ pub(super) fn check_rust_file(
                         name: function.sig.ident.to_string(),
                         params,
                         returns,
-                        effects: effects
-                            .get(&function.sig.ident.to_string())
-                            .cloned()
-                            .unwrap_or_default(),
+                        effects: loom_proto::EffectSet {
+                            labels: Vec::new(),
+                            unknown: true,
+                            declared: None,
+                        },
                     });
                 }
             }
-            aggregate_effects = rust_effects::aggregate(&file, signatures, &effects, &exports);
+            if require_entry && exports.is_empty() {
+                diagnostics.push(diagnostic(
+                    Lang::Rust,
+                    "LOOM_ENTRYPOINT",
+                    "A definition must export at least one crate-root pub fn; private functions and nested pub fn items are not entries.",
+                ));
+            }
             fn ambient_macro(tokens: proc_macro2::TokenStream) -> bool {
                 tokens.into_iter().any(|token| match token {
                     proc_macro2::TokenTree::Ident(name) => [

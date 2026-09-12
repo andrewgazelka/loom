@@ -18,7 +18,7 @@ impl Service {
             ensure!(valid_alias(alias), "dependency alias must be an identifier");
         }
         let source = format!(
-            "#[loom::def] pub fn main() -> loom::Value {{ loom::serde_json::to_value({{ {} }}).expect(\"eval result must serialize\") }}",
+            "pub fn main() -> loom::Value {{ loom::serde_json::to_value({{ {} }}).expect(\"eval result must serialize\") }}",
             request.source
         );
         let response = self

@@ -44,15 +44,20 @@ The second command starts the MCP stdio transport. Configure an MCP client to ru
 ```sh
 curl -sS http://127.0.0.1:8787/v1/define \
   -H "Authorization: Bearer $LOOM_TOKEN" -H 'Content-Type: application/json' \
-  -d '{"name":"add","source":"#[loom::def] pub fn main(a: i64, b: i64) -> i64 { a + b }"}'
+  -d '{"name":"add","source":"pub fn main(a: i64, b: i64) -> i64 { a + b }"}'
 ```
 
 The returned definition hash identifies the callable. Invoke `POST /v1/command` with `{"command":"call","args":{"hash":"<hash>","args":[20,22]}}`. Rust definitions build during `define` and return structured cargo diagnostics. A Rust single-file definition uses the same endpoint with `"lang":"rust"` and source such as:
 
 ```rust
-#[loom::def]
 pub fn add(a: i64, b: i64) -> i64 { a + b }
 ```
+
+Every ordinary `pub fn` at the crate root is an entry, including `main`. A crate can expose several entries; nested functions and private helpers are not entries. A crate with zero entries is rejected with a diagnostic asking for a root public function. Guest Rust uses ordinary functions and types without macro invocations, macro definitions, or procedural attributes.
+
+The command contract selects an entry by name with `run <name>`. A hash selects its sole entry; when a hash has several entries, the caller must choose from the reported candidates. The build and run integration must preserve these rules when wiring the driver output into the command path; the driver’s entry table alone does not verify that runtime wiring.
+
+A behavior can declare its schema as `pub const LOOM_SCHEMA: &str = "...";` at the crate root. Rustc evaluates the string. The build generates the `loom_schema` ABI wrapper that behavior loading reads; the constant itself is not a Wasm export.
 
 Actors use the `actor_*` MCP tools and `actor://` resources. Each actor owns its domain tables, inbox, effects, and outbox in one Turso file. See [Actors on Turso](actors-turso.md) for transactions, supervision, and behavior changes.
 
@@ -78,7 +83,7 @@ Stores containing retired actor tables are rejected at open with an error naming
 | `loom-store` | CAS, definitions, names, call traces, effect results |
 | `loom-check` | Language checking and definition identity |
 | `loom-build` | Rust compiler sidecars and build cache |
-| `loom-guest-rs`, `loom-guest-macros` | Synchronous Rust guest API and exports |
+| `loom-guest-rs` | Synchronous Rust guest API |
 | `loom-rt` | Wasmtime fibers, definition calls, effects, machine filesystem roots |
 | `loom-actor`, `loom-behavior` | Turso actors and transactional Loom definitions |
 | `loom-maintenance` | Backups, bounded index and build-cache maintenance |
@@ -147,7 +152,7 @@ The runner creates a separate 10,000-file fixture, starts Codex with only Loom c
 
 Calling an effect performs it: `loom::sleep(100)` suspends until its timer finishes, and `loom::perform::<T>(label, args)` performs a custom effect. Concurrent Rust work on the shared-core path uses `loom::scope`, `scope.spawn(|| ...)`, and `child.join()`. Use `loom::spawn(|| ...)` with `'static` captures for fire-and-forget work or a `JoinHandle` moved into another task. Dropping that handle leaves its task running; the host cancels unfinished detached tasks when the definition entry returns, without an implicit wait. Joining a trapped detached task returns its error; an unjoined detached failure is discarded. A synchronous `loom::call(DEF, args)` can run inside a scoped child.
 
-Definition signatures distinguish inferred effects, the host-enforced `allowed_effects` policy, and effects observed during execution. Inference is conservative: dynamic calls, getters, iterators, and unexpanded Rust code can leave the set unknown. Omitting `allowed_effects` permits all host effects; `[]` permits none. Explicit policies are part of definition identity. Cross-definition calls inherit the intersection of caller and callee permissions, including on cache hits. Scoped children inherit the caller's permissions.
+Definition signatures record the residual effect row: the labels that can reach the outermost host handler. The compiler infers this row through resolved calls, including the concrete implementations selected by trait and generic calls. The host-enforced `allowed_effects` policy is a separate permission limit. Omitting `allowed_effects` adds no policy restriction; `[]` permits none. Explicit policies are part of definition identity. Cross-definition calls inherit the intersection of caller and callee permissions, including on cache hits. Scoped children inherit the caller's permissions.
 
 The Effects view shows individual invocations and their outcomes. To capture file content changes from a process, pass `capture_paths: ["note.txt"]` to `exec` or `process.start`. Paths are resolved within the process root; the capture records actual before/after bytes in CAS and displays created, modified, and deleted files as diffs. Capture is limited to 64 explicitly selected regular files, at most 1 MiB each. Symlinks, unsupported files, and unavailable reads are reported explicitly.
 
@@ -177,7 +182,6 @@ closure. The handler receives an `Effect` and a one-shot `Continuation`, then re
 ```rust
 use loom::{Continuation, Effect, Reply, Value};
 
-#[loom::def(effects = [])]
 pub fn main() {
     loom::handle(["sleep"], |_effect: Effect, _k: Continuation| {
         Reply::Resume(Value::Null)
@@ -217,20 +221,15 @@ replay are implemented by the same host handler chain used for execution.
 
 For content-addressed reuse, see [stored handler definitions](content-addressed-handlers.md).
 
-### Residual effect declarations
+### Residual effect rows
 
-`#[loom::def(effects = ["sleep"])]` declares the effect names that the host must
-supply. `loom-check` rejects known residual effects outside that set. A total
-`handle` removes its selected effects from the body's inferred row;
-effects performed by the handler itself remain in the outer row. Unknown
-dispatch requires an explicit declaration, which the runtime enforces at the
-root.
+Effect rows are inferred. Calling `loom::sleep(100)` adds `sleep`; calling `loom::perform("custom.label", args)` adds `custom.label`. Trait dispatch follows the implementation selected for that entry's concrete types. An unused implementation that calls `exec` does not add `exec` to the entry's row.
 
-This is Loom's conservative source analysis and runtime capability check, not
-an effect type system inside rustc. A declaration does not grant additional
-host capabilities: it intersects the caller's allowed effects. Omitting `exec`
-from the permitted root row prevents guest code from reaching the host's exec
-implementation even through dynamic dispatch.
+A total `loom::handle(["sleep"], handler, body)` removes `sleep` from the body's row. Effects performed by the handler itself remain in the outer row. `handle_any` may forward, so it does not remove labels. A pinned `handle_with` uses the stored handler's residual row and any stored total-handling labels.
+
+Effect rows are inferred through the resolved call graph. `perform` accepts a string literal or a const evaluated by rustc, such as `const L: &str = "custom.label";`. Dynamic labels are rejected at the call site with `perform label must be a string literal or a const` and its file and line. Sandboxing is omission: total handlers remove handled labels from the residual host row, and the host refuses every effect absent from that inferred row.
+
+Caller permissions still apply. If the residual row omits `exec`, the guest cannot reach the host's exec implementation.
 
 ### Preview filesystem writes
 

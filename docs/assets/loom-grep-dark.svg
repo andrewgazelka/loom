@@ -3,7 +3,6 @@
 <desc>Berkeley Mono with liga and calt shaping. Code excerpt from the runnable Rust example.</desc>
 <metadata>use loom::{scope, sleep};
 
-#[loom::def(effects = [&quot;sleep&quot;])]
 pub fn main() {
     scope(|s| {
         s.spawn(|| sleep(100)).unwrap();
@@ -37,39 +36,6 @@ pub fn main() {
 <use href="#regular-196" fill="#d5d7dc" transform="translate(597.6000 120.0000) scale(0.038000 -0.038000)"/>
 <use href="#regular-358" fill="#d5d7dc" transform="translate(620.4000 120.0000) scale(0.038000 -0.038000)"/>
 <use href="#regular-338" fill="#d5d7dc" transform="translate(643.2000 120.0000) scale(0.038000 -0.038000)"/>
-<use href="#regular-616" fill="#d5d7dc" transform="translate(96.0000 224.0000) scale(0.038000 -0.038000)"/>
-<use href="#regular-313" fill="#d5d7dc" transform="translate(118.8000 224.0000) scale(0.038000 -0.038000)"/>
-<use href="#regular-175" fill="#d5d7dc" transform="translate(141.6000 224.0000) scale(0.038000 -0.038000)"/>
-<use href="#regular-186" fill="#d5d7dc" transform="translate(164.4000 224.0000) scale(0.038000 -0.038000)"/>
-<use href="#regular-186" fill="#d5d7dc" transform="translate(187.2000 224.0000) scale(0.038000 -0.038000)"/>
-<use href="#regular-180" fill="#d5d7dc" transform="translate(210.0000 224.0000) scale(0.038000 -0.038000)"/>
-<use href="#regular-616" fill="#d5d7dc" transform="translate(232.8000 224.0000) scale(0.038000 -0.038000)"/>
-<use href="#regular-287" fill="#d5d7dc" transform="translate(255.6000 224.0000) scale(0.038000 -0.038000)"/>
-<use href="#regular-137" fill="#d5d7dc" transform="translate(278.4000 224.0000) scale(0.038000 -0.038000)"/>
-<use href="#regular-141" fill="#d5d7dc" transform="translate(301.2000 224.0000) scale(0.038000 -0.038000)"/>
-<use href="#regular-152" fill="#d5d7dc" transform="translate(324.0000 224.0000) scale(0.038000 -0.038000)"/>
-<use href="#regular-355" fill="#d5d7dc" transform="translate(346.8000 224.0000) scale(0.038000 -0.038000)"/>
-<use href="#regular-141" fill="#d5d7dc" transform="translate(369.6000 224.0000) scale(0.038000 -0.038000)"/>
-<use href="#regular-152" fill="#d5d7dc" transform="translate(392.4000 224.0000) scale(0.038000 -0.038000)"/>
-<use href="#regular-152" fill="#d5d7dc" transform="translate(415.2000 224.0000) scale(0.038000 -0.038000)"/>
-<use href="#regular-141" fill="#d5d7dc" transform="translate(438.0000 224.0000) scale(0.038000 -0.038000)"/>
-<use href="#regular-132" fill="#d5d7dc" transform="translate(460.8000 224.0000) scale(0.038000 -0.038000)"/>
-<use href="#regular-210" fill="#d5d7dc" transform="translate(483.6000 224.0000) scale(0.038000 -0.038000)"/>
-<use href="#regular-203" fill="#d5d7dc" transform="translate(506.4000 224.0000) scale(0.038000 -0.038000)"/>
-<use href="#regular-261" fill="#d5d7dc" transform="translate(529.2000 224.0000) scale(0.038000 -0.038000)"/>
-<use href="#regular-490" fill="#d5d7dc" transform="translate(552.0000 224.0000) scale(0.038000 -0.038000)"/>
-<use href="#regular-261" fill="#d5d7dc" transform="translate(574.8000 224.0000) scale(0.038000 -0.038000)"/>
-<use href="#regular-359" fill="#d5d7dc" transform="translate(597.6000 224.0000) scale(0.038000 -0.038000)"/>
-<use href="#regular-371" fill="#9cab9f" transform="translate(620.4000 224.0000) scale(0.038000 -0.038000)"/>
-<use href="#regular-203" fill="#9cab9f" transform="translate(643.2000 224.0000) scale(0.038000 -0.038000)"/>
-<use href="#regular-175" fill="#9cab9f" transform="translate(666.0000 224.0000) scale(0.038000 -0.038000)"/>
-<use href="#regular-141" fill="#9cab9f" transform="translate(688.8000 224.0000) scale(0.038000 -0.038000)"/>
-<use href="#regular-141" fill="#9cab9f" transform="translate(711.6000 224.0000) scale(0.038000 -0.038000)"/>
-<use href="#regular-196" fill="#9cab9f" transform="translate(734.4000 224.0000) scale(0.038000 -0.038000)"/>
-<use href="#regular-371" fill="#9cab9f" transform="translate(757.2000 224.0000) scale(0.038000 -0.038000)"/>
-<use href="#regular-360" fill="#d5d7dc" transform="translate(780.0000 224.0000) scale(0.038000 -0.038000)"/>
-<use href="#regular-356" fill="#d5d7dc" transform="translate(802.8000 224.0000) scale(0.038000 -0.038000)"/>
-<use href="#regular-360" fill="#d5d7dc" transform="translate(825.6000 224.0000) scale(0.038000 -0.038000)"/>
 <use href="#regular-196" fill="#b7a5d8" transform="translate(96.0000 276.0000) scale(0.038000 -0.038000)"/>
 <use href="#regular-214" fill="#b7a5d8" transform="translate(118.8000 276.0000) scale(0.038000 -0.038000)"/>
 <use href="#regular-131" fill="#b7a5d8" transform="translate(141.6000 276.0000) scale(0.038000 -0.038000)"/>

@@ -20,13 +20,14 @@ See [docs/guide.md](docs/guide.md) for running without Nix and for the HTTP API.
 
 ## Effects
 
+Effect rows are inferred from resolved calls, including concrete trait and generic calls. A runtime-selected `perform` label is rejected with its call site; use a literal or Rust constant label.
+
 Calling an effect performs it. A handler can supply a value, forward to an outer
 handler, or keep a one-shot continuation to resume later:
 
 ```rust
 use loom::sleep;
 
-#[loom::def(effects = ["sleep"])]
 pub fn main() {
     loom::scope(|s| {
         let a = s.spawn(|| sleep(100)).expect("spawn");
@@ -166,7 +167,6 @@ Details: [docs/content-addressed-code.md](docs/content-addressed-code.md).
 | `loom-build` | core wasm builder |
 | `loom-check` | effect/language checking before a definition becomes executable |
 | `loom-cli` | command-line client for a running `loomd` |
-| `loom-guest-macros` | `#[loom::def]` / `#[loom::actor]` proc macros |
 | `loom-guest-rs` | synchronous guest interface to the host, for Rust definitions |
 | `loom-maintenance` | garbage collection over derived indexes only; CAS and event log untouched |
 | `loom-mcp` | MCP server exposing the API as tools |

@@ -25,7 +25,7 @@ async fn run() -> Result<()> {
             .define(DefineRequest {
                 name: "timing/expression".into(),
                 lang: Lang::Rust,
-                source: format!("#[loom::def] pub fn main() -> i32 {{ {expression} }}"),
+                source: format!("pub fn main() -> i32 {{ {expression} }}"),
                 deps: BTreeMap::new(),
                 allowed_effects: None,
             })
