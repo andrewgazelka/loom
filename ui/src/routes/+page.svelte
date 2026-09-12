@@ -1,361 +1,548 @@
 <script lang="ts">
-  import { onMount } from "svelte";
-  import { X } from "lucide-svelte";
-  import WorkspaceNavigation from "$lib/WorkspaceNavigation.svelte";
-  import WorkspaceHeader from "$lib/WorkspaceHeader.svelte";
-  import type { WorkspaceView } from "$lib/workspace-view";
+  import { onMount, onDestroy, tick } from "svelte";
   import {
-    Client,
-    AuthenticationError,
-    items,
-    record,
-    resultOf,
+    Box,
+    FileCode2,
+    Network,
+    GitBranch,
+    Search,
+    Settings2,
+    RefreshCw,
+    ChevronRight,
+    ChevronDown,
+    Circle,
+    Plus,
+  } from "lucide-svelte";
+  import { fragmentToken } from "$lib/workbench/fragment-token";
+  const connectionKey = "loom.connection";
+  import { Journal, type JournalEntry } from "$lib/workbench/journal";
+  import ReplHistory from "$lib/workbench/ReplHistory.svelte";
+  const journal = new Journal();
+  let replay = false;
+  function rerun(entry: JournalEntry) {
+    if (entry.state === "running") return;
+    navigate(entry.command, entry.values);
+    replay = true;
+  }
+  import CommandPanel from "$lib/workbench/CommandPanel.svelte";
+  import CommandPalette from "$lib/workbench/CommandPalette.svelte";
+  import Hash from "$lib/workbench/Hash.svelte";
+  import { commands, commandById } from "$lib/workbench/commands";
+  import {
+    HttpTransport,
+    RequestSlot,
+    WorkbenchClient,
+  } from "$lib/workbench/client";
+  import {
+    actor,
+    actorTree,
+    array,
+    definition,
+    flattenTree,
+    type Actor,
     type Definition,
-    type LogEvent,
-  } from "$lib/api";
-  import type { Entry } from "$lib/journal";
-  import SessionJournal from "$lib/SessionJournal.svelte";
-  import ConnectionForm from "$lib/ConnectionForm.svelte";
-  import Composer from "$lib/Composer.svelte";
-  import DefinitionBrowser from "$lib/DefinitionBrowser.svelte";
-  import EffectsBrowser from "$lib/EffectsBrowser.svelte";
-  import CasBrowser from "$lib/CasBrowser.svelte";
-  import "@fontsource/jetbrains-mono/400.css";
+    type TreeRow,
+    type Json,
+    type Row,
+  } from "$lib/workbench/schema";
+  import "@fontsource/inter/latin-400.css";
+  import "@fontsource/inter/latin-500.css";
+  import "@fontsource/inter/latin-600.css";
+  import "@fontsource/jetbrains-mono/latin-400.css";
   import "$lib/app.css";
-  let view: WorkspaceView = "Session",
-    endpoint = "",
-    token = "",
-    session = "",
-    settings = false,
+  let client: WorkbenchClient;
+  let ready = false,
+    mock = false,
+    palette = false,
     help = false,
+    settings = false,
+    loading = false;
+  let endpoint = "",
+    token = "",
     error = "",
-    connected = false;
+    selectedDef = "",
+    selectedActor = "";
   let definitions: Definition[] = [],
-    events: LogEvent[] = [],
-    entries: Entry[] = [];
-  let mode = "eval",
-    source = "",
-    name = "",
-    dependencies = "{}",
-    busy = false,
-    refreshing = false;
-  let inspectHash = "",
-    socket: WebSocket | undefined,
-    reconnectTimer: ReturnType<typeof setTimeout> | undefined,
-    disposed = false,
-    reconnectAuthorized = false;
-  let connecting = false;
-  let authenticated = false;
-  function unauthorized(problem: AuthenticationError) {
-    authenticated = false;
-    connected = false;
-    reconnectAuthorized = false;
-    if (reconnectTimer) clearTimeout(reconnectTimer);
-    if (socket) { socket.onclose = null; socket.close(); socket = undefined; }
-    settings = true;
-    error = problem.message;
-  }
-  function makeClient(endpoint: string, token: string) {
-    const candidate = new Client(endpoint, token, problem => { if (candidate === client) unauthorized(problem); });
-    return candidate;
-  }
-  let client = makeClient("", "");
-  $: sequence = Math.max(
-    0,
-    ...events.map((event) => event.seq),
-    ...entries.map((entry) => entry.reply?.seq ?? 0),
-  );
+    actors: Actor[] = [],
+    tree: TreeRow[] = [];
+  let commandId = "find",
+    overrides: Record<string, string> = {},
+    panelVersion = 0;
+  let typeScale = 12;
+  let collapsed = new Set<string>();
+  let mockDefaults: Record<string, string> = {};
+  const slot = new RequestSlot();
+  $: command = commandById(commandId);
+  $: selectedDefinition = definitions.find((def) => def.hash === selectedDef);
+  $: currentActor = actors.find((actor) => actor.id === selectedActor);
+  $: defaults = {
+    ...mockDefaults,
+    query:
+      commandId === "actor_sql" && mock
+        ? "SELECT * FROM inbox ORDER BY seq"
+        : "",
+    ...(selectedDefinition
+      ? {
+          hash: selectedDefinition.hash,
+          expected_hash: selectedDefinition.hash,
+          name: selectedDefinition.name,
+          after: selectedDefinition.hash,
+        }
+      : {}),
+    ...(currentActor
+      ? { id: currentActor.id, behavior_hash: currentActor.behavior_hash }
+      : {}),
+    ...overrides,
+  };
+  $: actorTabs = [
+    "actor_info",
+    "actor_inbox",
+    "actor_outbox",
+    "actor_effects",
+    "actor_lineage",
+    "actor_dead_letters",
+    "actor_validate",
+    "actor_promote",
+    "actor_send",
+  ];
+  $: definitionTabs = [
+    "view",
+    "history",
+    "diff",
+    "run",
+    "dependents",
+    "update",
+  ];
+  $: visibleTree = tree.filter((row) => {
+    let parent = row.parent;
+    const seen = new Set<string>();
+    while (parent) {
+      if (collapsed.has(parent)) return false;
+      if (seen.has(parent)) return false;
+      seen.add(parent);
+      parent = actors.find((actor) => actor.id === parent)?.parent ?? null;
+    }
+    return true;
+  });
   async function refresh() {
-    const current = client;
-    refreshing = true;
-    try {
-      const results = await Promise.all([
-        current.command("defs"),
-        current.request("events?limit=1000"),
-      ]);
-      if (current !== client) return;
-      definitions = items<Definition>(resultOf(results[0]!), "defs");
-      const received = items<LogEvent>(resultOf(results[1]!), "events");
-      const combined = new Map<number, LogEvent>();
-      for (const event of [...received, ...events])
-        combined.set(event.seq, event);
-      events = [...combined.values()]
-        .sort((a, b) => a.seq - b.seq)
-        .slice(-1000);
-      error = "";
-    } catch (e) {
-      if (current === client) error = e instanceof Error ? e.message : String(e);
-    } finally {
-      if (current === client) refreshing = false;
-    }
+    loading = true;
+    error = "";
+    await slot.run(
+      async (signal) => {
+        const replies = await Promise.all([
+          client.call(commandById("find"), { query: "" }, signal),
+          client.call(commandById("actor_list"), {}, signal),
+          client.call(commandById("actor_tree"), {}, signal),
+        ]);
+        const definitions = array(replies[0], "find").map(definition);
+        const actors = array(replies[1], "actor_list").map(actor);
+        return {
+          definitions,
+          actors,
+          tree: flattenTree(actorTree(replies[2]), actors),
+        };
+      },
+      (value) => {
+        definitions = value.definitions;
+        actors = value.actors;
+        tree = value.tree;
+        if (!definitions.some((def) => def.hash === selectedDef))
+          selectedDef = definitions[0]?.hash ?? "";
+        if (!actors.some((actor) => actor.id === selectedActor))
+          selectedActor = actors[0]?.id ?? "";
+        ready = true;
+      },
+      (message) => (error = message),
+      () => (loading = false),
+    );
   }
-  function connect() {
-    if (reconnectTimer) clearTimeout(reconnectTimer);
-    if (socket) {
-      socket.onclose = null;
-      socket.close();
-    }
-    let url: URL;
+  function navigate(id: string, values: Record<string, string> = {}) {
+    replay = false;
     try {
-      url = new URL(`${client.endpoint || location.origin}/v1/stream`);
-    } catch {
-      error = "Enter a valid API endpoint URL.";
+      commandById(id);
+    } catch (problem) {
+      error = String(problem);
       return;
     }
-    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-    const streamToken = client.token;
-    const current = new WebSocket(url);
-    socket = current;
-    current.onopen = () =>
-      current.send(JSON.stringify({ token: streamToken, after: sequence }));
-    current.onmessage = (event) => {
-      if (socket !== current) return;
-      try {
-        const data = record(JSON.parse(String(event.data)));
-        if (data.ok === false || data.error) {
-          unauthorized(new AuthenticationError());
-          return;
-        }
-        connected = true;
-        reconnectAuthorized = true;
-        if (typeof data.seq === "number" && "event" in data) {
-          const item = data as unknown as LogEvent;
-          events = [...events.filter((event) => event.seq !== item.seq), item]
-            .sort((a, b) => a.seq - b.seq)
-            .slice(-1000);
-        }
-      } catch {
-        error = "The event stream returned an invalid message.";
-      }
-    };
-    current.onclose = () => {
-      if (socket !== current) return;
-      connected = false;
-      if (!disposed && reconnectAuthorized)
-        reconnectTimer = setTimeout(connect, 1500);
-    };
-    current.onerror = () => {
-      if (socket === current) connected = false;
-    };
+    if (values.hash && definitions.some((def) => def.hash === values.hash))
+      selectedDef = values.hash;
+    if (values.id) selectedActor = values.id;
+    commandId = id;
+    overrides = values;
+    panelVersion++;
+    palette = false;
+    const url = new URL(location.href);
+    url.searchParams.set("panel", id);
+    history.replaceState(null, "", url);
   }
-  function persist() {
-    localStorage.setItem(
-      "loom.connection",
-      JSON.stringify({ endpoint, token, session }),
-    );
+  function selectDefinition(def: Definition) {
+    selectedDef = def.hash;
+    navigate("view", { hash: def.hash });
   }
-  async function save() {
-    if (connecting || !token.trim()) return;
-    connecting = true;
-    const candidate = makeClient(endpoint.trim(), token.trim());
+  function selectActor(actor: Actor) {
+    selectedActor = actor.id;
+    navigate("actor_info", { id: actor.id });
+  }
+  function toggle(id: string) {
+    const next = new Set(collapsed);
+    next.has(id) ? next.delete(id) : next.add(id);
+    collapsed = next;
+  }
+  function completed(body: Row, result: Json) {
+    if (command.group === "Definitions") {
+      if (["view", "add", "update"].includes(commandId))
+        selectedDef = definition(result).hash;
+      else if (typeof body.hash === "string") selectedDef = body.hash;
+      else if (typeof body.name === "string")
+        selectedDef =
+          definitions.find((def) => def.name === body.name)?.hash ??
+          selectedDef;
+    } else if (typeof body.id === "string") selectedActor = body.id;
+    if (!command.read && !mock) void refresh();
+  }
+  async function connect() {
+    error = "";
     try {
-      resultOf(await candidate.command("defs"));
-      client.dispose();
-      client = candidate;
-      endpoint = candidate.endpoint;
-      token = candidate.token;
-      reconnectAuthorized = false;
-      persist();
+      if (!mock)
+        client = new WorkbenchClient(new HttpTransport(endpoint, token));
+      localStorage.setItem(connectionKey, JSON.stringify({ endpoint, token }));
+      ready = false;
+      panelVersion++;
       settings = false;
-      error = "";
-      authenticated = true;
       await refresh();
-      if (!settings) connect();
     } catch (problem) {
-      candidate.dispose();
-      settings = true;
-      error = problem instanceof Error ? problem.message : String(problem);
-    } finally { connecting = false; }
+      error = String(problem);
+    }
+  }
+  async function keyboard(event: KeyboardEvent) {
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+      event.preventDefault();
+      palette = !palette;
+      return;
+    }
+    if (palette) return;
+    const target = event.target as HTMLElement;
+    if (
+      target?.closest(
+        "input,textarea,select,[contenteditable=true],.cm-editor",
+      ) ||
+      event.metaKey ||
+      event.ctrlKey ||
+      event.altKey
+    )
+      return;
+    if (event.key === "?") {
+      event.preventDefault();
+      help = !help;
+    } else if (event.key === "Escape") {
+      help = false;
+      settings = false;
+    } else if (event.key === "+" || event.key === "-") {
+      event.preventDefault();
+      typeScale = Math.max(
+        10,
+        Math.min(18, typeScale + (event.key === "+" ? 1 : -1)),
+      );
+    } else if (event.key === "j" || event.key === "k") {
+      const pane = target.closest("[data-pane]");
+      const options = [
+        ...(pane ?? document).querySelectorAll<HTMLButtonElement>("[data-row]"),
+      ];
+      if (!options.length) return;
+      event.preventDefault();
+      const index = options.indexOf(target as HTMLButtonElement);
+      const next =
+        options[
+          Math.max(
+            0,
+            Math.min(options.length - 1, index + (event.key === "j" ? 1 : -1)),
+          )
+        ];
+      next?.focus();
+      next?.scrollIntoView({ block: "nearest" });
+    } else if (event.key === "h" || event.key === "l") {
+      event.preventDefault();
+      const panes = [...document.querySelectorAll<HTMLElement>("[data-pane]")];
+      const index = panes.indexOf(target.closest("[data-pane]") as HTMLElement);
+      const pane =
+        panes[
+          Math.max(
+            0,
+            Math.min(panes.length - 1, index + (event.key === "l" ? 1 : -1)),
+          )
+        ];
+      pane?.querySelector<HTMLElement>('button,input,[tabindex="0"]')?.focus();
+    }
   }
   onMount(() => {
-    try {
-      const data = record(
-        JSON.parse(localStorage.getItem("loom.connection") || "{}"),
-      );
-      endpoint = typeof data.endpoint === "string" ? data.endpoint : "";
-      token = typeof data.token === "string" ? data.token : "";
-      session = typeof data.session === "string" ? data.session : "";
-    } catch {
-      error = "Saved connection settings could not be read.";
-    }
-    client.dispose();
-    client = makeClient(endpoint, token);
-    if (token) void save();
-    else settings = true;
-    return () => {
-      disposed = true;
-      client.dispose();
-      if (reconnectTimer) clearTimeout(reconnectTimer);
-      socket?.close();
-    };
-  });
-  function inspect(hash: string) {
-    inspectHash = hash;
-    view = "CAS";
-  }
-  function navigate(next: WorkspaceView) {
-    view = next;
-    if (next === "CAS") inspectHash = "";
-    if (next !== "Session") void refresh();
-  }
-  async function submit() {
-    if (busy || !source.trim() || (mode === "define" && !name.trim())) return;
-    busy = true;
-    const id = Date.now(),
-      submitted = source,
-      operation = mode;
-    const entry: Entry = {
-      id,
-      source: submitted,
-      mode: operation === "define" ? "define rust" : operation,
-      ...(operation === "define" ? { name } : {}),
-    };
-    entries = [...entries, entry];
-    const start = performance.now();
-    try {
-      let body: Record<string, unknown> = {
-        source: submitted,
-        ...(session ? { session } : {}),
-      };
-      if (operation === "define") {
-        const deps: unknown = JSON.parse(dependencies);
-        if (
-          !deps ||
-          typeof deps !== "object" ||
-          Array.isArray(deps) ||
-          Object.values(deps).some((value) => typeof value !== "string")
-        )
-          throw new Error(
-            "Dependencies must map import names to definition hashes.",
+    const initialize = async () => {
+      const params = new URLSearchParams(location.search);
+      mock = params.get("mock") === "1";
+      const requestedPanel = params.get("panel") ?? "find";
+      try {
+        const fragment = location.hash;
+        // Remove credentials before parsing or making any request, including failures.
+        if (new URLSearchParams(fragment.slice(1)).has("token")) {
+          history.replaceState(
+            history.state,
+            "",
+            location.pathname + location.search,
           );
-        body = { lang: "rust", name, source: submitted, deps };
-      } else if (operation === "command") {
-        const command: unknown = JSON.parse(submitted);
-        if (typeof record(command).command !== "string")
-          throw new Error("Enter an object with command and args.");
-        body = { ...record(command), ...(session ? { session } : {}) };
+        }
+        if (params.has("token")) {
+          settings = true;
+          throw new Error(
+            "Query-string tokens are not accepted; use #token=… because ?token= reaches server logs.",
+          );
+        }
+        const suppliedToken = fragmentToken(fragment);
+        if (suppliedToken !== null) {
+          endpoint = "";
+          token = suppliedToken;
+        } else if (!mock) {
+          const saved = localStorage.getItem(connectionKey);
+          if (saved !== null) {
+            const connection = JSON.parse(saved);
+            if (
+              !connection ||
+              typeof connection.endpoint !== "string" ||
+              typeof connection.token !== "string"
+            )
+              throw new Error(
+                "Saved connection: expected endpoint and token strings.",
+              );
+            endpoint = connection.endpoint;
+            token = connection.token;
+          }
+        }
+        commandById(requestedPanel);
+        commandId = requestedPanel;
+        if (mock) {
+          const { MockTransport, fixtures } = await import(
+            "$lib/workbench/mock"
+          );
+          const verdict = params.get("verdict") ?? "DivergedAt";
+          client = new WorkbenchClient(new MockTransport(verdict));
+          mockDefaults = {
+            source: fixtures.definitions[0]!.source,
+            before: fixtures.definitions[2]!.hash,
+            candidate_hash: fixtures.definitions[2]!.hash,
+            args: "[42]",
+            assertions: JSON.stringify(
+              fixtures.verdicts[
+                verdict as keyof typeof fixtures.verdicts
+              ].assertions.map((assertion) => assertion.query),
+            ),
+            author: "operator",
+            rationale: "Extract increment helper",
+            name: "counter",
+            old_hash: fixtures.definitions[0]!.hash,
+            new_hash: fixtures.definitions[2]!.hash,
+            at_seq: "40",
+            reason: "shutdown",
+            group: "workers",
+            query: "SELECT * FROM inbox ORDER BY seq",
+            msg: '{"value": 43}',
+          };
+          selectedActor = "a0-counter";
+        }
+        if (mock && suppliedToken === null) await refresh();
+        else await connect();
+        await tick();
+      } catch (problem) {
+        error = problem instanceof Error ? problem.message : String(problem);
       }
-      const reply = await client.request(operation, body);
-      entries = entries.map((item) =>
-        item.id === id
-          ? { ...item, reply, ms: Math.round(performance.now() - start) }
-          : item,
-      );
-      const returned = record(reply.result);
-      if (typeof returned.session === "string") {
-        session = returned.session;
-        persist();
-      }
-      await refresh();
-    } catch (e) {
-      entries = entries.map((item) =>
-        item.id === id
-          ? {
-              ...item,
-              error: String(e),
-              ms: Math.round(performance.now() - start),
-            }
-          : item,
-      );
-    } finally {
-      busy = false;
-    }
-  }
-  function call(definition: Definition) {
-    view = "Session";
-    mode = "command";
-    source = JSON.stringify(
-      { command: "call", args: { hash: definition.hash, args: [] } },
-      null,
-      2,
-    );
-  }
+    };
+    void initialize();
+  });
+  onDestroy(() => slot.cancel());
 </script>
 
+<svelte:window on:keydown={keyboard} />
 <svelte:head
-  ><title>loom · workspace</title><meta
-    name="description"
-    content="A live journal for Loom sessions, definitions, and content."
-  /><meta name="color-scheme" content="light dark" /></svelte:head
+  ><title>loom · definitions & actors{mock ? " · fixture preview" : ""}</title
+  ><meta name="color-scheme" content="light dark" /></svelte:head
 >
-{#if !authenticated}
-  <main class="authentication-gate">
-    <section class="connection-panel" aria-labelledby="connect-title" aria-busy={connecting}>
-      <a href="/" class="wordmark">loom</a>
-      <h1 id="connect-title">Connect to your workspace</h1>
-      <p class="gate-intro">Enter your token to access sessions, definitions, and the content store.</p>
-      {#if error}<p class="gate-error" role="alert">{error}</p>{/if}
-      <ConnectionForm bind:endpoint bind:token bind:session {connecting} submit={save} />
-    </section>
-  </main>
-{:else}
-<WorkspaceHeader {connected} {refreshing} {refresh}
-  toggleHelp={() => help = !help} toggleSettings={() => settings = !settings} />
-<div class="workspace">
-  <WorkspaceNavigation {view} {sequence} {navigate}
-    definitionCount={definitions.length} />
-  <main>
-    {#if settings}<section class="connection-panel">
-        <div class="panel-heading">
-          <h2>Connect to Loom</h2>
+<div class="app-shell" style={`--type-scale:${typeScale}px`}>
+  <header class="app-header">
+    <Box size={20} class="icon-brand" /><strong class="wordmark">loom</strong
+    ><span class="header-path">/</span><span>workspace</span><span
+      class="environment">{mock ? "STATIC FIXTURES" : "LOCAL"}</span
+    ><button class="palette-trigger" on:click={() => (palette = true)}
+      ><Search size={13} /> Commands <kbd>⌘ K</kbd></button
+    ><button
+      aria-label="Refresh workspace"
+      title="Refresh workspace"
+      disabled={loading || !client}
+      on:click={refresh}><RefreshCw size={14} /></button
+    ><button
+      aria-label="Connection settings"
+      title="Connection settings"
+      disabled={mock}
+      on:click={() => (settings = !settings)}><Settings2 size={15} /></button
+    >
+  </header>
+  {#if settings}<form
+      class="connection-strip"
+      on:submit|preventDefault={connect}
+    >
+      <label
+        >API endpoint<input
+          bind:value={endpoint}
+          placeholder="Same origin"
+        /></label
+      ><label
+        >Bearer token<input
+          type="password"
+          bind:value={token}
+          autocomplete="off"
+        /></label
+      ><button class="primary" disabled={loading}>Connect</button><span
+        class="muted"
+        >Saved in this browser. Use #token=…; ?token= is not accepted because it
+        reaches server logs.</span
+      >
+    </form>{/if}
+  {#if help}<div class="help-strip">
+      <span><kbd>j / k</kbd> Move through rows</span><span
+        ><kbd>h / l</kbd> Change panes</span
+      ><span><kbd>Enter</kbd> Open</span><span><kbd>⌘ K</kbd> Commands</span
+      ><span><kbd>⌘ Enter</kbd> Run form</span><span
+        ><kbd>+ / −</kbd> Type scale</span
+      ><span><kbd>r</kbd> Rerun focused history entry</span><span
+        ><kbd>?</kbd> Hide help</span
+      >
+    </div>{/if}
+  {#if error}<div class="error" role="alert">
+      {error}<button
+        class="text-control"
+        on:click={() => (settings = true)}
+        disabled={mock}>Connection settings</button
+      >
+    </div>{/if}
+  <div class="panes">
+    <aside
+      class="explorer"
+      data-pane="explorer"
+      aria-label="Workspace explorer"
+    >
+      <div class="section-bar">
+        <FileCode2 size={14} class="icon-code" />
+        <h2>Definitions</h2>
+        <span class="muted">{definitions.length}</span><button
+          class="push"
+          aria-label="Add definition"
+          on:click={() => navigate("add")}><Plus size={14} /></button
+        >
+      </div>
+      <button class="explorer-action" data-row on:click={() => navigate("find")}
+        ><Search size={13} /> Find definitions</button
+      >
+      {#each definitions as def}<div class="definition-row">
           <button
-            aria-label="Close connection settings"
-            on:click={() => (settings = false)}><X size={14} /></button
+            class="definition-entry"
+            data-row
+            aria-current={selectedDef === def.hash &&
+            command.group === "Definitions"
+              ? "true"
+              : undefined}
+            on:click={() => selectDefinition(def)}
+            ><FileCode2 size={14} class="icon-code" /><span
+              ><strong>{def.name}</strong></span
+            ></button
+          ><Hash value={def.hash} />
+        </div>{/each}
+      <div class="section-bar actor-heading">
+        <Network size={14} class="icon-actor" />
+        <h2>Actors</h2>
+        <span class="muted">{actors.length}</span><button
+          class="push"
+          aria-label="Spawn actor"
+          on:click={() => navigate("actor_spawn")}><Plus size={14} /></button
+        >
+      </div>
+      <div class="tree-heading">
+        <span>Supervision tree</span><span title="Cursor / inbox length"
+          >Cursor / Inbox</span
+        >
+      </div>
+      {#each visibleTree as row}<div
+          class="tree-entry"
+          class:selected={selectedActor === row.id &&
+            command.group === "Actors"}
+          style={`--depth:${row.depth}`}
+        >
+          {#if tree.some((child) => child.parent === row.id)}<button
+              class="disclosure"
+              aria-label={`${collapsed.has(row.id) ? "Expand" : "Collapse"} ${row.id}`}
+              aria-expanded={!collapsed.has(row.id)}
+              on:click={() => toggle(row.id)}
+              >{#if collapsed.has(row.id)}<ChevronRight
+                  size={12}
+                />{:else}<ChevronDown size={12} />{/if}</button
+            >{:else}<span class="disclosure"></span>{/if}
+          <button
+            class="actor-entry"
+            data-row
+            aria-current={selectedActor === row.id ? "true" : undefined}
+            on:click={() => selectActor(row)}
+            ><Circle size={7} class={`status-icon ${row.status}`} /><span
+              title={`${row.id} · ${row.status}`}>{row.id}</span
+            ><small>{row.cursor} / {row.inbox_len}</small></button
           >
-        </div>
-        <ConnectionForm bind:endpoint bind:token bind:session {connecting} submit={save} />
-      </section>{/if}{#if help}<div class="help-panel">
-        <p>
-          <strong>Prompt</strong> ⌘ Enter or Ctrl Enter runs the current input.
-        </p>
-        <p>
-          <strong>Dependency graph</strong> Two-finger scroll pans. Pinch zooms around
-          the pointer. Arrow keys pan; 0 resets.
-        </p>
-      </div>{/if}{#if error}<div class="error" role="alert">
-        <span>{error}</span><button
-          aria-label="Dismiss error"
-          on:click={() => (error = "")}><X size={13} /></button
+        </div>{/each}
+      <button
+        class="explorer-action"
+        data-row
+        on:click={() => navigate("actor_list")}
+        >All actors, including forks</button
+      >
+      <div class="explorer-footer">
+        <GitBranch size={12} /><span>Root supervisor → children</span>
+      </div>
+    </aside>
+    <main class="main-pane" data-pane="main" aria-label="Command workspace">
+      <nav class="operation-tabs" aria-label={`${command.group} panels`}>
+        {#each command.group === "Definitions" ? definitionTabs : actorTabs as id}<button
+            aria-current={commandId === id ? "page" : undefined}
+            on:click={() => navigate(id)}
+            >{id.replace("actor_", "").replaceAll("_", " ")}</button
+          >{/each}<button class="push" on:click={() => (palette = true)}
+          >All commands</button
         >
-      </div>{/if}
-    {#key client}{#if view === "Session"}<SessionJournal
-      {client}
-        {events}
-        {entries}
-        {inspect}
-        loadSource={(hash) => client.text(hash)}
-      /><Composer
-        bind:mode
-        bind:source
-        bind:name
-        bind:dependencies
-        {busy}
-        {submit}
-      />
-      <div class="session-footer">
-        <span>{session ? `Session ${session}` : "New session"}</span><span
-          >Rust prompt · Rust definitions</span
-        >
-      </div>{:else if view === "Definitions"}<DefinitionBrowser
-        {client}
-        {definitions}
-        {events}
-        {inspect}
-        {call}
-      />{:else if view === "Effects"}<EffectsBrowser {client} {events} {inspect} />{:else}<CasBrowser {client} initialHash={inspectHash} />{/if}{/key}
-  </main>
-  <footer class="workspace-footer">
-    <span>loom</span><span>Content addressed · Event sourced</span>
+      </nav>
+      <div class="panel-scroll">
+        {#if ready}{#key `${panelVersion}:${commandId}`}<CommandPanel
+              {command}
+              {client}
+              {defaults}
+              {mock}
+              {navigate}
+              {completed}
+              {journal}
+              {replay}
+            />{/key}{:else}<div class="empty">
+            {loading
+              ? "Reading definitions and actor tree…"
+              : "Connect to load the workspace."}
+          </div>{/if}
+      </div>
+      <ReplHistory {journal} {rerun} />
+    </main>
+  </div>
+  <footer class="status-bar">
+    <span class="status-light"></span><span
+      >{mock
+        ? "Static fixture preview · mutations return snapshots"
+        : loading
+          ? "Reading workspace"
+          : ready
+            ? "HTTP workspace"
+            : "Disconnected"}</span
+    ><span class="push">Rust</span><span>UTF-8</span><span>{typeScale}px</span>
   </footer>
 </div>
-
-{/if}
-
-<style>
-  .authentication-gate { min-height:100svh; display:grid; place-items:center; padding:28px 20px; }
-  .authentication-gate .connection-panel { width:100%; max-width:440px; margin:0; padding:32px; }
-  .authentication-gate .wordmark { display:inline-block; margin-bottom:28px; }
-  .authentication-gate h1 { font-size:22px; font-weight:500; letter-spacing:-.6px; margin:0 0 8px; }
-  .gate-intro { color:var(--muted); line-height:1.7; margin:0 0 28px; }
-  .gate-error { color:var(--error); margin:0 0 20px; }
-</style>
+{#if palette}<CommandPalette
+    choose={(id) => navigate(id)}
+    close={() => (palette = false)}
+  />{/if}

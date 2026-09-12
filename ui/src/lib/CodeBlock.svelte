@@ -1,11 +1,14 @@
 <script lang="ts">
   import { highlighter, type CodeLanguage } from "./highlight";
+  export let inline = false;
+  let error = "";
   export let code: string;
   export let language: CodeLanguage = "text";
   let html = "",
     revision = 0;
   async function render(source: string, lang: CodeLanguage) {
     const current = ++revision;
+    error = "";
     try {
       const engine = await highlighter;
       const result = engine.codeToHtml(source, {
@@ -14,24 +17,30 @@
         defaultColor: false,
       });
       if (current === revision) html = result;
-    } catch {
-      if (current === revision) html = "";
+    } catch (problem) {
+      if (current === revision) {
+        html = "";
+        error = `Syntax highlighting: ${String(problem)}`;
+      }
     }
   }
   $: void render(code, language);
 </script>
 
-<div class="code-block">
+<div class="code-block" class:inline>
+  {#if error}<span role="alert">{error}</span>{/if}
   {#if html}{@html html}{:else}<pre><code>{code}</code></pre>{/if}
 </div>
 
 <style>
   .code-block {
+    white-space: normal;
     overflow: auto;
-    font: 11px/1.9 var(--mono);
+    font: 0.92em/1.65 var(--mono);
     max-height: 500px;
   }
   .code-block :global(pre) {
+    white-space: pre;
     font: inherit;
     margin: 0;
     padding: 15px 18px;
@@ -53,5 +62,14 @@
     .code-block :global(.shiki span) {
       color: var(--shiki-dark);
     }
+  }
+  .inline {
+    font-size: inherit;
+    line-height: inherit;
+    max-height: none;
+  }
+  .inline :global(pre) {
+    padding: 0;
+    background: transparent !important;
   }
 </style>
