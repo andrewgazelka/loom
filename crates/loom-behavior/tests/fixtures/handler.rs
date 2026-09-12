@@ -46,6 +46,9 @@ pub fn handle(msg: Vec<u8>) {
             // Swallowing a rejected root effect must not make a message commit.
             let _ = loom::perform::<Value>("nope", json!({"request":[]}));
         }
+        "unknown_actor" => {
+            let _ = loom::perform::<Value>("actor.nope", json!({"request":[]}));
+        }
         "effect" => {
             insert(&msg);
             let _ = loom::perform::<Vec<u8>>("test.effect", json!({"request":[1,2,3]}));
