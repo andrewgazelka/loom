@@ -25,6 +25,7 @@ mod types;
 pub use actor::Actor;
 pub use directory::{ActorInfo, MonitorInfo};
 pub use effects::{DefaultEffects, EffectError, EffectHandler, EffectKey};
+pub use history::memo::{MemoConfig, PromoteReport};
 pub use ids::ActorId;
 pub use node::Node;
 pub use schema::SCHEMA;
