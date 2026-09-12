@@ -32,7 +32,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
     let cache = cache_path.as_path();
     let directory = directory_path.as_path();
     let target_name = "wasm32-unknown-unknown";
-    let toolchain = crate::resolve_guest_toolchain(root).await?;
+    let toolchain = crate::resolve_guest_toolchain_with_driver(root, Some(&driver.path)).await?;
     let sysroot = toolchain.sysroot.clone();
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"rustc-contract-v7-dependency-artifact-digests");
@@ -195,8 +195,16 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
         }
     }
     artifacts::initialize_index(store)?;
-    let shareable =
-        graph_shareable(root, cache, directory, &target, isolated, Some(&sysroot)).await?;
+    let shareable = graph_shareable(
+        root,
+        cache,
+        directory,
+        &target,
+        isolated,
+        Some(&sysroot),
+        Some(&driver.path),
+    )
+    .await?;
     if !shareable {
         return Err(rejected(
             "untrusted host build scripts and procedural macros are not admitted",
@@ -226,7 +234,6 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
     toolchain.configure(&mut command)?;
     command
         .env("RUSTC", &driver.path)
-        .env("RUSTUP_TOOLCHAIN", &toolchain.channel)
         .env("LOOM_LOCKED", "1")
         .env("LOOM_RUST_TARGET", target_name)
         .env("LOOM_CAS_SOURCES", cache.join("source-trees"))

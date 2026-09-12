@@ -6,7 +6,7 @@ use artifact::{
     validate_component,
 };
 mod toolchain;
-pub use toolchain::{GuestToolchain, resolve_guest_toolchain};
+pub use toolchain::{GuestToolchain, resolve_guest_toolchain, resolve_guest_toolchain_with_driver};
 mod identity;
 #[cfg(test)]
 mod identity_tests;
@@ -37,8 +37,11 @@ async fn seed_build_lock(source: &Path, destination: &Path) -> Result<(), std::i
 // Fetching the compiler workspace resolves archives without executing build
 // scripts. Do this before cache lookup: prepared definition metadata can outlive
 // the host Cargo cache that supplies independently verified compiler sources.
-async fn prepare_compiler_dependencies(root: &Path) -> Result<(), BuildError> {
-    let toolchain = resolve_guest_toolchain(root).await?;
+async fn prepare_compiler_dependencies(
+    root: &Path,
+    driver: Option<&Path>,
+) -> Result<(), BuildError> {
+    let toolchain = resolve_guest_toolchain_with_driver(root, driver).await?;
     let manifest = toolchain
         .sysroot
         .join("lib/rustlib/src/rust/library/Cargo.toml");
@@ -57,10 +60,9 @@ async fn prepare_compiler_dependencies(root: &Path) -> Result<(), BuildError> {
             command.env(name, value);
         }
     }
+    toolchain.configure(&mut command)?;
     command
         .env("RUSTC_BOOTSTRAP", "1")
-        .env("RUSTUP_TOOLCHAIN", &toolchain.channel)
-        .env("RUSTC", &toolchain.rustc)
         .args(["fetch", "--locked", "--manifest-path"])
         .arg(manifest);
     let output = tokio::time::timeout(
@@ -218,6 +220,7 @@ impl Builder {
         })
         .await?;
         sdk::reconcile(sdk::Rebuild {
+            driver: Some(&driver.path),
             store: &self.store,
             root: &self.root,
             cache: &self.cache,

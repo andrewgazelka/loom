@@ -57,13 +57,13 @@ impl Driver {
         }
         let source = root.join("tools/hash-rustc");
         let manifest = source.join("Cargo.toml");
-        if !manifest.is_file() {
+        if selected.is_none() && !manifest.is_file() {
             return Err(rejected(format!(
                 "hash-rustc driver unavailable: {}",
                 manifest.display()
             )));
         }
-        let toolchain = crate::resolve_guest_toolchain(root).await?;
+        let toolchain = crate::resolve_guest_toolchain_with_driver(root, selected).await?;
         let guest_version = toolchain.version.as_bytes();
         let target = cache
             .join("hash-rustc")
@@ -77,7 +77,13 @@ impl Driver {
                 .current_dir(&source)
                 .env("RUSTC", toolchain.sysroot.join("bin/rustc"))
                 .env_remove("RUSTC_WRAPPER")
-                .env("RUSTUP_TOOLCHAIN", &toolchain.channel)
+                .env(
+                    "RUSTUP_TOOLCHAIN",
+                    toolchain
+                        .channel
+                        .as_deref()
+                        .expect("source driver uses pinned toolchain"),
+                )
                 .env_remove("RUSTFLAGS")
                 .env_remove("CARGO_ENCODED_RUSTFLAGS")
                 .env("CARGO_TARGET_DIR", &target)

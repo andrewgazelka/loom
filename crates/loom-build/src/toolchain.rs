@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
 pub struct GuestToolchain {
-    pub channel: String,
+    pub channel: Option<String>,
     pub rustc: PathBuf,
     pub cargo: PathBuf,
     pub sysroot: PathBuf,
@@ -18,8 +18,15 @@ impl GuestToolchain {
             std::iter::once(self.sysroot.join("bin")).chain(std::env::split_paths(&ambient));
         command
             .env("PATH", std::env::join_paths(paths).map_err(rejected)?)
-            .env("RUSTUP_TOOLCHAIN", &self.channel)
             .env("RUSTC", &self.rustc);
+        match &self.channel {
+            Some(channel) => {
+                command.env("RUSTUP_TOOLCHAIN", channel);
+            }
+            None => {
+                command.env_remove("RUSTUP_TOOLCHAIN");
+            }
+        }
         Ok(())
     }
 }
@@ -45,7 +52,78 @@ async fn output(command: &mut Command, owner: &str) -> Result<String, BuildError
 /// Resolve the repository's pinned guest compiler, validating any explicit
 /// RUSTC override against that compiler before it can be used.
 pub async fn resolve_guest_toolchain(root: &Path) -> Result<GuestToolchain, BuildError> {
-    resolve(root, std::env::var_os("RUSTC")).await
+    let driver = std::env::var_os("LOOM_HASH_RUSTC").map(PathBuf::from);
+    resolve_guest_toolchain_with_driver(root, driver.as_deref()).await
+}
+
+pub async fn resolve_guest_toolchain_with_driver(
+    root: &Path,
+    driver: Option<&Path>,
+) -> Result<GuestToolchain, BuildError> {
+    match driver {
+        Some(driver) => prebuilt(driver, std::env::var_os("RUSTC")).await,
+        None => resolve(root, std::env::var_os("RUSTC")).await,
+    }
+}
+
+async fn prebuilt(
+    driver: &Path,
+    override_rustc: Option<std::ffi::OsString>,
+) -> Result<GuestToolchain, BuildError> {
+    let owner = format!("hash-rustc driver {}", driver.display());
+    let version = output(Command::new(driver).arg("-vV"), &owner).await?;
+    let sysroot = PathBuf::from(
+        output(Command::new(driver).args(["--print", "sysroot"]), &owner)
+            .await?
+            .trim(),
+    );
+    let sysroot = std::fs::canonicalize(&sysroot)
+        .map_err(|error| rejected(format!("{owner} sysroot {}: {error}", sysroot.display())))?;
+    let rustc = override_rustc
+        .map(PathBuf::from)
+        .unwrap_or_else(|| sysroot.join("bin/rustc"));
+    let guest_version = output(
+        Command::new(&rustc).arg("-vV"),
+        &format!("guest compiler {}", rustc.display()),
+    )
+    .await?;
+    let guest_sysroot = PathBuf::from(
+        output(
+            Command::new(&rustc).args(["--print", "sysroot"]),
+            &format!("guest compiler {}", rustc.display()),
+        )
+        .await?
+        .trim(),
+    );
+    let canonical_guest_sysroot = std::fs::canonicalize(&guest_sysroot).map_err(|error| {
+        rejected(format!(
+            "guest compiler {} sysroot {}: {error}",
+            rustc.display(),
+            guest_sysroot.display()
+        ))
+    })?;
+    if guest_version != version || canonical_guest_sysroot != sysroot {
+        return Err(rejected(format!(
+            "guest compiler {} is incompatible with {owner}: driver sysroot {}, guest sysroot {}; driver {version}guest {guest_version}",
+            rustc.display(),
+            sysroot.display(),
+            guest_sysroot.display()
+        )));
+    }
+    let cargo = sysroot.join("bin/cargo");
+    if !cargo.is_file() {
+        return Err(rejected(format!(
+            "{owner} guest cargo unavailable: {}",
+            cargo.display()
+        )));
+    }
+    Ok(GuestToolchain {
+        channel: None,
+        rustc,
+        cargo,
+        sysroot,
+        version,
+    })
 }
 
 async fn resolve(
@@ -123,7 +201,7 @@ async fn resolve(
         rustc
     };
     Ok(GuestToolchain {
-        channel,
+        channel: Some(channel),
         rustc,
         cargo,
         sysroot,
@@ -147,7 +225,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            toolchain.channel,
+            toolchain.channel.as_deref().unwrap(),
             document["toolchain"]["channel"].as_str().unwrap()
         );
         assert!(toolchain.rustc.is_absolute());
@@ -191,7 +269,62 @@ mod tests {
             .to_string();
         std::fs::remove_dir_all(directory).unwrap();
         assert!(error.contains(compiler.to_str().unwrap()), "{error}");
-        assert!(error.contains(&pinned.channel), "{error}");
+        assert!(
+            error.contains(pinned.channel.as_deref().unwrap()),
+            "{error}"
+        );
         assert!(error.contains("incompatible"), "{error}");
+    }
+    #[cfg(unix)]
+    async fn reject_prebuilt_override(different_version: bool) {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = std::env::temp_dir().join(format!(
+            "loom-prebuilt-mismatch-{}-{different_version}",
+            std::process::id()
+        ));
+        let other = directory.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        let driver = directory.join("driver");
+        let compiler = if different_version {
+            directory.join("rustc")
+        } else {
+            other.join("rustc")
+        };
+        for path in [&driver, &compiler] {
+            let version = if path == &compiler && different_version {
+                "different"
+            } else {
+                "matching"
+            };
+            let script = format!(
+                "#!/bin/sh\nif [ \"$1\" = -vV ]; then printf '%s\\n' '{version}'; else cd \"$(dirname \"$0\")\"; pwd -P; fi\n"
+            );
+            std::fs::write(path, script).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let error = prebuilt(&driver, Some(compiler.clone().into_os_string()))
+            .await
+            .err()
+            .expect("incompatible prebuilt compiler accepted")
+            .to_string();
+        assert!(error.contains(driver.to_str().unwrap()), "{error}");
+        assert!(error.contains(compiler.to_str().unwrap()), "{error}");
+        assert!(error.contains("incompatible"), "{error}");
+        if !different_version {
+            assert!(error.contains(other.to_str().unwrap()), "{error}");
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prebuilt_rejects_guest_version_mismatch() {
+        reject_prebuilt_override(true).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prebuilt_rejects_guest_sysroot_mismatch() {
+        reject_prebuilt_override(false).await;
     }
 }
