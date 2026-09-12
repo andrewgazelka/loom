@@ -169,3 +169,13 @@ Mutation results are fixed snapshots; they do not simulate persistence. Any
 panel can be opened with `&panel=<command id>`. Validation fixtures select one of
 `&verdict=Matched`, `DivergedAt`, `Differs`, or `Trapped`. All fixture responses
 pass through the same response parsers as HTTP responses.
+
+## Active build progress
+
+`GET /v1/builds/active` requires bearer authentication and Read access. It returns
+the standard response envelope with `result.active` either null or
+`{name, stage, elapsed_ms}`. Stages are `preflight`, `check`, `compile`, and
+`publish`. Completion, failure, and cancellation clear the active build.
+The endpoint observes the node's serialized definition intake; it does not
+submit, retry, or cancel a command. Build output remains in the completed
+publication's `build.logs_ref` and is retrieved through authenticated CAS reads.

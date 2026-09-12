@@ -20,6 +20,13 @@ import {
 } from "./schema";
 export interface Transport {
   request(command: Command, body: Row, signal?: AbortSignal): Promise<unknown>;
+  activeBuild?(signal?: AbortSignal): Promise<unknown>;
+  compilerLog?(hash: string, signal?: AbortSignal): Promise<string>;
+}
+export interface ActiveBuild {
+  name: string;
+  stage: "preflight" | "check" | "compile" | "publish";
+  elapsed_ms: number;
 }
 export type FetchRequest = (
   input: string,
@@ -74,6 +81,26 @@ export class HttpTransport implements Transport {
         `${command.name}: HTTP ${response.status} returned invalid JSON`,
       );
     }
+  }
+  async activeBuild(signal?: AbortSignal): Promise<unknown> {
+    const response = await this.fetcher(`${this.base}/v1/builds/active`, {
+      signal,
+      headers: this.token ? { Authorization: `Bearer ${this.token}` } : {},
+    });
+    if (!response.ok)
+      throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+    return response.json();
+  }
+  async compilerLog(hash: string, signal?: AbortSignal): Promise<string> {
+    if (!/^[a-f0-9]{64}$/.test(hash))
+      throw new Error("Invalid compiler log hash");
+    const response = await this.fetcher(`${this.base}/v1/cas/${hash}`, {
+      signal,
+      headers: this.token ? { Authorization: `Bearer ${this.token}` } : {},
+    });
+    if (!response.ok)
+      throw new Error(`Compiler output: HTTP ${response.status}`);
+    return response.text();
   }
 }
 /** Validate the result after unwrapping the shared protocol envelope. */
@@ -156,6 +183,33 @@ export function parseEnvelope(value: unknown): Json {
 }
 export class WorkbenchClient {
   constructor(private transport: Transport) {}
+  compilerLog(hash: string, signal?: AbortSignal): Promise<string> {
+    if (!this.transport.compilerLog)
+      throw new Error("Transport does not support compiler output");
+    return this.transport.compilerLog(hash, signal);
+  }
+  async activeBuild(signal?: AbortSignal): Promise<ActiveBuild | null> {
+    if (!this.transport.activeBuild)
+      throw new Error("Transport does not support build progress");
+    const result = object(
+      parseEnvelope(await this.transport.activeBuild(signal)),
+      "build progress",
+    );
+    if (result.active === null) return null;
+    const active = object(result.active, "active build");
+    const stage = string(active.stage, "build stage");
+    if (
+      stage !== "preflight" &&
+      stage !== "check" &&
+      stage !== "compile" &&
+      stage !== "publish"
+    )
+      throw new Error(`Unknown build stage: ${stage}`);
+    const elapsed_ms = integer(active.elapsed_ms, "build elapsed time");
+    if (elapsed_ms < 0)
+      throw new Error("Build elapsed time must be nonnegative");
+    return { name: string(active.name, "build name"), stage, elapsed_ms };
+  }
   async call(command: Command, body: Row, signal?: AbortSignal): Promise<Json> {
     try {
       return parseResult(

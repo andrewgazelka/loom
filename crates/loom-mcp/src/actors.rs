@@ -18,7 +18,7 @@ impl ActorMcp {
     pub(crate) async fn resource(&self, uri: &str) -> Result<ReadResourceResult, ErrorData> {
         let value = self.service.resource(uri).await.map_err(error)?;
         Ok(ReadResourceResult {
-            contents: vec![ResourceContents::text(value.to_string(), uri)],
+            contents: vec![crate::json_resource(value, uri)],
         })
     }
 }

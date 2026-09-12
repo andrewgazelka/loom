@@ -1,16 +1,19 @@
 <script lang="ts">
-  import { V } from "./commands";
+  import { V, type Command } from "./commands";
   import { onMount, onDestroy } from "svelte";
   import { Play, RefreshCw } from "lucide-svelte";
-  import { commandById, parseFields, type Command } from "./commands";
-  import { RequestSlot, type WorkbenchClient } from "./client";
-  import { definitionView, type Json, type Row } from "./schema";
+  import type { WorkbenchClient, ActiveBuild } from "./client";
+  import type { Json, Row } from "./schema";
   import DefinitionResult from "./DefinitionResult.svelte";
   import CodeEditor from "../CodeEditor.svelte";
   import type { Journal } from "./journal";
-  export let journal: Journal;
-  export let replay = false;
+  import type { Workspace } from "./workspace";
   import ActorResult from "./ActorResult.svelte";
+  import BuildLog from "./BuildLog.svelte";
+  import RunArguments from "./RunArguments.svelte";
+  export let journal: Journal;
+  export let workspace: Workspace;
+  export let replay = false;
   export let command: Command;
   export let client: WorkbenchClient;
   export let defaults: Record<string, string>;
@@ -19,78 +22,65 @@
     command: string,
     overrides?: Record<string, string>,
   ) => void;
-  export let completed: (body: Row, result: Json) => void;
-  let values: Record<string, string> = {};
-  for (const field of command.fields)
-    values[field.key] = defaults[field.key] ?? field.initial ?? "";
-  let result: Json | undefined;
+  export let panelId: number;
+  const owner = panelId;
+  export let completed: (
+    owner: number,
+    command: Command,
+    body: Row,
+    result: Json,
+  ) => void;
+  const session = workspace.open(command, defaults, replay);
   let form: HTMLFormElement;
-  let resultActorId = "";
-  let error = "",
-    busy = false,
-    elapsed: number | null = null;
-  const slot = new RequestSlot();
+  let now = Date.now();
+  let build: ActiveBuild | null = null;
+  let progressError = "";
+  let polling = false;
+  let disposed = false;
+  const progressController = new AbortController();
   async function execute() {
-    if (busy) return;
-    error = "";
-    result = undefined;
-    elapsed = null;
-    const entry = journal.begin(command, values);
-    let body;
-    try {
-      body = parseFields(command, values);
-    } catch (problem) {
-      error = problem instanceof Error ? problem.message : String(problem);
-      journal.fail(entry, error);
-      return;
-    }
-    busy = true;
-    const start = performance.now();
-    await slot.run(
-      async (signal) => {
-        try {
-          const value = await client.call(command, body, signal);
-          journal.finish(entry, value);
-          return value;
-        } catch (error) {
-          journal.fail(entry, String(error));
-          throw error;
-        }
-      },
-      (value) => {
-        result = value;
-        resultActorId = String(body.id ?? "");
-        elapsed = Math.round(performance.now() - start);
-        completed(body, value);
-      },
-      (message) => (error = message),
-      () => (busy = false),
+    await session.execute(client, journal, (body, result) =>
+      completed(owner, command, body, result),
     );
   }
-  onMount(() => {
-    if (command.id === V.update && !values.source && values.name) {
-      busy = true;
-      void slot.run(
-        (signal) =>
-          client.call(commandById(V.view), { target: values.name! }, signal),
-        (result) =>
-          (values = { ...values, source: definitionView(result).source }),
-        (message) => (error = message),
-        () => (busy = false),
-      );
+  async function progress() {
+    now = Date.now();
+    if (
+      disposed ||
+      mock ||
+      polling ||
+      !$session.busy ||
+      $session.loadingSource ||
+      ![V.add, V.update].some((id) => id === command.id)
+    )
       return;
+    polling = true;
+    try {
+      build = await client.activeBuild(progressController.signal);
+      progressError = "";
+    } catch (error) {
+      if (!disposed) progressError = `Build status: ${String(error)}`;
+    } finally {
+      polling = false;
     }
-    // Opening a live mutation always requires the operator's explicit Run action.
-    if (command.read || mock || replay) {
-      try {
-        parseFields(command, values);
-        void execute();
-      } catch {
-        /* Incomplete forms await input. */
-      }
-    }
+  }
+  onMount(() => {
+    const timer = setInterval(() => {
+      void progress();
+    }, 1000);
+    void session.prepare(client).then(() => {
+      if (command.read || mock || replay) void execute();
+    });
+    return () => clearInterval(timer);
   });
-  onDestroy(() => slot.cancel());
+  onDestroy(() => {
+    disposed = true;
+    progressController.abort();
+  });
+  $: activeBuild =
+    build?.name === ($session.values.name?.trim() || "main") ? build : null;
+  $: duration =
+    $session.startedAt === null ? 0 : Math.max(0, now - $session.startedAt);
 </script>
 
 <svelte:window
@@ -106,7 +96,11 @@
     }
   }}
 />
-<section class="command-panel" aria-label={command.name} aria-busy={busy}>
+<section
+  class="command-panel"
+  aria-label={command.name}
+  aria-busy={$session.busy}
+>
   <div class="panel-title">
     <div>
       <h1>{command.name}</h1>
@@ -114,12 +108,16 @@
     </div>
     <span class="scope">{command.read ? "Read" : "Execute"}</span>
   </div>
+  {#if command.id === V.run}<RunArguments
+      {client}
+      target={$session.values.target ?? ""}
+    />{/if}
   <form
     bind:this={form}
     aria-label={`${command.name} input`}
     on:submit|preventDefault={execute}
   >
-    <fieldset disabled={busy}>
+    <fieldset disabled={$session.busy}>
       <div class="fields">
         {#each command.fields as field}<div
             class="field"
@@ -130,59 +128,80 @@
                   >optional</small
                 >{/if}</span
             >
-            {#if field.options}<select bind:value={values[field.key]}
+            {#if field.options}<select bind:value={$session.values[field.key]}
                 >{#each field.options as option}<option value={option}
                     >{option}</option
                   >{/each}</select
               >
             {:else if field.kind === "source" || field.kind === "json"}<CodeEditor
-                bind:value={values[field.key]}
+                bind:value={$session.values[field.key]}
                 language={field.key === "query"
                   ? V.sql
                   : field.kind === "source"
                     ? "rust"
                     : "json"}
                 label={field.label}
-                disabled={busy}
+                disabled={$session.busy}
                 submit={execute}
               />
             {:else}<input
                 type="text"
                 inputmode={field.kind === "number" ? "numeric" : undefined}
-                bind:value={values[field.key]}
+                bind:value={$session.values[field.key]}
                 spellcheck="false"
                 aria-label={field.label}
               />{/if}
           </div>{/each}
       </div>
       <div class="form-actions">
-        <button class="primary" type="submit" disabled={busy}
+        {#if $session.dirty}<button
+            type="button"
+            on:click={() => session.discard(client)}
+            disabled={$session.busy}>Discard draft</button
+          ><span class="muted">Draft</span>{/if}
+        <button class="primary" type="submit" disabled={$session.busy}
           >{#if command.read}<RefreshCw size={12} />{:else}<Play
               size={12}
-            />{/if}{busy ? "Running…" : command.name}</button
-        >{#if elapsed !== null}<span class="muted"
-            >{mock ? "Fixture response" : "Completed"} · {elapsed} ms</span
+            />{/if}{$session.busy ? "Running…" : command.name}</button
+        >{#if $session.busy}<span role="status" class="muted"
+            >{#if $session.loadingSource}Loading stored source…{:else}{activeBuild
+                ? {
+                    preflight: "Preparing compiler",
+                    check: "Checking source",
+                    compile: "Compiling Rust",
+                    publish: "Publishing definition",
+                  }[activeBuild.stage]
+                : "Waiting for completion"} · {(duration / 1000).toFixed(0)} s{/if}</span
+          >{/if}{#if $session.elapsed !== null}<span class="muted"
+            >{mock ? "Fixture response" : "Completed"} · {$session.elapsed} ms</span
           >{/if}
       </div>
     </fieldset>
   </form>
-  {#if error}<p class="error" role="alert">{error}</p>{/if}
-  {#if result !== undefined}<section
+  {#if $session.busy && progressError}<p class="error" role="alert">
+      {progressError}
+    </p>{/if}
+  {#if $session.error}<p class="error" role="alert">{$session.error}</p>{/if}
+  {#if $session.result !== undefined}<section
       class="operation-result"
       aria-label={`${command.name} result`}
     >
       {#if command.group === "Definitions"}<DefinitionResult
           operation={command.operation}
-          value={result}
+          value={$session.result}
           {navigate}
         />
+        {#if !mock && [V.add, V.update].some((id) => id === command.id)}<BuildLog
+            {client}
+            value={$session.result}
+          />{/if}
       {:else}<ActorResult
           operation={command.operation}
-          value={result}
-          actorId={resultActorId}
+          value={$session.result}
+          actorId={$session.actorId}
           {navigate}
         />{/if}
-    </section>{:else if !busy && !error}<p class="note">
+    </section>{:else if !$session.busy && !$session.error}<p class="note">
       Enter the fields above, then run <code>{command.name}</code>.
     </p>{/if}
 </section>

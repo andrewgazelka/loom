@@ -17,17 +17,20 @@ impl Service {
         }
     }
     pub(super) async fn define_inner(&self, request: DefineRequest) -> Result<Response> {
+        let progress = self.build_progress.start(&request.name);
         self.builder.preflight().await?;
         let mut intake = self.clone();
         intake.store = self.store.stage_intake()?;
         intake.builder = Arc::new(self.builder.for_store(intake.store.clone()));
-        intake.define_staged(request, &self.store).await
+        intake.define_staged(request, &self.store, &progress).await
     }
     async fn define_staged(
         &self,
         mut request: DefineRequest,
         destination: &Store,
+        progress: &build_progress::BuildGuard,
     ) -> Result<Response> {
+        progress.stage("check");
         ensure!(
             self.languages.contains(&request.lang),
             "language {} is disabled",
@@ -58,6 +61,7 @@ impl Service {
             });
         }
         let dependencies = dependency_closure(&self.store, &checked.deps)?;
+        progress.stage("compile");
         let built = self
             .builder
             .build_with_dependencies(&checked, &dependencies)
@@ -74,6 +78,7 @@ impl Service {
             !built.component.is_empty(),
             "builder returned an empty component"
         );
+        progress.stage("publish");
         let component_hash = self.store.put("component", &built.component)?;
         let logs_ref = self.store.put("blob", built.logs.as_bytes())?;
         let identity = built

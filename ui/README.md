@@ -14,13 +14,13 @@ prints each exit status, then prints `N/3 UI gates pass`. Unit tests
 cover every command fixture, request encoding, input and response rejection,
 validation verdicts, tree identity joins, superseded request ownership, and immutable command history snapshots.
 
-The development server proxies `/api` to `127.0.0.1:8787`. Connection settings
+The development server proxies `/v1` to `127.0.0.1:8787`. Connection settings
 accept an optional HTTP endpoint and bearer token. Manual connections and launcher fragment tokens are saved as `{ endpoint, token }`
 in localStorage under `loom.connection`. Open `/#token=<URL-encoded token>` to
 connect to the page origin automatically; the fragment is removed before requests.
 Query-string tokens are rejected because they reach server logs. The
 static build goes to `build/`; production must serve `index.html` and route
-`/api` to the daemon. HTTP errors remain visible with operation context.
+`/v1` to the daemon. HTTP errors remain visible with operation context.
 
 Open `http://127.0.0.1:5186/?mock=1` for the static fixture preview without a daemon.
 Use `&panel=actor_validate&verdict=Differs` to inspect a specific panel and verdict.
@@ -47,29 +47,32 @@ and prevents late results from replacing the newly selected identity.
 Rust and JSON inputs use CodeMirror 6 with line numbers, bracket matching, and
 OS-aware syntax colors. SQL inputs use the SQL grammar. Shiki renders source,
 item names, JSON results, and inline diffs with GitHub light/dark themes. Hash
-pills show eight characters and copy the full hash. Session history retains
-command inputs, results, and errors in invocation order; background workspace
-refreshes are excluded. History is in memory and clears on page reload.
+pills show eight characters and copy the full hash. History retains the latest 100 completed commands and every running command,
+including inputs, results, errors, and timestamps. It is saved per endpoint on
+this device; background workspace refreshes and transport credentials are excluded.
+Export downloads the retained history as JSON. Clear removes it, and is disabled
+while commands are running. After reload, unfinished commands are marked
+interrupted with an unknown server outcome and are never automatically rerun.
 
-## Visual verification environment
+Command drafts survive panel changes and reloads, separately for each endpoint,
+operation, and definition or actor. Discard draft restores the form's baseline;
+Update fetches the current stored source. Replay refuses to replace an unsaved
+draft or an in-flight command. Storage failures remain visible and preserve
+in-memory work. Invalid saved data is preserved instead of being overwritten.
 
-The addendum's CDP connection through `repl.ts` reached the browser WebSocket but
-failed with `browserType.connectOverCDP: Timeout 30000ms exceeded`. Visual checks
-therefore use the permitted `agent-browser --session r5-ui` fallback.
+The workspace owns in-flight commands, so navigating away does not abort an Add
+or lose its result. Add and Update show elapsed time and the server's actual
+preflight, checking, compilation, and publication stages from authenticated
+`GET /v1/builds/active`. Compiler output is available after a successful build.
+Run shows parameter names, protocol types, and a JSON example. It accepts the same
+JSON values as HTTP and MCP, including single scalar and object arguments.
 
+## Browser verification
 
-Computer Use startup failed while requesting
-`sky.get_app_state({app:'com.google.Chrome'})` with the verbatim error
-`Sky Computer Use native pipe startup failed`. This blocks Computer Use UI checks
-in this session. The owner's explicitly requested
-`agent-browser --session r5-ui` provides the screenshot and interaction route.
+Use Playwright through `repl.ts`, connected to the existing browser at
+`http://localhost:9222`. Open a new task tab. Test live commands against the
+packaged daemon in addition to fixtures: scalar Run, draft navigation/reload,
+replay conflicts, history export/clear, and navigating away during compilation.
 
-With the development server running, `bun scripts/screenshots.ts` verifies a
-rendered result for all 30 panels and writes PNGs under `screenshots/r5-ui/`.
-It also captures Matched, Differs and Trapped validation results and the OS-light
-stylesheet. Set `UI_PREVIEW_URL` to verify a locally served production build.
-
-Restart `vite preview` after rebuilding. In this SvelteKit setup a running preview
-retained the earlier entry script even after `build/index.html` changed. Restarting
-made the served entry match the built entry and the changed actor-selection
-behavior pass. Keep the preview build fixed while taking screenshots.
+Restart a static preview after rebuilding so its entry script matches the
+current build. Keep the preview build fixed while capturing screenshots.

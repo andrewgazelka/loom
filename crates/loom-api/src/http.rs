@@ -17,6 +17,7 @@ pub fn router(service: Arc<Service>, authorizer: Authorizer) -> Router {
         .route("/v1/defs/{name}", get(definition))
         .route("/v1/graph/deps/{hash}", get(deps))
         .route("/v1/builds/{hash}", get(build))
+        .route("/v1/builds/active", get(active_build))
         .layer(DefaultBodyLimit::max(16 * 1024 * 1024))
         .route_layer(middleware::from_fn_with_state(
             state.authorizer.clone(),
@@ -195,6 +196,9 @@ async fn deps(State(s): State<ApiState>, Path(hash): Path<String>) -> Json<Respo
 }
 async fn build(State(s): State<ApiState>, Path(hash): Path<String>) -> Json<Response> {
     Json(s.service.response(s.service.build_record(&hash)))
+}
+async fn active_build(State(s): State<ApiState>) -> Json<Response> {
+    Json(s.service.response(Ok(s.service.build_progress.snapshot())))
 }
 async fn stream(State(s): State<ApiState>, ws: WebSocketUpgrade) -> HttpResponse {
     ws.max_message_size(4096)

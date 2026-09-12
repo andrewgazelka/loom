@@ -10,6 +10,7 @@ mod unison;
 pub use http::{protect, router};
 use source::*;
 mod auth;
+mod build_progress;
 mod cas_browser;
 use anyhow::{Context, Result, bail, ensure};
 pub use auth::{Access, Authorizer, Scope, TokenConfig};
@@ -49,6 +50,7 @@ pub struct Service {
     languages: Vec<Lang>,
     backup_directory: PathBuf,
     definitions_gate: Arc<tokio::sync::Mutex<()>>,
+    build_progress: build_progress::BuildProgress,
     last_reply_storage_nanos: Arc<AtomicU64>,
 }
 impl Service {
@@ -70,6 +72,7 @@ impl Service {
             languages,
             backup_directory,
             definitions_gate: Arc::new(tokio::sync::Mutex::new(())),
+            build_progress: build_progress::BuildProgress::default(),
             last_reply_storage_nanos: Arc::new(AtomicU64::new(0)),
         })
     }

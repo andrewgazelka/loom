@@ -1,11 +1,11 @@
 use super::*;
 #[tokio::test]
 async fn auth_gates_every_operation_and_health_is_public() {
-    for path in ["/v1/command", "/v1/events", "/v1/cas/hash"] {
+    for path in ["/v1/command", "/v1/events", "/v1/cas/hash", "/v1/builds/active"] {
         let response = app()
             .oneshot(
                 Request::builder()
-                    .method(if path == "/v1/events" || path.starts_with("/v1/cas") {
+                    .method(if path != "/v1/command" {
                         "GET"
                     } else {
                         "POST"

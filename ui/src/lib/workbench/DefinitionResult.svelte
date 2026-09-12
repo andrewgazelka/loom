@@ -112,8 +112,10 @@
   <div class="section-bar"><h2>Hash chain</h2></div>
   {#each history(value) as revision}<section class="revision">
       <div class="section-bar">
-        <Hash value={revision.hash} /><time class="push muted"
-          >{revision.timestamp}</time
+        <Hash value={revision.hash} /><time
+          class="push muted"
+          datetime={new Date(revision.timestamp * 1000).toISOString()}
+          >{new Date(revision.timestamp * 1000).toLocaleString()}</time
         ><button
           data-row
           class="text-control"

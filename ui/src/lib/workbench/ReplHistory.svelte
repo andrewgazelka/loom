@@ -2,12 +2,28 @@
   import { tick } from "svelte";
   import { History, RotateCcw, Check, X } from "lucide-svelte";
   import CodeBlock from "../CodeBlock.svelte";
-  import type { Journal, JournalEntry } from "./journal";
+  import {
+    invocationSummary,
+    preview,
+    type Journal,
+    type JournalEntry,
+  } from "./journal";
   export let journal: Journal;
   export let rerun: (entry: JournalEntry) => void;
   let list: HTMLDivElement;
   let expanded: number | null = null;
   let count = 0;
+  $: storageError = journal.storageError;
+  function exportHistory() {
+    const url = URL.createObjectURL(
+      new Blob([journal.exportJson()], { type: "application/json" }),
+    );
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "repl-history.json";
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
   $: if ($journal.length !== count) {
     count = $journal.length;
     expanded = null;
@@ -21,8 +37,15 @@
   <div class="section-bar">
     <History size={14} class="icon-item" />
     <h2>REPL history</h2>
-    <span class="muted">{$journal.length} commands · this session</span>
+    <span class="muted">{$journal.length} commands</span>
+    <button on:click={exportHistory} disabled={!$journal.length}>Export</button>
+    <button
+      on:click={() => journal.clear()}
+      disabled={!$journal.length ||
+        $journal.some((entry) => entry.state === "running")}>Clear</button
+    >
   </div>
+  {#if $storageError}<p class="error" role="status">{$storageError}</p>{/if}
   <div class="history-scroll" bind:this={list}>
     {#each $journal as entry (entry.id)}
       <article>
@@ -34,7 +57,12 @@
             on:click={() =>
               (expanded = expanded === entry.id ? null : entry.id)}
             on:keydown={(event) => {
-              if (event.key === "r" && !event.metaKey && !event.ctrlKey) {
+              if (
+                event.key === "r" &&
+                !event.metaKey &&
+                !event.ctrlKey &&
+                entry.state !== "running"
+              ) {
                 event.preventDefault();
                 rerun(entry);
               }
@@ -48,8 +76,11 @@
                 size={12}
                 class="failed"
               />{/if}
-            <strong>{entry.name}</strong><span class="muted">{entry.state}</span
-            >
+            <strong>{entry.name}</strong><time
+              datetime={entry.startedAt}
+              title={entry.startedAt}
+              >{new Date(entry.startedAt).toLocaleTimeString()}</time
+            ><span class="muted">{entry.state}</span>
           </button>
           <button
             aria-label={`Rerun command ${entry.id}: ${entry.name}`}
@@ -58,14 +89,11 @@
           >
         </div>
         {#if expanded !== entry.id}<div class="result-preview">
-            {#if entry.error}<span class="error">{entry.error}</span
+            <div class="invocation">{invocationSummary(entry)}</div>
+            {#if entry.error}<span class="error">{preview(entry.error)}</span
               >{:else if entry.state === "running"}<span class="muted"
                 >Running…</span
-              >{:else}<CodeBlock
-                inline
-                language="json"
-                code={JSON.stringify(entry.result)}
-              />{/if}
+              >{:else}<span>{preview(entry.result)}</span>{/if}
           </div>{/if}
         {#if expanded === entry.id}
           <div class="entry-detail">
@@ -90,7 +118,7 @@
           </div>
         {/if}
       </article>
-    {:else}<p class="empty">Run a command to start this session.</p>{/each}
+    {:else}<p class="empty">Run a command to start your history.</p>{/each}
   </div>
 </section>
 
@@ -126,6 +154,13 @@
     flex: 1;
     padding: 7px 12px;
     text-align: left;
+  }
+  time {
+    color: var(--muted);
+    font-size: 0.85em;
+  }
+  .invocation {
+    color: var(--muted);
   }
   .entry strong {
     font-weight: 500;

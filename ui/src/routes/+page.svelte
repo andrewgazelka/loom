@@ -19,16 +19,27 @@
   import { Journal, type JournalEntry } from "$lib/workbench/journal";
   import ReplHistory from "$lib/workbench/ReplHistory.svelte";
   const journal = new Journal();
+  import { Workspace } from "$lib/workbench/workspace";
+  const workspace = new Workspace();
+  const draftError = workspace.storageError;
   let replay = false;
   function rerun(entry: JournalEntry) {
     if (entry.state === "running") return;
+    const problem = workspace.replayError(
+      commandById(entry.command),
+      entry.values,
+    );
+    if (problem) {
+      error = problem;
+      return;
+    }
     navigate(entry.command, entry.values);
     replay = true;
   }
   import CommandPanel from "$lib/workbench/CommandPanel.svelte";
   import CommandPalette from "$lib/workbench/CommandPalette.svelte";
   import Hash from "$lib/workbench/Hash.svelte";
-  import { commands, commandById } from "$lib/workbench/commands";
+  import { commands, commandById, type Command } from "$lib/workbench/commands";
   import {
     HttpTransport,
     RequestSlot,
@@ -92,6 +103,7 @@
     ...(currentActor
       ? { id: currentActor.id, def: currentActor.behavior_hash }
       : {}),
+    ...(commandId === V.add ? { name: "" } : {}),
     ...overrides,
   };
   $: actorTabs = [
@@ -147,7 +159,10 @@
         actors = value.actors;
         tree = value.tree;
         if (!definitions.some((def) => def.hash === selectedDef))
-          selectedDef = definitions[0]?.hash ?? "";
+          selectedDef =
+            definitions.find((def) => def.name === overrides.name)?.hash ??
+            definitions[0]?.hash ??
+            "";
         if (!actors.some((actor) => actor.id === selectedActor))
           selectedActor = actors[0]?.id ?? "";
         ready = true;
@@ -173,6 +188,25 @@
     palette = false;
     const url = new URL(location.href);
     url.searchParams.set("panel", id);
+    for (const key of ["target", "name", "id", "hash", "old", "new", "def"])
+      url.searchParams.delete(key);
+    const definition = definitions.find((def) => def.hash === selectedDef);
+    const identity = {
+      target: definition?.hash ?? "",
+      name: id === V.add ? "" : (definition?.name ?? ""),
+      id: selectedActor,
+      ...values,
+    };
+    for (const field of commandById(id).fields) {
+      if (
+        ["target", "name", "id", "hash", "old", "new", "def"].includes(
+          field.key,
+        )
+      ) {
+        const value = identity[field.key as keyof typeof identity];
+        if (value) url.searchParams.set(field.key, value);
+      }
+    }
     history.replaceState(null, "", url);
   }
   function selectDefinition(def: Definition) {
@@ -188,8 +222,12 @@
     next.has(id) ? next.delete(id) : next.add(id);
     collapsed = next;
   }
-  function completed(body: Row, result: Json) {
-    if (command.group === "Definitions") {
+  function completed(owner: number, origin: Command, body: Row, result: Json) {
+    if (owner !== panelVersion) {
+      if (!origin.read && !mock) void refresh();
+      return;
+    }
+    if (origin.group === "Definitions") {
       if ([V.view, V.add, V.update].some((verb) => verb === commandId))
         selectedDef = definitionView(result).hash;
       else if (typeof body.hash === "string") selectedDef = body.hash;
@@ -203,9 +241,19 @@
   async function connect() {
     error = "";
     try {
-      if (!mock)
-        client = new WorkbenchClient(new HttpTransport(endpoint, token));
+      if (workspace.busy)
+        throw new Error("Wait for running commands before reconnecting.");
+      const nextClient = mock
+        ? client
+        : new WorkbenchClient(new HttpTransport(endpoint, token));
+      const workspaceEndpoint = new URL(
+        endpoint || location.origin,
+      ).href.replace(/\/$/, "");
+      // Complete fallible validation/persistence before switching any active owner.
       localStorage.setItem(connectionKey, JSON.stringify({ endpoint, token }));
+      workspace.connect(workspaceEndpoint);
+      journal.connect(workspaceEndpoint);
+      client = nextClient;
       ready = false;
       panelVersion++;
       settings = false;
@@ -317,6 +365,18 @@
         }
         commandById(requestedPanel);
         commandId = requestedPanel;
+        overrides = Object.fromEntries(
+          commandById(requestedPanel)
+            .fields.filter(
+              (field) =>
+                ["target", "name", "id", "hash", "old", "new", "def"].includes(
+                  field.key,
+                ) && params.has(field.key),
+            )
+            .map((field) => [field.key, params.get(field.key)!]),
+        );
+        selectedDef = overrides.target ?? "";
+        selectedActor = overrides.id ?? "";
         if (mock) {
           const { MockTransport, fixtures } = await import(
             "$lib/workbench/mock"
@@ -517,6 +577,8 @@
               {navigate}
               {completed}
               {journal}
+              {workspace}
+              panelId={panelVersion}
               {replay}
             />{/key}{:else}<div class="empty">
             {loading
@@ -524,6 +586,7 @@
               : "Connect to load the workspace."}
           </div>{/if}
       </div>
+      {#if $draftError}<p class="error" role="alert">{$draftError}</p>{/if}
       <ReplHistory {journal} {rerun} />
     </main>
   </div>

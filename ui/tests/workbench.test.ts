@@ -413,3 +413,28 @@ test("blank defaulted fields and nullable optional JSON preserve server semantic
     }).params,
   ).toBeNull();
 });
+
+for (const args of [42, false, "hello", null, { n: 4 }, [1, 2], [[1, 2]]]) {
+  test(`run preserves ${JSON.stringify(args)} through the HTTP boundary`, async () => {
+    let sent: unknown;
+    const client = new WorkbenchClient(
+      new HttpTransport("", "", async (_url, options) => {
+        sent = JSON.parse(String(options?.body));
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            seq: 1,
+            diagnostics: [],
+            result: { output: args, effects: [] },
+          }),
+        );
+      }),
+    );
+    const body = parseFields(commandById(V.run), {
+      target: "echo",
+      args: JSON.stringify(args),
+    });
+    await client.call(commandById(V.run), body);
+    expect(sent).toEqual({ command: V.run, args: { target: "echo", args } });
+  });
+}

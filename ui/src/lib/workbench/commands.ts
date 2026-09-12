@@ -366,7 +366,6 @@ export function parseFields(
     )
   )
     throw new Error("assertions: expected SQL strings");
-  if ("args" in result) array(result.args, "args");
   if (
     "params" in result &&
     result.params !== null &&

@@ -313,12 +313,14 @@ async fn mcp_resources_read() {
     let ResourceContents::TextResourceContents {
         text,
         uri: returned_uri,
+        mime_type,
         ..
     } = &resource.contents[0]
     else {
         panic!("expected JSON text resource")
     };
     assert_eq!(returned_uri, &uri);
+    assert_eq!(mime_type.as_deref(), Some("application/json"));
     let rows: Value = serde_json::from_str(text).unwrap();
     let rows = rows.as_array().unwrap();
     assert_eq!(rows.len(), 3);

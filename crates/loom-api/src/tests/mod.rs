@@ -1,4 +1,5 @@
 mod cas;
+mod build_progress;
 mod transport;
 use super::*;
 #[tokio::test]

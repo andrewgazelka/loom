@@ -178,8 +178,17 @@ impl ServerHandler for LoomMcp {
             ));
         }
         Ok(ReadResourceResult {
-            contents: vec![ResourceContents::text(response.result.to_string(), uri)],
+            contents: vec![json_resource(response.result, uri)],
         })
+    }
+}
+
+fn json_resource(value: serde_json::Value, uri: &str) -> ResourceContents {
+    ResourceContents::TextResourceContents {
+        uri: uri.into(),
+        mime_type: Some("application/json".into()),
+        text: value.to_string(),
+        meta: None,
     }
 }
 
