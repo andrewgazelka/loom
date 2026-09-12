@@ -1,5 +1,5 @@
 import { validateSiteAssets } from "./site-assets";
-/** Production HTTP path. All linked browser data is created by a real TS guest. */
+/** Production HTTP path. All linked browser data is created by a real Rust guest. */
 const endpoint = process.env.LOOM_URL;
 const token = process.env.LOOM_TOKEN;
 if (!endpoint || !token) throw new Error('Set LOOM_URL and LOOM_TOKEN for a running loomd');
@@ -34,13 +34,13 @@ try {
     const response = await fetch(`${endpoint}/v1/command`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ command: 'cas.list', args: {} }) });
     assert(response.status === 401, 'unauthenticated CAS listing was accepted');
   });
-  await check('TS guest creates real linked CAS values', async () => {
-    const source = `import {cas} from "loom"; export function main(): unknown {
-      const leaf = cas.put({label:"Site browser leaf",answer:42});
-      const parent = cas.put({label:"Site browser parent",child:{$ref:leaf.$ref}});
-      return {leaf:{$ref:leaf.$ref},parent:{$ref:parent.$ref}};
+  await check('Rust guest creates real linked CAS values', async () => {
+    const source = `#[loom::def(effects=["cas.put"])] pub fn main() -> loom::Value {
+      let leaf = loom::cas::put(loom::serde_json::json!({"label":"Site browser leaf","answer":42})).expect("leaf");
+      let parent = loom::cas::put(loom::serde_json::json!({"label":"Site browser parent","child":leaf})).expect("parent");
+      loom::serde_json::json!({"leaf":leaf,"parent":parent})
     }`;
-    const definition = await operation('define', { name: 'site-browser-seed', lang: 'ts', source });
+    const definition = await operation('define', { name: 'site-browser-seed', lang: 'rust', source });
     definitionHash = definition.result.def.hash;
     const values = await command('call', { hash: definitionHash, args: [] });
     leafCid = values.leaf.$ref;

@@ -32,6 +32,7 @@ pub use actor::Actor;
 pub use directory::{ActorInfo, MonitorInfo};
 pub use durability_worker::ShippingFailure;
 pub use effects::{DefaultEffects, EffectError, EffectHandler, EffectKey};
+pub use history::memo::{MemoConfig, PromoteReport};
 pub use ids::ActorId;
 pub use node::Node;
 pub use remote_store::{Clock, StoreConfig, SystemClock};

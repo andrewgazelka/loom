@@ -101,7 +101,7 @@
 <div class="section-heading">
   <div>
     <h1>Definitions</h1>
-    <p>Named code. Immutable identities. TypeScript and Rust.</p>
+    <p>Named code. Immutable identities. Rust.</p>
   </div>
   <AlignLeft size={18} strokeWidth={1.4} />
 </div>
@@ -112,7 +112,7 @@
     >
     <div class="definition-title">
       <h2>{definitionName(selected)}</h2>
-      <span class="badge">{selected.lang === "rust" ? "Rust" : "TS"}</span
+      <span class="badge">Rust</span
       ><button class="small-button right" on:click={() => call(selected!)}
         ><Play size={12} /> Call</button
       >
@@ -124,7 +124,7 @@
     >{#if source}<details class="source-card"><summary class="source-summary">Source</summary>
         <CodeBlock
           code={source}
-          language={selected.lang === "rust" ? "rust" : "typescript"}
+          language="rust"
         />
       </details>{:else if loading}<p class="empty">Reading definition…</p>{/if}
     <details class="plain-details">
@@ -184,7 +184,7 @@
               >{short(def.hash, 25)}</code
             >
           </div>
-          <span class="badge">{def.lang === "rust" ? "Rust" : "TS"}</span><span
+          <span class="badge">Rust</span><span
             class="quiet"
             >{typeof def.component_size === "number"
               ? bytes(def.component_size)
@@ -192,7 +192,7 @@
                 ? "Built"
                 : "On first use"}</span
           ><ChevronRight size={12} /></button
-        ><details class="source-peek"><summary>Source</summary><RowPreview code language={def.lang === "rust" ? "rust" : "ts"} load={() => preview(def)} /></details></div>{:else}<p class="empty">
+        ><details class="source-peek"><summary>Source</summary><RowPreview code load={() => preview(def)} /></details></div>{:else}<p class="empty">
           No definitions yet. Save one from the session prompt.
         </p>{/each}
     </div>{/if}{/if}

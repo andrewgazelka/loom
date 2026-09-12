@@ -54,7 +54,7 @@ export function eventRow(event: LogEvent): JournalRow {
   } else if (type === "evaluated") {
     result.title = typeof data.source === "string" ? data.source : "Evaluation";
     result.source = typeof data.source === "string" ? data.source : undefined;
-    result.language = "ts";
+    result.language = "rust";
     result.value = data.result;
   } else if (type === "actor_created") {
     const actor = record(data.actor);
@@ -72,7 +72,7 @@ export function localRow(entry: Entry): JournalRow {
     id: `local-${entry.id}`,
     kind: entry.mode,
     title: entry.name || entry.mode,
-    language: entry.mode.includes("rust") ? "rust" : "ts",
+    language: entry.mode === "command" ? "json" : "rust",
     source: entry.source,
     value:
       entry.mode === "eval" && "value" in result

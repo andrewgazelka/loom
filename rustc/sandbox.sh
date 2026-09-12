@@ -58,15 +58,11 @@ case "$cc_executable" in
   /nix/store/*) ;;
   *) args+=(--symlink "$cc_executable" /opt/loom-bin/cc) ;;
 esac
-if command -v cargo-component >/dev/null; then
-  args+=(--ro-bind "$(realpath "$(command -v cargo-component)")" /opt/loom-bin/cargo-component)
-fi
 args+=(--ro-bind "$source_root" "$source_root" --bind "$target_dir" "$target_dir")
 for guest in loom-guest-rs loom-guest-macros loom-proto; do
   args+=(--ro-bind "$repo_root/crates/$guest" "$repo_root/crates/$guest")
 done
-args+=(--ro-bind "$repo_root/wit" "$repo_root/wit"
-  --ro-bind "$repo_root/rustc/build.sh" /opt/build.sh
+args+=(--ro-bind "$repo_root/rustc/build.sh" /opt/build.sh
   --ro-bind "$repo_root/rustc/capture.sh" /opt/capture.sh --chdir "$crate_dir")
 if [[ $mode == vendor ]]; then
   # Cargo vendor resolves/downloads packages but never executes their build scripts.
@@ -81,23 +77,19 @@ if [[ $mode == vendor ]]; then
   [[ -f $ca_bundle ]] || { echo 'trusted CA bundle unavailable' >&2; exit 69; }
   args+=(--ro-bind "$(realpath "$ca_bundle")" /opt/ca-bundle.crt
     --setenv CARGO_HTTP_CAINFO /opt/ca-bundle.crt --setenv SSL_CERT_FILE /opt/ca-bundle.crt)
-  if [[ ${LOOM_RUST_TARGET:-wasm32-wasip1} == wasm32-unknown-unknown ]]; then
-    library_manifest="$rust_root/lib/rustlib/src/rust/library/Cargo.toml"
-    [[ -f $library_manifest ]] || { echo 'shared core builds require matching rust-src' >&2; exit 69; }
-    args+=(--setenv RUSTC_BOOTSTRAP 1 --setenv LOOM_RUST_SRC_MANIFEST "$library_manifest")
-    run=(/bin/sh -eu -c '
-      cargo metadata --format-version=1 > /dev/null
-      cargo vendor --locked --sync "$LOOM_RUST_SRC_MANIFEST" vendor > .cargo/config.toml
-      # Preserve original archives for offline compiler-lock source verification.
-      # These bytes are checked against the selected compiler lock before trust.
-      for archive in "$CARGO_HOME"/registry/cache/*/*.crate; do
-        [ -f "$archive" ] || continue
-        cp "$archive" "vendor/.loom-archive-${archive##*/}"
-      done
-    ')
-  else
-    run=(/bin/sh -eu -c 'cargo metadata --format-version=1 > /dev/null; cargo vendor --locked vendor > .cargo/config.toml')
-  fi
+  library_manifest="$rust_root/lib/rustlib/src/rust/library/Cargo.toml"
+  [[ -f $library_manifest ]] || { echo 'shared core builds require matching rust-src' >&2; exit 69; }
+  args+=(--setenv RUSTC_BOOTSTRAP 1 --setenv LOOM_RUST_SRC_MANIFEST "$library_manifest")
+  run=(/bin/sh -eu -c '
+    cargo metadata --format-version=1 > /dev/null
+    cargo vendor --locked --sync "$LOOM_RUST_SRC_MANIFEST" vendor > .cargo/config.toml
+    # Preserve original archives for offline compiler-lock source verification.
+    # These bytes are checked against the selected compiler lock before trust.
+    for archive in "$CARGO_HOME"/registry/cache/*/*.crate; do
+      [ -f "$archive" ] || continue
+      cp "$archive" "vendor/.loom-archive-${archive##*/}"
+    done
+  ')
 
 else
   [[ -f $crate_dir/Cargo.lock && -f $crate_dir/.cargo/config.toml && -d $crate_dir/vendor ]] || {
@@ -108,7 +100,7 @@ else
     echo 'offline Cargo configuration differs from the fixed vendor contract' >&2; exit 65;
   }
   args+=(--setenv CARGO_NET_OFFLINE true --setenv LOOM_LOCKED 1
-    --setenv LOOM_RUST_TARGET "${LOOM_RUST_TARGET:-wasm32-wasip1}"
+    --setenv LOOM_RUST_TARGET "${LOOM_RUST_TARGET:-wasm32-unknown-unknown}"
     --setenv LOOM_CAS_SOURCES "$source_root/source-trees")
   if [[ $mode == build && -n ${LOOM_COMPILER_CACHE_OWNER:-} ]]; then
     args+=(--ro-bind "$LOOM_COMPILER_CACHE_OWNER" "$LOOM_COMPILER_CACHE_OWNER"

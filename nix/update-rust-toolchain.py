@@ -16,8 +16,6 @@ RUST_KEY_SHA256 = "e54b09a439647e006b4831eec9785cbaaf3e07ab371c3a6ee6a68e1bdb9fb
 TARGETS = {
     "host-darwin": {"package": "rust", "target": "aarch64-apple-darwin"},
     "host-linux": {"package": "rust", "target": "x86_64-unknown-linux-gnu"},
-    "wasip1": {"package": "rust-std", "target": "wasm32-wasip1"},
-    "wasip2": {"package": "rust-std", "target": "wasm32-wasip2"},
     "rust-src": {"package": "rust-src", "target": "*"},
 }
 

@@ -1,0 +1,4 @@
+<script lang="ts">let { data } = $props();</script>
+<svelte:head><title>MCP tools · Loom</title><meta name="description" content="MCP tool reference generated from the Loom actor specification." /></svelte:head>
+<div class="eyebrow">GENERATED REFERENCE</div><h1>MCP tools</h1><p class="page-intro">The actor control interface, drawn from the MCP surface section of <a href="/docs/actors-turso/">the actor specification</a>.</p>
+{#if data.tools.length}<div class="table-wrap"><table><thead><tr><th>Tool</th><th>Description</th></tr></thead><tbody>{#each data.tools as tool}<tr><td><code>{tool.name}</code></td><td>{tool.description}</td></tr>{/each}</tbody></table></div>{:else}<div class="empty-state"><h2>No MCP surface section in this checkout</h2><p>Add the tool list to <code>docs/actors-turso.md</code> under an MCP surface heading. This table is generated when the site builds.</p></div>{/if}

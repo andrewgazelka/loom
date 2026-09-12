@@ -54,14 +54,14 @@ if [[ ${1:-} == --worker ]]; then
   status=0
   case "$action" in
     prepare) ;;
-    tools) nix build --max-jobs 1 --cores 8 --out-link "$base/tools" nixpkgs#cargo-component nixpkgs#binaryen nixpkgs#podman nixpkgs#bubblewrap || status=$? ;;
+    tools) nix build --max-jobs 1 --cores 8 --out-link "$base/tools" nixpkgs#binaryen nixpkgs#podman nixpkgs#bubblewrap || status=$? ;;
     machine)
       nix build --max-jobs 1 --cores 8 --out-link "$base/static-busybox" nixpkgs#pkgsStatic.busybox
       LOOM_STATIC_BUSYBOX="$base/static-busybox/bin/busybox" cargo test --locked -p loom-rt machine::tests::hermetic_exec_uses_snapshot_and_caches_across_actors -- --ignored --exact || status=$?
       ;;
     targets)
       mkdir -p "$base/official" "$base/downloads" "$base/bin"
-      for package in rustc-1.97.0-x86_64-unknown-linux-gnu rust-std-1.97.0-x86_64-unknown-linux-gnu rust-std-1.97.0-wasm32-wasip1 rust-std-1.97.0-wasm32-wasip2; do
+      for package in rustc-1.97.0-x86_64-unknown-linux-gnu rust-std-1.97.0-x86_64-unknown-linux-gnu rust-src-1.97.0; do
         archive="$package.tar.xz"
         cd "$base/downloads"
         [[ -f "$archive" ]] || curl --fail --location --retry 2 -o "$archive" "https://static.rust-lang.org/dist/$archive"
@@ -74,8 +74,7 @@ if [[ ${1:-} == --worker ]]; then
       chmod +x "$base/bin/rustc.new"
       mv "$base/bin/rustc.new" "$base/bin/rustc"
       "$base/bin/rustc" --version
-      printf 'fn main() { println!("loom WASI toolchain smoke"); }\n' > "$base/downloads/smoke.rs"
-      "$base/bin/rustc" --target wasm32-wasip2 --emit=obj "$base/downloads/smoke.rs" -o "$base/downloads/smoke.o"
+      test -f "$base/official/lib/rustlib/src/rust/library/Cargo.toml"
       ;;
     check) cargo check --workspace --all-targets --locked || status=$? ;;
     test) cargo test --workspace --locked || status=$? ;;
@@ -93,7 +92,7 @@ POLICY
       bash scripts/container-smoke.sh || status=$?
       ;;
     vendor)
-      cargo run --locked -p loom-build --example build_smoke -- "$PWD" rust examples/bundles/itoa.json "$base/itoa.wasm" || status=$?
+      cargo run --locked -p loom-build --example build_smoke -- "$PWD" examples/bundles/itoa.json "$base/itoa.wasm" || status=$?
       [[ "$status" -ne 0 ]] || test -s "$base/itoa.wasm" || status=$?
       ;;
     compiler)
@@ -112,9 +111,9 @@ COMPILER
       mkdir -p "$base/legacy-sdk"
       tar -xf "$base/legacy-sdk.tar" -C "$base/legacy-sdk"
       LOOM_BUILD_DIR="$base/sdk-rebuild-cache" cargo run --locked -p loom-build --example sdk_rebuild_smoke -- "$PWD" "$base/legacy-sdk" "$base/sdk-rebuilt.wasm" || status=$?
-      [[ "$status" -ne 0 ]] || cargo run --locked -p loom-rt --example component_smoke -- "$base/sdk-rebuilt.wasm" rust itoa || status=$?
+      [[ "$status" -ne 0 ]] || cargo run --locked -p loom-rt --example component_smoke -- "$base/sdk-rebuilt.wasm" itoa || status=$?
       ;;
-    vendor_run) cargo run --locked -p loom-rt --example component_smoke -- "$base/itoa.wasm" rust itoa || status=$? ;;
+    vendor_run) cargo run --locked -p loom-rt --example component_smoke -- "$base/itoa.wasm" itoa || status=$? ;;
     sandbox) bash rustc/test-sandbox.sh || status=$? ;;
     nix)
       /run/wrappers/bin/sudo -n env NIX_REMOTE=local \
@@ -133,8 +132,6 @@ COMPILER
       fi
       ;;
     dag)
-      (cd checker && bun install --frozen-lockfile)
-      (cd guest-ts && bun install --frozen-lockfile)
       bash scripts/dag-cbor-check.sh || status=$?
       ;;
     acceptance)
@@ -143,8 +140,6 @@ COMPILER
       ;;
     m9)
       export LOOM_STATIC_BUSYBOX="$base/static-busybox/bin/busybox"
-      (cd checker && bun install --frozen-lockfile)
-      (cd guest-ts && bun install --frozen-lockfile)
       bash scripts/milestones/m9.sh || status=$?
       ;;
     *) echo "Unknown action: $action"; status=64 ;;
@@ -161,8 +156,8 @@ host=dev-compute-4
 base="/home/andrew/loom-$session"
 unit="loom-check-$session"
 ssh "$host" "mkdir -p '$base'; if systemctl --user is-active --quiet '$unit'; then echo 'Linux verification already running' >&2; exit 75; fi; mkdir '$base/staging'"
-inputs=(Cargo.toml crates wit scripts)
-for input in flake.nix flake.lock nix Cargo.lock Dockerfile .dockerignore deploy checker rustc guest-ts ui examples; do
+inputs=(Cargo.toml crates scripts)
+for input in flake.nix flake.lock nix Cargo.lock Dockerfile .dockerignore deploy rustc ui examples; do
   [[ ! -e "$input" ]] || inputs+=("$input")
 done
 tar_flags=()

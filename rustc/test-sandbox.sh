@@ -32,5 +32,5 @@ bash "$repo/rustc/sandbox.sh" vendor "$work/source" "$work/source/root" "$work/t
 echo 'sandbox vendor: pinned sources and no build-script execution'
 bash "$repo/rustc/sandbox.sh" build "$work/source" "$work/source/root" "$work/target" "$repo"
 [[ -n $(find "$work/target" -name sandbox-witness -print -quit) ]]
-[[ -f $work/target/wasm32-wasip1/release/sandbox_witness.wasm ]]
-echo 'sandbox 4/4: vendor, credentials, network, component'
+[[ -f $work/target/wasm32-unknown-unknown/release/sandbox_witness.wasm ]]
+echo 'sandbox 4/4: vendor, credentials, network, core wasm'

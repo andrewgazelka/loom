@@ -6,7 +6,12 @@ use loom_proto::{Diagnostic, Lang};
 /// Admission policy compiled into this checker, used to invalidate artifacts
 /// when policy changes without consulting mutable runtime source files.
 pub fn safety_policy_bytes() -> &'static [u8] {
-    concat!(include_str!("safety.rs"), include_str!("rust_effects.rs"), include_str!("handler_references.rs")).as_bytes()
+    concat!(
+        include_str!("safety.rs"),
+        include_str!("rust_effects.rs"),
+        include_str!("handler_references.rs")
+    )
+    .as_bytes()
 }
 
 pub fn untrusted_source_diagnostics(source: &str) -> Vec<Diagnostic> {

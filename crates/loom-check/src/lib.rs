@@ -1,18 +1,17 @@
 //! Language checking before definitions become executable identities.
+mod rust_file;
+use rust_file::check_rust_file;
 mod crates;
 pub use crates::{CrateDependency, crate_dependencies};
-mod rust_effects;
 mod handler_references;
+mod rust_effects;
 mod safety;
-pub use safety::{safety_policy_bytes, untrusted_package_diagnostics, untrusted_source_diagnostics};
 use loom_proto::{DefineRequest, Diagnostic, ExportSig, Lang, ParamSig, TypeSig, ValueShape};
-use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, path::PathBuf, process::Stdio};
-use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::{Child, ChildStdin, ChildStdout, Command},
-    sync::Mutex,
+pub use safety::{
+    safety_policy_bytes, untrusted_package_diagnostics, untrusted_source_diagnostics,
 };
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckedDef {
@@ -30,30 +29,12 @@ pub enum CheckError {
     Io(#[from] std::io::Error),
     #[error("checker protocol: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("checker sidecar: {0}")]
-    Sidecar(String),
 }
-struct Sidecar {
-    child: Child,
-    input: ChildStdin,
-    output: BufReader<ChildStdout>,
-}
-pub struct Checker {
-    root: PathBuf,
-    sidecar: Mutex<Option<Sidecar>>,
-}
-#[derive(Deserialize)]
-struct TsResult {
-    canonical: String,
-    sig: TypeSig,
-    diagnostics: Vec<Diagnostic>,
-}
+#[derive(Default)]
+pub struct Checker;
 impl Checker {
-    pub fn new(root: PathBuf) -> Self {
-        Self {
-            root,
-            sidecar: Mutex::new(None),
-        }
+    pub fn new() -> Self {
+        Self
     }
     pub async fn check(&self, request: &DefineRequest) -> Result<CheckedDef, CheckError> {
         self.check_with_signatures(request, &BTreeMap::new()).await
@@ -63,65 +44,7 @@ impl Checker {
         request: &DefineRequest,
         signatures: &BTreeMap<String, TypeSig>,
     ) -> Result<CheckedDef, CheckError> {
-        let mut checked = match request.lang {
-            Lang::Ts => {
-                let mut guard = self.sidecar.lock().await;
-                if guard.is_none() {
-                    let mut child = Command::new("bun")
-                        .arg(self.root.join("checker/checker.ts"))
-                        .stdin(Stdio::piped())
-                        .stdout(Stdio::piped())
-                        .stderr(Stdio::inherit())
-                        .kill_on_drop(true)
-                        .spawn()?;
-                    let input = child
-                        .stdin
-                        .take()
-                        .ok_or_else(|| CheckError::Sidecar("missing stdin".into()))?;
-                    let output = BufReader::new(
-                        child
-                            .stdout
-                            .take()
-                            .ok_or_else(|| CheckError::Sidecar("missing stdout".into()))?,
-                    );
-                    *guard = Some(Sidecar {
-                        child,
-                        input,
-                        output,
-                    });
-                }
-                let sidecar = guard
-                    .as_mut()
-                    .ok_or_else(|| CheckError::Sidecar("not running".into()))?;
-                let mut message = serde_json::to_value(request)?;
-                message["dep_sigs"] = serde_json::to_value(signatures)?;
-                let mut bytes = serde_json::to_vec(&message)?;
-                bytes.push(b'\n');
-                sidecar.input.write_all(&bytes).await?;
-                sidecar.input.flush().await?;
-                let mut line = String::new();
-                if sidecar.output.read_line(&mut line).await? == 0 {
-                    let status = sidecar.child.wait().await?;
-                    *guard = None;
-                    return Err(CheckError::Sidecar(format!("exited {status}")));
-                }
-                let response: serde_json::Value = serde_json::from_str(&line)?;
-                if let Some(error) = response.get("error") {
-                    return Err(CheckError::Sidecar(error.to_string()));
-                }
-                let result: TsResult = serde_json::from_value(response)?;
-                CheckedDef {
-                    hash: String::new(),
-                    lang: request.lang,
-                    name: request.name.clone(),
-                    source: result.canonical,
-                    deps: request.deps.clone(),
-                    sig: result.sig,
-                    diagnostics: result.diagnostics,
-                }
-            }
-            Lang::Rust => check_rust(request, signatures),
-        };
+        let mut checked = check_rust(request, signatures);
         for hash in checked.deps.values() {
             if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
                 checked.diagnostics.push(diagnostic(
@@ -145,12 +68,7 @@ impl Checker {
 fn diagnostic(lang: Lang, code: &str, message: &str) -> Diagnostic {
     Diagnostic {
         lang,
-        file: if lang == Lang::Rust {
-            "src/lib.rs"
-        } else {
-            "definition.ts"
-        }
-        .into(),
+        file: "src/lib.rs".into(),
         line: 1,
         col: 1,
         code: code.into(),
@@ -367,7 +285,14 @@ fn check_rust(request: &DefineRequest, signatures: &BTreeMap<String, TypeSig>) -
         for export in &mut checked.sig.exports {
             export.effects.unknown = true;
             if export.effects.declared.is_none() {
-                checked.diagnostics.push(diagnostic(Lang::Rust, "LOOM_EFFECT_ROW", &format!("{} has unknown dependency effects; declare its residual host row", export.name)));
+                checked.diagnostics.push(diagnostic(
+                    Lang::Rust,
+                    "LOOM_EFFECT_ROW",
+                    &format!(
+                        "{} has unknown dependency effects; declare its residual host row",
+                        export.name
+                    ),
+                ));
             }
         }
     }
@@ -381,362 +306,5 @@ fn check_rust(request: &DefineRequest, signatures: &BTreeMap<String, TypeSig>) -
     }
     checked
 }
-fn check_rust_file(request: &DefineRequest, signatures: &BTreeMap<String, TypeSig>) -> CheckedDef {
-    let source = request.source.replace("\r\n", "\n");
-    let mut diagnostics = Vec::new();
-    let mut deps = request.deps.clone();
-    let mut exports = Vec::new();
-    let mut aggregate_effects = loom_proto::EffectSet::default();
-    let source = match syn::parse_file(&source) {
-        Ok(mut file) => {
-            handler_references::lower(&mut file, &mut deps, &mut diagnostics);
-            struct EntryVisitor {
-                count: usize,
-            }
-            impl<'ast> syn::visit::Visit<'ast> for EntryVisitor {
-                fn visit_attribute(&mut self, attribute: &'ast syn::Attribute) {
-                    if attribute
-                        .path()
-                        .segments
-                        .last()
-                        .is_some_and(|segment| segment.ident == "def" || segment.ident == "actor")
-                    {
-                        self.count += 1;
-                    }
-                    syn::visit::visit_attribute(self, attribute);
-                }
-            }
-            let mut entries = EntryVisitor { count: 0 };
-            syn::visit::Visit::visit_file(&mut entries, &file);
-            if entries.count > 1 {
-                diagnostics.push(diagnostic(Lang::Rust,"LOOM_ENTRYPOINT","A definition crate must have one #[loom::def] or #[loom::actor] entrypoint; place reusable functions in separate hashed definitions."));
-            }
-            diagnostics.extend(rust_effects::unsafe_source_diagnostics(&file));
-            diagnostics.extend(rust_effects::unsupported_mode_diagnostics(&file));
-            let effects = rust_effects::infer(&file, signatures);
-            diagnostics.extend(rust_effects::declaration_diagnostics(&file, &effects));
-            for item in &file.items {
-                if let syn::Item::Fn(function) = item
-                    && function.attrs.iter().any(|attribute| {
-                        attribute
-                            .path()
-                            .segments
-                            .last()
-                            .is_some_and(|segment| segment.ident == "def")
-                    })
-                {
-                    let params: Vec<ParamSig> = function
-                        .sig
-                        .inputs
-                        .iter()
-                        .filter_map(|argument| {
-                            let syn::FnArg::Typed(argument) = argument else {
-                                return None;
-                            };
-                            let name = if let syn::Pat::Ident(binding) = argument.pat.as_ref() {
-                                binding.ident.to_string()
-                            } else {
-                                "argument".into()
-                            };
-                            Some(ParamSig {
-                                name,
-                                shape: rust_type_shape(&argument.ty),
-                            })
-                        })
-                        .collect();
-                    let returns = match &function.sig.output {
-                        syn::ReturnType::Default => ValueShape::Null,
-                        syn::ReturnType::Type(_, ty) => rust_type_shape(ty),
-                    };
-                    exports.push(ExportSig {
-                        name: function.sig.ident.to_string(),
-                        params,
-                        returns,
-                        effects: effects
-                            .get(&function.sig.ident.to_string())
-                            .cloned()
-                            .unwrap_or_default(),
-                    });
-                }
-            }
-            aggregate_effects = rust_effects::aggregate(&file, signatures, &effects, &exports);
-            diagnostics.extend(rust_effects::actor_declaration_diagnostics(&file, &aggregate_effects));
-            fn ambient_macro(tokens: proc_macro2::TokenStream) -> bool {
-                tokens.into_iter().any(|token| match token {
-                    proc_macro2::TokenTree::Ident(name) => [
-                        "include",
-                        "include_str",
-                        "include_bytes",
-                        "env",
-                        "option_env",
-                    ]
-                    .contains(&name.to_string().as_str()),
-                    proc_macro2::TokenTree::Group(group) => ambient_macro(group.stream()),
-                    _ => false,
-                })
-            }
-            struct IoVisitor {
-                violations: Vec<String>,
-            }
-            impl<'ast> syn::visit::Visit<'ast> for IoVisitor {
-                fn visit_macro(&mut self, mac: &'ast syn::Macro) {
-                    if mac.path.segments.last().is_some_and(|segment| {
-                        [
-                            "include",
-                            "include_str",
-                            "include_bytes",
-                            "env",
-                            "option_env",
-                        ]
-                        .contains(&segment.ident.to_string().as_str())
-                    }) || ambient_macro(mac.tokens.clone())
-                    {
-                        self.violations
-                            .push("compile-time ambient input macro".into());
-                    }
-                    syn::visit::visit_macro(self, mac);
-                }
-                fn visit_attribute(&mut self, attribute: &'ast syn::Attribute) {
-                    if attribute.path().is_ident("path") {
-                        self.violations.push("external module path".into());
-                    }
-                    fn conditional_path(meta: &syn::Meta) -> bool {
-                        if meta.path().is_ident("path") {
-                            return true;
-                        }
-                        if let syn::Meta::List(list) = meta
-                            && list.path.is_ident("cfg_attr")
-                            && let Ok(attributes)=list.parse_args_with(syn::punctuated::Punctuated::<syn::Meta,syn::Token![,]>::parse_terminated){return attributes.iter().skip(1).any(conditional_path);}
-                        false
-                    }
-                    if conditional_path(&attribute.meta) {
-                        self.violations.push("external module path".into());
-                    }
-                    if let syn::Meta::List(list) = &attribute.meta
-                        && ambient_macro(list.tokens.clone())
-                    {
-                        self.violations
-                            .push("compile-time ambient input attribute".into());
-                    }
-                    syn::visit::visit_attribute(self, attribute);
-                }
-                fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
-                    fn forbidden(prefix: &[String]) -> bool {
-                        prefix.last().is_some_and(|name| {
-                            [
-                                "include",
-                                "include_str",
-                                "include_bytes",
-                                "env",
-                                "option_env",
-                            ]
-                            .contains(&name.as_str())
-                        }) || (prefix.first().is_some_and(|name| name == "std")
-                            && prefix.get(1).is_some_and(|name| {
-                                ["fs", "net", "time", "env", "process"].contains(&name.as_str())
-                            }))
-                    }
-                    fn inspect(tree: &syn::UseTree, mut prefix: Vec<String>) -> bool {
-                        match tree {
-                            syn::UseTree::Path(path) => {
-                                prefix.push(path.ident.to_string());
-                                inspect(&path.tree, prefix)
-                            }
-                            syn::UseTree::Group(group) => {
-                                group.items.iter().any(|item| inspect(item, prefix.clone()))
-                            }
-                            syn::UseTree::Name(name) => {
-                                prefix.push(name.ident.to_string());
-                                forbidden(&prefix)
-                            }
-                            syn::UseTree::Rename(rename) => {
-                                prefix.push(rename.ident.to_string());
-                                forbidden(&prefix)
-                            }
-                            syn::UseTree::Glob(_) => {
-                                prefix.first().is_some_and(|name| name == "std")
-                            }
-                        }
-                    }
-                    if inspect(&item.tree, Vec::new()) {
-                        self.violations.push("ambient import".into());
-                    }
-                    syn::visit::visit_item_use(self, item);
-                }
-                fn visit_path(&mut self, path: &'ast syn::Path) {
-                    let segments: Vec<String> = path
-                        .segments
-                        .iter()
-                        .map(|segment| segment.ident.to_string())
-                        .collect();
-                    if segments.first().is_some_and(|s| s == "std")
-                        && segments.get(1).is_some_and(|s| {
-                            ["fs", "net", "time", "env", "process"].contains(&s.as_str())
-                        })
-                    {
-                        self.violations.push(segments.join("::"));
-                    }
-                    syn::visit::visit_path(self, path);
-                }
-            }
-            let mut visitor = IoVisitor {
-                violations: Vec::new(),
-            };
-            syn::visit::Visit::visit_file(&mut visitor, &file);
-            for path in visitor.violations {
-                diagnostics.push(diagnostic(
-                    Lang::Rust,
-                    "LOOM_IO",
-                    &format!("{path} is unavailable; use loom effects."),
-                ));
-            }
-            prettyplease::unparse(&file)
-        }
-        Err(error) => {
-            diagnostics.push(diagnostic(Lang::Rust, "RUST_PARSE", &error.to_string()));
-            source
-        }
-    };
-    CheckedDef {
-        hash: String::new(),
-        lang: Lang::Rust,
-        name: request.name.clone(),
-        source,
-        deps,
-        sig: TypeSig {
-            exports,
-            effects: aggregate_effects,
-        },
-        diagnostics,
-    }
-}
-
-fn rust_type_shape(ty: &syn::Type) -> ValueShape {
-    match ty {
-        syn::Type::Path(path) => {
-            let Some(segment) = path.path.segments.last() else {
-                return ValueShape::Value;
-            };
-            let name = segment.ident.to_string();
-            match name.as_str() {
-                "u8" | "u16" | "u32" | "u64" | "usize" | "i8" | "i16" | "i32" | "i64" | "isize"
-                | "f32" | "f64" => ValueShape::Number,
-                "bool" => ValueShape::Boolean,
-                "String" | "str" => ValueShape::String,
-                "Vec" | "Ref" | "Result" => {
-                    let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
-                        return ValueShape::Value;
-                    };
-                    let inner = arguments
-                        .args
-                        .iter()
-                        .find_map(|argument| {
-                            if let syn::GenericArgument::Type(ty) = argument {
-                                Some(rust_type_shape(ty))
-                            } else {
-                                None
-                            }
-                        })
-                        .unwrap_or_default();
-                    match name.as_str() {
-                        "Vec" => ValueShape::Array {
-                            items: Box::new(inner),
-                        },
-                        "Ref" => ValueShape::Ref {
-                            target: Box::new(inner),
-                        },
-                        _ => inner,
-                    }
-                }
-                _ => ValueShape::Value,
-            }
-        }
-        syn::Type::Reference(reference) => rust_type_shape(&reference.elem),
-        syn::Type::Tuple(tuple) if tuple.elems.is_empty() => ValueShape::Null,
-        _ => ValueShape::Value,
-    }
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[tokio::test]
-    async fn rust_rejects_ambient_io_and_hashes_formatting_stably() {
-        let checker = Checker::new(PathBuf::new());
-        let mut request = DefineRequest {
-            lang: Lang::Rust,
-            name: "test".into(),
-            source: "pub fn f()->u32 { 2 }".into(),
-            deps: BTreeMap::new(),
-            allowed_effects: None,
-        };
-        let first = checker.check(&request).await.unwrap();
-        request.source = "pub fn f() -> u32 {\n 2\n}\n".into();
-        assert_eq!(first.hash, checker.check(&request).await.unwrap().hash);
-        request.allowed_effects = Some(vec![]);
-        assert_ne!(first.hash, checker.check(&request).await.unwrap().hash);
-        request.source = "pub fn f() { std::fs::read(\"secret\").unwrap(); }".into();
-        assert!(
-            !checker
-                .check(&request)
-                .await
-                .unwrap()
-                .diagnostics
-                .is_empty()
-        );
-    }
-    #[tokio::test]
-    async fn external_crate_initialization_is_not_claimed_pure() {
-        let request=DefineRequest {
-            lang:Lang::Rust,name:"external".into(),deps:BTreeMap::new(),allowed_effects:None,
-            source:serde_json::json!({"files":{"Cargo.toml":"[package]\nname='external'\nversion='0.1.0'\n[dependencies]\nthird_party='1'\n","src/lib.rs":"#[loom::def(effects=[])] pub fn main()->i64 {42}"}}).to_string(),
-        };
-        let checked = Checker::new(PathBuf::new()).check(&request).await.unwrap();
-        assert!(checked.diagnostics.is_empty());
-        assert!(checked.sig.effects.unknown);
-        assert!(checked.sig.exports[0].effects.unknown);
-    }
-    #[tokio::test]
-    async fn rejects_compiler_file_reads_and_macro_aliases() {
-        let checker = Checker::new(PathBuf::new());
-        for source in [
-            r#"#[loom::def] fn f()->String { include_str!("/etc/passwd").into() }"#,
-            r#"#[loom::def] fn f()->String { include_str!("/tmp/secret").into() }"#,
-            r#"#[loom::def] fn f()->String { env!("LOOM_TOKEN").into() }"#,
-            r#"use core::include_str as secret; #[loom::def] fn f()->String {secret!("/etc/passwd").into()}"#,
-            r#"#[cfg_attr(all(),path="/etc/passwd")]mod secret;"#,
-            r#"use std::{fs as files}; #[loom::def]fn f(){let _=files::read("/tmp/x");}"#,
-        ] {
-            let request = DefineRequest {
-                lang: Lang::Rust,
-                name: "test".into(),
-                source: source.into(),
-                deps: BTreeMap::new(),
-                allowed_effects: None,
-            };
-            assert!(
-                checker
-                    .check(&request)
-                    .await
-                    .unwrap()
-                    .diagnostics
-                    .iter()
-                    .any(|error| error.code == "LOOM_IO"),
-                "{source}"
-            );
-        }
-    }
-    #[test]
-    fn bundle_bytes_roundtrip_and_paths_are_bounded() {
-        let original = vec![0, 255, 128, 1];
-        assert_eq!(
-            SourceFile::from_bytes(original.clone()).bytes().unwrap(),
-            original
-        );
-        let mut files = BTreeMap::new();
-        files.insert("Cargo.toml".into(), SourceFile::Text("[package]".into()));
-        files.insert("src/lib.rs".into(), SourceFile::Text(String::new()));
-        files.insert("../escape".into(), SourceFile::Text(String::new()));
-        assert!(SourceBundle { files }.validate().is_err());
-    }
-}
+mod tests;

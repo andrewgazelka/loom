@@ -7,7 +7,6 @@ ENV CARGO_BUILD_JOBS=4
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY examples ./examples
-COPY wit ./wit
 COPY rustc/vendor-config.toml ./rustc/vendor-config.toml
 RUN --mount=type=cache,id=loom-host-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=loom-host-target,target=/opt/loom/target \
@@ -20,7 +19,7 @@ RUN cd ui && bun install --frozen-lockfile && bun run build
 FROM docker.io/library/rust:1.97.0-bookworm
 COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
 RUN apt-get update && apt-get install -y --no-install-recommends binaryen bubblewrap ca-certificates pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
-RUN rustup target add wasm32-wasip1 wasm32-wasip2 && cargo install --locked cargo-component --version 0.21.1 --jobs 4
+RUN rustup component add rust-src && rustup target add wasm32-unknown-unknown
 WORKDIR /opt/loom
 COPY --from=build /out/loomd /usr/local/bin/loomd
 COPY --from=build /out/loom /usr/local/bin/loom
@@ -28,12 +27,7 @@ COPY --from=build /opt/loom/ui/build ./ui/build
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY examples ./examples
-COPY wit ./wit
-COPY checker ./checker
-COPY guest-ts ./guest-ts
 COPY rustc ./rustc
-RUN cd checker && bun install --frozen-lockfile
-RUN cd guest-ts && bun install --frozen-lockfile
 RUN useradd --create-home --uid 10001 loom && mkdir -p /data /opt/loom/.loom-build && chown -R loom:loom /data /opt/loom/.loom-build
 ENV LOOM_ROOT=/opt/loom LOOM_BUILD_DIR=/data/builds CARGO_HOME=/data/cargo CARGO_BUILD_JOBS=4
 USER loom

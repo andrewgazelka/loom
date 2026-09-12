@@ -524,3 +524,61 @@ takeover dedupe, and store-free behavior. Their assertions also cover competing
 claims, expiry during a handler, renewal while a handler is blocked, termination
 replay, and recovery from a failed close. They use local filesystem storage; an
 S3/MinIO service is not part of this test suite.
+
+## Addendum D: validation memo and cutoff
+
+`validate` and `validate_assertions` consult `_node.db.validation_memo` before
+creating a fork. Its columns are `key TEXT PRIMARY KEY`, `verdict BLOB`,
+`tables BLOB`, `outbox_hash TEXT`, and `created_at INTEGER`. The verdict is
+canonical JSON; `tables` contains the fork's named table hashes and assertion
+results. A hit returns both without executing the candidate or copying a file.
+Malformed persisted JSON is an error naming `validation_memo`.
+
+The key uses BLAKE3 over length-delimited fields: candidate behavior hash,
+BLAKE3 of snapshot file bytes, window boundaries, canonical inbox and effects
+rows in `(N-k,N]`, and the ordered assertions list. Rows are ordered by their
+primary keys; values have SQL type tags and byte lengths. Outbox hashes cover
+`seq,idx,target,msg`, ordered by `seq,idx`; delivery bookkeeping is excluded.
+
+The current replay engine needs more inputs than the proposed five-field key.
+Snapshots can precede `N-k`, deferred messages use recorded commit order, and
+upgrade hooks consume effects at negative sequences. This implementation also
+keys source metadata, code changes, the complete inbox/effect logs, and original
+domain table hashes used to calculate the verdict. It hashes the latest snapshot
+at or before `N-k`, not a synthesized snapshot exactly there. This conservative
+key prevents stale hits but scans history; bounding those scans requires an exact
+boundary snapshot and an explicit replay-input representation. That work is not
+claimed here. Arbitrary SQL assertions and native behaviors must be deterministic
+and obey the existing Behavior contract for memoization to be sound.
+
+Under that contract, replay is a pure function of these inputs. External effects
+come from the recorded log. `random()` derives bytes from actor identity, sequence,
+and its per-message counter. `now()` currently reads a recorded effect keyed by
+actor and sequence; it is not computed directly from that pair. Identity and
+incarnation are included through snapshot bytes and source metadata. Runtime
+failures return errors and do not become cached deterministic verdicts.
+
+`promote_report(id, hash, k)` validates, checks that its input key still matches
+while holding the actor lock, promotes, and returns `PromoteReport { verdict,
+downstream_unaffected, receivers }`. The cutoff helper is
+`history.rs::Node::promotion_cutoff`. Equal outbox hashes set
+`downstream_unaffected` even when internal tables differ. Receivers are sorted,
+distinct outbox targets in the original window. `ActorId` is currently a string
+alias, so routing targets such as `effect:echo` are retained verbatim too. The report concerns
+that historical window, not predictions about future messages. Ordinary
+`Node::promote` still needs the call-site integration in `node.rs`; this scoped
+change does not alter that file or invent a default window for its existing API.
+
+`MemoConfig.max_rows` defaults to 10,000. `validate_with_memo_config` uses the same
+validation implementation with an explicit limit. `memo::store` evicts oldest
+records after insertion or a hit, inside one transaction; it is the leaver of
+retained memo state. `created_at` is a monotonic insertion ordinal, so clock skew
+and timestamp ties cannot reorder eviction. Zero retains nothing. Keys are never
+invalidated; eviction affects performance only. Forks retain the existing history
+API lifecycle and remain undeliverable; memo hits create no additional forks.
+
+`lib.rs` re-exports `history::memo::{MemoConfig, PromoteReport}`.
+`history.rs` owns `memo.rs` and includes `tests/memo.rs` as unit tests because the
+crate manifest sets `autotests = false`. The four tests cover replay-free hits,
+independent key changes, send cutoff despite state differences, and oldest-first
+eviction. Existing tests remain in the integration target.

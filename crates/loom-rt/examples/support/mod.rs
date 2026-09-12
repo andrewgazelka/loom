@@ -3,13 +3,14 @@ use loom_proto::{Def, Lang, definition_identity};
 use loom_store::Store;
 use std::{collections::BTreeMap, path::Path};
 
-/// Register a prebuilt test component using the same identity contract as checked
+/// Register a prebuilt core wasm module using the same identity contract as checked
 /// source. Include its content hash so distinct compiled fixtures stay distinct.
 pub fn register(store: &Store, lang: Lang, path: impl AsRef<Path>, label: &str) -> Result<String> {
-    // Cargo-built fixtures carry no protocol marker; stamp them exactly as the
-    // build path stamps checked source, so admission sees the same contract.
-    let mut component = std::fs::read(path)?;
-    loom_proto::component_protocol::stamp(&mut component);
+    let component = std::fs::read(path)?;
+    anyhow::ensure!(
+        loom_proto::core_protocol::is_current(&component),
+        "fixture {label} requires an admitted core wasm artifact produced by loom-build"
+    );
     let component_hash = store.put("component", &component)?;
     let source = format!("{label}: {component_hash}");
     let deps = BTreeMap::new();

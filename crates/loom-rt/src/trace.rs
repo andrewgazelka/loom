@@ -278,7 +278,9 @@ impl ExecutionTrace {
     pub fn finish_scope(&self, scope: &str) {
         let mut state = self.state.lock().unwrap();
         let prefix = format!("{scope}/");
-        let cancelled: Vec<_> = state.entries.values()
+        let cancelled: Vec<_> = state
+            .entries
+            .values()
             .filter(|entry| {
                 (entry.key.scope == scope || entry.key.scope.starts_with(&prefix))
                     && matches!(entry.outcome, TraceOutcome::Cancelled)
@@ -639,11 +641,7 @@ mod tests {
         let desc = json!({"op":"unsupported"});
         assert!(
             trace
-                .begin(
-                    &"x".repeat(loom_proto::TRACE_MAX_SCOPE_BYTES + 1),
-                    0,
-                    &desc,
-                )
+                .begin(&"x".repeat(loom_proto::TRACE_MAX_SCOPE_BYTES + 1), 0, &desc,)
                 .is_err()
         );
         let StartedEffect::Recorded(guard) = trace.begin("root", 0, &desc)? else {

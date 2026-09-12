@@ -97,24 +97,7 @@
           runHook postInstall
         '';
       };
-  project = directory:
-    pkgs.stdenvNoCC.mkDerivation {
-      pname = directory;
-      version = "0.1.0";
-      src = packageSource directory;
-      strictDeps = true;
-      dontBuild = true;
-      installPhase = ''
-        runHook preInstall
-        mkdir -p "$out"
-        cp -R . "$out/"
-        ln -s ${dependencies directory}/node_modules "$out/node_modules"
-        runHook postInstall
-      '';
-    };
 in {
-  checker = project "checker";
-  guest = project "guest-ts";
   ui = pkgs.stdenvNoCC.mkDerivation {
     pname = "ui";
     version = "0.1.0";

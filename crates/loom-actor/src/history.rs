@@ -1,3 +1,10 @@
+#[path = "memo.rs"]
+pub mod memo;
+#[cfg(test)]
+#[path = "../tests/memo.rs"]
+mod memo_tests;
+mod validation;
+
 use crate::{Actor, ActorId, Node, TableDifference, TableHash, Verdict, actor, effects::ReplayEffects, ids};
 use anyhow::{Context, Result, ensure};
 use std::{
@@ -7,24 +14,26 @@ use std::{
 use turso::{Connection, Value};
 
 /// Removes tracked paths unless `disarm` ran; guards fork staging files on every early return.
-struct Cleanup(Vec<PathBuf>);
-
 pub(crate) enum ReplayMode {
     Historical,
     Candidate,
     Remote,
 }
+
+struct Cleanup {
+    paths: Vec<PathBuf>,
+}
 impl Cleanup {
     fn track(&mut self, path: PathBuf) {
-        self.0.push(path);
+        self.paths.push(path);
     }
     fn disarm(&mut self) {
-        self.0.clear();
+        self.paths.clear();
     }
 }
 impl Drop for Cleanup {
     fn drop(&mut self) {
-        for path in self.0.drain(..) {
+        for path in self.paths.drain(..) {
             let _ = std::fs::remove_file(path);
         }
     }
@@ -42,7 +51,7 @@ impl Node {
         let fork_id = ids::root();
         let staging = self.path(&fork_id).with_extension("forking");
         std::fs::copy(&path, &staging)?;
-        let mut cleanup = Cleanup(Vec::new());
+        let mut cleanup = Cleanup { paths: Vec::new() };
         cleanup.track(staging.clone());
         cleanup.track(PathBuf::from(format!("{}-wal", staging.display())));
         let mut conn = actor::connect(&staging, self.config.io).await?;
@@ -183,6 +192,9 @@ impl Node {
                     Err(error) if error.runtime && retry < self.config.max_retries => {
                         tokio::time::sleep(self.config.retry_backoff.saturating_mul(u32::try_from(retry + 1)?)).await;
                     }
+                    Err(error) if error.runtime => {
+                        anyhow::bail!("actor {id} seq {}: replay runtime failure: {}", message.seq, error.message)
+                    }
                     Err(error) => {
                         return Ok(Some(Verdict::Trapped { seq: message.seq, error: error.message }));
                     }
@@ -224,63 +236,6 @@ impl Node {
         let actor = self.open_actor(id).await?;
         let source = actor.conn.lock().await;
         self.fork_from(&source, id, at).await.map(|actor| actor.id).with_context(|| format!("actor {id} seq {at}: fork"))
-    }
-
-    pub(crate) async fn validate_inner(&self, id: &str, candidate: &str, k: i64) -> Result<Verdict> {
-        Ok(self.validate_assertions(id, candidate, k, &[]).await?.verdict)
-    }
-
-    pub async fn validate_assertions(&self, id: &str, candidate: &str, k: i64, assertions: &[String]) -> Result<crate::ValidationResult> {
-        let _admission = self.admit().await?;
-        self.validate_assertions_inner(id, candidate, k, assertions).await.with_context(|| format!("actor {id} seq -1: validation"))
-    }
-
-    async fn validate_assertions_inner(&self, id: &str, candidate: &str, k: i64, assertions: &[String]) -> Result<crate::ValidationResult> {
-        let actor = self.open_actor(id).await?;
-        let source = actor.conn.lock().await;
-        let cursor = actor::cursor(&source).await?;
-        ensure!(k >= 0 && k <= cursor, "actor {id} seq {cursor}: validation window outside history");
-        let behavior = actor::behavior(&self.registry, candidate)?;
-        let fork = self.fork_from(&source, id, cursor - k).await?;
-        let mut conn = fork.conn.lock().await;
-        let effects = ReplayEffects::load(&source).await?;
-        if let Some(verdict) = promote_replay(&mut conn, behavior.as_ref(), "validation", "candidate", &effects).await? {
-            return Ok(crate::ValidationResult { verdict, assertions: Vec::new() });
-        }
-        if let Some(verdict) = self.replay(&source, &mut conn, id, cursor, &effects, ReplayMode::Candidate).await? {
-            return Ok(crate::ValidationResult { verdict, assertions: Vec::new() });
-        }
-        let original = table_hashes(&source).await?;
-        let replayed = table_hashes(&conn).await?;
-        let mut differences = Vec::new();
-        for name in original.keys().chain(replayed.keys()).collect::<BTreeSet<_>>() {
-            if original.get(name) != replayed.get(name) {
-                differences.push(TableDifference {
-                    name: name.clone(),
-                    original_hash: original.get(name).cloned().unwrap_or_else(|| "absent".into()),
-                    fork_hash: replayed.get(name).cloned().unwrap_or_else(|| "absent".into()),
-                });
-            }
-        }
-        let verdict = if differences.is_empty() {
-            Verdict::Matched { tables: original.into_iter().map(|(name, hash)| TableHash { name, hash }).collect() }
-        } else {
-            Verdict::Differs { tables: differences }
-        };
-        let mut results = Vec::new();
-        for query in assertions {
-            let rows =
-                actor::inspect_query(&conn, query, ()).await.with_context(|| format!("actor {id} seq {cursor}: validation assertion"))?;
-            let passed = rows.rows.len() == 1
-                && rows.columns.len() == 1
-                && match rows.rows[0].get_value(0)? {
-                    Value::Integer(value) => value != 0,
-                    Value::Real(value) => value != 0.0,
-                    _ => false,
-                };
-            results.push(crate::AssertionResult { query: query.clone(), passed });
-        }
-        Ok(crate::ValidationResult { verdict, assertions: results })
     }
 }
 
@@ -326,40 +281,8 @@ async fn table_hashes(conn: &Connection) -> Result<BTreeMap<String, String>> {
         if crate::schema::SYSTEM_TABLES.contains(&name.as_str()) || name.starts_with("sqlite_") {
             continue;
         }
-        let rows = actor::query(conn, &format!("SELECT * FROM \"{}\" ORDER BY rowid", name.replace('"', "\"\"")), ()).await?;
-        let mut hash = blake3::Hasher::new();
-        for row in rows.rows {
-            hash.update(&(row.column_count() as u64).to_le_bytes());
-            for i in 0..row.column_count() {
-                let value = row.get_value(i)?;
-                let bytes = match value {
-                    Value::Null => vec![0],
-                    Value::Integer(n) => {
-                        let mut b = vec![1];
-                        b.extend(n.to_le_bytes());
-                        b
-                    }
-                    Value::Real(n) => {
-                        let mut b = vec![2];
-                        b.extend(n.to_bits().to_le_bytes());
-                        b
-                    }
-                    Value::Text(s) => {
-                        let mut b = vec![3];
-                        b.extend(s.as_bytes());
-                        b
-                    }
-                    Value::Blob(v) => {
-                        let mut b = vec![4];
-                        b.extend(v);
-                        b
-                    }
-                };
-                hash.update(&(bytes.len() as u64).to_le_bytes());
-                hash.update(&bytes);
-            }
-        }
-        result.insert(name, hash.finalize().to_hex().to_string());
+        let hash = memo::rows_hash(conn, &format!("SELECT * FROM \"{}\" ORDER BY rowid", name.replace('"', "\"\"")), ()).await?;
+        result.insert(name, hash);
     }
     Ok(result)
 }

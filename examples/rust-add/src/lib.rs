@@ -5,7 +5,7 @@ pub fn add(left: i64, right: i64) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use loom::bindings::Guest;
+    use loom::core::Guest;
     #[test]
     fn call_checks_arity_and_decodes_values() {
         assert_eq!(
@@ -34,8 +34,12 @@ mod tests {
         let args = <super::AddInvocation as loom::Invocation>::arguments(super::AddArgs {
             right: 30,
             left: 12,
-        }).unwrap();
-        assert_eq!(args, vec![loom::serde_json::json!(12), loom::serde_json::json!(30)]);
+        })
+        .unwrap();
+        assert_eq!(
+            args,
+            vec![loom::serde_json::json!(12), loom::serde_json::json!(30)]
+        );
         let result = super::__LoomDefinition::call(vec![], loom::encode(&args).unwrap()).unwrap();
         assert_eq!(loom::decode::<i64>(&result).unwrap(), 42);
         let _call = loom::call::<super::AddInvocation>;

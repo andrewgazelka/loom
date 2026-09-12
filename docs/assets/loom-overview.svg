@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="420" viewBox="0 0 1280 420" role="img" aria-labelledby="title description">
   <title id="title">Loom: ordinary functions, recorded effects</title>
-  <desc id="description">A TypeScript REPL calls TypeScript and Rust actors. Actors perform effects through the Rust host, which suspends and resumes their execution. The host records events and stores content and results in the CAS.</desc>
+  <desc id="description">A browser REPL calls Rust actors. Actors perform effects through the Rust host, which suspends and resumes their execution. The host records events and stores content and results in the CAS.</desc>
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 1 1 L 8 5 L 1 9" fill="none" stroke="#8b8b87" stroke-width="1.5"/></marker>
     <style>

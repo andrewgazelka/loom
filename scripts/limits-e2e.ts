@@ -41,7 +41,7 @@ try {
   check(stats.ok && (await stats.json()).ok === true, "read token cannot read stats");
   for (const request of [
     { operation: "command", body: { command: "gc", args: { limit: 1 } } },
-    { operation: "define", body: { name: "forbidden", source: "export function f(): number { return 1; }" } },
+    { operation: "define", body: { name: "forbidden", source: "#[loom::def(effects=[])] pub fn f() -> i64 { 1 }" } },
     { operation: "eval", body: { source: "1" } },
   ]) {
     const response = await post(request.operation, request.body, "reader");
@@ -50,7 +50,7 @@ try {
   const megabyte = 1024 * 1024;
   check((await post("command", { command: "stats", args: { padding: "x".repeat(megabyte) } })).status === 413, "command body exceeds 1 MiB without 413");
   check((await post("eval", { source: "x".repeat(megabyte) })).status === 413, "eval body exceeds 1 MiB without 413");
-  check((await post("define", { name: "large", lang: "ts", source: "x".repeat(megabyte) })).status === 413, "TS define body exceeds 1 MiB without 413");
+  check((await post("define", { name: "large", lang: "rust", source: "x".repeat(megabyte) })).status === 413, "Rust define body exceeds 1 MiB without 413");
   check((await post("define", { name: "large", lang: "rust", source: "x".repeat(16 * megabyte) })).status === 413, "Rust define body exceeds 16 MiB without 413");
   // >1 MiB Rust input must reach the language pipeline; deterministic invalid
   // source gives diagnostics without triggering a successful expensive build.
@@ -99,7 +99,7 @@ try {
   const initialized = await rpc("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "loom-limits", version: "1" } });
   protocolVersion = initialized.protocolVersion;
   await rpc("notifications/initialized", {}, true);
-  const denied = await rpc("tools/call", { name: "loom_define", arguments: { name: "forbidden_mcp", source: "export function main(): number { return 1; }" } });
+  const denied = await rpc("tools/call", { name: "loom_define", arguments: { name: "forbidden_mcp", source: "#[loom::def(effects=[])] pub fn main() -> i64 { 1 }" } });
   const denial = JSON.parse(denied.content.find((item: any) => item.type === "text").text);
   check(denial.ok === false && denial.result?.code === "forbidden", "MCP read token allowed definition");
   console.log(`${checks}/${checks} HTTP/MCP auth, scopes, limits controls pass`);
