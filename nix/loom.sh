@@ -5,11 +5,21 @@ export SSL_CERT_FILE='@certificates@'
 export NIX_SSL_CERT_FILE="$SSL_CERT_FILE"
 export LOOM_ROOT='@sources@'
 export RUSTC='@rustc@'
+export LOOM_HASH_RUSTC='@hashRustc@'
 if [[ ${1:-} == --help || ${1:-} == -h ]]; then
   exec '@daemon@' "$@"
 fi
 if [[ $(uname -s) == Darwin ]]; then
   data_home=${XDG_DATA_HOME:-"$HOME/Library/Application Support"}
+  # rustc puts its sysroot's lib directory on the linker's dyld search path, so a
+  # clang that loads libLLVM.dylib by name (nixpkgs' clang) resolves the guest
+  # toolchain's libLLVM instead of its own and aborts on a missing symbol
+  # (_LLVMInitializeLanaiAsmParser). Apple's cc links against no LLVM dylib.
+  if [[ ! -x /usr/bin/cc ]]; then
+    printf 'Loom needs /usr/bin/cc (Xcode Command Line Tools) to link guest build scripts on macOS\n' >&2
+    exit 1
+  fi
+  export CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER=/usr/bin/cc
 else
   data_home=${XDG_DATA_HOME:-"$HOME/.local/share"}
 fi

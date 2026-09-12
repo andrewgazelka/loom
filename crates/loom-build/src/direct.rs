@@ -90,7 +90,9 @@ async fn run_with_deadline(
         .map_err(BuildError::from)
 }
 
-fn compiler_environment(command: &mut Command) {
+/// The environment every guest-side cargo or rustc invocation runs in: cleared,
+/// then only the named variables pass through, plus the host linker.
+pub(crate) fn compiler_environment(command: &mut Command) {
     let preserved = [
         "PATH",
         "HOME",
@@ -107,6 +109,26 @@ fn compiler_environment(command: &mut Command) {
         }
     }
     command.env("LANG", "C.UTF-8");
+    host_linker(command);
+}
+
+/// Build scripts, proc macros and the driver link for the host. On macOS rustc
+/// puts its sysroot's `lib` on the linker's dyld search path, so a clang that
+/// loads `libLLVM.dylib` by name (nixpkgs') resolves the guest toolchain's copy
+/// and aborts (`Symbol not found: _LLVMInitializeLanaiAsmParser`); Apple's `cc`
+/// links against no LLVM dylib. An explicit `CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER`
+/// in the process environment wins.
+pub(crate) fn host_linker(command: &mut Command) {
+    #[cfg(target_os = "macos")]
+    {
+        let linker = std::env::var_os("CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER")
+            .unwrap_or_else(|| "/usr/bin/cc".into());
+        command.env("CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER", linker);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = command;
+    }
 }
 
 fn rustc_diagnostics(stderr: &str) -> Vec<Diagnostic> {

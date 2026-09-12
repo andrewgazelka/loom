@@ -7,41 +7,44 @@ export type Json =
   | { [key: string]: Json };
 export type Row = { [key: string]: Json };
 export interface Definition {
-  name: string;
+  name: string | null;
   hash: string;
-  entry_item_hash: string | null;
-  updated: string;
+  items: Record<string, string>;
 }
-export interface Item {
-  name: string;
-  hash: string;
-  preimage_size: number;
-  refs: string[];
+export interface EffectRow {
+  labels: string[];
+  unknown: boolean;
 }
 export interface DefinitionView extends Definition {
   source: string;
-  items: Item[];
+  def: Row;
+  behavior_hash: string;
+  wasm_hash: string;
+  toolchain_hash: string;
+  entries: Record<string, { effects: EffectRow }>;
 }
 export interface Change {
   name: string;
-  before: string | null;
-  after: string | null;
-}
-export interface Revision {
-  hash: string;
-  parent_hash: string | null;
-  updated: string;
-  changed_items: Change[];
+  old: string;
+  new: string;
 }
 export interface DefinitionDiff {
-  before: string;
-  after: string;
-  source_before: string;
-  source_after: string;
-  changed_items: Change[];
+  old: string;
+  new: string;
+  added: { name: string; hash: string }[];
+  removed: { name: string; hash: string }[];
+  changed: Change[];
+}
+export interface Revision {
+  name: string;
+  hash: string;
+  timestamp: number;
+  changes: DefinitionDiff | null;
 }
 export interface RunResult {
+  hash: string;
   output: Json;
+  scope: string;
   effects: Row[];
 }
 export interface Actor {
@@ -133,68 +136,88 @@ export function rows(value: unknown, path: string): Row[] {
     (item, index) => json(object(item, `${path}[${index}]`), path) as Row,
   );
 }
+function hashes(value: unknown, path: string): Record<string, string> {
+  const data = object(value, path);
+  return Object.fromEntries(
+    Object.keys(data).map((name) => [
+      name,
+      string(data[name], `${path}.${name}`),
+    ]),
+  );
+}
 export function definition(value: unknown): Definition {
   const data = object(value, "definition");
   return {
-    name: string(data.name, "definition.name"),
+    name: nullableString(data.name, "definition.name"),
     hash: string(data.hash, "definition.hash"),
-    entry_item_hash: nullableString(
-      data.entry_item_hash,
-      "definition.entry_item_hash",
-    ),
-    updated: string(data.updated, "definition.updated"),
+    items: hashes(data.items, "definition.items"),
   };
 }
 export function definitionView(value: unknown): DefinitionView {
-  const data = object(value, "view");
+  const data = object(value, "definition view");
+  const entries = object(data.entries, "entries");
+  const parsed: DefinitionView["entries"] = {};
+  for (const name of Object.keys(entries)) {
+    const effects = object(
+      object(entries[name], name).effects,
+      `${name}.effects`,
+    );
+    if (typeof effects.unknown !== "boolean")
+      throw new Error(`${name}.effects.unknown: expected boolean`);
+    parsed[name] = {
+      effects: {
+        labels: array(effects.labels, "labels").map((label) =>
+          string(label, "label"),
+        ),
+        unknown: effects.unknown,
+      },
+    };
+  }
   return {
     ...definition(value),
-    source: string(data.source, "view.source"),
-    items: array(data.items, "view.items").map((value) => {
+    source: string(data.source, "source"),
+    def: json(object(data.def, "def"), "def") as Row,
+    behavior_hash: string(data.behavior_hash, "behavior_hash"),
+    wasm_hash: string(data.wasm_hash, "wasm_hash"),
+    toolchain_hash: string(data.toolchain_hash, "toolchain_hash"),
+    entries: parsed,
+  };
+}
+export function definitionDiff(value: unknown): DefinitionDiff {
+  const data = object(value, "definition diff");
+  const items = (value: unknown) =>
+    array(value, "items").map((value) => {
       const item = object(value, "item");
-      const size = integer(item.preimage_size, "item.preimage_size");
-      if (size < 0) throw new Error("item.preimage_size: must be nonnegative");
       return {
-        name: string(item.name, "item.name"),
-        hash: string(item.hash, "item.hash"),
-        preimage_size: size,
-        refs: array(item.refs, "item.refs").map((value) =>
-          string(value, "item.refs[]"),
-        ),
+        name: string(item.name, "name"),
+        hash: string(item.hash, "hash"),
+      };
+    });
+  return {
+    old: string(data.old, "old"),
+    new: string(data.new, "new"),
+    added: items(data.added),
+    removed: items(data.removed),
+    changed: array(data.changed, "changed").map((value) => {
+      const item = object(value, "change");
+      return {
+        name: string(item.name, "name"),
+        old: string(item.old, "old"),
+        new: string(item.new, "new"),
       };
     }),
   };
 }
-export function changes(value: unknown): Change[] {
-  return array(value, "changed_items").map((value) => {
-    const item = object(value, "changed_item");
-    return {
-      name: string(item.name, "changed_item.name"),
-      before: nullableString(item.before, "changed_item.before"),
-      after: nullableString(item.after, "changed_item.after"),
-    };
-  });
-}
 export function history(value: unknown): Revision[] {
-  return array(value, "history").map((value) => {
-    const item = object(value, "history entry");
+  return array(value, "revisions").map((value) => {
+    const data = object(value, "revision");
     return {
-      hash: string(item.hash, "history.hash"),
-      parent_hash: nullableString(item.parent_hash, "history.parent_hash"),
-      updated: string(item.updated, "history.updated"),
-      changed_items: changes(item.changed_items),
+      name: string(data.name, "name"),
+      hash: string(data.hash, "hash"),
+      timestamp: integer(data.timestamp, "timestamp"),
+      changes: data.changes === null ? null : definitionDiff(data.changes),
     };
   });
-}
-export function definitionDiff(value: unknown): DefinitionDiff {
-  const data = object(value, "diff");
-  return {
-    before: string(data.before, "diff.before"),
-    after: string(data.after, "diff.after"),
-    source_before: string(data.source_before, "diff.source_before"),
-    source_after: string(data.source_after, "diff.source_after"),
-    changed_items: changes(data.changed_items),
-  };
 }
 export function actor(value: unknown): Actor {
   const data = object(value, "actor");
@@ -208,14 +231,14 @@ export function actor(value: unknown): Actor {
   };
 }
 export function actorTree(value: unknown, depth = 0): ActorNode {
-  if (depth > 128) throw new Error("actor_tree: depth exceeds 128");
-  const data = object(value, "actor_tree");
+  if (depth > 128) throw new Error("supervision tree: depth exceeds 128");
+  const data = object(value, "supervision tree");
   return {
-    id: string(data.id, "actor_tree.id"),
-    status: string(data.status, "actor_tree.status"),
-    behavior_hash: string(data.behavior_hash, "actor_tree.behavior_hash"),
-    cursor: integer(data.cursor, "actor_tree.cursor"),
-    children: array(data.children, "actor_tree.children").map((value) =>
+    id: string(data.id, "supervision tree.id"),
+    status: string(data.status, "supervision tree.status"),
+    behavior_hash: string(data.behavior_hash, "supervision tree.behavior_hash"),
+    cursor: integer(data.cursor, "supervision tree.cursor"),
+    children: array(data.children, "supervision tree.children").map((value) =>
       actorTree(value, depth + 1),
     ),
   };
@@ -227,10 +250,10 @@ export function flattenTree(root: ActorNode, actors: Actor[]): TreeRow[] {
   const result: TreeRow[] = [];
   function visit(node: ActorNode, depth: number) {
     if (seen.has(node.id))
-      throw new Error(`actor_tree: duplicate actor ${node.id}`);
+      throw new Error(`supervision tree: duplicate actor ${node.id}`);
     seen.add(node.id);
     const actor = byId.get(node.id);
-    if (!actor) throw new Error(`actor_list: missing tree actor ${node.id}`);
+    if (!actor) throw new Error(`actors list: missing tree actor ${node.id}`);
     result.push({ ...actor, depth });
     node.children.forEach((child) => visit(child, depth + 1));
   }
@@ -238,7 +261,7 @@ export function flattenTree(root: ActorNode, actors: Actor[]): TreeRow[] {
   return result;
 }
 export function validation(value: unknown): Validation {
-  const data = object(value, "actor_validate");
+  const data = object(value, "validation");
   const tagged = object(data.verdict, "verdict");
   if (Object.keys(tagged).length !== 1)
     throw new Error("verdict: expected one variant");

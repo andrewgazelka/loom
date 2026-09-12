@@ -38,7 +38,7 @@ pub(super) fn engine(store: Store) -> Result<(Engine, Arc<LoomCompilationCache>)
         .epoch_interruption(true);
     let cache = Arc::new(LoomCompilationCache::new(store, &config)?);
     config.enable_incremental_compilation(cache.clone())?;
-    let engine = Engine::new(&config).map_err(|e| anyhow::anyhow!("{e:#}"))?;
+    let engine = crate::wasm_engine::create(&config)?;
     Ok((engine, cache))
 }
 // Keep the classification while sharing a failure with cancelled sibling tasks.

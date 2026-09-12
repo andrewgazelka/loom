@@ -1,13 +1,6 @@
 <script lang="ts">
-  import {
-    FileCode2,
-    Fingerprint,
-    GitCommitHorizontal,
-    Play,
-    ArrowRight,
-  } from "lucide-svelte";
+  import { V } from "./commands";
   import CodeBlock from "../CodeBlock.svelte";
-  import { diffLines } from "../text-diff";
   import {
     array,
     definition,
@@ -16,6 +9,7 @@
     history,
     object,
     rows,
+    string,
     type Json,
   } from "./schema";
   import Hash from "./Hash.svelte";
@@ -26,25 +20,34 @@
     command: string,
     overrides?: Record<string, string>,
   ) => void;
-  let selectedItem = "";
 </script>
 
-{#if ["view", "add", "update"].includes(operation)}
+{#if [V.view, V.add, V.update].some((verb) => verb === operation)}
   {@const def = definitionView(value)}
   <div class="section-bar">
-    <FileCode2 size={15} class="icon-code" />
-    <h2>{def.name}</h2>
+    <h2>{def.name ?? def.hash}</h2>
     <span class="muted">Rust</span><button
       class="push text-control"
-      on:click={() => navigate("run", { hash: def.hash })}
-      ><Play size={12} /> Run</button
+      on:click={() => navigate(V.run, { target: def.name ?? def.hash })}
+      >Run</button
     >
   </div>
   <div class="identity-strip">
     <span>Definition <Hash value={def.hash} /></span><span
-      >Entry <Hash value={def.entry_item_hash} /></span
-    ><time>{def.updated}</time>
+      >Behavior <Hash value={def.behavior_hash} /></span
+    ><span>Wasm <Hash value={def.wasm_hash} /></span><span
+      >Toolchain <Hash value={def.toolchain_hash} /></span
+    >
   </div>
+  <div class="section-bar"><h3>Inferred effects per entry</h3></div>
+  <DataTable
+    label="Inferred entry effects"
+    rows={Object.keys(def.entries).map((name) => ({
+      name,
+      labels: def.entries[name]!.effects.labels,
+      unknown: def.entries[name]!.effects.unknown,
+    }))}
+  />
   <div class="source-items">
     <section class="source">
       <div class="section-bar">
@@ -55,138 +58,108 @@
     </section>
     <section class="items">
       <div class="section-bar">
-        <Fingerprint size={14} class="icon-item" />
         <h3>Items</h3>
-        <span class="muted">{def.items.length}</span>
+        <span class="muted">{Object.keys(def.items).length}</span>
       </div>
-      <table aria-label="Definition items">
-        <thead><tr><th>Item</th><th>Hash</th><th>Preimage</th></tr></thead
-        ><tbody>
-          {#each def.items as item}<tr
-              class:selected={selectedItem === item.name}
-              ><td
-                ><button
-                  data-row
-                  class="text-control"
-                  on:click={() => (selectedItem = item.name)}
-                  ><CodeBlock inline language="rust" code={item.name} /></button
-                ></td
-              ><td><Hash value={item.hash} /></td><td class="numeric"
-                >{item.preimage_size} B</td
-              ></tr
-            >{:else}<tr
-              ><td colspan="3" class="empty">No item hashes returned.</td></tr
-            >{/each}
-        </tbody>
-      </table>
-      {#each def.items.filter((item) => item.name === selectedItem) as item}<div
-          class="item-inspector"
-        >
-          <h3>{item.name}</h3>
-          <Hash value={item.hash} full />
-          <dl>
-            <dt>Preimage size</dt>
-            <dd>{item.preimage_size} bytes</dd>
-            <dt>References</dt>
-            <dd>{item.refs.join(", ") || "None"}</dd>
-          </dl>
-        </div>{/each}
+      <DataTable
+        label="Definition items"
+        rows={Object.keys(def.items).map((name) => ({
+          name,
+          hash: def.items[name]!,
+        }))}
+      />
     </section>
   </div>
-{:else if ["find", "dependents"].includes(operation)}
+{:else if operation === V.find}
   {@const definitions = array(value, operation).map(definition)}
   <div class="section-bar">
-    <h2>{operation === "find" ? "Definitions" : "Dependents"}</h2>
+    <h2>Definitions</h2>
     <span class="muted">{definitions.length}</span>
   </div>
-  <div class="table-wrap">
-    <table aria-label="Definitions">
-      <thead
-        ><tr
-          ><th>Name</th><th>Hash</th><th>Entry item hash</th><th>Updated</th
+  <table aria-label="Definitions">
+    <thead><tr><th>Name</th><th>Hash</th><th>Items</th></tr></thead><tbody
+      >{#each definitions as def}<tr
+          ><td
+            ><button
+              data-row
+              class="text-control"
+              on:click={() =>
+                navigate(V.view, { target: def.name ?? def.hash })}
+              >{def.name ?? "Unnamed"}</button
+            ></td
+          ><td><Hash value={def.hash} /></td><td
+            >{Object.keys(def.items).join(", ")}</td
           ></tr
-        ></thead
-      ><tbody>
-        {#each definitions as def}<tr
-            ><td
-              ><button
-                data-row
-                class="text-control"
-                on:click={() =>
-                  navigate("view", { hash: def.hash, name: def.name })}
-                ><FileCode2 size={13} class="icon-code" />{def.name}</button
-              ></td
-            ><td><Hash value={def.hash} /></td><td
-              ><Hash value={def.entry_item_hash} /></td
-            ><td>{def.updated}</td></tr
-          >{:else}<tr
-            ><td colspan="4" class="empty">No definitions found.</td></tr
-          >{/each}
-      </tbody>
-    </table>
-  </div>
-{:else if operation === "history"}
-  <div class="section-bar">
-    <GitCommitHorizontal size={15} class="icon-item" />
-    <h2>Hash chain</h2>
-  </div>
+        >{:else}<tr><td colspan="3" class="empty">No definitions found.</td></tr
+        >{/each}</tbody
+    >
+  </table>
+{:else if operation === V.dependents}
+  <div class="section-bar"><h2>Dependents</h2></div>
+  {#each array(value, operation) as dependent}{@const hash = string(
+      dependent,
+      "dependent hash",
+    )}
+    <div class="identity-strip">
+      <button
+        data-row
+        class="text-control"
+        on:click={() => navigate(V.view, { target: hash })}
+        ><Hash value={hash} /></button
+      >
+    </div>{:else}<p class="empty">No dependents found.</p>{/each}
+{:else if operation === V.history}
+  <div class="section-bar"><h2>Hash chain</h2></div>
   {#each history(value) as revision}<section class="revision">
       <div class="section-bar">
-        <Hash value={revision.hash} /><ArrowRight size={12} /><Hash
-          value={revision.parent_hash}
-        /><time class="push muted">{revision.updated}</time><button
+        <Hash value={revision.hash} /><time class="push muted"
+          >{revision.timestamp}</time
+        ><button
           data-row
           class="text-control"
-          disabled={!revision.parent_hash}
+          disabled={!revision.changes}
           on:click={() =>
-            navigate("diff", {
-              before: revision.parent_hash!,
-              after: revision.hash,
+            navigate(V.diff, {
+              old: revision.changes!.old,
+              new: revision.hash,
             })}>Diff parent</button
         >
       </div>
-      <DataTable
-        label="Changed items"
-        rows={revision.changed_items.map((item) => ({ ...item }))}
-      />
+      {#if revision.changes}<DataTable
+          label="Changed items"
+          rows={revision.changes.changed.map((item) => ({ ...item }))}
+        /><DataTable
+          label="Added items"
+          rows={revision.changes.added.map((item) => ({ ...item }))}
+        /><DataTable
+          label="Removed items"
+          rows={revision.changes.removed.map((item) => ({ ...item }))}
+        />{:else}<p class="note">Initial revision.</p>{/if}
     </section>{:else}<p class="empty">No history returned.</p>{/each}
-{:else if operation === "diff"}
+{:else if operation === V.diff}
   {@const diff = definitionDiff(value)}
   <div class="section-bar">
     <h2>Definition diff</h2>
-    <Hash value={diff.before} /><ArrowRight size={12} /><Hash
-      value={diff.after}
-    />
+    <Hash value={diff.old} /><span>→</span><Hash value={diff.new} />
   </div>
   <DataTable
     label="Changed items"
-    rows={diff.changed_items.map((item) => ({ ...item }))}
+    rows={diff.changed.map((item) => ({ ...item }))}
+  /><DataTable
+    label="Added items"
+    rows={diff.added.map((item) => ({ ...item }))}
+  /><DataTable
+    label="Removed items"
+    rows={diff.removed.map((item) => ({ ...item }))}
   />
-  <div class="diff-code" aria-label="Source diff">
-    {#each diffLines(diff.source_before, diff.source_after) as line}<div
-        class:added={line.kind === "added"}
-        class:removed={line.kind === "removed"}
-      >
-        <span
-          >{line.kind === "added"
-            ? "+"
-            : line.kind === "removed"
-              ? "−"
-              : " "}</span
-        ><CodeBlock inline language="rust" code={line.text || " "} />
-      </div>{/each}
-  </div>
-{:else if operation === "run"}
-  {@const result = object(value, "run")}
-  <div class="section-bar">
-    <Play size={14} class="icon-run" />
-    <h2>Output</h2>
-  </div>
+{:else if operation === V.run}
+  {@const result = object(value, "execution result")}
+  <div class="section-bar"><h2>Output</h2></div>
   <CodeBlock code={JSON.stringify(result.output, null, 2)} language="json" />
   <div class="section-bar"><h3>Effects performed</h3></div>
   <DataTable
     label="Effects performed"
-    rows={rows(result.effects, "run.effects")}
+    rows={rows(result.effects, "execution effects")}
   />
 {/if}
 
@@ -200,9 +173,6 @@
     font-size: 0.92em;
     color: var(--muted);
   }
-  .identity-strip time {
-    margin-left: auto;
-  }
   .source-items {
     display: grid;
     grid-template-columns: minmax(280px, 1fr) minmax(290px, 0.8fr);
@@ -212,38 +182,8 @@
     border-left: 1px solid var(--line);
     overflow: auto;
   }
-  .item-inspector {
-    padding: 14px;
-    border-top: 1px solid var(--line);
-  }
-  .item-inspector h3 {
-    margin-bottom: 10px;
-  }
   .revision {
     border-bottom: 1px solid var(--line);
-  }
-  .diff-code {
-    font: 1em/1.9 var(--mono);
-    overflow: auto;
-    padding: 8px 0;
-  }
-  .diff-code > div {
-    display: flex;
-    white-space: pre;
-    min-width: fit-content;
-  }
-  .diff-code span {
-    width: 32px;
-    text-align: center;
-    flex: none;
-  }
-  .added {
-    background: color-mix(in srgb, var(--verdict-green) 18%, var(--bg));
-    border-left: 2px solid var(--verdict-green);
-  }
-  .removed {
-    background: color-mix(in srgb, var(--verdict-red) 10%, var(--bg));
-    border-left: 2px solid var(--verdict-red);
   }
   @media (max-width: 1100px) {
     .source-items {

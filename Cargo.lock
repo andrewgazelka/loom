@@ -2566,6 +2566,7 @@ dependencies = [
  "loom-process",
  "loom-proto",
  "loom-store",
+ "mach2",
  "rusqlite",
  "serde",
  "serde_json",

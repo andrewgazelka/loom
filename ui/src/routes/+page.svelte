@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { V, panels } from "$lib/workbench/commands";
   import { onMount, onDestroy, tick } from "svelte";
   import {
     Box,
@@ -38,6 +39,7 @@
     actorTree,
     array,
     definition,
+    definitionView,
     flattenTree,
     type Actor,
     type Definition,
@@ -65,7 +67,7 @@
   let definitions: Definition[] = [],
     actors: Actor[] = [],
     tree: TreeRow[] = [];
-  let commandId = "find",
+  let commandId: string = V.find,
     overrides: Record<string, string> = {},
     panelVersion = 0;
   let typeScale = 12;
@@ -78,40 +80,38 @@
   $: defaults = {
     ...mockDefaults,
     query:
-      commandId === "actor_sql" && mock
-        ? "SELECT * FROM inbox ORDER BY seq"
-        : "",
+      commandId === V.sql && mock ? "SELECT * FROM inbox ORDER BY seq" : "",
     ...(selectedDefinition
       ? {
           hash: selectedDefinition.hash,
-          expected_hash: selectedDefinition.hash,
-          name: selectedDefinition.name,
-          after: selectedDefinition.hash,
+          target: selectedDefinition.hash,
+          name: selectedDefinition.name ?? "",
+          new: selectedDefinition.hash,
         }
       : {}),
     ...(currentActor
-      ? { id: currentActor.id, behavior_hash: currentActor.behavior_hash }
+      ? { id: currentActor.id, def: currentActor.behavior_hash }
       : {}),
     ...overrides,
   };
   $: actorTabs = [
-    "actor_info",
-    "actor_inbox",
-    "actor_outbox",
-    "actor_effects",
-    "actor_lineage",
-    "actor_dead_letters",
-    "actor_validate",
-    "actor_promote",
-    "actor_send",
+    V.info,
+    panels.inbox,
+    panels.outbox,
+    panels.effects,
+    V.lineage,
+    V.dead_letters,
+    V.validate,
+    V.promote,
+    V.send,
   ];
   $: definitionTabs = [
-    "view",
-    "history",
-    "diff",
-    "run",
-    "dependents",
-    "update",
+    V.view,
+    V.history,
+    V.diff,
+    V.run,
+    V.dependents,
+    V.update,
   ];
   $: visibleTree = tree.filter((row) => {
     let parent = row.parent;
@@ -130,12 +130,12 @@
     await slot.run(
       async (signal) => {
         const replies = await Promise.all([
-          client.call(commandById("find"), { query: "" }, signal),
-          client.call(commandById("actor_list"), {}, signal),
-          client.call(commandById("actor_tree"), {}, signal),
+          client.call(commandById(V.find), { text: "" }, signal),
+          client.call(commandById(V.actors), {}, signal),
+          client.call(commandById(V.tree), {}, signal),
         ]);
-        const definitions = array(replies[0], "find").map(definition);
-        const actors = array(replies[1], "actor_list").map(actor);
+        const definitions = array(replies[0], V.find).map(definition);
+        const actors = array(replies[1], V.actors).map(actor);
         return {
           definitions,
           actors,
@@ -164,8 +164,8 @@
       error = String(problem);
       return;
     }
-    if (values.hash && definitions.some((def) => def.hash === values.hash))
-      selectedDef = values.hash;
+    if (values.target && definitions.some((def) => def.hash === values.target))
+      selectedDef = values.target;
     if (values.id) selectedActor = values.id;
     commandId = id;
     overrides = values;
@@ -177,11 +177,11 @@
   }
   function selectDefinition(def: Definition) {
     selectedDef = def.hash;
-    navigate("view", { hash: def.hash });
+    navigate(V.view, { target: def.hash });
   }
   function selectActor(actor: Actor) {
     selectedActor = actor.id;
-    navigate("actor_info", { id: actor.id });
+    navigate(V.info, { id: actor.id });
   }
   function toggle(id: string) {
     const next = new Set(collapsed);
@@ -190,8 +190,8 @@
   }
   function completed(body: Row, result: Json) {
     if (command.group === "Definitions") {
-      if (["view", "add", "update"].includes(commandId))
-        selectedDef = definition(result).hash;
+      if ([V.view, V.add, V.update].some((verb) => verb === commandId))
+        selectedDef = definitionView(result).hash;
       else if (typeof body.hash === "string") selectedDef = body.hash;
       else if (typeof body.name === "string")
         selectedDef =
@@ -278,7 +278,7 @@
     const initialize = async () => {
       const params = new URLSearchParams(location.search);
       mock = params.get("mock") === "1";
-      const requestedPanel = params.get("panel") ?? "find";
+      const requestedPanel = params.get("panel") ?? V.find;
       try {
         const fragment = location.hash;
         // Remove credentials before parsing or making any request, including failures.
@@ -325,8 +325,8 @@
           client = new WorkbenchClient(new MockTransport(verdict));
           mockDefaults = {
             source: fixtures.definitions[0]!.source,
-            before: fixtures.definitions[2]!.hash,
-            candidate_hash: fixtures.definitions[2]!.hash,
+            old: fixtures.definitions[2]!.hash,
+            candidate: fixtures.definitions[2]!.hash,
             args: "[42]",
             assertions: JSON.stringify(
               fixtures.verdicts[
@@ -336,9 +336,8 @@
             author: "operator",
             rationale: "Extract increment helper",
             name: "counter",
-            old_hash: fixtures.definitions[0]!.hash,
-            new_hash: fixtures.definitions[2]!.hash,
-            at_seq: "40",
+            new: fixtures.definitions[2]!.hash,
+            seq: "40",
             reason: "shutdown",
             group: "workers",
             query: "SELECT * FROM inbox ORDER BY seq",
@@ -432,10 +431,10 @@
         <span class="muted">{definitions.length}</span><button
           class="push"
           aria-label="Add definition"
-          on:click={() => navigate("add")}><Plus size={14} /></button
+          on:click={() => navigate(V.add)}><Plus size={14} /></button
         >
       </div>
-      <button class="explorer-action" data-row on:click={() => navigate("find")}
+      <button class="explorer-action" data-row on:click={() => navigate(V.find)}
         ><Search size={13} /> Find definitions</button
       >
       {#each definitions as def}<div class="definition-row">
@@ -458,7 +457,7 @@
         <span class="muted">{actors.length}</span><button
           class="push"
           aria-label="Spawn actor"
-          on:click={() => navigate("actor_spawn")}><Plus size={14} /></button
+          on:click={() => navigate(V.spawn)}><Plus size={14} /></button
         >
       </div>
       <div class="tree-heading">
@@ -494,8 +493,7 @@
       <button
         class="explorer-action"
         data-row
-        on:click={() => navigate("actor_list")}
-        >All actors, including forks</button
+        on:click={() => navigate(V.actors)}>All actors, including forks</button
       >
       <div class="explorer-footer">
         <GitBranch size={12} /><span>Root supervisor → children</span>
@@ -505,8 +503,7 @@
       <nav class="operation-tabs" aria-label={`${command.group} panels`}>
         {#each command.group === "Definitions" ? definitionTabs : actorTabs as id}<button
             aria-current={commandId === id ? "page" : undefined}
-            on:click={() => navigate(id)}
-            >{id.replace("actor_", "").replaceAll("_", " ")}</button
+            on:click={() => navigate(id)}>{id.replaceAll("_", " ")}</button
           >{/each}<button class="push" on:click={() => (palette = true)}
           >All commands</button
         >
