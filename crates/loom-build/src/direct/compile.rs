@@ -104,13 +104,6 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
     let directory = workspace.as_path();
     let root_incremental = target.join("incremental").join(&lineage);
     let isolated = directory.join("vendor").is_dir();
-    if isolated {
-        return Err(rejected(format!(
-            "hash-rustc driver {} cannot be selected by {}:41: sandbox forces the plain sysroot compiler",
-            driver.path.display(),
-            root.join("rustc/sandbox.sh").display()
-        )));
-    }
     let manifest: toml::Value =
         toml::from_str(&fs::read_to_string(directory.join("Cargo.toml")).await?)
             .map_err(rejected)?;
@@ -319,6 +312,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
             .arg(directory)
             .arg(&target)
             .arg(root);
+        driver.configure(&mut command, identity_directory);
         command
     } else {
         hash_command
