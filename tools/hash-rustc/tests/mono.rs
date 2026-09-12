@@ -35,14 +35,35 @@ fn compile(source: &str) -> Audit {
             .unwrap();
     assert_eq!(report["refused"], 0, "{report}");
     assert_eq!(report["mono"]["refused_unique_items"], 0, "{report}");
+    let hir: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(directory.path().join("hir.json")).unwrap()).unwrap();
+    assert_eq!(
+        hir["items"].as_object().unwrap().len() as u64,
+        report["candidates"].as_u64().unwrap()
+    );
     Audit {
         hashes: serde_json::from_value(report["mono"]["hashes"].clone()).unwrap(),
-        hir: serde_json::from_slice(&std::fs::read(directory.path().join("hir.json")).unwrap())
-            .unwrap(),
+        hir,
     }
 }
 
 impl Audit {
+    fn item(&self, name: &str) -> &str {
+        self.hir["items"][name]["hash"].as_str().unwrap()
+    }
+
+    fn instance(&self, argument: &str) -> &str {
+        let matches: Vec<_> = self
+            .hashes
+            .iter()
+            .filter(|entry| {
+                entry.0.contains("::generic)") && entry.0.contains(&format!("args: [{argument}]"))
+            })
+            .collect();
+        assert_eq!(matches.len(), 1, "{:?}", self.hashes);
+        matches[0].1
+    }
+
     fn generic(&self) -> &str {
         let matches: Vec<_> = self
             .hashes
@@ -146,7 +167,7 @@ fn strings() {
 fn local_adt_referent_changes_and_renames() {
     let source = "pub struct Record { pub field: u32 } #[inline(never)] pub fn generic<T>(value: T) -> T { value } pub fn entry(value: Record) -> Record { generic(value) }";
     let first = compile(source);
-    assert_eq!(
+    assert_ne!(
         first.generic(),
         compile(&source.replace("Record", "Renamed")).generic()
     );
@@ -234,7 +255,7 @@ fn compiler_drop_shims() {
         .filter(|entry| entry.0.contains("DropGlue") && entry.0.contains("args: [Renamed]"))
         .map(|entry| entry.1.clone())
         .collect();
-    assert_eq!(before, renamed_shims);
+    assert_ne!(before, renamed_shims);
     assert_ne!(before, shims(&changed));
 }
 
@@ -255,4 +276,81 @@ fn static_identity() {
     };
     assert_eq!(static_hash(&before), static_hash(&renamed));
     assert_ne!(static_hash(&before), static_hash(&changed));
+}
+
+#[test]
+fn distinct_adts_with_equal_shape_hash_differently() {
+    for declaration in [
+        "pub struct Alpha(pub u32);",
+        "pub enum Alpha { Value(u32) }",
+        "pub union Alpha { pub value: u32 }",
+    ] {
+        let source = format!(
+            "{declaration} {} #[inline(never)] pub fn generic<T>(value: T) -> T {{ value }} pub fn entry(a: Alpha, b: Beta) {{ generic(a); generic(b); }}",
+            declaration.replace("Alpha", "Beta")
+        );
+        let audit = compile(&source);
+        assert_ne!(audit.item("Alpha"), audit.item("Beta"));
+        assert_ne!(audit.instance("Alpha"), audit.instance("Beta"));
+    }
+}
+
+#[test]
+fn impl_drop_moves_adt_and_its_instances() {
+    let source = "pub struct Alpha(pub u32); pub struct Beta(pub u32); #[inline(never)] pub fn generic<T>(value: T) -> T { value } pub fn entry(a: Alpha, b: Beta) { generic(a); generic(b); }";
+    let before = compile(source);
+    let after = compile(&format!(
+        "{source} impl Drop for Alpha {{ fn drop(&mut self) {{}} }}"
+    ));
+    assert_ne!(before.item("Alpha"), after.item("Alpha"));
+    assert_ne!(before.instance("Alpha"), after.instance("Alpha"));
+    assert_eq!(before.item("Beta"), after.item("Beta"));
+    assert_eq!(before.instance("Beta"), after.instance("Beta"));
+    assert_eq!(before.item("generic"), after.item("generic"));
+}
+
+#[test]
+fn renaming_a_type_moves_its_hash_renaming_a_fn_does_not() {
+    let source = "pub struct Alpha(pub u32); #[inline(never)] pub fn generic<T>(value: T) -> T { value } pub fn entry(a: Alpha) -> Alpha { generic(a) }";
+    let before = compile(source);
+    let renamed_type = compile(&source.replace("Alpha", "Meters"));
+    assert_ne!(before.item("Alpha"), renamed_type.item("Meters"));
+    assert_ne!(before.instance("Alpha"), renamed_type.instance("Meters"));
+    assert_ne!(before.item("entry"), renamed_type.item("entry"));
+    let renamed_fn = compile(&source.replace("entry", "renamed").replace("value", "local"));
+    assert_eq!(before.item("entry"), renamed_fn.item("renamed"));
+    assert_eq!(before.item("generic"), renamed_fn.item("generic"));
+    assert_eq!(before.instance("Alpha"), renamed_fn.instance("Alpha"));
+}
+
+#[test]
+fn inherent_and_trait_impl_bodies_move_the_type() {
+    let source = "pub struct Alpha; pub trait Value { fn read(&self) -> u32; } impl Alpha { pub fn inherent(&self) -> u32 { 7 } } impl Value for Alpha { fn read(&self) -> u32 { 9 } } #[inline(never)] pub fn generic<T>(value: T) -> T { value } pub fn entry(a: Alpha) -> Alpha { generic(a) }";
+    let before = compile(source);
+    for changed in [
+        source.replace("{ 7 }", "{ 8 }"),
+        source.replace("{ 9 }", "{ 10 }"),
+    ] {
+        let changed = compile(&changed);
+        assert_ne!(before.item("Alpha"), changed.item("Alpha"));
+        assert_ne!(before.instance("Alpha"), changed.instance("Alpha"));
+    }
+}
+
+#[test]
+fn impl_order_and_function_names_do_not_enter_type_identity() {
+    let prefix = "pub struct Alpha; pub trait Value { fn read(&self) -> u32; }";
+    let inherent = "impl Alpha { pub fn inherent(&self) -> u32 { 7 } }";
+    let implementation = "impl Value for Alpha { fn read(&self) -> u32 { 9 } }";
+    let suffix = "#[inline(never)] pub fn generic<T>(value: T) -> T { value } pub fn entry(a: Alpha) -> Alpha { generic(a) }";
+    let before = compile(&format!("{prefix} {inherent} {implementation} {suffix}"));
+    let reordered = compile(&format!("{prefix} {implementation} {inherent} {suffix}"));
+    let renamed = compile(&format!(
+        "{prefix} {} {implementation} {suffix}",
+        inherent.replace("inherent", "renamed")
+    ));
+    assert_eq!(before.item("Alpha"), reordered.item("Alpha"));
+    assert_eq!(before.instance("Alpha"), reordered.instance("Alpha"));
+    assert_eq!(before.item("Alpha"), renamed.item("Alpha"));
+    assert_eq!(before.instance("Alpha"), renamed.instance("Alpha"));
 }

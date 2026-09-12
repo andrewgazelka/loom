@@ -47,7 +47,7 @@ impl<'a, 'tcx> Encoder<'a, 'tcx> {
             return Ok(crate::graph::external(self.tcx, id));
         }
         self.local = true;
-        let path = self.tcx.def_path_str(id);
+        let path = crate::graph::item_path(self.tcx, id);
         if let Some(hash) = self.document.and_then(|document| document.hash_for(&path)) {
             return blake3::Hash::from_hex(hash).map_err(|error| error.to_string());
         }

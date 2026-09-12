@@ -24,8 +24,10 @@ fn preimage_rehashes_to_item_hash() {
         directory.path().join("fixture.rs"),
         r#"
         const VALUE: u32 = 5;
+        const _: () = ();
+        const _: () = ();
         struct A;
-        impl A { fn value(&self) -> u32 { VALUE } }
+        impl A { fn value(&self) -> u32 { VALUE } fn duplicate(&self) -> u32 { VALUE } }
         fn a(n: u32) -> u32 { if n == 0 { VALUE } else { b(n - 1) } }
         fn b(n: u32) -> u32 { if n == 0 { 1 } else { a(n - 1) } }
         fn recursive(n: u32) -> u32 { if n == 0 { 0 } else { recursive(n - 1) } }
@@ -45,6 +47,8 @@ fn preimage_rehashes_to_item_hash() {
         serde_json::from_slice(&std::fs::read(directory.path().join("hashes.json")).unwrap())
             .unwrap();
     let items = document["items"].as_object().unwrap();
+    assert!(items.contains_key("_"));
+    assert!(items.contains_key("_#1"));
     let mut cycles_checked = 0;
     for (path, item) in items {
         let hash = item["hash"].as_str().unwrap();
@@ -77,7 +81,10 @@ fn preimage_rehashes_to_item_hash() {
             cycles_checked += 1;
         }
     }
-    assert_eq!(cycles_checked, 3, "mutual recursion plus self recursion");
+    assert_eq!(
+        cycles_checked, 7,
+        "function recursion plus the ADT/impl/method cycle"
+    );
     assert_eq!(
         items["duplicate_one"]["hash"],
         items["duplicate_two"]["hash"]

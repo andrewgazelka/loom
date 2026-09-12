@@ -17,6 +17,21 @@ use rustc_middle::ty::{TyCtxt, TypeckResults};
 pub enum Part {
     Bytes(Vec<u8>),
     Reference(DefId),
+    Unordered(Vec<Vec<Part>>),
+}
+
+impl Part {
+    pub fn references(&self) -> Vec<DefId> {
+        match self {
+            Self::Bytes(_) => Vec::new(),
+            Self::Reference(id) => vec![*id],
+            Self::Unordered(entries) => entries
+                .iter()
+                .flatten()
+                .flat_map(Self::references)
+                .collect(),
+        }
+    }
 }
 
 pub struct Encoder<'tcx> {
@@ -28,10 +43,11 @@ pub struct Encoder<'tcx> {
     parameters: HashMap<LocalDefId, usize>,
     targets: Vec<hir::HirId>,
     auditing: bool,
+    implementations: Vec<DefId>,
 }
 
 impl<'tcx> Encoder<'tcx> {
-    pub fn new(tcx: TyCtxt<'tcx>, owner: LocalDefId) -> Self {
+    pub fn new(tcx: TyCtxt<'tcx>, owner: LocalDefId, implementations: Vec<DefId>) -> Self {
         Self {
             tcx,
             owner,
@@ -41,6 +57,7 @@ impl<'tcx> Encoder<'tcx> {
             parameters: HashMap::new(),
             targets: Vec::new(),
             auditing: false,
+            implementations,
         }
     }
 
@@ -56,7 +73,7 @@ impl<'tcx> Encoder<'tcx> {
     }
 
     pub fn encode(mut self) -> Vec<Part> {
-        self.text("loom-hir-v2");
+        self.text("loom-hir-v3");
         self.metadata(self.owner);
         self.item(self.owner);
         self.parts

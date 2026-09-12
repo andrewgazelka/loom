@@ -176,3 +176,47 @@ fn distinct_associated_slots_do_not_collapse() {
         compile(&source.replace("T::First", "T::Second")).entry()
     );
 }
+
+#[test]
+fn cycle_function_renaming_preserves_content_identity() {
+    let source = "fn first(n: u32) -> u32 { if n == 0 { 7 } else { second(n - 1) } } fn second(n: u32) -> u32 { if n == 0 { 9 } else { first(n - 1) } } pub fn entry(n: u32) -> u32 { first(n) }";
+    let before = compile(source);
+    let renamed = compile(&source.replace("first", "zeta").replace("second", "alpha"));
+    assert_eq!(before.entry(), renamed.entry());
+    assert_eq!(before.item("first").hash, renamed.item("zeta").hash);
+    assert_eq!(before.item("second").hash, renamed.item("alpha").hash);
+}
+
+#[test]
+fn identical_functions_share_hashes_inside_nominal_cycles() {
+    let source = "struct Alpha; impl Alpha { fn one(&self) -> u32 { 7 } fn two(&self) -> u32 { 7 } } pub fn entry() -> u32 { Alpha.one() + Alpha.two() }";
+    let before = compile(source);
+    assert_eq!(before.item("one").hash, before.item("two").hash);
+    let renamed = compile(&source.replace("one", "zeta").replace("two", "alpha"));
+    assert_eq!(before.entry(), renamed.entry());
+    assert_eq!(before.item("Alpha").hash, renamed.item("Alpha").hash);
+}
+
+#[test]
+fn trait_impl_member_bindings_are_not_a_bag_of_bodies() {
+    let source = "struct Alpha; trait Read { fn first(&self) -> u32; fn second(&self) -> u32; } impl Read for Alpha { fn first(&self) -> u32 { 7 } fn second(&self) -> u32 { 9 } } pub fn entry() -> u32 { Alpha.first() }";
+    let before = compile(source);
+    let swapped = compile(
+        &source
+            .replace("{ 7 }", "{ TEMP }")
+            .replace("{ 9 }", "{ 7 }")
+            .replace("{ TEMP }", "{ 9 }"),
+    );
+    assert_ne!(before.item("Alpha").hash, swapped.item("Alpha").hash);
+    assert_ne!(before.entry(), swapped.entry());
+}
+
+#[test]
+fn aliased_self_types_and_empty_impls_are_dependencies() {
+    let source = "struct Alpha; type Alias = Alpha; impl Alias { fn read(&self) -> u32 { 7 } } pub fn entry() -> u32 { Alpha.read() }";
+    let before = compile(source);
+    let changed = compile(&source.replace("{ 7 }", "{ 9 }"));
+    assert_ne!(before.item("Alpha").hash, changed.item("Alpha").hash);
+    let empty = compile(&format!("{source} impl Alpha {{}}"));
+    assert_ne!(before.item("Alpha").hash, empty.item("Alpha").hash);
+}

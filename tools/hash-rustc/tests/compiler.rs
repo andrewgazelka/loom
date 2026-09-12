@@ -132,7 +132,7 @@ fn generics_shadowing_closures_and_macro_expansion_are_alpha_equivalent() {
 }
 
 #[test]
-fn trait_dispatch_excludes_monomorphized_impl() {
+fn trait_dispatch_keeps_generic_identity_but_tracks_nominal_impls() {
     let directory = tempfile::tempdir().unwrap();
     let source = "trait Value { fn value(&self) -> u32; } struct A; impl Value for A { fn value(&self) -> u32 { 1 } } fn generic<T: Value>(x: T) -> u32 { x.value() } pub fn entry() -> u32 { generic(A) }";
     let first = run(directory.path(), source, &[]);
@@ -149,7 +149,12 @@ fn trait_dispatch_excludes_monomorphized_impl() {
         String::from_utf8_lossy(&second.stderr)
     );
     let after = json(directory.path());
-    assert_eq!(before["entry"], after["entry"]);
+    assert_ne!(before["entry"], after["entry"]);
+    assert_ne!(before["items"]["A"]["hash"], after["items"]["A"]["hash"]);
+    assert_eq!(
+        before["items"]["generic"]["hash"],
+        after["items"]["generic"]["hash"]
+    );
     assert_ne!(before["items"], after["items"]);
     let generic = before["items"]
         .as_object()
