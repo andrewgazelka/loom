@@ -63,34 +63,21 @@ impl Driver {
                 manifest.display()
             )));
         }
-        let compiler = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
-        let output = Command::new(&compiler)
-            .arg("-vV")
-            .output()
-            .await
-            .map_err(|error| {
-                rejected(format!(
-                    "guest compiler {}: {error}",
-                    Path::new(&compiler).display()
-                ))
-            })?;
-        if !output.status.success() {
-            return Err(rejected(String::from_utf8_lossy(&output.stderr)));
-        }
-        let guest_version = output.stdout;
+        let toolchain = crate::resolve_guest_toolchain(root).await?;
+        let guest_version = toolchain.version.as_bytes();
         let target = cache
             .join("hash-rustc")
-            .join(blake3::hash(&guest_version).to_hex().as_str());
+            .join(blake3::hash(guest_version).to_hex().as_str());
         let path = selected
             .map(Path::to_owned)
             .unwrap_or_else(|| target.join("release/hash-rustc"));
         if selected.is_none() {
             // Cargo's freshness check covers changes in the independently pinned driver.
-            let output = Command::new("cargo")
+            let output = Command::new(&toolchain.cargo)
                 .current_dir(&source)
-                .env_remove("RUSTC")
+                .env("RUSTC", toolchain.sysroot.join("bin/rustc"))
                 .env_remove("RUSTC_WRAPPER")
-                .env_remove("RUSTUP_TOOLCHAIN")
+                .env("RUSTUP_TOOLCHAIN", &toolchain.channel)
                 .env_remove("RUSTFLAGS")
                 .env_remove("CARGO_ENCODED_RUSTFLAGS")
                 .env("CARGO_TARGET_DIR", &target)
@@ -126,12 +113,12 @@ impl Driver {
             return Err(rejected(format!(
                 "guest rustc is incompatible with hash-rustc driver {}: guest {}driver {}; select the matching guest compiler explicitly with RUSTC",
                 path.display(),
-                String::from_utf8_lossy(&guest_version),
+                String::from_utf8_lossy(guest_version),
                 String::from_utf8_lossy(&version.stdout)
             )));
         }
         let mut hasher = blake3::Hasher::new();
-        hasher.update(&guest_version);
+        hasher.update(guest_version);
         hasher.update(&version.stdout);
         // The compiler version alone cannot distinguish encoder revisions.
         hasher.update(blake3::hash(&std::fs::read(&path)?).as_bytes());

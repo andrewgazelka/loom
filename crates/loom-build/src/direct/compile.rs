@@ -32,27 +32,8 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
     let cache = cache_path.as_path();
     let directory = directory_path.as_path();
     let target_name = "wasm32-unknown-unknown";
-    let compiler_owner = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".into());
-    let mut compiler_command = Command::new(&compiler_owner);
-    compiler_environment(&mut compiler_command);
-    let compiler = compiler_command.arg("-vV").output().await?;
-    if !compiler.status.success() {
-        return Err(rejected(String::from_utf8_lossy(&compiler.stderr)));
-    }
-    let mut sysroot_command = Command::new(&compiler_owner);
-    compiler_environment(&mut sysroot_command);
-    let sysroot_output = sysroot_command
-        .args(["--print", "sysroot"])
-        .output()
-        .await?;
-    if !sysroot_output.status.success() {
-        return Err(rejected(String::from_utf8_lossy(&sysroot_output.stderr)));
-    }
-    let sysroot = PathBuf::from(
-        String::from_utf8(sysroot_output.stdout)
-            .map_err(rejected)?
-            .trim(),
-    );
+    let toolchain = crate::resolve_guest_toolchain(root).await?;
+    let sysroot = toolchain.sysroot.clone();
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"rustc-contract-v7-dependency-artifact-digests");
     let manifest_bytes = fs::read_to_string(directory.join("Cargo.toml"))
@@ -62,8 +43,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
         .into_bytes();
     let compiler_identity = format!(
         "{}\nhash-rustc:{}",
-        String::from_utf8(compiler.stdout).map_err(rejected)?,
-        driver.toolchain_hash
+        toolchain.version, driver.toolchain_hash
     );
     for bytes in [
         manifest_bytes,
@@ -243,8 +223,10 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
         command
     };
     compiler_environment(&mut command);
+    toolchain.configure(&mut command)?;
     command
         .env("RUSTC", &driver.path)
+        .env("RUSTUP_TOOLCHAIN", &toolchain.channel)
         .env("LOOM_LOCKED", "1")
         .env("LOOM_RUST_TARGET", target_name)
         .env("LOOM_CAS_SOURCES", cache.join("source-trees"))
