@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { V } from "./commands";
   import { Check, GitBranch, ScanSearch } from "lucide-svelte";
   import {
     actorTree,
@@ -36,7 +37,7 @@
   }
 </script>
 
-{#if operation === "actor_validate"}
+{#if operation === V.validate}
   {@const result = validation(value)}
   <div class="verdict" class:matched={result.verdict.kind === "Matched"}>
     <ScanSearch size={21} />
@@ -90,7 +91,7 @@
     label="SQL assertions"
     rows={result.assertions.map((assertion) => ({ ...assertion }))}
   />
-{:else if operation === "actor_info"}
+{:else if operation === V.info}
   {@const info = object(value, operation)}
   <div class="section-bar">
     <GitBranch size={15} class="icon-actor" />
@@ -113,7 +114,7 @@
     <dd>
       {#if info.parent}<button
           class="text-control"
-          on:click={() => navigate("actor_info", { id: String(info.parent) })}
+          on:click={() => navigate(V.info, { id: String(info.parent) })}
           >{String(info.parent)}</button
         >{:else}Root supervisor{/if}
     </dd>
@@ -134,12 +135,12 @@
       )
       .map((key) => ({ field: key, value: json(info[key], key) }))}
   />
-{:else if operation === "actor_tree"}<DataTable
+{:else if operation === V.tree}<DataTable
     label="Supervision tree"
     rows={treeRows(actorTree(value))}
   />
-{:else if ["actor_list", "actor_lineage", "actor_dead_letters", "actor_sql", "actor_behaviors"].includes(operation)}<DataTable
-    label={operation.replace("actor_", "").replaceAll("_", " ")}
+{:else if [V.actors, V.lineage, V.dead_letters, V.sql, V.behaviors].some((verb) => verb === operation)}<DataTable
+    label={operation.replaceAll("_", " ")}
     rows={rows(value, operation)}
   />
 {:else if Array.isArray(value)}<DataTable
