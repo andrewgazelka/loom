@@ -32,6 +32,7 @@
             || file.hasExt "svelte"
             || file.hasExt "css"
             || file.hasExt "html"
+            || file.hasExt "json"
             || file.name == "package.json"
             || file.name == "bun.lock"
             || file.name == "tsconfig.json"
