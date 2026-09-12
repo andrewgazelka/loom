@@ -60,6 +60,7 @@ impl Driver {
                 .current_dir(&source)
                 .env("RUSTC", toolchain.sysroot.join("bin/rustc"))
                 .env_remove("RUSTC_WRAPPER")
+                .env_remove("RUSTC_WORKSPACE_WRAPPER")
                 .env(
                     "RUSTUP_TOOLCHAIN",
                     toolchain
@@ -98,11 +99,18 @@ impl Driver {
             )));
         }
         if guest_version != version.stdout {
+            // The driver is a rustc plugin: it answers with the compiler it was
+            // linked against, which must be the guest compiler byte for byte.
             return Err(rejected(format!(
-                "guest rustc is incompatible with hash-rustc driver {}: guest {}driver {}; select the matching guest compiler explicitly with RUSTC",
+                "hash-rustc driver {} is incompatible with the guest compiler{}: guest {}driver {}",
                 path.display(),
+                toolchain
+                    .channel
+                    .as_deref()
+                    .map(|channel| format!(" pin {channel}"))
+                    .unwrap_or_default(),
                 String::from_utf8_lossy(guest_version),
-                String::from_utf8_lossy(&version.stdout)
+                String::from_utf8_lossy(&version.stdout),
             )));
         }
         let mut hasher = blake3::Hasher::new();
