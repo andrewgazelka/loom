@@ -13,7 +13,7 @@ blake3 = "1"
 tokio = { version = "1", features = ["full"] }
 futures = { version = "0.3", features = ["thread-pool"] }
 uuid = { version = "1", features = ["v4"] }
-wasmtime = { version = "=48.0.1", default-features = false, features = ["threads", "anyhow", "async", "component-model", "cranelift", "incremental-cache", "runtime", "pooling-allocator", "parallel-compilation", "std", "wat"] }
+wasmtime = { version = "=48.0.1", default-features = false, features = ["threads", "anyhow", "async", "cranelift", "incremental-cache", "runtime", "pooling-allocator", "parallel-compilation", "std", "wat"] }
 rusqlite = "0.32"
 
 serde = { version = "1", features = ["derive"] }

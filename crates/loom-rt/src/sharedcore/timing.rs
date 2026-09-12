@@ -10,7 +10,7 @@ impl Runtime {
     /// so this is an upper bound on a single complete effect round trip.
     pub async fn benchmark_handler_module(&self, bytes: &[u8]) -> Result<Value> {
         anyhow::ensure!(
-            loom_proto::component_protocol::is_core_current(bytes),
+            loom_proto::core_protocol::is_current(bytes),
             "benchmark requires a current admitted core artifact"
         );
         let module_hash = blake3::hash(bytes).to_hex().to_string();

@@ -59,7 +59,7 @@
   on:wheel|nonpassive={wheel}
   on:keydown={keyboard}
 >
-  <svg width="100%" height="100%" aria-label="Cross-language dependencies"
+  <svg width="100%" height="100%" aria-label="Definition dependencies"
     ><g transform={`translate(${x},${y}) scale(${scale})`}>
       {#each edges as edge}{@const from = nodes.find(
           (n) => n.hash === edge.from,

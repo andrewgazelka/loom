@@ -34,7 +34,7 @@ impl Runtime {
     /// alone establishes identity, not this atomic-access/lifetime contract.
     pub async unsafe fn verify_borrowed_handler_cancellation(&self, bytes: &[u8]) -> Result<Value> {
         anyhow::ensure!(
-            loom_proto::component_protocol::is_core_current(bytes),
+            loom_proto::core_protocol::is_current(bytes),
             "cancellation control requires current core ABI"
         );
         let module_hash = blake3::hash(bytes).to_hex().to_string();

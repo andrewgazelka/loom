@@ -59,23 +59,16 @@ impl Runtime {
                 super::sharedcore::Entry::Schema,
             )
             .await?;
-        match call {
-            Some(call) => call
-                .output
-                .decode()?
-                .as_str()
-                .map(str::to_owned)
-                .ok_or_else(|| {
-                    GuestFailure::new(format!(
-                        "definition {hash}: loom_schema must return SQL text"
-                    ))
-                    .into()
-                }),
-            None => {
-                self.instance(hash, "schema", true).await?;
-                Ok(String::new())
-            }
-        }
+        call.output
+            .decode()?
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                GuestFailure::new(format!(
+                    "definition {hash}: loom_schema must return SQL text"
+                ))
+                .into()
+            })
     }
 
     /// Execute one definition with caller-owned root effects. No old actor,

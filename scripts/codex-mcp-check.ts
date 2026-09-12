@@ -36,7 +36,7 @@ async function createFixture(root:string):Promise<void> {
   await symlink('missing-target',join(root,'broken-link'));
   console.log(JSON.stringify({fixture:root,...await scan(root)}));
 }
-if(args.includes('--baseline')) {console.log('0/6 fresh Codex recursive MCP checks pass; first failing step: real Codex trace not supplied');process.exit(1);}
+if(args.includes('--baseline')) {console.log('0/4 fresh Codex recursive MCP checks pass; first failing step: real Codex trace not supplied');process.exit(1);}
 if(option('--create-fixture')) {await createFixture(resolve(requireValue(option('--create-fixture'),'fixture')));process.exit(0);}
 let passed=0;
 let firstFailure: string | undefined;
@@ -82,7 +82,7 @@ try {
     const path=typeof result.path==='string'?result.path.replace(/^\.\//,''):undefined;
     assert(path===expected.largest.path&&result.size===expected.largest.size,`${lang} expected${JSON.stringify(expected.largest)}, got${JSON.stringify(result)}`);
   }
-  for(const lang of ['ts','rust'])await gate(`${lang} model-written recursive definition executes correctly`,async()=>{
+  for(const lang of ['rust'])await gate(`${lang} model-written recursive definition executes correctly`,async()=>{
     const definitions=calls.filter(call=>call.server==='loom'&&call.tool==='loom_define'&&successfulLoomResult(call)&&object(call.arguments).name===`codex-recursive-${lang}`);
     assert(definitions.length>0,`trace lacks successful${lang}definitiontool`);
     const traced=object(object(decodedLoomResult(definitions.at(-1)!)!.result).def);
@@ -94,15 +94,15 @@ try {
     await invoke(lang);
   });
   let mutationFile:string;
-  await gate('both languages observe a new deeper directory and winner',async()=>{
+  await gate('Rust observes a new deeper directory and winner',async()=>{
     mutationRoot=await mkdtemp(join(root,'nested/middle/deep','.loom-check-'));
     const mutationDirectory=join(mutationRoot,'deeper');
     await mkdir(mutationDirectory);
     mutationFile=join(mutationDirectory,'winner.dat');
-    await writeFile(mutationFile,new Uint8Array(16387));expected=await scan(root);await invoke('ts');await invoke('rust');
+    await writeFile(mutationFile,new Uint8Array(16387));expected=await scan(root);await invoke('rust');
   });
   const failures: string[] = [];
-  for(const lang of ['ts','rust'])try { await gate(`${lang} five fresh warm scans median below1500ms`,async()=>{
+  for(const lang of ['rust'])try { await gate(`${lang} five fresh warm scans median below1500ms`,async()=>{
     const samples:number[]=[];
     for(let iteration=0;iteration<5;iteration++){
       await writeFile(mutationFile!,new Uint8Array(16388+iteration));expected=await scan(root);
@@ -112,4 +112,4 @@ try {
   }); } catch(error) { failures.push(String(error)); console.error(error); }
   if(failures.length)throw new Error(failures.join('; '));
 }catch(error){firstFailure ??= String(error);console.error(error);process.exitCode=1;}
-finally {try {if(mutationRoot)await rm(mutationRoot,{recursive:true});} catch(error) {firstFailure ??= `fixture cleanup: ${String(error)}`;console.error(error);process.exitCode=1;} try {await client?.close();} catch(error) {console.error(error);process.exitCode=1;} console.log(`${passed}/6 fresh Codex recursive MCP checks pass${firstFailure ? `; first failing step: ${firstFailure}` : ''}`);}
+finally {try {if(mutationRoot)await rm(mutationRoot,{recursive:true});} catch(error) {firstFailure ??= `fixture cleanup: ${String(error)}`;console.error(error);process.exitCode=1;} try {await client?.close();} catch(error) {console.error(error);process.exitCode=1;} console.log(`${passed}/4 fresh Codex recursive MCP checks pass${firstFailure ? `; first failing step: ${firstFailure}` : ''}`);}

@@ -113,4 +113,4 @@ The long-term goal is a formally verified guest language whose guarantees surviv
 
 Run the consolidated benchmark against a copied, freshly built release daemon. Its scope is the scan and crate-cache targets above. Run explicit unsafe-code rejection controls alongside it. Unit and integration tests must also cover persistence, explicit upgrades, writer failure, and compiler artifact invalidation.
 
-After those gates pass, disable the TypeScript-to-Wasm path as separately requested. Keep persisted records readable. Linux I/O improvements must preserve isolated instance memory and the DAG-CBOR effect protocol; the canceled shared-memory performance targets are no longer acceptance criteria.
+Rust is the only guest language. Unsupported persisted guest records fail admission. Linux I/O improvements must preserve isolated instance memory and the DAG-CBOR effect protocol; the canceled shared-memory performance targets are no longer acceptance criteria.

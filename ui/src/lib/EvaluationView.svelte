@@ -16,11 +16,11 @@
 
 <div class="evaluation" class:result-first={resultFirst}>
   {#if source && !resultFirst}<div class="evaluation-source">
-      <CodeBlock code={source} language="typescript" />
+      <CodeBlock code={source} language="rust" />
     </div>{/if}
   <div class="evaluation-value"><ValueView value={isPreview ? preview.result : value} {inspect} />{#if isPreview}<FilesystemChanges {value} {client} {inspect} />{/if}</div>
   {#if source && resultFirst}<div class="evaluation-source">
-      <CodeBlock code={source} language="typescript" />
+      <CodeBlock code={source} language="rust" />
     </div>{/if}{#if definition}<div class="evaluation-definition">
       <span>Definition</span><ReferenceLink hash={definition} {inspect} />
     </div>{/if}

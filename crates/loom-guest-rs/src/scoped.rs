@@ -194,7 +194,7 @@ impl Drop for TaskRegistry {
     }
 }
 
-#[cfg(all(loom_core, target_arch = "wasm32"))]
+#[cfg(target_arch = "wasm32")]
 pub(crate) unsafe fn start_task(run: unsafe fn(*mut ()), data: *mut (), detached: bool) -> u64 {
     unsafe {
         crate::core::host_spawn(
@@ -204,7 +204,7 @@ pub(crate) unsafe fn start_task(run: unsafe fn(*mut ()), data: *mut (), detached
         )
     }
 }
-#[cfg(all(loom_core, target_arch = "wasm32"))]
+#[cfg(target_arch = "wasm32")]
 pub(crate) fn join_task(id: u64) -> i32 {
     unsafe { crate::core::host_join(id) }
 }
@@ -283,7 +283,8 @@ mod tests {
         }
         let drops = std::sync::atomic::AtomicUsize::new(0);
         scope(|scope| {
-            scope.spawn(|| ResultDrop { drops: &drops }).unwrap();
+            let _ =
+                std::mem::ManuallyDrop::new(scope.spawn(|| ResultDrop { drops: &drops }).unwrap());
         });
         assert_eq!(drops.load(Ordering::Relaxed), 1);
     }
@@ -292,12 +293,14 @@ mod tests {
     fn scope_body_unwind_still_joins_borrowed_task() {
         let mut value = 0;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            scope(|scope| {
-                scope
-                    .spawn(|| {
-                        value = 9;
-                    })
-                    .unwrap();
+            scope::<_, ()>(|scope| {
+                let _ = std::mem::ManuallyDrop::new(
+                    scope
+                        .spawn(|| {
+                            value = 9;
+                        })
+                        .unwrap(),
+                );
                 panic!("scope body control");
             });
         }));
@@ -318,11 +321,13 @@ mod tests {
             assert_eq!(*job.join().unwrap(), 8);
         });
         scope(|scope| {
-            scope
-                .spawn(|| {
-                    values[2] = 9;
-                })
-                .unwrap();
+            let _ = std::mem::ManuallyDrop::new(
+                scope
+                    .spawn(|| {
+                        values[2] = 9;
+                    })
+                    .unwrap(),
+            );
         });
         assert_eq!(values, [1, 8, 9]);
     }

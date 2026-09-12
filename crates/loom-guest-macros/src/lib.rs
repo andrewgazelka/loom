@@ -33,7 +33,7 @@ pub fn schema(attr: TokenStream, item: TokenStream) -> TokenStream {
     let name = &signature.ident;
     quote! {
         #function
-        #[cfg(all(loom_core, not(feature = "loom-dependency")))]
+        #[cfg(not(feature = "loom-dependency"))]
         #[unsafe(export_name = "loom_schema")]
         pub extern "C" fn __loom_schema_export() -> u64 {
             ::loom::core::response(Ok(#name()))
@@ -42,7 +42,7 @@ pub fn schema(attr: TokenStream, item: TokenStream) -> TokenStream {
     .into()
 }
 
-/// Export one free function as the component's callable definition.
+/// Export one free function as a core wasm callable definition.
 #[proc_macro_attribute]
 pub fn def(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut definition_hash = syn::LitStr::new("$self", proc_macro2::Span::call_site());
@@ -88,7 +88,7 @@ pub fn def(attr: TokenStream, item: TokenStream) -> TokenStream {
         .into();
     }
     let name = &function.sig.ident;
-    let component = format_ident!("__LoomDefinition");
+    let definition = format_ident!("__LoomDefinition");
     let mut decode = Vec::new();
     let mut arguments = Vec::new();
     let mut argument_types = Vec::new();
@@ -163,9 +163,9 @@ pub fn def(attr: TokenStream, item: TokenStream) -> TokenStream {
             ::loom::serde_json::json!({"effects":{"labels":[],"unknown":true,"declared":#declared_metadata},"exports":[{"name":#export_name,"params":[#(#parameter_signatures),*],"returns":#return_shape,"effects":{"labels":[],"unknown":true,"declared":#declared_metadata}}]})
         }
         #invocation
-        pub struct #component;
+        pub struct #definition;
         #[cfg(not(feature = "loom-dependency"))]
-        impl ::loom::bindings::Guest for #component {
+        impl ::loom::core::Guest for #definition {
             fn run(_state: Vec<u8>, _msg: Vec<u8>) -> Result<Vec<u8>, String> { Err("free definition has no actor handler".into()) }
             fn fold(_state: Vec<u8>, _event: Vec<u8>) -> Vec<u8> { panic!("free definition has no fold") }
             fn call(_def: Vec<u8>, args: Vec<u8>) -> Result<Vec<u8>, String> {
@@ -177,7 +177,7 @@ pub fn def(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
         }
         #[cfg(not(feature = "loom-dependency"))]
-        ::loom::bindings::export!(#component);
+        ::loom::export_core!(#definition);
     }.into()
 }
 
@@ -200,14 +200,8 @@ pub fn actor(attr: TokenStream, item: TokenStream) -> TokenStream {
     let name = &structure.ident;
     quote! {
         #structure
-        // loom_core gates host-vs-guest codegen; it is set by loom-guest-rs's own
-        // build, never registered by the destination (guest) crate this macro expands
-        // into, so unexpected_cfgs would fire there for every actor. #[allow] must sit
-        // on the enclosing item: rustc resolves #[cfg] before an #[allow] on the same item.
-        #[allow(unexpected_cfgs)]
         #[cfg(not(feature = "loom-dependency"))]
-        impl ::loom::bindings::Guest for #name {
-            #[cfg(loom_core)]
+        impl ::loom::core::Guest for #name {
             fn init() -> Result<Vec<u8>, String> { ::loom::encode(&<Self as ::loom::Actor>::init()) }
             fn run(state: Vec<u8>, msg: Vec<u8>) -> Result<Vec<u8>, String> {
                 let state = if ::loom::decode_host::<::loom::Value>(&state)?.is_null() { <Self as ::loom::Actor>::init() } else { ::loom::decode_host(&state)? };
@@ -222,7 +216,7 @@ pub fn actor(attr: TokenStream, item: TokenStream) -> TokenStream {
             fn call(_def: Vec<u8>, _args: Vec<u8>) -> Result<Vec<u8>, String> { Err("actor definition has no free function".into()) }
         }
         #[cfg(not(feature = "loom-dependency"))]
-        ::loom::bindings::export!(#name);
+        ::loom::export_core!(#name);
     }.into()
 }
 

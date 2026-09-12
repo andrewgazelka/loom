@@ -4,7 +4,7 @@
 mod effects;
 mod wire;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use loom_actor::{Behavior, Ctx, Registry, Trap};
 use loom_rt::{CallEffects, GuestFailure, Runtime};
@@ -24,10 +24,6 @@ impl LoomBehavior {
         let definition = store
             .executable_definition(def_hash)?
             .with_context(|| format!("definition {def_hash} not found"))?;
-        ensure!(
-            definition.lang == loom_proto::Lang::Rust,
-            "definition {def_hash} must be Rust"
-        );
         let runtime = Runtime::new(store)?;
         let schema = runtime
             .definition_schema(def_hash)

@@ -4,18 +4,28 @@ use loom_api::Service;
 use loom_proto::{DefineRequest, EvalRequest, Lang};
 use loom_store::Store;
 use serde_json::json;
-use std::{collections::BTreeMap, path::PathBuf, time::Instant};
-#[tokio::main]
-async fn main() -> Result<()> {
+use std::{collections::BTreeMap, path::PathBuf, process::ExitCode, time::Instant};
+fn main() -> Result<ExitCode> {
+    if let Some(status) = loom_build::compiler_cache_entry()? {
+        return Ok(status);
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run())?;
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn run() -> Result<()> {
     let root = PathBuf::from(std::env::var("LOOM_ROOT")?).canonicalize()?;
-    let service = Service::new(Store::memory()?, root, vec![Lang::Ts])?;
+    let service = Service::new(Store::memory()?, root, vec![Lang::Rust])?;
     for expression in ["2 + 2", "2 + 3", "42 * 2"] {
         let start = Instant::now();
         let definition = service
             .define(DefineRequest {
                 name: "timing/expression".into(),
-                lang: Lang::Ts,
-                source: format!("export function main(): number {{ return {expression}; }}"),
+                lang: Lang::Rust,
+                source: format!("#[loom::def] pub fn main() -> i32 {{ {expression} }}"),
                 deps: BTreeMap::new(),
                 allowed_effects: None,
             })

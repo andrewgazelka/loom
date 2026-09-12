@@ -204,7 +204,7 @@ fn abort_execution() -> ! {
         std::process::abort()
     }
 }
-#[cfg(all(loom_core, target_arch = "wasm32"))]
+#[cfg(target_arch = "wasm32")]
 unsafe fn host_push(run: HandlerRun, data: *mut (), labels: &[u8]) -> u64 {
     unsafe {
         crate::core::host_handle_push(
@@ -215,39 +215,39 @@ unsafe fn host_push(run: HandlerRun, data: *mut (), labels: &[u8]) -> u64 {
         )
     }
 }
-#[cfg(not(all(loom_core, target_arch = "wasm32")))]
+#[cfg(not(target_arch = "wasm32"))]
 unsafe fn host_push(_: HandlerRun, _: *mut (), _: &[u8]) -> u64 {
     0
 }
-#[cfg(all(loom_core, target_arch = "wasm32"))]
+#[cfg(target_arch = "wasm32")]
 fn host_pop(frame: u64) -> i32 {
     unsafe { crate::core::host_handle_pop(frame) }
 }
-#[cfg(not(all(loom_core, target_arch = "wasm32")))]
+#[cfg(not(target_arch = "wasm32"))]
 fn host_pop(_: u64) -> i32 {
     -1
 }
-#[cfg(all(loom_core, target_arch = "wasm32"))]
+#[cfg(target_arch = "wasm32")]
 fn host_resume(id: u64, bytes: &[u8]) -> i32 {
     unsafe { crate::core::host_resume(id, bytes.as_ptr() as u32, bytes.len() as u32) }
 }
-#[cfg(not(all(loom_core, target_arch = "wasm32")))]
+#[cfg(not(target_arch = "wasm32"))]
 fn host_resume(_: u64, _: &[u8]) -> i32 {
     -1
 }
-#[cfg(all(loom_core, target_arch = "wasm32"))]
+#[cfg(target_arch = "wasm32")]
 fn host_abandon(id: u64) -> i32 {
     unsafe { crate::core::host_abandon(id) }
 }
-#[cfg(not(all(loom_core, target_arch = "wasm32")))]
+#[cfg(not(target_arch = "wasm32"))]
 fn host_abandon(_: u64) -> i32 {
     -1
 }
-#[cfg(all(loom_core, target_arch = "wasm32"))]
+#[cfg(target_arch = "wasm32")]
 fn host_drop(id: u64) -> i32 {
     unsafe { crate::core::host_continuation_drop(id) }
 }
-#[cfg(all(not(test), not(all(loom_core, target_arch = "wasm32"))))]
+#[cfg(all(not(test), not(target_arch = "wasm32")))]
 fn host_drop(_: u64) -> i32 {
     -1
 }

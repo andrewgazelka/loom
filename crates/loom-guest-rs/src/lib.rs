@@ -1,37 +1,18 @@
-//! Synchronous guest interface to the language-independent Loom host.
-#[cfg(loom_core)]
+//! Synchronous guest interface to the core wasm Loom host.
 #[doc(hidden)]
 pub mod core;
-#[cfg(any(loom_core, not(target_arch = "wasm32")))]
 mod detached;
-#[cfg(any(loom_core, not(target_arch = "wasm32")))]
 mod scoped;
-#[cfg(any(loom_core, not(target_arch = "wasm32")))]
 pub use detached::{JoinHandle, spawn};
-#[cfg(any(loom_core, not(target_arch = "wasm32")))]
 pub use scoped::{Scope, ScopedJoinHandle, scope};
-#[cfg(any(loom_core, not(target_arch = "wasm32")))]
 mod handlers;
-#[cfg(any(loom_core, not(target_arch = "wasm32")))]
 pub mod preview;
-#[cfg(any(loom_core, not(target_arch = "wasm32")))]
 pub use handlers::{Continuation, Effect, Reply, handle, handle_any};
 pub use loom_guest_macros::{actor, def, schema};
 pub use serde;
 use serde::{Serialize, de::DeserializeOwned};
 pub use serde_json;
 use std::marker::PhantomData;
-
-#[cfg(not(loom_core))]
-pub mod bindings {
-    wit_bindgen::generate!({ path: "../../wit", world: "handler", pub_export_macro: true, default_bindings_module: "::loom::bindings" });
-}
-
-#[cfg(loom_core)]
-pub mod bindings {
-    pub use crate::core::Guest;
-    pub use crate::export_core as export;
-}
 
 pub type EffectError = String;
 pub use loom_proto::{DirEntry, EntryKind, TypeSig, Value, decode, decode_host, encode};
@@ -41,15 +22,7 @@ pub fn perform<T: DeserializeOwned>(name: &str, args: impl Serialize) -> Result<
     let args = serde_json::to_value(args).map_err(|error| error.to_string())?;
     let desc = loom_proto::Desc::<T>::new(name, args);
     let bytes = encode(&desc)?;
-    #[cfg(not(loom_core))]
-    {
-        let result = bindings::loom::host::effects::perform(&bytes)?;
-        decode_host(&result)
-    }
-    #[cfg(loom_core)]
-    {
-        core::perform(&bytes)
-    }
+    core::perform(&bytes)
 }
 
 pub struct Def<F> {

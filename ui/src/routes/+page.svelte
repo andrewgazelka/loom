@@ -1,16 +1,9 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import {
-    GitBranch,
-    Terminal,
-    AlignLeft,
-    Circle,
-    Database,
-    Settings,
-    RefreshCw,
-    X,
-    HelpCircle,
-  } from "lucide-svelte";
+  import { X } from "lucide-svelte";
+  import WorkspaceNavigation from "$lib/WorkspaceNavigation.svelte";
+  import WorkspaceHeader from "$lib/WorkspaceHeader.svelte";
+  import type { WorkspaceView } from "$lib/workspace-view";
   import {
     Client,
     AuthenticationError,
@@ -32,10 +25,8 @@
   import CasBrowser from "$lib/CasBrowser.svelte";
   import "@fontsource/jetbrains-mono/400.css";
   import "$lib/app.css";
-  type View = "Session" | "Definitions" | "Actors" | "CAS" | "Effects";
-  const views: View[] = ["Session", "Definitions", "Actors", "CAS", "Effects"];
   let selectedActor = "";
-  let view: View = "Session",
+  let view: WorkspaceView = "Session",
     endpoint = "",
     token = "",
     session = "",
@@ -48,7 +39,6 @@
     events: LogEvent[] = [],
     entries: Entry[] = [];
   let mode = "eval",
-    language = "ts",
     source = "",
     name = "",
     dependencies = "{}",
@@ -210,7 +200,7 @@
     inspectHash = hash;
     view = "CAS";
   }
-  function navigate(next: View) {
+  function navigate(next: WorkspaceView) {
     view = next;
     if (next === "CAS") inspectHash = "";
     if (next !== "Session") void refresh();
@@ -224,7 +214,7 @@
     const entry: Entry = {
       id,
       source: submitted,
-      mode: operation === "define" ? `define ${language}` : operation,
+      mode: operation === "define" ? "define rust" : operation,
       ...(operation === "define" ? { name } : {}),
     };
     entries = [...entries, entry];
@@ -245,7 +235,7 @@
           throw new Error(
             "Dependencies must map import names to definition hashes.",
           );
-        body = { lang: language, name, source: submitted, deps };
+        body = { lang: "rust", name, source: submitted, deps };
       } else if (operation === "command") {
         const command: unknown = JSON.parse(submitted);
         if (typeof record(command).command !== "string")
@@ -325,51 +315,11 @@
     </section>
   </main>
 {:else}
-<header class="workspace-header">
-  <a href="/" class="wordmark">loom</a><span class="header-divider">/</span>
-  <div class="workspace-identity">
-    <GitBranch size={14} /><span>workspace</span>
-  </div>
-  <div class="header-controls">
-    <span class="connection-status"
-      ><span class:connected class="status-dot"></span>{connected
-        ? "Connected"
-        : "Offline"}</span
-    ><button
-      title="Refresh workspace"
-      aria-label="Refresh workspace"
-      disabled={refreshing}
-      on:click={refresh}><RefreshCw size={14} /></button
-    ><button
-      title="Keyboard & gestures"
-      aria-label="Keyboard & gestures"
-      on:click={() => (help = !help)}><HelpCircle size={14} /></button
-    ><button
-      title="Connection settings"
-      aria-label="Connection settings"
-      on:click={() => (settings = !settings)}><Settings size={14} /></button
-    >
-  </div>
-</header>
+<WorkspaceHeader {connected} {refreshing} {refresh}
+  toggleHelp={() => help = !help} toggleSettings={() => settings = !settings} />
 <div class="workspace">
-  <nav class="primary-nav" aria-label="Workspace views">
-    {#each views as item}<button
-        aria-current={view === item ? "page" : undefined}
-        on:click={() => navigate(item)}
-        >{#if item === "Session"}<Terminal
-            size={14}
-          />{:else if item === "Definitions"}<AlignLeft
-            size={14}
-          />{:else if item === "Actors"}<Circle size={13} />{:else}<Database
-            size={14}
-          />{/if}<span>{item}</span
-        >{#if item === "Definitions" || item === "Actors"}<small
-            >{item === "Definitions"
-              ? definitions.length
-              : actors.length}</small
-          >{/if}</button
-      >{/each}<span class="sequence">seq {sequence}</span>
-  </nav>
+  <WorkspaceNavigation {view} {sequence} {navigate}
+    definitionCount={definitions.length} actorCount={actors.length} />
   <main>
     {#if settings}<section class="connection-panel">
         <div class="panel-heading">
@@ -402,7 +352,6 @@
         loadSource={(hash) => client.text(hash)}
       /><Composer
         bind:mode
-        bind:language
         bind:source
         bind:name
         bind:dependencies
@@ -411,7 +360,7 @@
       />
       <div class="session-footer">
         <span>{session ? `Session ${session}` : "New session"}</span><span
-          >TypeScript prompt · Rust definitions</span
+          >Rust prompt · Rust definitions</span
         >
       </div>{:else if view === "Definitions"}<DefinitionBrowser
         {client}

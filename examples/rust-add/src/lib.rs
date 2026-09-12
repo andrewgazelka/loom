@@ -5,7 +5,7 @@ pub fn add(left: i64, right: i64) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use loom::bindings::Guest;
+    use loom::core::Guest;
     #[test]
     fn call_checks_arity_and_decodes_values() {
         assert_eq!(

@@ -4,7 +4,7 @@ use loom_check::CheckedDef;
 use loom_proto::{Def, Lang, definition_identity};
 use loom_store::Store;
 use serde::Serialize;
-use std::{collections::BTreeMap, ffi::OsStr, path::PathBuf, process::ExitCode};
+use std::{collections::BTreeMap, path::PathBuf, process::ExitCode};
 
 #[derive(Serialize)]
 struct FixtureHashes {
@@ -14,42 +14,13 @@ struct FixtureHashes {
 }
 
 fn main() -> Result<ExitCode> {
+    if let Some(status) = loom_build::compiler_cache_entry()? {
+        return Ok(status);
+    }
     let mut arguments = std::env::args_os().skip(1);
     let first = arguments
         .next()
-        .context("expected definitions database path or __compiler-cache")?;
-    if first == OsStr::new("__compiler-cache") {
-        let operation = arguments
-            .next()
-            .context("compiler cache operation is required")?;
-        let operation = operation
-            .to_str()
-            .context("compiler cache operation must be UTF-8")?;
-        ensure!(
-            matches!(operation, "lookup" | "record"),
-            "unknown compiler cache operation {operation}"
-        );
-        let recipe = PathBuf::from(
-            arguments
-                .next()
-                .context("compiler cache recipe is required")?,
-        );
-        let mirror = PathBuf::from(
-            arguments
-                .next()
-                .context("compiler cache mirror is required")?,
-        );
-        ensure!(
-            arguments.next().is_none(),
-            "unexpected compiler cache argument"
-        );
-        let hit = loom_build::compiler_cache_main(operation, &recipe, &mirror)?;
-        return Ok(if hit {
-            ExitCode::SUCCESS
-        } else {
-            ExitCode::from(3)
-        });
-    }
+        .context("expected definitions database path")?;
     ensure!(
         arguments.next().is_none(),
         "expected exactly one definitions database path"

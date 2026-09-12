@@ -101,8 +101,8 @@ The current `defs` schema has no `behavior_hash` column, and the actor `code_cha
 ## Implemented loom-rt seam: a CAS-backed function compilation cache
 
 `loom_rt::LoomCompilationCache` implements Wasmtime 48.0.1's synchronous
-`CacheStore`. Both runtime engines select `Strategy::Cranelift` and install the
-same adapter with `Config::enable_incremental_compilation`; Cargo enables
+`CacheStore`. The core Wasm engine selects `Strategy::Cranelift` and installs the
+adapter with `Config::enable_incremental_compilation`; Cargo enables
 `incremental-cache` and `cranelift`. This caches native compilation per Cranelift
 function across modules. Validation, translation to Cranelift IR, and module
 assembly still occur. The whole-module cache is not enabled by this seam.
@@ -141,8 +141,8 @@ arbitrary bytes are valid machine code for a compiler input.
 error counts and the last diagnostic. Missing index rows are ordinary misses.
 Storage failures, missing mapped blobs, corrupt blobs and conflicting inserts
 have separate counters and diagnostics naming the key/blob. Wasmtime's trait
-can return only `None` or `false` on failure, so both runtime compilation
-boundaries also check the error counter before publishing a compiled module.
+can return only `None` or `false` on failure, so the runtime compilation
+boundary also checks the error counter before publishing a compiled module.
 Any cache error during that window returns a retryable host error. Overlapping
 compiles conservatively share failures; a later retry starts a fresh window and
 can succeed after the underlying store is repaired. Diagnostics retain only

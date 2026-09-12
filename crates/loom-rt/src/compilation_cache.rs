@@ -22,7 +22,7 @@ pub struct CompilationCacheStats {
     pub last_error: Option<String>,
 }
 
-/// A persistent function cache shared by the runtime's core and component engines.
+/// A persistent function cache used by the runtime's core Wasm engine.
 /// Index rows retain CAS blobs until `clear` removes this backend's mappings.
 pub struct LoomCompilationCache {
     store: Store,

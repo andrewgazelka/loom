@@ -105,7 +105,7 @@ unsafe fn run_detached<F: FnOnce() -> T, T>(pointer: *mut ()) {
     // not unwind: that reference remains in execution memory until teardown.
 }
 
-#[cfg(all(loom_core, target_arch = "wasm32"))]
+#[cfg(target_arch = "wasm32")]
 fn task_error(id: u64) -> EffectError {
     // SAFETY: join_error transfers a UTF-8 allocation made with alignment 1.
     let packed = unsafe { crate::core::host_join_error(id) };

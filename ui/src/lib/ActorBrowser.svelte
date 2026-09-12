@@ -115,7 +115,7 @@
     >
     <div class="actor-identity">
       <Circle size={15} /><code>{selected.id}</code><span class="badge"
-        >{selected.lang === "rust" ? "Rust" : "TS"}</span
+        >Rust</span
       >
     </div>
     <button
@@ -237,7 +237,7 @@
             )}</span
           >
         </div>
-        <span class="badge">{actor.lang === "rust" ? "Rust" : "TS"}</span><span
+        <span class="badge">Rust</span><span
           class="quiet">seq {actor.last_seq ?? 0}</span
         ><ChevronRight size={13} /></button
       ><RowPreview load={async () => resultOf(await client.command("state", {actor:actor.id}))} {inspect} /></div>{:else}<div class="empty">

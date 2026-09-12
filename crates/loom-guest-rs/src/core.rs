@@ -219,53 +219,6 @@ fn encoded_response_bytes(result: Result<Vec<u8>, String>) -> Vec<u8> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn encoded_envelopes_match_typed_arrays_null_and_errors() {
-        let entries = vec![crate::DirEntry {
-            name: "file.rs".into(),
-            size: 42,
-            kind: crate::EntryKind::File,
-        }];
-        let typed = encoded_response_bytes(Ok(crate::encode(&entries).unwrap()));
-        assert_eq!(
-            typed,
-            crate::encode(&Response::Success { ok: &entries }).unwrap()
-        );
-        let decoded: HostResponse<Vec<crate::DirEntry>> = crate::decode_host(&typed).unwrap();
-        assert_eq!(decoded.result.unwrap(), entries);
-
-        let null = encoded_response_bytes(Ok(crate::encode(&()).unwrap()));
-        assert_eq!(null, crate::encode(&Response::Success { ok: () }).unwrap());
-        let decoded: HostResponse<()> = crate::decode_host(&null).unwrap();
-        assert_eq!(decoded.result, Ok(()));
-
-        let error = "task failed".to_string();
-        let failed = encoded_response_bytes(Err(error.clone()));
-        assert_eq!(
-            failed,
-            crate::encode(&Response::<()>::Failure {
-                error: error.clone()
-            })
-            .unwrap()
-        );
-        let decoded: HostResponse<()> = crate::decode_host(&failed).unwrap();
-        assert_eq!(decoded.result, Err(error));
-    }
-
-    #[test]
-    fn malformed_guest_payloads_remain_for_strict_host_admission() {
-        for payload in [vec![0, 0], vec![0x18, 0]] {
-            let wrapped = encoded_response_bytes(Ok(payload.clone()));
-            assert_eq!(&wrapped[4..], payload);
-            assert!(crate::decode::<crate::Value>(&wrapped).is_err());
-        }
-    }
-}
-
 #[macro_export]
 macro_rules! export_core {
     ($guest:ty) => {
@@ -358,5 +311,52 @@ pub unsafe extern "C" fn loom_effect_run(pointer: u32, length: u32) -> u64 {
         let _ = pointer;
         let _ = length;
         response::<()>(Err("core effects require wasm32".into()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encoded_envelopes_match_typed_arrays_null_and_errors() {
+        let entries = vec![crate::DirEntry {
+            name: "file.rs".into(),
+            size: 42,
+            kind: crate::EntryKind::File,
+        }];
+        let typed = encoded_response_bytes(Ok(crate::encode(&entries).unwrap()));
+        assert_eq!(
+            typed,
+            crate::encode(&Response::Success { ok: &entries }).unwrap()
+        );
+        let decoded: HostResponse<Vec<crate::DirEntry>> = crate::decode_host(&typed).unwrap();
+        assert_eq!(decoded.result.unwrap(), entries);
+
+        let null = encoded_response_bytes(Ok(crate::encode(&()).unwrap()));
+        assert_eq!(null, crate::encode(&Response::Success { ok: () }).unwrap());
+        let decoded: HostResponse<()> = crate::decode_host(&null).unwrap();
+        assert_eq!(decoded.result, Ok(()));
+
+        let error = "task failed".to_string();
+        let failed = encoded_response_bytes(Err(error.clone()));
+        assert_eq!(
+            failed,
+            crate::encode(&Response::<()>::Failure {
+                error: error.clone()
+            })
+            .unwrap()
+        );
+        let decoded: HostResponse<()> = crate::decode_host(&failed).unwrap();
+        assert_eq!(decoded.result, Err(error));
+    }
+
+    #[test]
+    fn malformed_guest_payloads_remain_for_strict_host_admission() {
+        for payload in [vec![0, 0], vec![0x18, 0]] {
+            let wrapped = encoded_response_bytes(Ok(payload.clone()));
+            assert_eq!(&wrapped[4..], payload);
+            assert!(crate::decode::<crate::Value>(&wrapped).is_err());
+        }
     }
 }
