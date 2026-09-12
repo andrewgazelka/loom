@@ -18,6 +18,7 @@ extern crate rustc_target;
 mod cache_backend;
 mod cache_flags;
 mod cache_metrics;
+mod coverage;
 mod encode;
 mod entries;
 mod graph;
@@ -49,6 +50,9 @@ impl Callbacks for HashCallbacks {
     }
 
     fn after_analysis<'tcx>(&mut self, _: &interface::Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
+        if let Some(path) = std::env::var_os("LOOM_ITEM_COVERAGE") {
+            coverage::write(tcx, &PathBuf::from(path));
+        }
         if self.destination.is_some() {
             self.document = Some(graph::collect(tcx));
         }

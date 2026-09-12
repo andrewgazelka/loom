@@ -141,7 +141,16 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let driver = std::fs::canonicalize(args.next().expect("driver path")).unwrap();
     let root = std::fs::canonicalize(args.next().expect("persistent staging path")).unwrap();
-    let smoke = args.next().as_deref() == Some("smoke");
+    let mode = args.next();
+    let smoke = mode.as_deref() == Some("smoke");
+    if mode.as_deref() == Some("coverage") {
+        assert!(
+            !root.join("workspace").exists()
+                && !root.join("loom_guest_rs.json").exists()
+                && !root.join("loom_example_preview.json").exists(),
+            "coverage requires a fresh staging directory to audit one complete source snapshot"
+        );
+    }
     for name in ["loom_guest_rs", "loom_example_preview"] {
         let path = root.join(format!("{name}.json"));
         if path.exists() {
@@ -161,7 +170,6 @@ fn main() {
     let workspace = root.join("workspace");
     if !root.join("loom_example_preview.json").exists() {
         for directory in [
-            "loom-wit",
             "crates/loom-guest-rs",
             "crates/loom-proto",
             "crates/loom-guest-macros",
@@ -212,6 +220,36 @@ fn main() {
         .unwrap();
         let source = workspace.join(fixture.source);
         let original = std::fs::read_to_string(repo.join(fixture.source)).unwrap();
+        if mode.as_deref() == Some("coverage") {
+            std::fs::write(&source, &original).unwrap();
+            let output = root.join(format!("{}-coverage-output", fixture.name));
+            std::fs::create_dir_all(&output).unwrap();
+            let mut args = invocation.args.clone();
+            let position = args.iter().position(|arg| arg == "--out-dir").unwrap();
+            args[position + 1] = output.to_str().unwrap().into();
+            let result = Command::new(&driver)
+                .args(args)
+                .current_dir(&invocation.cwd)
+                .envs(&invocation.env)
+                .env_remove("LOOM_OBJECT_CACHE")
+                .env_remove("LOOM_ITEM_HASHES")
+                .env_remove("LOOM_ITEM_PREIMAGES")
+                .env(
+                    "LOOM_ITEM_COVERAGE",
+                    root.join(format!("{}-coverage.json", fixture.name)),
+                )
+                .output()
+                .unwrap();
+            std::fs::write(output.join("stderr.log"), &result.stderr).unwrap();
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            assert!(result.status.success(), "{stderr}");
+            for line in stderr.lines().filter(|line| {
+                line.starts_with("item-coverage:") || line.starts_with("mono-coverage:")
+            }) {
+                println!("{} {line}", fixture.name);
+            }
+            continue;
+        }
         assert_eq!(original.matches(fixture.before).count(), 1);
         let changed = original.replace(fixture.before, fixture.after);
         let mut cached = Vec::new();

@@ -57,6 +57,15 @@ struct FunctionIdentity {
     references: Vec<ItemIdentity>,
 }
 
+pub(crate) fn audit_item<'tcx>(tcx: TyCtxt<'tcx>, item: MonoItem<'tcx>) -> Result<(), String> {
+    match item {
+        MonoItem::Fn(instance) => {
+            function_identity(tcx, instance, None, &mut Vec::new()).map(|_| ())
+        }
+        _ => Err("static or global assembly requires a relocation identity".into()),
+    }
+}
+
 pub fn prepare(tcx: TyCtxt<'_>) -> bool {
     let Some(directory) = std::env::var_os("LOOM_OBJECT_CACHE") else {
         return false;

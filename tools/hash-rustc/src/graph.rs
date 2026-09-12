@@ -38,7 +38,7 @@ struct Definition {
     entry: bool,
 }
 
-fn supported(kind: DefKind) -> bool {
+pub(crate) fn supported(kind: DefKind) -> bool {
     matches!(
         kind,
         DefKind::Fn
