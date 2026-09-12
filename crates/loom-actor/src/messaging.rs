@@ -116,15 +116,18 @@ impl Node {
             return Ok(false);
         }
         let request: Alarm = serde_json::from_value(payload).with_context(|| format!("actor {sender} seq -1: invalid timer alarm"))?;
-        let source = self.open(sender).await?;
-        source.conn.lock().await.execute("UPDATE timers SET armed=1 WHERE ref=? AND kind='message'", [request.timer_ref]).await?;
+        let source = self.open_actor(sender).await?;
+        let mut conn = source.conn.lock().await;
+        let tx = conn.transaction().await?;
+        tx.execute("UPDATE timers SET armed=1 WHERE ref=? AND kind='message'", [request.timer_ref]).await?;
+        self.commit_control(sender, tx).await?;
         Ok(true)
     }
 
     /// The sender pump serializes call delivery; the monitor is installed before the call envelope.
     pub(crate) async fn deliver_call(&self, sender: &str, target: &str, msg: &[u8], key: &str) -> Result<()> {
         let request: CallRequest = serde_json::from_slice(msg)?;
-        let source = self.open(sender).await?;
+        let source = self.open_actor(sender).await?;
         {
             let conn = source.conn.lock().await;
             if !actor::query(&conn, "SELECT value FROM meta WHERE key=?", [format!("call_done:{}", request.reference)])
@@ -142,7 +145,10 @@ impl Node {
         self.monitor(sender, target, &request.reference).await?;
         let envelope = serde_json::to_vec(&serde_json::json!({"type":"call","ref":request.reference,"from":sender,"msg":request.msg}))?;
         self.deliver_message(target, key, sender, &envelope).await?;
-        source.conn.lock().await.execute("UPDATE timers SET armed=1 WHERE ref=? AND kind='call'", [request.reference]).await?;
+        let mut conn = source.conn.lock().await;
+        let tx = conn.transaction().await?;
+        tx.execute("UPDATE timers SET armed=1 WHERE ref=? AND kind='call'", [request.reference]).await?;
+        self.commit_control(sender, tx).await?;
         Ok(())
     }
 
@@ -160,7 +166,7 @@ impl Node {
         let Some(reference) = payload["ref"].as_str() else {
             return Ok(false);
         };
-        let owner = self.open(caller).await?;
+        let owner = self.open_actor(caller).await?;
         let mut conn = owner.conn.lock().await;
         let tx = conn.transaction().await?;
         let receipt = format!("call_done:{reference}");
@@ -200,7 +206,7 @@ impl Node {
             actor::set_meta(&tx, &receipt, &target).await?;
             target
         };
-        tx.commit().await?;
+        self.commit_control(caller, tx).await?;
         drop(conn);
         self.demonitor(caller, reference, &target).await?;
         self.wake.notify_one();
@@ -222,7 +228,7 @@ impl Node {
     pub(crate) async fn fire_timers(&self) -> Result<TimerProgress> {
         let mut progress = TimerProgress { progressed: self.fire_shutdowns().await?, next_deadline: None };
         for id in self.actor_ids()? {
-            let source = self.open(&id).await?;
+            let source = self.open_actor(&id).await?;
             let timers = {
                 let Ok(conn) = source.conn.try_lock() else {
                     continue;
@@ -276,7 +282,7 @@ impl Node {
                         if removed != 0 {
                             actor::enqueue(&tx, actor::cursor(&tx).await?, &timer.target, &timer.msg).await?;
                         }
-                        tx.commit().await?;
+                        self.commit_control(&id, tx).await?;
                         progress.progressed |= removed != 0;
                     }
                     "call" => {

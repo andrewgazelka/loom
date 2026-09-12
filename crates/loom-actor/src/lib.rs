@@ -5,18 +5,24 @@
 mod actor;
 pub mod builtin;
 mod directory;
+mod durability;
+mod durability_open;
+mod durability_worker;
 mod effects;
 mod history;
 mod hooks;
 mod ids;
 mod lifecycle;
+mod local_store;
 mod mailbox;
 mod messaging;
 mod node;
 mod pump;
+mod remote_store;
 mod reset;
 mod scheduler;
 mod schema;
+mod shipping_history;
 mod supervision;
 mod supervisor;
 mod supervisor_store;
@@ -24,16 +30,18 @@ mod types;
 
 pub use actor::Actor;
 pub use directory::{ActorInfo, MonitorInfo};
+pub use durability_worker::ShippingFailure;
 pub use effects::{DefaultEffects, EffectError, EffectHandler, EffectKey};
 pub use history::memo::{MemoConfig, PromoteReport};
 pub use ids::ActorId;
 pub use node::Node;
+pub use remote_store::{Clock, StoreConfig, SystemClock};
 pub use schema::SCHEMA;
 pub use supervisor::Supervisor;
 pub use turso::{IntoParams, Value};
 pub use types::{
-    AssertionResult, ChildSpec, ChildState, ChildType, Config, Io, RestartPolicy, RestartVerb, Rows, Shutdown, Status, TableDifference,
-    TableHash, Trap, TreeEntry, ValidationResult, Verdict,
+    AssertionResult, ChildSpec, ChildState, ChildType, Config, Durability, Io, RestartPolicy, RestartVerb, Rows, Shutdown, Status,
+    TableDifference, TableHash, Trap, TreeEntry, ValidationResult, Verdict,
 };
 
 use anyhow::Result;
@@ -91,8 +99,8 @@ pub struct Ctx<'a> {
 impl Ctx<'_> {
     pub(crate) fn runtime(&mut self, error: impl std::fmt::Display) -> Trap {
         let message = format!("actor {} seq {}: {error}", self.actor_id, self.seq);
-        self.failure.get_or_insert_with(|| Trap { message: message.clone(), runtime: true });
-        Trap { message, runtime: true }
+        self.failure.get_or_insert_with(|| Trap { message: message.clone(), runtime: true, durability: false });
+        Trap { message, runtime: true, durability: false }
     }
 
     fn effect_error(&mut self, error: EffectError) -> Trap {
@@ -101,8 +109,8 @@ impl Ctx<'_> {
         if !runtime && self.failure.as_ref().is_some_and(|failure| failure.runtime) {
             self.failure = None;
         }
-        self.failure.get_or_insert_with(|| Trap { message: message.clone(), runtime });
-        Trap { message, runtime }
+        self.failure.get_or_insert_with(|| Trap { message: message.clone(), runtime, durability: false });
+        Trap { message, runtime, durability: false }
     }
 
     pub fn seq(&self) -> i64 {

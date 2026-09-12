@@ -6,6 +6,10 @@ use std::time::Duration;
 
 #[derive(Clone, Debug)]
 pub struct Config {
+    pub store: Option<crate::StoreConfig>,
+    pub ship_interval: Duration,
+    pub lease_ttl: Duration,
+    pub lease_clock: std::sync::Arc<dyn crate::Clock>,
     pub io: Io,
     pub snapshot_every: i64,
     /// Retries after the first attempt, before supervision receives the error.
@@ -15,7 +19,32 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { io: Io::Auto, snapshot_every: 64, max_retries: 3, retry_backoff: Duration::from_millis(10) }
+        Self {
+            store: None,
+            ship_interval: Duration::from_secs(1),
+            lease_ttl: Duration::from_secs(10),
+            lease_clock: std::sync::Arc::new(crate::SystemClock),
+            io: Io::Auto,
+            snapshot_every: 64,
+            max_retries: 3,
+            retry_backoff: Duration::from_millis(10),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Durability {
+    #[default]
+    Local,
+    Remote,
+}
+impl Durability {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Remote => "remote",
+        }
     }
 }
 
@@ -49,11 +78,12 @@ impl Status {
 pub struct Trap {
     pub message: String,
     pub(crate) runtime: bool,
+    pub(crate) durability: bool,
 }
 
 impl Trap {
     pub fn new(message: impl Into<String>) -> Self {
-        Self { message: message.into(), runtime: false }
+        Self { message: message.into(), runtime: false, durability: false }
     }
 
     pub(crate) fn finish(saved: Option<Self>, result: Result<(), Self>) -> Result<(), Self> {
@@ -129,6 +159,7 @@ pub enum RestartVerb {
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct ChildSpec {
+    pub durability: Durability,
     pub behavior_hash: String,
     pub init: Vec<u8>,
     pub restart: RestartPolicy,
@@ -142,6 +173,8 @@ impl<'de> Deserialize<'de> for ChildSpec {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
         #[derive(Deserialize)]
         struct Fields {
+            #[serde(default)]
+            durability: Durability,
             behavior_hash: String,
             init: Vec<u8>,
             #[serde(default)]
@@ -160,6 +193,7 @@ impl<'de> Deserialize<'de> for ChildSpec {
             ChildType::Worker => Shutdown::Brutal,
         });
         Ok(Self {
+            durability: fields.durability,
             behavior_hash: fields.behavior_hash,
             init: fields.init,
             restart: fields.restart,
@@ -173,6 +207,7 @@ impl<'de> Deserialize<'de> for ChildSpec {
 impl ChildSpec {
     pub fn new(hash: &str, init: &[u8], child_type: ChildType) -> Self {
         Self {
+            durability: Durability::Local,
             behavior_hash: hash.into(),
             init: init.into(),
             restart: RestartPolicy::Permanent,

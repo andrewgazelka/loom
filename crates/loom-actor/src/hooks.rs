@@ -1,8 +1,31 @@
 //! Lifecycle hooks share the actor transaction and use a separate effect sequence.
 use crate::{Behavior, Ctx, EffectHandler, Status, Trap, actor};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
+use serde::{Deserialize, Serialize};
 use std::{future::Future, panic::AssertUnwindSafe, task::Poll};
 use turso::Connection;
+
+#[derive(Serialize, Deserialize)]
+struct Termination {
+    epoch: i64,
+    counter: i64,
+    revision: i64,
+    behavior_hash: String,
+    reason: String,
+    trapped: bool,
+}
+
+async fn record_termination(conn: &Connection, behavior: &dyn Behavior, reason: &str, trapped: bool) -> Result<()> {
+    let operation = Termination {
+        epoch: actor::meta(conn, "commit_epoch").await?.parse()?,
+        counter: actor::meta(conn, "hook_counter").await?.parse()?,
+        revision: actor::code(conn).await?.revision,
+        behavior_hash: behavior.hash().to_owned(),
+        reason: reason.to_owned(),
+        trapped,
+    };
+    actor::set_meta(conn, &format!("termination:{}", operation.counter), &serde_json::to_string(&operation)?).await
+}
 
 enum Hook<'a> {
     Terminate { reason: &'a str },
@@ -10,7 +33,7 @@ enum Hook<'a> {
 }
 
 async fn invoke(conn: &Connection, id: &str, behavior: &dyn Behavior, effects: &dyn EffectHandler, hook: Hook<'_>) -> Result<(), Trap> {
-    let runtime = |error: anyhow::Error| Trap { message: format!("actor {id} seq -1: {error:#}"), runtime: true };
+    let runtime = |error: anyhow::Error| Trap { message: format!("actor {id} seq -1: {error:#}"), runtime: true, durability: false };
     let counter = actor::meta(conn, "hook_counter")
         .await
         .map_err(runtime)?
@@ -78,10 +101,10 @@ pub(crate) async fn terminate(
             turso::params![seq, reason.as_bytes(), format!("actor {id} seq {seq}: {}", error.message), crate::effects::now()?],
         )
         .await?;
-        return Ok(());
+        return record_termination(conn, behavior, reason, true).await;
     }
     conn.execute("RELEASE terminate_hook", ()).await?;
-    Ok(())
+    record_termination(conn, behavior, reason, false).await
 }
 
 pub(crate) async fn upgrade(
@@ -94,21 +117,106 @@ pub(crate) async fn upgrade(
     invoke(conn, id, behavior, effects, Hook::Upgrade { from_hash }).await.map_err(Into::into)
 }
 
+pub(crate) struct Stop<'a> {
+    pub reason: &'a str,
+    pub key: &'a str,
+    pub initiator: &'a str,
+}
 pub(crate) async fn stop(
     conn: &mut Connection,
     id: &str,
-    reason: &str,
-    key: &str,
-    initiator: &str,
+    operation: Stop<'_>,
     behavior: &dyn Behavior,
     effects: &dyn EffectHandler,
+    node: &crate::Node,
 ) -> Result<()> {
+    let Stop { reason, key, initiator } = operation;
     let tx = conn.transaction().await?;
     if !crate::supervision::applied(&tx, key).await? && actor::status(&tx).await? != Status::Stopped {
         terminate(&tx, id, reason, behavior, effects).await?;
     }
     let reason = if reason == "kill" { "killed" } else { reason };
     actor::stop_state(&tx, id, reason, key, initiator).await?;
-    tx.commit().await?;
+    node.commit_control(id, tx).await?;
     Ok(())
+}
+
+impl crate::Node {
+    pub(crate) async fn replay_terminations(
+        &self,
+        source: &Connection,
+        conn: &mut Connection,
+        epoch: i64,
+        effects: &crate::effects::ReplayEffects,
+    ) -> Result<Option<crate::Verdict>> {
+        let rows = actor::query(source, "SELECT value FROM meta WHERE key LIKE 'termination:%'", ()).await?;
+        let mut operations = Vec::new();
+        for row in rows.rows {
+            operations.push(serde_json::from_str::<Termination>(&row.get::<String>(0)?)?);
+        }
+        operations.sort_by_key(|operation| operation.counter);
+        for operation in operations {
+            if operation.epoch > epoch || operation.counter <= actor::meta(conn, "hook_counter").await?.parse::<i64>()? {
+                continue;
+            }
+            let changes = actor::query(
+                source,
+                "SELECT behavior_hash,author,rationale FROM code_changes WHERE seq>? AND seq<=? ORDER BY seq",
+                turso::params![actor::code(conn).await?.revision, operation.revision],
+            )
+            .await?;
+            for row in changes.rows {
+                let hash: String = row.get(0)?;
+                if let Some(verdict) = crate::history::promote_replay(
+                    conn,
+                    actor::behavior(&self.registry, &hash)?.as_ref(),
+                    &row.get::<String>(1)?,
+                    &row.get::<String>(2)?,
+                    effects,
+                )
+                .await?
+                {
+                    return Ok(Some(verdict));
+                }
+            }
+            ensure!(
+                actor::meta(conn, "hook_counter").await?.parse::<i64>()?.checked_add(1) == Some(operation.counter),
+                "termination history has a hook counter gap at {}",
+                operation.counter
+            );
+            ensure!(
+                actor::code(conn).await?.hash == operation.behavior_hash,
+                "termination history behavior differs at hook {}",
+                operation.counter
+            );
+            let tx = conn.transaction().await?;
+            if operation.trapped {
+                // A trapped hook rolled back its effects and domain writes. Its
+                // audit row arrives with the final runtime-table overlay.
+                actor::set_meta(&tx, "hook_counter", &operation.counter.to_string()).await?;
+            } else {
+                let seq = operation.counter.checked_neg().context("termination replay sequence overflow")?;
+                let identity = actor::meta(&tx, "replay_source").await?;
+                effects.begin(seq).await;
+                let result = terminate(
+                    &tx,
+                    &identity,
+                    &operation.reason,
+                    actor::behavior(&self.registry, &operation.behavior_hash)?.as_ref(),
+                    effects,
+                )
+                .await;
+                if let Some(verdict) = effects.finish(seq, result.is_ok()).await? {
+                    tx.rollback().await?;
+                    return Ok(Some(verdict));
+                }
+                result?;
+                let key = format!("termination:{}", operation.counter);
+                let recorded: Termination = serde_json::from_str(&actor::meta(&tx, &key).await?)?;
+                ensure!(!recorded.trapped, "termination replay trapped at hook {}", operation.counter);
+            }
+            tx.commit().await?;
+        }
+        Ok(None)
+    }
 }

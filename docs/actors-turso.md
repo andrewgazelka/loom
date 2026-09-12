@@ -423,6 +423,110 @@ JSON resources are `actor://tree`, `actor://<id>/inbox`, `actor://<id>/effects`,
 read scope; mutation tools require execute scope, except promotions, which require
 define scope. A SQL assertion passes when it returns one nonzero numeric scalar.
 
+## Addendum C: durability and failover
+
+`Config.store` enables per-actor shipping through the `object_store` 0.14.1
+`ObjectStore` trait. `None` retains local-only execution. `StoreConfig::Local`
+selects a filesystem directory; `StoreConfig::S3` takes an endpoint, bucket and
+region, with credentials loaded by `AmazonS3Builder::from_env`. HTTP endpoints
+are enabled only when explicitly configured with `http://`, for local MinIO.
+
+The upstream `LocalFileSystem` implements conditional creation but returns
+`NotImplemented` for `PutMode::Update` (`object_store` 0.14.1 `local.rs:399`).
+`local_store.rs` supplies that operation through the same upstream trait. An OS
+per-object file lock covers version comparison and atomic publication, including completion
+when the caller is cancelled. Filesystem publications use fsync. Every writer to
+this local store must use this adapter; directly replacing its files bypasses
+fencing. S3 uses `Create` / `If-None-Match: *` and `Update(UpdateVersion)` /
+`If-Match`, preserving both returned version fields.
+
+`ChildSpec.durability` defaults to `Local` and is persisted as the actor's
+`durability` meta key at spawn. It is immutable: no setter exists, and reset
+carries it forward. A Local message commits locally; the node ships at
+`Config.ship_interval`, default one second, and on `Node::close`. A Remote message
+publishes its prepared transaction's segment and conditional head before the
+local transaction completes. If publication fails, SQL changes roll back and the
+inbox message remains pending; storage failures do not poison it. Physical local
+commit failure after remote acknowledgement is an uncertain outcome: reopening
+recovers the published history. Short effects still require idempotency by their
+existing actor/generation/sequence/index key.
+
+The store layout is:
+
+- `actors/<id>/snapshots/<epoch>-<seq>.db`: a complete `VACUUM INTO` snapshot.
+- `actors/<id>/segments/<epoch>-<from_seq>-<to_seq>.bin`: canonical tagged JSON
+  row additions and removals for inbox, effects, outbox, code changes and runtime
+  bookkeeping. Integer values, blobs, nulls and floating-point bits remain exact.
+- `actors/<id>/head`: JSON `{epoch, seq, snapshot_seq, snapshot, segments}`. Its cached
+  version is the condition on every head update. `snapshot` holds the full object
+  key (null before the initial snapshot), including the epoch that wrote it.
+- `actors/<id>/lease`: JSON `{owner, epoch, expires_at}`. Expiry is Unix time in
+  milliseconds; owner identities are generated per Node instance.
+
+The durable revision `seq` is separate from the contiguous inbox cursor. Both
+advance together for an ordinary message stream; a control change, selective
+receive, failed publication reservation or snapshot can advance the durable
+revision without advancing the cursor. This prevents two different states from
+sharing an immutable segment key. The local `durability_seq` meta key is compared
+with the remote head. Snapshot compaction bounds the active segment chain using
+`snapshot_every`; reset publishes a new snapshot before replacing the live file.
+Old object versions and unreferenced failed uploads are retained.
+
+On first open, the node acquires a lease before serving the actor. A lease lasts
+`Config.lease_ttl`, default ten seconds. Independent renewal workers renew at
+TTL/3; a blocked handler or shipment does not block other actors' renewals.
+`Config.lease_clock` accepts a `Clock` implementation for deterministic expiry
+checks. Production clocks must be synchronized across owners: object storage
+provides conditional writes, not a trusted shared clock.
+
+Takeover conditionally replaces an expired lease with a higher epoch, then fences
+head before restoring. An old head write already in flight may finish before
+that fence; takeover reads that result. Once takeover finishes, the old cached
+head version cannot publish. Every runtime commit checks the cached lease, with
+no lease request on the message path. Conditional conflicts invalidate the cache.
+An exact head read can recover an acknowledgement lost after a successful PUT;
+a different head is never accepted as that acknowledgement.
+
+Lease loss stops the actor with reason `lease_lost`, cancels its active handler,
+and renames its database and WAL to `<id>.stale.<epoch>.db` and the corresponding
+sidecar paths. Existing handles can inspect the stopped file. `Node::open` is the
+leaver: after ownership can be acquired again it restores and serves a new live
+file. Losing-owner bytes are not discarded. Ordinary supervision restart is not
+the path out of `lease_lost`.
+
+A missing or older local file is restored from the declared snapshot and the
+complete segment range before its connection is admitted. A previous owner's
+unshipped tail is archived when its epoch is superseded. A retained local file
+from the immediately preceding owner is checkpointed before serving, preserving
+its local tail. Restore replays with registered behavior hashes and recorded
+short effects, never the external effect handler. Termination hooks and host
+supervisor spawns have replay records; outbox delivery flags, pending inbox keys,
+timers and other runtime rows are restored as well. Direct `Actor::sql` on a
+store-managed actor is read-only; behavior SQL remains transactional.
+
+Turso 0.7.2's public `turso::Connection` does not expose `wal_get_frame`,
+`wal_changed_pages_after`, `wal_insert_frame` or `wal_insert_begin`; those methods
+exist on `turso_core::Connection`. This implementation ships snapshots and logical
+history through the existing replay path. WAL-frame shipping is the v2 replacement
+for that unit, not an assumed API in this implementation. Delta construction
+currently scans runtime tables; large histories therefore have a CPU and memory
+cost even when the uploaded delta is small.
+
+`Node::ship` flushes an actor and verifies its head fence. Background failures are
+logged and available through `Node::shipping_failures` as the latest error per
+actor. `Node::renew_leases` permits an explicit renewal tick. `Node::close` excludes
+new admitted operations, flushes while renewal remains active, then closes and
+releases leases. A flush failure leaves the node usable; release failures leave it
+closed and a subsequent `close` retries release. Dropping a Node cancels its
+workers but does not promise a final shipment; use `close` for that guarantee.
+
+The five tests in `tests/durability.rs` cover fresh-node restore, Remote rollback
+on failed puts versus Local success, stale-file preservation and head fencing,
+takeover dedupe, and store-free behavior. Their assertions also cover competing
+claims, expiry during a handler, renewal while a handler is blocked, termination
+replay, and recovery from a failed close. They use local filesystem storage; an
+S3/MinIO service is not part of this test suite.
+
 ## Addendum D: validation memo and cutoff
 
 `validate` and `validate_assertions` consult `_node.db.validation_memo` before
@@ -475,8 +579,7 @@ and timestamp ties cannot reorder eviction. Zero retains nothing. Keys are never
 invalidated; eviction affects performance only. Forks retain the existing history
 API lifecycle and remain undeliverable; memo hits create no additional forks.
 
-Scope wiring: `lib.rs` should re-export
-`history::memo::{MemoConfig, PromoteReport}`. Until that edit is integrated,
+`lib.rs` re-exports `history::memo::{MemoConfig, PromoteReport}`.
 `history.rs` owns `memo.rs` and includes `tests/memo.rs` as unit tests because the
 crate manifest sets `autotests = false`. The four tests cover replay-free hits,
 independent key changes, send cutoff despite state differences, and oldest-first

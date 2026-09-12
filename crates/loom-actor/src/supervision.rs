@@ -16,7 +16,7 @@ impl Node {
                 let _relation = self.guard(&key_pair).await;
                 for owner in [sender, target] {
                     let peer = if owner == sender { target } else { sender };
-                    let actor = self.open(owner).await?;
+                    let actor = self.open_actor(owner).await?;
                     let mut conn = actor.conn.lock().await;
                     let tx = conn.transaction().await?;
                     if !applied(&tx, key).await? {
@@ -27,7 +27,7 @@ impl Node {
                         }
                         actor::set_meta(&tx, &format!("applied:{key}"), "1").await?;
                     }
-                    tx.commit().await?;
+                    self.commit_control(owner, tx).await?;
                 }
                 Ok(())
             }
@@ -38,12 +38,12 @@ impl Node {
                 let flush = payload["flush"].as_bool().context("demonitor flush missing")?;
                 self.demonitor(sender, target, destination).await?;
                 if flush {
-                    let owner = self.open(sender).await?;
+                    let owner = self.open_actor(sender).await?;
                     let mut conn = owner.conn.lock().await;
                     let tx = conn.transaction().await?;
                     tx.execute("DELETE FROM inbox WHERE key=? AND state!='done'", [format!("down:{target}")]).await?;
                     crate::mailbox::refresh_cursor(&tx).await?;
-                    tx.commit().await?;
+                    self.commit_control(sender, tx).await?;
                 }
                 Ok(())
             }
@@ -54,14 +54,16 @@ impl Node {
 
     pub(crate) async fn monitor(&self, watcher: &str, target: &str, reference: &str) -> Result<()> {
         let _relation = self.guard(&format!("monitor:{watcher}:{reference}")).await;
-        let a = self.open(watcher).await?;
-        let b = self.open(target).await?;
+        let a = self.open_actor(watcher).await?;
+        let b = self.open_actor(target).await?;
         {
-            let conn = a.conn.lock().await;
+            let mut conn = a.conn.lock().await;
             if applied(&conn, &format!("monitor:{reference}")).await? {
                 return Ok(());
             }
-            conn.execute("INSERT OR IGNORE INTO monitors(ref,target) VALUES (?,?)", [reference, target]).await?;
+            let tx = conn.transaction().await?;
+            tx.execute("INSERT OR IGNORE INTO monitors(ref,target) VALUES (?,?)", [reference, target]).await?;
+            self.commit_control(watcher, tx).await?;
         }
         let mut conn = b.conn.lock().await;
         let tx = conn.transaction().await?;
@@ -75,13 +77,13 @@ impl Node {
                 "generation":generation.parse::<i64>()?,"event":format!("{target}:{generation}:{counter}")});
             actor::enqueue(&tx, actor::cursor(&tx).await?, &format!("down:{watcher}"), &serde_json::to_vec(&msg)?).await?;
         }
-        tx.commit().await?;
+        self.commit_control(target, tx).await?;
         Ok(())
     }
 
     pub(crate) async fn demonitor(&self, watcher: &str, reference: &str, target: &str) -> Result<()> {
         let _relation = self.guard(&format!("monitor:{watcher}:{reference}")).await;
-        let a = self.open(watcher).await?;
+        let a = self.open_actor(watcher).await?;
         let mut conn = a.conn.lock().await;
         let tx = conn.transaction().await?;
         let target = if target.is_empty() {
@@ -103,10 +105,14 @@ impl Node {
         }
         tx.execute("DELETE FROM monitors WHERE ref=?", [reference]).await?;
         actor::set_meta(&tx, &format!("applied:monitor:{reference}"), "1").await?;
-        tx.commit().await?;
+        self.commit_control(watcher, tx).await?;
         drop(conn);
         if !target.is_empty() {
-            self.open(&target).await?.conn.lock().await.execute("DELETE FROM monitored_by WHERE ref=?", [reference]).await?;
+            let owner = self.open_actor(&target).await?;
+            let mut conn = owner.conn.lock().await;
+            let tx = conn.transaction().await?;
+            tx.execute("DELETE FROM monitored_by WHERE ref=?", [reference]).await?;
+            self.commit_control(&target, tx).await?;
         }
         Ok(())
     }
@@ -117,7 +123,7 @@ impl Node {
         if kind == "down" && self.complete_call(target, sender, key, msg).await? {
             return Ok(());
         }
-        let receiver = self.open(target).await?;
+        let receiver = self.open_actor(target).await?;
         let mut conn = receiver.conn.lock().await;
         let tx = conn.transaction().await?;
         if kind == "down" {
@@ -128,12 +134,16 @@ impl Node {
                 tx.execute("DELETE FROM monitors WHERE ref=?", [reference]).await?;
                 actor::set_meta(&tx, &format!("applied:{done}"), "1").await?;
             }
-            tx.commit().await?;
+            self.commit_control(target, tx).await?;
             drop(conn);
-            self.open(sender).await?.conn.lock().await.execute("DELETE FROM monitored_by WHERE ref=?", [reference]).await?;
+            let owner = self.open_actor(sender).await?;
+            let mut conn = owner.conn.lock().await;
+            let tx = conn.transaction().await?;
+            tx.execute("DELETE FROM monitored_by WHERE ref=?", [reference]).await?;
+            self.commit_control(sender, tx).await?;
         } else {
             if applied(&tx, key).await? {
-                tx.commit().await?;
+                self.commit_control(target, tx).await?;
                 return Ok(());
             }
             let trapping: bool = actor::meta(&tx, "trap_exit").await?.parse()?;
@@ -147,7 +157,7 @@ impl Node {
                     actor::inject(&tx, key, sender, msg).await?;
                 }
                 actor::set_meta(&tx, &format!("applied:{key}"), "1").await?;
-                tx.commit().await?;
+                self.commit_control(target, tx).await?;
             }
         }
         self.wake.notify_one();
@@ -155,7 +165,7 @@ impl Node {
     }
 
     pub(crate) async fn child_state(&self, id: &str) -> Result<ChildState> {
-        let actor = self.open(id).await?;
+        let actor = self.open_actor(id).await?;
         let conn = actor.conn.lock().await;
         let code = actor::code(&conn).await?;
         let poison = actor::query(&conn, "SELECT value FROM meta WHERE key='poison_revision'", ()).await?;
@@ -183,7 +193,7 @@ impl Node {
         while let Some(visit) = queue.pop_front() {
             ensure!(seen.insert(visit.id.clone()), "actor {} seq -1: children contain a cycle", visit.id);
             let state = self.child_state(&visit.id).await?;
-            let actor = self.open(&visit.id).await?;
+            let actor = self.open_actor(&visit.id).await?;
             let rows = actor::query(&*actor.conn.lock().await, "SELECT id FROM children ORDER BY rowid", ()).await?;
             for row in rows.rows {
                 queue.push_back(Visit { id: row.get(0)?, depth: visit.depth + 1 });

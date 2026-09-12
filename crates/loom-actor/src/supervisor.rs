@@ -1,7 +1,9 @@
 //! A durable supervisor implemented entirely as a normal actor behavior.
+mod specs;
 use crate::{Behavior, ChildSpec, ChildState, ChildType, Ctx, RestartPolicy, RestartVerb, Trap, Value};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use specs::specs;
 
 /// Default supervision policy; configuration and restart history live in its file.
 #[derive(Clone, Copy, Debug, Default)]
@@ -9,7 +11,7 @@ pub struct Supervisor;
 pub(crate) const HASH: &str = "supervisor-v1";
 
 const SCHEMA: &str = r#"
-CREATE TABLE IF NOT EXISTS spec(child_id TEXT PRIMARY KEY, "order" INTEGER, behavior_hash TEXT, init BLOB, restart TEXT, shutdown TEXT, link INTEGER, type TEXT, monitor INTEGER);
+CREATE TABLE IF NOT EXISTS spec(child_id TEXT PRIMARY KEY, "order" INTEGER, behavior_hash TEXT, init BLOB, restart TEXT, shutdown TEXT, link INTEGER, type TEXT, monitor INTEGER, durability TEXT NOT NULL DEFAULT 'local');
 INSERT OR REPLACE INTO meta(key,value) VALUES ('trap_exit','true');
 UPDATE meta SET value='one_for_one' WHERE key='strategy' AND value IN ('park','skip','stop');
 INSERT OR IGNORE INTO meta(key,value) VALUES ('strategy','one_for_one'),('max_restarts','3'),('max_seconds','5');
@@ -83,51 +85,7 @@ fn integer(cx: &Ctx<'_>, row: &turso::Row, index: usize) -> Result<i64, Trap> {
         _ => Err(error(cx, format!("expected integer at column {index}"))),
     }
 }
-async fn specs(cx: &mut Ctx<'_>) -> Result<Vec<SpecRow>, Trap> {
-    let rows =
-        cx.sql("SELECT child_id,\"order\",behavior_hash,init,restart,shutdown,link,type,monitor FROM spec ORDER BY \"order\"", ()).await?;
-    let mut result = Vec::new();
-    for row in rows.rows {
-        let init = match cell(cx, &row, 3)? {
-            Value::Blob(value) => value,
-            _ => return Err(error(cx, "child init must be a blob")),
-        };
-        let restart = match text(cx, &row, 4)?.as_str() {
-            "permanent" => RestartPolicy::Permanent,
-            "transient" => RestartPolicy::Transient,
-            "temporary" => RestartPolicy::Temporary,
-            _ => return Err(error(cx, "invalid child restart policy")),
-        };
-        let shutdown = serde_json::from_str(&text(cx, &row, 5)?).map_err(|e| error(cx, e))?;
-        let link = match integer(cx, &row, 6)? {
-            0 => false,
-            1 => true,
-            _ => return Err(error(cx, "invalid child link flag")),
-        };
-        result.push(SpecRow {
-            id: text(cx, &row, 0)?,
-            order: integer(cx, &row, 1)?,
-            spec: ChildSpec {
-                behavior_hash: text(cx, &row, 2)?,
-                init,
-                restart,
-                shutdown,
-                link,
-                child_type: match text(cx, &row, 7)?.as_str() {
-                    "worker" => ChildType::Worker,
-                    "supervisor" => ChildType::Supervisor,
-                    _ => return Err(error(cx, "invalid child type")),
-                },
-                monitor: match integer(cx, &row, 8)? {
-                    0 => false,
-                    1 => true,
-                    _ => return Err(error(cx, "invalid child monitor flag")),
-                },
-            },
-        });
-    }
-    Ok(result)
-}
+
 async fn meta(cx: &mut Ctx<'_>, key: &str) -> Result<String, Trap> {
     let rows = cx.sql("SELECT value FROM meta WHERE key=?", [key]).await?;
     let row = rows.rows.first().ok_or_else(|| error(cx, format!("missing supervisor meta {key}")))?;
