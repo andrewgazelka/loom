@@ -6,6 +6,46 @@ Loom executes Rust core WebAssembly definitions in `loom-rt`. Definitions, core 
 
 The long-term goal is a formally verified guest language, compiler, and runtime contract. If their checked guarantees cover direct memory interaction, we can revisit the isolation design on that basis. Until then, separate Wasm memories and DAG-CBOR remain the execution model.
 
+## Try it
+
+Start the browser REPL, HTTP API, and MCP endpoint on `127.0.0.1:8793`:
+
+```sh
+nix run --builders '' .#repl -- --bind 127.0.0.1:8793
+```
+
+The launcher prints `Token file: <path>` and opens `http://127.0.0.1:8793/#token=<token>`. The `CLI: <store path>/bin/loom` line identifies the matching CLI. Put its directory on `PATH`, export `LOOM_TOKEN` from the token file, and set `LOOM_URL=http://127.0.0.1:8793`. Pass `--url "$LOOM_URL"` to the CLI as shown in the README. Follow the [README command sequence](../README.md#try-it) to add, view, run, update, and replay the guests in `examples/unison/`.
+
+The proof checks these results in order:
+
+1. `loom add examples/unison/greet.rs --name greet` returns a definition hash and an empty inferred effect row.
+2. `loom view <hash>` returns the exact stored source reported by `add` and two items after the input file has been moved away. The checker formats Rust before storing it, so this compares stored bytes rather than the input file's whitespace.
+3. `loom run greet '"loom"'` returns `"hello, loom"` with an empty effects list.
+4. Updating with `greet-v2.rs` only renames a local and keeps the hash. Updating with `greet-v3.rs` changes the greeting constant and moves the hash. The old hash still runs; `history greet` contains both hashes.
+5. Adding `sleeper.rs` infers exactly `["sleep"]` through a trait method on a generic. The source has no effect declaration.
+6. Adding `counter.rs`, spawning it, and sending three messages leaves its cursor at 3.
+7. Adding `counter-v2.rs` preserves the effect row. Validating three messages under that candidate returns `Differs` and unequal original/fork hashes for the `counter` table.
+8. Promotion with rationale `e2e` puts both behavior hashes in lineage. One more message moves the cursor to 4.
+9. The HTTP MCP companion repeats checks 1–8 under separate names and actors, then checks discovery of the eight definition tools and 19 actor tools. It prints its own `N/9`.
+
+Stop the daemon on the test port and commit your changes before running the automated version. This machine’s Nix requires a committed Git input:
+
+```sh
+LOOM_E2E_PORT=8793 scripts/e2e-unison.sh
+```
+
+Install `nix`, `bun`, and `curl` on `PATH` first. The shell takes the matching CLI directory from the launcher’s `CLI:` line. `LOOM_E2E_PORT` defaults to 8787 and drives the occupancy check, launcher bind, and `LOOM_URL`. The example uses 8793 to leave the live REPL on 8787 alone. The shell refuses an occupied port, creates a fresh `LOOM_DATA_DIR` and build directory, starts `nix run --builders '' .#repl -- --bind 127.0.0.1:$LOOM_E2E_PORT`, reads the printed token file, and uses disposable fixture copies. It stops its daemon on exit and retains state and logs at the printed path. The final stdout line is `N/9`; success requires `9/9` and exit status zero. Prerequisite failures mark dependent checks as blocked. The initial build timeout defaults to 3600 seconds (`LOOM_E2E_START_TIMEOUT`); each client operation defaults to 600000 milliseconds (`LOOM_E2E_OPERATION_TIMEOUT_MS`).
+
+The TypeScript companion shares semantic assertions between the CLI and MCP paths and reuses `scripts/mcp-client.ts` for authenticated Streamable HTTP. This avoids adding a Rust test binary just to drive JSON transports. To run the MCP companion against an already running daemon, copy the fixtures into a disposable directory and pass that directory:
+
+```sh
+fixtures=$(mktemp -d)
+cp examples/unison/*.rs "$fixtures/"
+bun scripts/e2e-unison-mcp.ts --mcp "$fixtures"
+```
+
+MCP is also available over stdio with `nix run --builders '' .#repl -- --bind 127.0.0.1:8793 -- --stdio`; the automated proof uses HTTP. Every tool uses a bare verb and returns `{ok, seq, result, diagnostics}`. MCP carries this envelope in `structuredContent`. Add/update expose `result.hash` and `result.entries.<entry>.effects = {labels, unknown}`; view returns `result.source` and an item-name-to-hash map; run returns `result.output` and `result.effects`; history returns an array of revisions with `hash`. Every inferred-row check requires `unknown: false`. Product failures are reported as `PRODUCT <step> <what>` after separating them from script mistakes.
+
 ## Run locally
 
 On Apple Silicon macOS or x86-64 Linux, Nix supplies the daemon, Svelte app, the pinned Rust compiler that guest definitions are built with, and the content-hashing rustc driver, prebuilt:
