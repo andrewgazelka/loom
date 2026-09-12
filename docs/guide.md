@@ -68,6 +68,8 @@ Guest Rust has no macros. Every crate-root `pub fn` is an entry. An optional sch
 pub fn sum(a: i64, b: i64) -> i64 { a + b }
 ```
 
+A source file may expose several entries. `run <name>` selects the matching public function in a named definition, or a unique entry with that name among currently named definitions. Ambiguous names report the matching definition hashes. `run <hash>` requires a sole entry and otherwise reports the candidate names. Private helpers and nested functions are not entries.
+
 HTTP clients post `{ "command": "run", "args": { "target": "sum", "args": [20,22] } }` to `/v1/command` with the bearer token. `add` takes `source` and an optional `name`; `update` takes `name` and `source`. The remaining definition arguments are `target` for `view`, `name` for `history`, `old` and `new` for `diff`, `text` for `find`, and `hash` for `dependents`.
 
 Item hashes describe compiler-resolved definitions. Renaming a local variable or reformatting source leaves them unchanged. A changed helper can change its callers' hashes too. The definition hash is the driver’s resolved-HIR entry hash. Alpha-renaming a local leaves both the definition hash and history unchanged; changing a constant changes the hash. Source revisions have their own BLAKE3 hashes. A published definition pins its executable and schema; a conflicting publication is rejected. The Wasm and toolchain hashes identify its executable build. Builds require the `hash-rustc` driver and reject missing identity outputs. Stores without `defs.behavior_hash` are rejected by column name.
@@ -189,7 +191,7 @@ The runner creates a separate 10,000-file fixture, starts Codex with only Loom c
 
 Calling an effect performs it: `loom::sleep(100)` suspends until its timer finishes, and `loom::perform::<T>(label, args)` performs a custom effect. Concurrent Rust work on the shared-core path uses `loom::scope`, `scope.spawn(|| ...)`, and `child.join()`. Use `loom::spawn(|| ...)` with `'static` captures for fire-and-forget work or a `JoinHandle` moved into another task. Dropping that handle leaves its task running; the host cancels unfinished detached tasks when the definition entry returns, without an implicit wait. Joining a trapped detached task returns its error; an unjoined detached failure is discarded. A synchronous `loom::call(DEF, args)` can run inside a scoped child.
 
-Definition signatures distinguish inferred effects, the host-enforced `allowed_effects` policy, and effects observed during execution. Inference is conservative: dynamic calls, getters, iterators, and unexpanded Rust code can leave the set unknown. Omitting `allowed_effects` permits all host effects; `[]` permits none. Explicit policies are part of definition identity. Cross-definition calls inherit the intersection of caller and callee permissions, including on cache hits. Scoped children inherit the caller's permissions.
+Definition signatures record the residual effect row: the labels that can reach the outermost host handler. The compiler infers this row through resolved calls, including the concrete implementations selected by trait and generic calls. The host-enforced `allowed_effects` policy is a separate permission limit. Omitting `allowed_effects` adds no policy restriction; `[]` permits none. A publication pins its policy with the executable; a different policy for the same entry hash is rejected. Cross-definition calls inherit the intersection of caller and callee permissions, including on cache hits. Scoped children inherit the caller's permissions.
 
 The Effects view shows individual invocations and their outcomes. To capture file content changes from a process, pass `capture_paths: ["note.txt"]` to `exec` or `process.start`. Paths are resolved within the process root; the capture records actual before/after bytes in CAS and displays created, modified, and deleted files as diffs. Capture is limited to 64 explicitly selected regular files, at most 1 MiB each. Symlinks, unsupported files, and unavailable reads are reported explicitly.
 
@@ -212,7 +214,6 @@ closure. The handler receives an `Effect` and a one-shot `Continuation`, then re
 ```rust
 use loom::{Continuation, Effect, Reply, Value};
 
-#[loom::def(effects = [])]
 pub fn main() {
     loom::handle(["sleep"], |_effect: Effect, _k: Continuation| {
         Reply::Resume(Value::Null)
@@ -252,20 +253,15 @@ replay are implemented by the same host handler chain used for execution.
 
 For content-addressed reuse, see [stored handler definitions](content-addressed-handlers.md).
 
-### Residual effect declarations
+### Residual effect rows
 
-`#[loom::def(effects = ["sleep"])]` declares the effect names that the host must
-supply. `loom-check` rejects known residual effects outside that set. A total
-`handle` removes its selected effects from the body's inferred row;
-effects performed by the handler itself remain in the outer row. Unknown
-dispatch requires an explicit declaration, which the runtime enforces at the
-root.
+Effect rows are inferred. Calling `loom::sleep(100)` adds `sleep`; calling `loom::perform("custom.label", args)` adds `custom.label`. Trait dispatch follows the implementation selected for that entry's concrete types. An unused implementation that calls `exec` does not add `exec` to the entry's row.
 
-This is Loom's conservative source analysis and runtime capability check, not
-an effect type system inside rustc. A declaration does not grant additional
-host capabilities: it intersects the caller's allowed effects. Omitting `exec`
-from the permitted root row prevents guest code from reaching the host's exec
-implementation even through dynamic dispatch.
+A total `loom::handle(["sleep"], handler, body)` removes `sleep` from the body's row. Effects performed by the handler itself remain in the outer row. `handle_any` may forward, so it does not remove labels. A pinned `handle_with` uses the stored handler's residual row and any stored total-handling labels.
+
+Effect rows are inferred through the resolved call graph. `perform` accepts a string literal or a const evaluated by rustc, such as `const L: &str = "custom.label";`. Dynamic labels are rejected at the call site with `effect label at <span> is not a literal or const; rows are inferred and need a static label`. Sandboxing is omission: total handlers remove handled labels from the residual host row, and the host refuses every effect absent from that inferred row.
+
+Caller permissions still apply. If the residual row omits `exec`, the guest cannot reach the host's exec implementation.
 
 ### Preview filesystem writes
 

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, ensure};
 use loom_build::Builder;
-use loom_check::CheckedDef;
-use loom_proto::{Def, Lang, definition_identity};
+use loom_check::Checker;
+use loom_proto::{Def, DefineRequest, Lang};
 use loom_store::Store;
 use serde::Serialize;
 use std::{collections::BTreeMap, path::PathBuf, process::ExitCode};
@@ -72,20 +72,30 @@ async fn build(database: PathBuf) -> Result<FixtureHashes> {
 
 async fn compile(builder: &Builder, store: &Store, name: &str, source: &str) -> Result<String> {
     let deps = BTreeMap::new();
-    let mut checked = CheckedDef {
-        hash: identity(source)?,
+    let checker = Checker::new();
+    let mut request = DefineRequest {
         lang: Lang::Rust,
         name: name.into(),
         source: source.into(),
         deps: deps.clone(),
-        sig: Default::default(),
-        diagnostics: Vec::new(),
+        allowed_effects: None,
     };
-    checked.source = builder
+    let checked = checker.check(&request).await?;
+    ensure!(
+        checked.diagnostics.is_empty(),
+        "fixture {name}: {:?}",
+        checked.diagnostics
+    );
+    request.source = builder
         .prepare_rust_source(&checked, &BTreeMap::new())
         .await
         .with_context(|| format!("prepare fixture {name}"))?;
-    checked.hash = identity(&checked.source)?;
+    let mut checked = checker.check(&request).await?;
+    ensure!(
+        checked.diagnostics.is_empty(),
+        "prepared fixture {name}: {:?}",
+        checked.diagnostics
+    );
     let built = builder
         .build(&checked)
         .await
@@ -101,9 +111,22 @@ async fn compile(builder: &Builder, store: &Store, name: &str, source: &str) -> 
         "fixture {name}: empty compiled module"
     );
     let component_hash = store.put("component", &built.component)?;
-    store.define(
+    let identity = built
+        .identity
+        .as_ref()
+        .context("fixture build returned no driver identity")?;
+    let item_json = store
+        .get(&identity.item_hashes_ref)?
+        .context("fixture driver JSON missing")?;
+    checked.apply_driver_effects_json(std::str::from_utf8(&item_json)?)?;
+    ensure!(
+        checked.diagnostics.is_empty(),
+        "fixture effects {name}: {:?}",
+        checked.diagnostics
+    );
+    store.define_with_identity(
         &Def {
-            hash: checked.hash.clone(),
+            hash: identity.behavior_hash.clone(),
             lang: Lang::Rust,
             component_hash: Some(component_hash),
             sig: checked.sig,
@@ -113,17 +136,7 @@ async fn compile(builder: &Builder, store: &Store, name: &str, source: &str) -> 
         None,
         &checked.source,
         &deps,
+        Some(identity),
     )?;
-    Ok(checked.hash)
-}
-
-fn identity(source: &str) -> Result<String> {
-    Ok(blake3::hash(&definition_identity(
-        Lang::Rust,
-        source,
-        &BTreeMap::new(),
-        None,
-    )?)
-    .to_hex()
-    .to_string())
+    Ok(identity.behavior_hash.clone())
 }

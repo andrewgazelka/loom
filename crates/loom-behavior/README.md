@@ -23,7 +23,7 @@ pub fn message(msg: Vec<u8>) {
 }
 ```
 
-Schema uses `pub const LOOM_SCHEMA: &str`. Its generated
+Schema uses `pub const LOOM_SCHEMA: &str`. The driver evaluates the constant and reports its SQL in the JSON `schema` field. The generated
 `loom_schema() -> u64` core export returns the ordinary Loom CBOR result
 envelope containing SQL text. Behavior resolution invokes it in a pure execution;
 an absent export means empty SQL. The actor runtime runs that SQL during

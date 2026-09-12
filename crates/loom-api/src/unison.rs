@@ -66,6 +66,40 @@ impl Service {
             "source":source,"entries":entries}),
         )
     }
+    fn resolve_run_target(&self, target: &str) -> Result<Def> {
+        if let Some(definition) = self.store.resolve(target)? {
+            return Ok(definition);
+        }
+        let hashes: std::collections::BTreeSet<_> =
+            self.store.current_names()?.into_values().collect();
+        let mut candidates = Vec::new();
+        for hash in hashes {
+            let definition = self
+                .store
+                .resolve(&hash)?
+                .with_context(|| format!("definition {hash:?} disappeared"))?;
+            if definition
+                .sig
+                .exports
+                .iter()
+                .any(|entry| entry.name == target)
+            {
+                candidates.push(definition);
+            }
+        }
+        ensure!(
+            candidates.len() <= 1,
+            "entry {target:?} is ambiguous; definition candidates: {}",
+            candidates
+                .iter()
+                .map(|definition| definition.hash.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        candidates
+            .pop()
+            .with_context(|| format!("definition {target:?} not found"))
+    }
     fn diff_items(&self, old: &str, new: &str) -> Result<Value> {
         let old = self
             .store
@@ -174,14 +208,13 @@ impl Service {
             }
             "run" => {
                 let target = field(args, "target")?;
-                let def = self
-                    .store
-                    .resolve(target)?
-                    .with_context(|| format!("definition {target:?} not found"))?;
+                let def = self.resolve_run_target(target)?;
+                let entry = select_entry(&def, target)?;
                 let call = self
                     .runtime
-                    .call_def_timed(
+                    .call_entry_timed(
                         &def.hash,
+                        entry,
                         args.get("args").cloned().unwrap_or_else(|| json!([])),
                     )
                     .await?;
@@ -222,4 +255,24 @@ impl Service {
             _ => bail!("unknown definition operation {operation}"),
         }
     }
+}
+
+fn select_entry<'a>(def: &'a Def, target: &str) -> Result<&'a str> {
+    if target != def.hash
+        && let Some(entry) = def.sig.exports.iter().find(|entry| entry.name == target)
+    {
+        return Ok(&entry.name);
+    }
+    if def.sig.exports.len() == 1 {
+        return Ok(&def.sig.exports[0].name);
+    }
+    bail!(
+        "definition {target:?} requires an entry name; candidates: {}",
+        def.sig
+            .exports
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }

@@ -187,3 +187,64 @@ async fn dependents_follow_pins() {
         42
     );
 }
+
+#[tokio::test]
+#[ignore = "requires Rust guest toolchain and LOOM_COMPILER_CACHE_OWNER"]
+async fn run_selects_named_entry_and_rejects_ambiguous_hash() {
+    let service = service();
+    let added = command(
+        &service,
+        "add",
+        json!({"name":"alpha", "source":"pub fn alpha() -> i32 { 11 } pub fn beta() -> i32 { 22 }"}),
+    ).await;
+    assert_eq!(
+        command(&service, "run", json!({"target":"alpha"})).await["output"],
+        11
+    );
+    assert_eq!(
+        command(&service, "run", json!({"target":"beta"})).await["output"],
+        22
+    );
+    let response = service
+        .command(CommandRequest {
+            session: None,
+            command: "run".into(),
+            args: json!({"target":added["hash"]}),
+        })
+        .await;
+    assert!(!response.ok, "{response:?}");
+    let error = response.result.to_string();
+    assert!(error.contains("alpha") && error.contains("beta"), "{error}");
+    assert!(error.contains(added["hash"].as_str().unwrap()), "{error}");
+}
+
+#[tokio::test]
+#[ignore = "requires Rust guest toolchain and LOOM_COMPILER_CACHE_OWNER"]
+async fn named_entries_report_and_enforce_distinct_effect_rows() {
+    let service = service();
+    let added = command(
+        &service,
+        "add",
+        json!({"name":"pure", "source":"pub fn pure() -> i32 { 11 } pub fn delayed() -> i32 { loom::sleep(1).unwrap(); 22 }"}),
+    ).await;
+    assert_eq!(
+        added["entries"]["pure"]["effects"],
+        json!({"labels":[],"unknown":false})
+    );
+    assert_eq!(
+        added["entries"]["delayed"]["effects"],
+        json!({"labels":["sleep"],"unknown":false})
+    );
+    let pure = command(&service, "run", json!({"target":"pure"})).await;
+    assert_eq!(pure["output"], 11);
+    assert_eq!(pure["effects"], json!([]));
+    let delayed = command(&service, "run", json!({"target":"delayed"})).await;
+    assert_eq!(delayed["output"], 22);
+    assert!(
+        delayed["effects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|effect| effect["descriptor"]["op"] == "sleep")
+    );
+}

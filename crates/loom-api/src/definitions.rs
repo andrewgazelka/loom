@@ -37,7 +37,7 @@ impl Service {
                 .with_context(|| format!("dependency {hash} not found"))?
                 .hash;
         }
-        let checked = self.check_definition(&request).await?;
+        let mut checked = self.check_definition(&request).await?;
         if !checked.diagnostics.is_empty() {
             return Ok(Response {
                 ok: false,
@@ -69,6 +69,19 @@ impl Service {
             .identity
             .as_ref()
             .context("builder returned no item identity")?;
+        let item_json = self
+            .store
+            .get(&identity.item_hashes_ref)?
+            .context("driver item document missing")?;
+        checked.apply_driver_effects_json(std::str::from_utf8(&item_json)?)?;
+        if !checked.diagnostics.is_empty() {
+            return Ok(Response {
+                ok: false,
+                seq: self.store.latest_seq()?,
+                result: Value::Null,
+                diagnostics: checked.diagnostics,
+            });
+        }
         let def = Def {
             allowed_effects: request.allowed_effects.clone(),
             observed_effects: Vec::new(),

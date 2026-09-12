@@ -8,6 +8,22 @@ impl Runtime {
         self.call_scoped_timed(hash, args, &format!("call:{}", uuid::Uuid::new_v4()))
             .await
     }
+    pub async fn call_entry_timed(
+        &self,
+        hash: &str,
+        entry: &str,
+        args: Value,
+    ) -> Result<TimedCall> {
+        let scope = format!("call:{}", uuid::Uuid::new_v4());
+        self.call_traced_entry_timed(
+            hash,
+            Some(entry),
+            args,
+            &scope,
+            trace::ExecutionTrace::fresh(&scope),
+        )
+        .await
+    }
     pub(super) async fn call_scoped(
         &self,
         hash: &str,
@@ -63,13 +79,26 @@ impl Runtime {
         scope: &str,
         execution: Arc<trace::ExecutionTrace>,
     ) -> Result<TimedCall> {
+        self.call_traced_entry_timed(hash, None, args, scope, execution)
+            .await
+    }
+    async fn call_traced_entry_timed(
+        &self,
+        hash: &str,
+        entry: Option<&str>,
+        args: Value,
+        scope: &str,
+        execution: Arc<trace::ExecutionTrace>,
+    ) -> Result<TimedCall> {
         execution.identity(hash, &args)?;
         let session = trace::TraceSession::new(self.inner.store.clone(), execution.clone());
         let effects = EffectContext {
             trace: Some(execution),
             ..EffectContext::default()
         };
-        let result = self.call_scoped_delegated(hash, args, scope, effects).await;
+        let result = self
+            .core_call_entry(hash, entry, &args, scope, &effects)
+            .await;
         let outcome = match &result {
             Ok(call) => Ok(call.output.clone()),
             Err(error) => Err(anyhow::anyhow!("{error:#}")),

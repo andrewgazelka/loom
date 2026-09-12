@@ -29,7 +29,6 @@ async fn dynamic_actor_unknown_name_is_named() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "requires Rust guest toolchain and LOOM_COMPILER_CACHE_OWNER"]
 async fn dynamic_actor_add_then_spawn_on_running_node() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let service = service(directory.path()).await?;
@@ -49,9 +48,14 @@ pub fn handle(_message: Vec<u8>) {
         .await;
     assert!(added.ok, "{added:?}");
     let spawned = service
-        .actor_command("spawn", json!({"def":"new-actor","init":{}}))
-        .await?;
-    let id = spawned["id"].as_str().unwrap();
+        .command(loom_proto::CommandRequest {
+            session: None,
+            command: "spawn".into(),
+            args: json!({"def":"new-actor","init":{}}),
+        })
+        .await;
+    assert!(spawned.ok, "{spawned:?}");
+    let id = spawned.result["id"].as_str().unwrap();
     let node = &service.actors.as_ref().unwrap().node;
     node.run_until_idle().await?;
     assert_eq!(

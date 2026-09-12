@@ -54,13 +54,17 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
             .trim(),
     );
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"rustc-contract-v4-core-handlers-residual-rows");
+    hasher.update(b"rustc-contract-v6-driver-all-units-mir");
     let manifest_bytes = fs::read_to_string(directory.join("Cargo.toml"))
         .await?
         .replace(root.to_string_lossy().as_ref(), "$SDK")
         .replace(cache.to_string_lossy().as_ref(), "$CACHE")
         .into_bytes();
-    let compiler_identity = String::from_utf8(compiler.stdout).map_err(rejected)?;
+    let compiler_identity = format!(
+        "{}\nhash-rustc:{}",
+        String::from_utf8(compiler.stdout).map_err(rejected)?,
+        driver.toolchain_hash
+    );
     for bytes in [
         manifest_bytes,
         fs::read(directory.join("Cargo.lock")).await?,
@@ -100,6 +104,13 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
     let directory = workspace.as_path();
     let root_incremental = target.join("incremental").join(&lineage);
     let isolated = directory.join("vendor").is_dir();
+    if isolated {
+        return Err(rejected(format!(
+            "hash-rustc driver {} cannot be selected by {}:41: sandbox forces the plain sysroot compiler",
+            driver.path.display(),
+            root.join("rustc/sandbox.sh").display()
+        )));
+    }
     let manifest: toml::Value =
         toml::from_str(&fs::read_to_string(directory.join("Cargo.toml")).await?)
             .map_err(rejected)?;
@@ -111,11 +122,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
     if !root_build_script && let Some(mut recipe) = read_graph(store, &key)? {
         let setup_ms = started.elapsed().as_millis();
         let restore_started = std::time::Instant::now();
-        let replay_compiler = if isolated {
-            sysroot.join("bin/rustc").to_string_lossy().into_owned()
-        } else {
-            compiler_owner.clone()
-        };
+        let replay_compiler = driver.path.to_string_lossy().into_owned();
         recipe.rebase_graph(root, cache, directory, &sysroot, &replay_compiler)?;
         recipe.restore_sources(store, cache, &graph)?;
         let restored = recipe.restore_artifacts(store)?;
@@ -196,12 +203,21 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
                     rustc_invocations: repairs + 1,
                 });
             }
+            super::entry_abi::compile(super::entry_abi::Request {
+                recipe: &recipe,
+                identity: identity_directory,
+                root,
+                cache,
+                target: &target,
+                isolated,
+            })
+            .await?;
             crate::identity::publish(identity_directory, published_identity_directory)?;
             return Ok(Built {
                 bytes: fs::read(recipe.output()?).await?,
                 logs,
                 diagnostics,
-                rustc_invocations: repairs + 1,
+                rustc_invocations: repairs + 2,
             });
         }
     }
@@ -235,6 +251,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
     };
     compiler_environment(&mut command);
     command
+        .env("RUSTC", &driver.path)
         .env("LOOM_LOCKED", "1")
         .env("LOOM_RUST_TARGET", target_name)
         .env("LOOM_CAS_SOURCES", cache.join("source-trees"))
@@ -265,7 +282,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
             rustc_invocations,
         });
     }
-    let artifact = crate::cargo_artifact(&stdout, &directory.join("Cargo.toml"), &target)?;
+    crate::cargo_artifact(&stdout, &directory.join("Cargo.toml"), &target)?;
     let mut root_recipe = Recipe::parse(
         &fs::read(target.join("root-rustc.recipe")).await?,
         directory,
@@ -314,6 +331,15 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
             String::from_utf8_lossy(&hash_output.stderr)
         )));
     }
+    super::entry_abi::compile(super::entry_abi::Request {
+        recipe: &root_recipe,
+        identity: identity_directory,
+        root,
+        cache,
+        target: &target,
+        isolated,
+    })
+    .await?;
     if !root_build_script {
         let mut recipe = Recipe::parse(
             &fs::read(target.join("root-rustc.recipe")).await?,
@@ -322,7 +348,6 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
         let mut source_roots = vec![
             cache.to_owned(),
             root.join("crates/loom-guest-rs"),
-            root.join("crates/loom-guest-macros"),
             root.join("crates/loom-proto"),
             sysroot.join("lib/rustlib/src/rust/library"),
         ];
@@ -354,9 +379,9 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
     }
     crate::identity::publish(identity_directory, published_identity_directory)?;
     Ok(Built {
-        bytes: fs::read(artifact).await?,
+        bytes: fs::read(root_recipe.output()?).await?,
         logs,
         diagnostics,
-        rustc_invocations: rustc_invocations + 1,
+        rustc_invocations: rustc_invocations + 2,
     })
 }

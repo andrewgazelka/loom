@@ -41,7 +41,7 @@ fn app() -> Router {
 }
 #[tokio::test]
 #[ignore = "requires Rust guest toolchain and LOOM_COMPILER_CACHE_OWNER pointing to loomd or build_smoke"]
-async fn explicit_effect_policy_persists_and_changes_identity() {
+async fn explicit_effect_policy_persists_and_republication_rejects_changes() {
     let service = Service::new(
         Store::memory().unwrap(),
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
@@ -73,10 +73,22 @@ async fn explicit_effect_policy_persists_and_changes_identity() {
             ..request
         })
         .await;
-    assert!(unrestricted.ok, "{unrestricted:?}");
-    assert_ne!(
-        restricted.result["def"]["hash"],
-        unrestricted.result["def"]["hash"]
+    assert!(!unrestricted.ok, "{unrestricted:?}");
+    assert!(
+        unrestricted.result["error"]
+            .as_str()
+            .unwrap()
+            .contains(hash),
+        "{unrestricted:?}"
+    );
+    assert_eq!(
+        service
+            .store
+            .definition(hash)
+            .unwrap()
+            .unwrap()
+            .allowed_effects,
+        Some(Vec::new())
     );
 }
 #[tokio::test]

@@ -195,11 +195,11 @@ impl Execution {
                     .await
                     .map_err(|cause| running.error_context(cause))? as u64
             }
-            Invocation::Call { args } => {
+            Invocation::Call { args, export } => {
                 let buffer = running.input_encoded(&args).await?;
                 running
                     .instance
-                    .get_typed_func::<(i32, i32), i64>(&mut running.store, "loom_call")
+                    .get_typed_func::<(i32, i32), i64>(&mut running.store, &export)
                     .map_err(|cause| running.error_context(cause))?
                     .call_async(&mut running.store, (buffer.pointer, buffer.length))
                     .await

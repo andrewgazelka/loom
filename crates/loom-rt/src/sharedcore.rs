@@ -138,13 +138,14 @@ impl Execution {
     }
 }
 enum Invocation {
-    Call { args: Vec<u8> },
+    Call { args: Vec<u8>, export: String },
     Schema,
 }
 impl Entry<'_> {
     fn prepare(self) -> Result<Invocation> {
         Ok(match self {
-            Self::Call { args } => Invocation::Call {
+            Self::Call { args, export } => Invocation::Call {
+                export: export.into(),
                 args: encode(args)?,
             },
             Self::Schema => Invocation::Schema,
@@ -235,7 +236,7 @@ async fn respond(caller: &mut Caller<'_, Guest>, bytes: Vec<u8>) -> Result<i64> 
     Ok(((bytes.len() as u64) << 32 | pointer as u64) as i64)
 }
 pub(super) enum Entry<'a> {
-    Call { args: &'a Value },
+    Call { args: &'a Value, export: &'a str },
     Schema,
 }
 

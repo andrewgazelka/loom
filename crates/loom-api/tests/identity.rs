@@ -57,20 +57,21 @@ pub fn handle(_message: Vec<u8>) {
         "CREATE TABLE arrivals(value INTEGER)",
         "CREATE TABLE arrivals(value INTEGER, extra TEXT)",
     );
-    let rejected = service
-        .command(CommandRequest {
-            session: None,
-            command: "update".into(),
-            args: json!({"name":"pinned-actor","source":changed_schema_source}),
-        })
-        .await;
-    assert!(!rejected.ok, "schema replacement succeeded: {rejected:?}");
-    let reason = rejected.result["error"].as_str().unwrap();
-    assert!(
-        reason.contains(hash) && reason.contains(original.component_hash.as_ref().unwrap()),
-        "{reason}"
+    let updated = command(
+        &service,
+        "update",
+        json!({"name":"pinned-actor","source":changed_schema_source}),
+    )
+    .await;
+    assert_ne!(
+        updated["hash"], added["hash"],
+        "schema belongs to the entry contract"
     );
-    assert!(reason.contains("conflicts with"), "{reason}");
+    assert_eq!(
+        service.store.resolve("pinned-actor")?.unwrap().hash,
+        updated["hash"].as_str().unwrap()
+    );
+    assert_eq!(node.info(id).await?.behavior_hash, hash);
     let identity = service.store.build_identity(hash)?.unwrap();
     let stored_source = service.store.source(hash)?.unwrap();
     let mut changed = original.clone();
@@ -121,9 +122,14 @@ pub fn handle(_message: Vec<u8>) {
     let rows = node
         .open(id)
         .await?
-        .inspect_sql("SELECT value FROM arrivals", Vec::new())
+        .inspect_sql("SELECT * FROM arrivals", Vec::new())
         .await?;
     assert_eq!(rows.rows.len(), 2);
+    assert_eq!(
+        rows.columns,
+        vec!["value".to_owned()],
+        "existing actor retains its original schema"
+    );
     for row in rows.rows {
         assert_eq!(row.get::<i64>(0)?, 42);
     }

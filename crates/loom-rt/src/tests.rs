@@ -294,7 +294,15 @@ async fn rejects_unadmitted_artifact_before_execution() -> Result<()> {
             hash: hash.clone(),
             lang: loom_proto::Lang::Rust,
             component_hash: Some(artifact.clone()),
-            sig: Default::default(),
+            sig: loom_proto::TypeSig {
+                exports: vec![loom_proto::ExportSig {
+                    name: "main".into(),
+                    params: Vec::new(),
+                    returns: loom_proto::ValueShape::Null,
+                    effects: Default::default(),
+                }],
+                effects: Default::default(),
+            },
             allowed_effects: None,
             observed_effects: Vec::new(),
         },

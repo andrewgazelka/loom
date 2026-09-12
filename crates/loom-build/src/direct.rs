@@ -51,6 +51,7 @@ fn rejected(error: impl std::fmt::Display) -> BuildError {
 }
 
 mod compile;
+mod entry_abi;
 mod recipe;
 pub(crate) use compile::{Request, build};
 mod graph;

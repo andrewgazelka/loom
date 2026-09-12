@@ -72,7 +72,7 @@ impl Runtime {
                 let input = running.input_encoded(&encode(&json!([]))?).await?;
                 let call = running
                     .instance
-                    .get_typed_func::<(i32, i32), i64>(&mut running.store, "loom_call")
+                    .get_typed_func::<(i32, i32), i64>(&mut running.store, "loom_call_main")
                     .map_err(error)?;
                 let free = running
                     .instance
