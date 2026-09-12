@@ -8,17 +8,17 @@ The long-term goal is a formally verified guest language, compiler, and runtime 
 
 ## Try it
 
-Start the browser REPL, HTTP API, and MCP endpoint on `127.0.0.1:8787`:
+Start the browser REPL, HTTP API, and MCP endpoint on `127.0.0.1:8793`:
 
 ```sh
-nix run --builders '' .#repl
+nix run --builders '' .#repl -- --bind 127.0.0.1:8793
 ```
 
-The launcher prints `Token file: <path>` and opens `http://127.0.0.1:8787/#token=<token>`. Export `LOOM_TOKEN` from that file and `LOOM_URL=http://127.0.0.1:8787` in your CLI terminal. Follow the [README command sequence](../README.md#try-it) to add, view, run, update, and replay the guests in `examples/unison/`.
+The launcher prints `Token file: <path>` and opens `http://127.0.0.1:8793/#token=<token>`. The `CLI: <store path>/bin/loom` line identifies the matching CLI. Put its directory on `PATH`, export `LOOM_TOKEN` from the token file, and set `LOOM_URL=http://127.0.0.1:8793`. Pass `--url "$LOOM_URL"` to the CLI as shown in the README. Follow the [README command sequence](../README.md#try-it) to add, view, run, update, and replay the guests in `examples/unison/`.
 
 The proof checks these results in order:
 
-1. `loom add examples/unison/greet.rs` returns a definition hash and an empty inferred effect row.
+1. `loom add examples/unison/greet.rs --name greet` returns a definition hash and an empty inferred effect row.
 2. `loom view <hash>` returns the exact stored source and two items after the input file has been moved away.
 3. `loom run greet '"loom"'` returns `"hello, loom"` with an empty effects list.
 4. Updating with `greet-v2.rs` only renames a local and keeps the hash. Updating with `greet-v3.rs` changes the greeting constant and moves the hash. The old hash still runs; `history greet` contains both hashes.
@@ -28,13 +28,13 @@ The proof checks these results in order:
 8. Promotion with rationale `e2e` puts both behavior hashes in lineage. One more message moves the cursor to 4.
 9. The HTTP MCP companion repeats checks 1–8 under separate names and actors, then checks discovery of the eight definition tools and 19 actor tools. It prints its own `N/9`.
 
-Stop the interactive daemon before running the automated version:
+Stop the daemon on the test port and commit your changes before running the automated version. This machine’s Nix requires a committed Git input:
 
 ```sh
-./scripts/e2e-unison.sh
+LOOM_E2E_PORT=8793 scripts/e2e-unison.sh
 ```
 
-Install `nix`, `bun`, `curl`, and the contract `loom` CLI on `PATH` first. The shell refuses an occupied port, creates a fresh `LOOM_DATA_DIR` and build directory, starts `nix run --builders '' .#repl`, reads the printed token file, and uses disposable fixture copies. It stops its daemon on exit and retains state and logs at the printed path. The final stdout line is `N/9`; success requires `9/9` and exit status zero. Prerequisite failures mark dependent checks as blocked. The initial build timeout defaults to 3600 seconds (`LOOM_E2E_START_TIMEOUT`); each client operation defaults to 600000 milliseconds (`LOOM_E2E_OPERATION_TIMEOUT_MS`).
+Install `nix`, `bun`, and `curl` on `PATH` first. The shell takes the matching CLI directory from the launcher’s `CLI:` line. `LOOM_E2E_PORT` defaults to 8787 and drives the occupancy check, launcher bind, and `LOOM_URL`. The example uses 8793 to leave the live REPL on 8787 alone. The shell refuses an occupied port, creates a fresh `LOOM_DATA_DIR` and build directory, starts `nix run --builders '' .#repl -- --bind 127.0.0.1:$LOOM_E2E_PORT`, reads the printed token file, and uses disposable fixture copies. It stops its daemon on exit and retains state and logs at the printed path. The final stdout line is `N/9`; success requires `9/9` and exit status zero. Prerequisite failures mark dependent checks as blocked. The initial build timeout defaults to 3600 seconds (`LOOM_E2E_START_TIMEOUT`); each client operation defaults to 600000 milliseconds (`LOOM_E2E_OPERATION_TIMEOUT_MS`).
 
 The TypeScript companion shares semantic assertions between the CLI and MCP paths and reuses `scripts/mcp-client.ts` for authenticated Streamable HTTP. This avoids adding a Rust test binary just to drive JSON transports. To run the MCP companion against an already running daemon, copy the fixtures into a disposable directory and pass that directory:
 
@@ -44,7 +44,7 @@ cp examples/unison/*.rs "$fixtures/"
 bun scripts/e2e-unison-mcp.ts --mcp "$fixtures"
 ```
 
-MCP is also available over stdio with `nix run --builders '' .#repl -- --stdio`; the automated proof uses HTTP. The proof is written but has not been executed against the incoming contract. The definition wire fields remain phase-2 assumptions: `{hash,effects}` for add/update, `{source,items}` for view, `{value,effects}` for run, and an array of `{hash}` entries for history, inside the existing response envelope. MCP view/run use `target`; add/update send source text. The companion keeps these assumptions at its call and assertion sites so they can be reconciled with the landed interface without changing the required results. Product failures should be reported as `PRODUCT <step> <what>` after separating them from script/schema mistakes.
+MCP is also available over stdio with `nix run --builders '' .#repl -- --bind 127.0.0.1:8793 -- --stdio`; the automated proof uses HTTP. Every tool uses a bare verb and returns `{ok, seq, result, diagnostics}`. MCP carries this envelope in `structuredContent`. Add/update expose `result.hash` and `result.entries.<entry>.effects = {labels, unknown}`; view returns `result.source` and an item-name-to-hash map; run returns `result.output` and `result.effects`; history returns an array of revisions with `hash`. Every inferred-row check requires `unknown: false`. Product failures are reported as `PRODUCT <step> <what>` after separating them from script mistakes.
 
 ## Run locally
 

@@ -1,9 +1,4 @@
-/** Shared semantic assertions; CLI and MCP each execute the complete workflow.
- * Phase 1 wire assumptions: definition results use {hash,effects}, view uses
- * {source,items}, run uses {value,effects}, history is an array of {hash}.
- * These fields are not specified by the vocabulary contract. Reconcile them
- * with the landed implementation in phase 2; never relax semantic assertions.
- */
+/** CLI and HTTP MCP proof against the shared loom-proto verb table. */
 import { readFile, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import { LoomMcpClient, object } from './mcp-client';
@@ -15,8 +10,10 @@ if ((mode !== '--cli' && mode !== '--mcp') || !directory) {
 }
 const mcp = mode === '--mcp';
 const prefix = mcp ? 'mcp_' : '';
+const endpoint = process.env.LOOM_URL;
+if (!endpoint) throw new Error('Set LOOM_URL to the daemon under test');
 const client = new LoomMcpClient({
-  endpoint: process.env.LOOM_URL ?? 'http://127.0.0.1:8787',
+  endpoint,
   token: process.env.LOOM_TOKEN ?? '',
 });
 const names = ['add', 'view', 'run', 'update-history', 'inferred-sleep', 'actor-counter', 'validate', 'promote', 'tool-discovery'];
@@ -44,6 +41,10 @@ function text(value: unknown): string {
 function equal(actual: unknown, expected: unknown, label: string) {
   assert(JSON.stringify(actual) === JSON.stringify(expected), `${label}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
 }
+function effects(result: Record<string, unknown>, entry: string) {
+  const row = object(object(object(result.entries)[entry]).effects);
+  return { labels: list(row.labels), unknown: row.unknown };
+}
 function hash(value: unknown): string {
   const result = text(value);
   assert(/^[0-9a-f]{64}$/.test(result), `Expected BLAKE3 definition hash, got ${result}`);
@@ -57,20 +58,17 @@ async function bounded<T>(work: Promise<T>): Promise<T> {
     })]);
   } finally { clearTimeout(timer); }
 }
-// The existing MCP definition tools use Response envelopes; actor tools return
-// direct JSON. Keep that transport distinction at this boundary.
 async function call(cli: string[], tool: string, args: Record<string, unknown>): Promise<unknown> {
+  console.log(`# request ${JSON.stringify({ command: tool, args })}`);
   let value: unknown;
+  let exitStatus = 0;
   if (mcp) {
     if (!connected) { await bounded(client.connect()); connected = true; }
     const result = object(await bounded(client.rpc('tools/call', { name: tool, arguments: args })));
     assert(result.isError !== true, `${tool}: ${JSON.stringify(result)}`);
-    const blocks = list(result.content).map(item => object(item));
-    const texts = blocks.filter(item => item.type === 'text');
-    assert(texts.length === 1, `${tool}: expected one JSON text block`);
-    value = JSON.parse(text(texts[0]?.text));
+    value = object(result.structuredContent, 'MCP structured response');
   } else {
-    const child = Bun.spawn(['loom', ...cli], { stdout: 'pipe', stderr: 'pipe' });
+    const child = Bun.spawn(['loom', '--url', endpoint, ...cli], { stdout: 'pipe', stderr: 'pipe' });
     try {
       const output = { stdout: '', stderr: '', status: -1 };
       await bounded(Promise.all([
@@ -79,59 +77,58 @@ async function call(cli: string[], tool: string, args: Record<string, unknown>):
         child.exited.then(value => { output.status = value; }),
       ]));
       if (output.stderr) process.stderr.write(output.stderr);
-      assert(output.status === 0, `loom ${cli[0]} exited ${output.status}: ${output.stdout}`);
+      exitStatus = output.status;
       value = JSON.parse(output.stdout);
     } finally { child.kill(); }
   }
   console.log(`# ${tool} ${JSON.stringify(value)}`);
-  if (tool.startsWith('loom_')) {
-    const envelope = object(value);
-    assert(envelope.ok === true, `${tool}: ${JSON.stringify(envelope)}`);
-    assert('result' in envelope, `${tool}: missing result`);
-    return envelope.result;
-  }
-  return value;
+  const envelope = object(value);
+  assert(Number.isSafeInteger(envelope.seq) && Array.isArray(envelope.diagnostics), `${tool}: invalid response envelope`);
+  assert(envelope.ok === true, `${tool}: ${JSON.stringify(envelope)}`);
+  assert(exitStatus === 0, `loom ${cli[0]} exited ${exitStatus}`);
+  assert('result' in envelope, `${tool}: missing result`);
+  return envelope.result;
 }
 async function add(file: string, name: string): Promise<Record<string, unknown>> {
   const path = join(directory, file);
   const source = await readFile(path, 'utf8');
   assert(!source.includes('#[') && !/\w+!\s*\(/.test(source), `${file}: guest must have no macros`);
-  return object(await call(['add', path, '--name', name], 'loom_add', { source, name }));
+  return object(await call(['add', path, '--name', name], 'add', { source, name }));
 }
 async function runGreeting(reference: string, expected: string) {
-  const result = object(await call(['run', reference, '"loom"'], 'loom_run', { target: reference, args: 'loom' }));
-  equal(result.value, expected, 'greeting value');
+  const result = object(await call(['run', reference, '"loom"'], 'run', { target: reference, args: 'loom' }));
+  equal(result.output, expected, 'greeting value');
   equal(result.effects, [], 'run effects');
 }
 async function cursor(expected: number) {
-  const result = object(await call(['info', actorId], 'actor_info', { id: actorId }));
+  const result = object(await call(['info', actorId], 'info', { id: actorId }));
   equal(result.cursor, expected, 'actor cursor');
 }
 async function send() {
-  await call(['send', actorId, '1'], 'actor_send', { id: actorId, msg: 1 });
+  await call(['send', actorId, '1'], 'send', { id: actorId, msg: 1 });
 }
 
 const checks: Array<() => Promise<void>> = [
   async () => {
     const result = await add('greet.rs', `${prefix}greet`);
     greetHash = hash(result.hash);
-    equal(result.effects, [], 'inferred effect row');
+    equal(effects(result, 'greet'), { labels: [], unknown: false }, 'inferred effect row');
   },
   async () => {
     const path = join(directory, 'greet.rs');
     const source = await readFile(path, 'utf8');
     await rename(path, `${path}.removed`);
     try {
-      const result = object(await call(['view', greetHash], 'loom_view', { target: greetHash }));
+      const result = object(await call(['view', greetHash], 'view', { target: greetHash }));
       equal(result.source, source, 'stored source after input removal');
-      equal(list(result.items).length, 2, 'item table count');
+      equal(Object.keys(object(result.items)).length, 2, 'item table count');
     } finally { await rename(`${path}.removed`, path); }
   },
   async () => { await runGreeting(`${prefix}greet`, 'hello, loom'); },
   async () => {
     const name = `${prefix}greet`;
     const update = async (file: string) => object(await call(
-      ['update', name, join(directory, file)], 'loom_update',
+      ['update', name, join(directory, file)], 'update',
       { name, source: await readFile(join(directory, file), 'utf8') },
     ));
     equal(hash((await update('greet-v2.rs')).hash), greetHash, 'alpha-equivalent hash');
@@ -139,7 +136,7 @@ const checks: Array<() => Promise<void>> = [
     assert(changedHash !== greetHash, 'constant change did not move definition hash');
     await runGreeting(greetHash, 'hello, loom');
     await runGreeting(name, 'welcome, loom');
-    const history = list(await call(['history', name], 'loom_history', { name }));
+    const history = list(await call(['history', name], 'history', { name }));
     const hashes = history.map(item => hash(object(item).hash));
     assert(hashes.includes(greetHash) && hashes.includes(changedHash), 'history lacks old or new hash');
   },
@@ -148,14 +145,14 @@ const checks: Array<() => Promise<void>> = [
     assert(!/LOOM_EFFECT|effects\s*=|#\[/.test(source), 'sleeper declares an effect row');
     const result = await add('sleeper.rs', `${prefix}sleeper`);
     hash(result.hash);
-    equal(result.effects, ['sleep'], 'generic trait inferred row');
+    equal(effects(result, 'sleeper'), { labels: ['sleep'], unknown: false }, 'generic trait inferred row');
   },
   async () => {
     const result = await add('counter.rs', `${prefix}counter`);
     counterHash = hash(result.hash);
-    counterEffects = result.effects;
-    equal(counterEffects, ['sql'], 'counter inferred row');
-    const spawned = object(await call(['spawn', `${prefix}counter`], 'actor_spawn', { behavior_hash: counterHash, init: null }));
+    counterEffects = effects(result, 'handle');
+    equal(counterEffects, { labels: ['sql'], unknown: false }, 'counter inferred row');
+    const spawned = object(await call(['spawn', `${prefix}counter`], 'spawn', { def: `${prefix}counter`, init: null }));
     actorId = text(spawned.id);
     await send(); await send(); await send();
     await cursor(3);
@@ -164,9 +161,9 @@ const checks: Array<() => Promise<void>> = [
     const result = await add('counter-v2.rs', `${prefix}counter-v2`);
     candidateHash = hash(result.hash);
     assert(candidateHash !== counterHash, 'counter revision hash did not change');
-    equal(result.effects, counterEffects, 'counter revisions inferred rows');
-    const validation = object(await call(['validate', actorId, candidateHash, '3'], 'actor_validate', {
-      id: actorId, candidate_hash: candidateHash, k: 3,
+    equal(effects(result, 'handle'), counterEffects, 'counter revisions inferred rows');
+    const validation = object(await call(['validate', actorId, candidateHash, '3'], 'validate', {
+      id: actorId, candidate: candidateHash, k: 3,
     }));
     const differences = list(object(object(validation.verdict).Differs).tables).map(item => object(item));
     const counter = differences.find(item => item.name === 'counter');
@@ -177,10 +174,10 @@ const checks: Array<() => Promise<void>> = [
     await cursor(3);
   },
   async () => {
-    await call(['promote', actorId, candidateHash, '--rationale', 'e2e'], 'actor_promote', {
-      id: actorId, behavior_hash: candidateHash, author: 'e2e', rationale: 'e2e',
+    await call(['promote', actorId, candidateHash, '--rationale', 'e2e', '--author', 'e2e'], 'promote', {
+      id: actorId, hash: candidateHash, author: 'e2e', rationale: 'e2e',
     });
-    const lineage = list(await call(['lineage', actorId], 'actor_lineage', { id: actorId }));
+    const lineage = list(await call(['lineage', actorId], 'lineage', { id: actorId }));
     const hashes = lineage.map(item => text(object(item).behavior_hash));
     assert(hashes.includes(counterHash) && hashes.includes(candidateHash), 'lineage lacks both behavior hashes');
     await send();
@@ -189,10 +186,10 @@ const checks: Array<() => Promise<void>> = [
   async () => {
     const discovery = object(await bounded(client.rpc('tools/list')));
     const tools = list(discovery.tools).map(item => text(object(item).name));
-    for (const name of ['add', 'view', 'update', 'history', 'diff', 'run', 'find', 'dependents']) {
-      assert(tools.includes(`loom_${name}`), `missing loom_${name}`);
-    }
-    equal(tools.filter(name => name.startsWith('actor_')).length, 19, 'actor tool count');
+    const definitions = ['add', 'view', 'update', 'history', 'diff', 'run', 'find', 'dependents'];
+    const actors = ['spawn', 'send', 'tree', 'info', 'lineage', 'validate', 'promote', 'fork', 'actors',
+      'stop', 'restart', 'dead_letters', 'sql', 'whereis', 'register', 'members', 'behaviors', 'promote_where', 'drain'];
+    equal(tools.sort(), ['command', ...definitions, ...actors].sort(), 'shared verb discovery');
   },
 ];
 

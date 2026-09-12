@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Phase 2 entrypoint. Requires nix, bun, curl, and the contract CLI `loom` on PATH.
+# Requires nix, bun, and curl. The launcher supplies the matching CLI.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 passed=0
@@ -25,18 +25,19 @@ finish() {
 trap finish EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-for tool in nix bun curl loom; do command -v "$tool" >/dev/null; done
+for tool in nix bun curl; do command -v "$tool" >/dev/null; done
+LOOM_E2E_PORT=${LOOM_E2E_PORT:-8787}
 # Refuse an occupied port, including an unrelated HTTP server.
-if (exec 3<>/dev/tcp/127.0.0.1/8787) 2>/dev/null; then
-  printf 'Port 8787 is occupied; stop its owner before running this proof.\n' >&2
+if (exec 3<>"/dev/tcp/127.0.0.1/$LOOM_E2E_PORT") 2>/dev/null; then
+  printf 'Port %s is occupied; choose another LOOM_E2E_PORT.\n' "$LOOM_E2E_PORT" >&2
   exit 1
 fi
 state=$(mktemp -d "${TMPDIR:-/tmp}/loom-unison.XXXXXXXX")
 export LOOM_DATA_DIR="$state/data"
 export LOOM_BUILD_DIR="$state/builds"
-export LOOM_URL=http://127.0.0.1:8787
+export LOOM_URL="http://127.0.0.1:$LOOM_E2E_PORT"
 unset LOOM_TOKEN LOOM_BIND
-nix run --builders '' .#repl >"$state/launcher.log" 2>&1 &
+nix run --builders '' .#repl -- --bind "127.0.0.1:$LOOM_E2E_PORT" >"$state/launcher.log" 2>&1 &
 server_pid=$!
 # Allow the initial local Nix build to finish. Keep its log available on failure.
 deadline=$((SECONDS + ${LOOM_E2E_START_TIMEOUT:-3600}))
@@ -47,10 +48,15 @@ while ((SECONDS < deadline)); do
     exit 1
   fi
   token_file=$(sed -n 's/^Token file: //p' "$state/launcher.log" | tail -n 1)
-  if [[ -n "$token_file" && -s "$token_file" ]]; then
+  cli_path=$(sed -n 's/^CLI: //p' "$state/launcher.log" | tail -n 1)
+  if [[ -n "$token_file" && -s "$token_file" && -x "$cli_path" ]]; then
     LOOM_TOKEN=$(cat "$token_file")
     export LOOM_TOKEN
-    if curl --silent --fail --max-time 2 "$LOOM_URL/" >/dev/null; then ready=true; break; fi
+    if curl --silent --fail --max-time 2 "$LOOM_URL/" >/dev/null; then
+      export PATH="$(dirname "$cli_path"):$PATH"
+      ready=true
+      break
+    fi
   fi
   sleep 1
 done

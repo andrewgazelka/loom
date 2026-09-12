@@ -10,51 +10,52 @@ transaction, OTP-parity supervision trees.
 ## Try it
 
 ```sh
-nix run --builders '' .#repl
+nix run --builders '' .#repl -- --bind 127.0.0.1:8793
 ```
 
-The launcher prints `Token file: <path>` and opens `http://127.0.0.1:8787/#token=<token>`. In another terminal, set `LOOM_TOKEN` from that file and use the `loom` CLI:
+The launcher prints `Token file: <path>` and opens `http://127.0.0.1:8793/#token=<token>`. It also prints `CLI: <store path>/bin/loom`. In another terminal, use that CLI and token:
 
 ```sh
 export LOOM_TOKEN="$(cat /path/printed/by/launcher)"
-export LOOM_URL=http://127.0.0.1:8787
-loom add examples/unison/greet.rs
+export LOOM_URL=http://127.0.0.1:8793
+export PATH="/store/path/printed/by/launcher/bin:$PATH"
+loom --url "$LOOM_URL" add examples/unison/greet.rs --name greet
 # Copy the returned definition hash into OLD.
 OLD='paste-definition-hash'
-loom view "$OLD"                       # stored source and two items
-loom run greet '"loom"'                 # "hello, loom"; effects []
-loom update greet examples/unison/greet-v2.rs  # same hash: local renamed
-loom update greet examples/unison/greet-v3.rs  # new hash: constant changed
-loom run "$OLD" '"loom"'                # still "hello, loom"
-loom history greet                     # both hashes
-loom add examples/unison/sleeper.rs     # inferred effects ["sleep"]
-loom add examples/unison/counter.rs
-loom spawn counter
+loom --url "$LOOM_URL" view "$OLD"                       # stored source and two items
+loom --url "$LOOM_URL" run greet '"loom"'                 # "hello, loom"; effects []
+loom --url "$LOOM_URL" update greet examples/unison/greet-v2.rs  # same hash: local renamed
+loom --url "$LOOM_URL" update greet examples/unison/greet-v3.rs  # new hash: constant changed
+loom --url "$LOOM_URL" run "$OLD" '"loom"'                # still "hello, loom"
+loom --url "$LOOM_URL" history greet                     # both hashes
+loom --url "$LOOM_URL" add examples/unison/sleeper.rs --name sleeper     # inferred effects ["sleep"]
+loom --url "$LOOM_URL" add examples/unison/counter.rs --name counter
+loom --url "$LOOM_URL" spawn counter
 ID='paste-actor-id'
-loom send "$ID" 1
-loom send "$ID" 1
-loom send "$ID" 1
-loom info "$ID"                        # cursor 3
-loom add examples/unison/counter-v2.rs
+loom --url "$LOOM_URL" send "$ID" 1
+loom --url "$LOOM_URL" send "$ID" 1
+loom --url "$LOOM_URL" send "$ID" 1
+loom --url "$LOOM_URL" info "$ID"                        # cursor 3
+loom --url "$LOOM_URL" add examples/unison/counter-v2.rs --name counter-v2
 V2='paste-counter-v2-definition-hash'
-loom validate "$ID" "$V2" 3            # Differs, with table hashes
-loom promote "$ID" "$V2" --rationale e2e
-loom lineage "$ID"                     # both behavior hashes
-loom send "$ID" 1
-loom info "$ID"                        # cursor 4
+loom --url "$LOOM_URL" validate "$ID" "$V2" 3            # Differs, with table hashes
+loom --url "$LOOM_URL" promote "$ID" "$V2" --rationale e2e --author e2e
+loom --url "$LOOM_URL" lineage "$ID"                     # both behavior hashes
+loom --url "$LOOM_URL" send "$ID" 1
+loom --url "$LOOM_URL" info "$ID"                        # cursor 4
 ```
 
 The guests use plain root-level `pub fn` entries, no macros or effect declarations. The counter declares its SQL schema with `pub const LOOM_SCHEMA: &str`; `add` infers effect rows, including the sleeper's generic trait call.
 
-For the executable proof, stop the interactive daemon, ensure `nix`, `bun`, `curl`, and the contract `loom` CLI are on `PATH`, then run:
+For the executable proof, stop the daemon on the test port, ensure `nix`, `bun`, and `curl` are on `PATH`, commit your changes, then run:
 
 ```sh
-./scripts/e2e-unison.sh
+LOOM_E2E_PORT=8793 scripts/e2e-unison.sh
 ```
 
-The script starts `nix run --builders '' .#repl` with a fresh state directory on this machine. It checks the sequence above, moves its disposable source file before `view`, then repeats the workflow through authenticated HTTP MCP. Each check prints `ok <n> <name>` or `FAIL <n> <name>: <reason>`. MCP prints its own `N/9`; the final line is the overall `N/9`. A full pass is `9/9` with exit status zero. State and logs remain at the printed directory for inspection. This proof is written against the incoming interface contract; execution is pending.
+The script starts `nix run --builders '' .#repl -- --bind 127.0.0.1:8793` with a fresh state directory on this machine and takes the CLI from the launcher’s `CLI:` line. `LOOM_E2E_PORT` defaults to 8787; the command above uses 8793 to leave an existing REPL on 8787 alone. It checks the sequence above, moves its disposable source file before `view`, then repeats the workflow through authenticated HTTP MCP. Each check prints `ok <n> <name>` or `FAIL <n> <name>: <reason>`. MCP prints its own `N/9`; the final line is the overall `N/9`. A full pass is `9/9` with exit status zero. State and logs remain at the printed directory for inspection.
 
-See [the guide's Try it section](docs/guide.md#try-it) for transport details and the proof's wire assumptions.
+See [the guide's Try it section](docs/guide.md#try-it) for transport details and response shapes.
 
 ## Effects
 
