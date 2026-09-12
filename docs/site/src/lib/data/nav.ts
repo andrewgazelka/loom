@@ -28,10 +28,10 @@ export function getNav(docs: DocPage[]): NavSection[] {
   }
   const sections: NavSection[] = [
     { title: 'Start', items: [{ title: 'Overview', href: '/' }, ...pages(['readme', 'index', 'guide'])] },
-    { title: 'Architecture', items: pages(['architecture', 'plan-shared-execution', 'shared-core-abi']) },
+    { title: 'Architecture', items: pages(['architecture', 'plan-shared-execution', 'shared-core-abi', 'plan-unified-memory']) },
     { title: 'Actors', items: pages(['actors-turso']) },
     { title: 'Effects and handlers', items: pages(['plan-effects', 'content-addressed-handlers']) },
-    { title: 'Content-addressed code', items: pages(['content-addressed-code', 'plan-unified-memory']) },
+    { title: 'Content-addressed code', items: pages(['content-addressed-code']) },
     { title: 'MCP', items: [{ title: 'Tool reference', href: '/mcp/' }] },
     { title: 'Crates', items: [{ title: 'Crate catalog', href: '/crates/' }] },
     { title: 'Reference', items: [{ title: 'Search documentation', href: '/search/' }, ...docs.filter((doc) => !assigned.has(doc.slug)).map((doc) => ({ title: doc.title, href: `/docs/${doc.slug}/` }))] }
