@@ -7,8 +7,9 @@ pub(super) async fn graph_shareable(
     target: &Path,
     isolated: bool,
     compiler_sysroot: Option<&Path>,
+    driver: Option<&Path>,
 ) -> Result<bool, BuildError> {
-    let toolchain = crate::resolve_guest_toolchain(root).await?;
+    let toolchain = crate::resolve_guest_toolchain_with_driver(root, driver).await?;
     let mut command = if isolated {
         let mut command = Command::new(root.join("rustc/sandbox.sh"));
         command
