@@ -1,3 +1,5 @@
+#[path = "support/response_policy.rs"]
+mod response_policy;
 use loom_api::{Authorizer, Service};
 use loom_proto::{Lang, Response};
 use loom_store::Store;
@@ -21,6 +23,8 @@ impl loom_actor::Registry for TransportRegistry {
 }
 
 struct Server {
+    service: Arc<Service>,
+    node: loom_actor::Node,
     url: String,
     task: tokio::task::JoinHandle<()>,
     _directory: tempfile::TempDir,
@@ -52,15 +56,17 @@ impl Server {
                 vec![Lang::Rust],
             )
             .unwrap()
-            .with_actors(node),
+            .with_actors(node.clone()),
         );
-        let router = loom_api::router(service, Authorizer::single("test".into()).unwrap());
+        let router = loom_api::router(service.clone(), Authorizer::single("test".into()).unwrap());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let task = tokio::spawn(async move {
             axum::serve(listener, router).await.unwrap();
         });
         Self {
+            service,
+            node,
             url,
             task,
             _directory: directory,

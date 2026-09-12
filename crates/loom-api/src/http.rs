@@ -49,9 +49,6 @@ async fn authorize_token(
     request.extensions_mut().insert(access);
     next.run(request).await
 }
-fn operation_response(service: &Service, response: Response) -> HttpResponse {
-    protocol_response(service.inline(response))
-}
 fn protocol_response(response: Response) -> HttpResponse {
     let forbidden = response.result["code"] == "forbidden";
     let mut response = Json(response).into_response();
@@ -67,15 +64,7 @@ async fn command(
 ) -> HttpResponse {
     let service = s.service.scoped(access);
     match request {
-        Ok(Json(request)) => {
-            let direct = command_returns_direct(&request.command);
-            let response = service.command(request).await;
-            if direct {
-                protocol_response(response)
-            } else {
-                operation_response(&service, response)
-            }
-        }
+        Ok(Json(request)) => protocol_response(service.command(request).await),
         Err(error) => json_rejection(&service, error),
     }
 }

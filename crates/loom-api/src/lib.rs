@@ -207,7 +207,7 @@ fn field<'a>(args: &'a Value, name: &str) -> Result<&'a str> {
         .with_context(|| format!("missing string argument {name}"))
 }
 /// Definition commands return their requested data directly; CAS browsing stays read-only.
-pub fn command_returns_direct(command: &str) -> bool {
+fn command_returns_direct(command: &str) -> bool {
     matches!(
         command,
         "add"
