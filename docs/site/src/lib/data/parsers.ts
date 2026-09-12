@@ -18,7 +18,7 @@ export function plainText(text: string): string {
 }
 export function headingId(text: string): string { return plainText(text).toLowerCase().replace(/[^\p{L}\p{N}_\s-]/gu, '').replace(/\s+/g, '-').replace(/-+/g, '-'); }
 function fail(source: string, message: string): never { throw new Error(`${source}: ${message}`); }
-export function parseDoc(source: string, raw: string): DocPage {
+export function parseDoc(source: string, raw: string, slugOverride?: string): DocPage {
   let markdown = raw.replace(/^\uFEFF/, '');
   let metadata: Record<string, unknown> = {};
   if (markdown.startsWith('---\n') || markdown.startsWith('---\r\n')) {
@@ -43,7 +43,7 @@ export function parseDoc(source: string, raw: string): DocPage {
   const title = (metadata.title as string | undefined) ?? headings.find((heading) => heading.level === 1)?.text;
   if (!title?.trim()) fail(source, 'page needs a title in front matter or an H1 heading');
   const filename = source.split('/').at(-1) ?? '';
-  const slug = (metadata.slug as string | undefined) ?? filename.replace(/\.md$/i, '').toLowerCase();
+  const slug = slugOverride ?? (metadata.slug as string | undefined) ?? filename.replace(/\.md$/i, '').toLowerCase();
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)) fail(source, `invalid slug ${JSON.stringify(slug)}`);
   return { slug, title, description: (metadata.description as string | undefined) ?? paragraphs[0] ?? '', source, markdown, html: '', headings, paragraphs, wordCount: plainText(markdown).split(/\s+/).filter(Boolean).length };
 }
