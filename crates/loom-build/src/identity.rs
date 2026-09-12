@@ -36,25 +36,6 @@ impl Driver {
         cache: &Path,
         selected: Option<&Path>,
     ) -> Result<Self, BuildError> {
-        if let Some(path) = selected {
-            let probe = Command::new(path)
-                .arg("-vV")
-                .output()
-                .await
-                .map_err(|error| {
-                    rejected(format!(
-                        "hash-rustc driver unavailable: {}: {error}",
-                        path.display()
-                    ))
-                })?;
-            if !probe.status.success() {
-                return Err(rejected(format!(
-                    "hash-rustc driver unavailable: {}: {}",
-                    path.display(),
-                    String::from_utf8_lossy(&probe.stderr)
-                )));
-            }
-        }
         let source = root.join("tools/hash-rustc");
         let manifest = source.join("Cargo.toml");
         if selected.is_none() && !manifest.is_file() {
