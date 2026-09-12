@@ -460,7 +460,7 @@ Every second build reused six CGUs: 6/16 for the SDK and 6/10 for preview. The S
 
 The compiler driver emits residual host effects from the resolved call graph. A row contains the labels that can reach the host, which is the outermost handler. Concrete trait and generic calls contribute only their selected callees. The driver unions the entry's concrete instance rows to produce its entry row.
 
-The driver maps resolved SDK definitions to labels through the fixed path table in `tools/hash-rustc/src/effects/sdk.rs`. It recognizes the original `loom_guest_rs` crate identity and paths such as `sleep`, `fs::read`, `cas::put`, and `handlers::handle`. Import aliases and SDK re-exports retain the original definition identity, so renaming an import preserves its effect meaning. The driver and SDK are pinned together; changing an SDK effect path requires updating this table.
+The driver recognizes one effect primitive by its resolved definition path, `loom_guest_rs::perform`. The package name is `loom-guest-rs`; rustc uses the crate name `loom_guest_rs`. Wrappers such as `sleep`, `now`, and `fs::list` are ordinary functions: their rows come from the literal or evaluated constant passed to `perform` in their bodies. Import aliases preserve the resolved definition identity. Handler functions retain their special subtraction semantics.
 
 The driver enables `-Zalways-encode-mir` on every crate it compiles so callers can analyze external non-generic function bodies. Dependencies compiled with stock rustc must also enable this flag, for example through the build lane's `RUSTFLAGS`. Missing MIR for a user dependency is an explicit compiler error; it cannot establish an empty effect row.
 
@@ -479,7 +479,7 @@ The driver's JSON adds `effects` and `schema` without changing the existing iden
 }
 ```
 
-`entries` keys name entry items; `instances` keys identify concrete instances. Each row has `labels` and `unknown`. A literal or rustc-evaluated const passed to `perform` adds its label. A dynamic label adds an unknown call site such as `{"item":"guest::dispatch","span":"src/lib.rs:12:5"}`, which the checker rejects.
+`entries` keys name entry items; `instances` keys identify concrete instances. Each row has `labels` and `unknown`. A literal or rustc-evaluated const passed to `perform` adds its label. A dynamic label stops compilation at its call site.
 
 A total `handle([labels], handler, body)` subtracts those labels from the body's row and includes the handler callback's own residual effects. `handle_any` can forward, so it subtracts nothing. For a pinned `handle_with("<hash>", body)`, the build supplies CAS handler metadata through `LOOM_HANDLER_ROWS`:
 
@@ -499,7 +499,7 @@ A total `handle([labels], handler, body)` subtracts those labels from the body's
 
 Each entry hash includes a tagged reference to the exported `LOOM_SCHEMA` constant when present. Changing the schema changes the entry identity; unrelated constants remain outside that identity.
 
-Finalization installs exactly the inferred row. Each unknown call site produces `perform label must be a string literal or a const`, naming its item and file and line. Sandboxing is omission: total handlers remove labels from the residual row, and the existing host enforcement refuses effects outside that row.
+Finalization installs exactly the inferred row. A dynamic call site produces `effect label at <span> is not a literal or const; rows are inferred and need a static label`. The checker also rejects unknown sites in supplied driver rows. Sandboxing is omission: total handlers remove labels from the residual row, and the existing host enforcement refuses effects outside that row.
 
 
 ### Behavior schema constant

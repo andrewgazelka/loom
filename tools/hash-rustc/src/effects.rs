@@ -67,10 +67,7 @@ impl<'tcx> Analysis<'tcx> {
             }
             let mut node = Node::default();
             if let Some(label) = sdk_effect(self.tcx, instance.def_id()) {
-                if !label.starts_with('$') {
-                    node.row.labels.insert(label.to_owned());
-                }
-                if !label.starts_with('$') || label == "$perform" {
+                if label == "$perform" {
                     mir::scan_primitive(self, instance, &mut node);
                 }
             } else if let Some(local) = instance.def_id().as_local()
@@ -86,6 +83,19 @@ impl<'tcx> Analysis<'tcx> {
             self.nodes.insert(instance, node);
         }
     }
+}
+fn dynamic_label(tcx: TyCtxt<'_>, span: rustc_span::Span) -> ! {
+    let span = span.source_callsite();
+    let location = tcx.sess.source_map().lookup_char_pos(span.lo());
+    tcx.dcx().span_fatal(
+        span,
+        format!(
+            "effect label at {}:{}:{} is not a literal or const; rows are inferred and need a static label",
+            location.file.name.prefer_local_unconditionally(),
+            location.line,
+            location.col.0 + 1
+        ),
+    )
 }
 pub fn collect(tcx: TyCtxt<'_>) -> Document {
     let handlers = std::env::var("LOOM_HANDLER_ROWS")

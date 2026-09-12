@@ -1,77 +1,8 @@
-use std::path::Path;
-use std::process::{Command, Output};
-
 use serde_json::{Value, json};
 
-const SDK: &str = r#"
-pub fn sleep() {}
-pub fn exec() {}
-pub fn now() {}
-pub fn perform(_label: &str, _payload: ()) {}
-pub mod handlers {
-    pub fn handle<H: Fn(), B: Fn()>(_labels: &[&str], handler: H, body: B) {
-        handler(); body();
-    }
-    pub fn handle_any<H: Fn(), B: Fn()>(handler: H, body: B) { handler(); body(); }
-    pub fn handle_pinned<H: Fn(), B: Fn()>(_hash: &str, handler: H, body: B) {
-        handler(); body();
-    }
-}
-pub use handlers::{handle, handle_any, handle_pinned};
-pub fn external_total() { handle(&["sleep"], || now(), || sleep()); }
-pub fn external_unknown(label: &str) { perform(label, ()); }
-pub fn external_erased_callback() {
-    let callback: fn() = || sleep();
-    invoke_callback(callback);
-}
-fn invoke_callback(callback: fn()) { callback(); }
-"#;
-
-fn successful(output: Output) {
-    assert!(
-        output.status.success(),
-        "compiler failed: {}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-fn compile(directory: &Path, source: &str, handler_rows: Value) -> Value {
-    std::fs::write(directory.join("sdk.rs"), SDK).unwrap();
-    successful(
-        Command::new(env!("CARGO_BIN_EXE_hash-rustc"))
-            .current_dir(directory)
-            .args([
-                "sdk.rs",
-                "--crate-name=loom_guest_rs",
-                "--crate-type=rlib",
-                "--edition=2024",
-            ])
-            .env_remove("LOOM_ITEM_HASHES")
-            .env_remove("LOOM_HANDLER_ROWS")
-            .output()
-            .unwrap(),
-    );
-    std::fs::write(directory.join("input.rs"), source).unwrap();
-    successful(
-        Command::new(env!("CARGO_BIN_EXE_hash-rustc"))
-            .current_dir(directory)
-            .args([
-                "input.rs",
-                "--crate-name=fixture",
-                "--crate-type=rlib",
-                "--edition=2024",
-                "--extern=renamed=libloom_guest_rs.rlib",
-                "-Awarnings",
-            ])
-            .env("LOOM_ITEM_HASHES", directory.join("hashes.json"))
-            .env("LOOM_ITEM_PREIMAGES", directory.join("preimages"))
-            .env("LOOM_HANDLER_ROWS", handler_rows.to_string())
-            .output()
-            .unwrap(),
-    );
-    serde_json::from_slice(&std::fs::read(directory.join("hashes.json")).unwrap()).unwrap()
-}
+#[path = "support/effects_fixture.rs"]
+mod effects_fixture;
+use effects_fixture::{assert_rejected, compile};
 
 fn entry_row(document: &Value) -> &Value {
     document["effects"]["entries"]
@@ -133,20 +64,11 @@ pub fn entry() {
 }
 
 #[test]
-fn non_literal_perform_is_unknown_with_span() {
-    let directory = tempfile::tempdir().unwrap();
-    let document = compile(
-        directory.path(),
+fn non_literal_perform_is_rejected_with_span() {
+    assert_rejected(
         "pub fn entry(label: &str) {\n    renamed::perform(label, ());\n}\n",
-        json!({}),
+        "input.rs:2:5",
     );
-    let row = entry_row(&document);
-    let unknown = row["unknown"].as_array().unwrap();
-    assert_eq!(unknown.len(), 1, "{document:#}");
-    let item = unknown[0]["item"].as_str().unwrap();
-    assert!(item == "entry" || item.ends_with("::entry"), "{document:#}");
-    let span = unknown[0]["span"].as_str().unwrap();
-    assert!(span.ends_with("input.rs:2:5"), "{document:#}");
 }
 
 #[test]
@@ -237,20 +159,9 @@ pub fn entry() { Operand + Operand; }
 
 #[test]
 fn nonliteral_binding_dispatch_names_call_site() {
-    let directory = tempfile::tempdir().unwrap();
-    let document = compile(
-        directory.path(),
+    assert_rejected(
         "pub fn entry() {\n    let label = \"sleep\";\n    renamed::perform(label, ());\n}\n",
-        json!({}),
-    );
-    let unknown = entry_row(&document)["unknown"].as_array().unwrap();
-    assert_eq!(unknown.len(), 1, "{document:#}");
-    assert!(
-        unknown[0]["span"]
-            .as_str()
-            .unwrap()
-            .ends_with("input.rs:3:5"),
-        "diagnostics must name the nonliteral perform call: {document:#}"
+        "input.rs:3:5",
     );
 }
 
@@ -306,21 +217,10 @@ fn external_total_handler_removes_body_effect() {
 
 #[test]
 fn external_non_literal_dispatch_preserves_sdk_call_site() {
-    let directory = tempfile::tempdir().unwrap();
-    let document = compile(
-        directory.path(),
+    assert_rejected(
         "pub fn entry() { renamed::external_unknown(\"sleep\"); }",
-        json!({}),
+        "sdk.rs:",
     );
-    let unknown = entry_row(&document)["unknown"].as_array().unwrap();
-    assert_eq!(unknown.len(), 1, "{document:#}");
-    assert!(
-        unknown[0]["item"]
-            .as_str()
-            .unwrap()
-            .ends_with("external_unknown")
-    );
-    assert!(unknown[0]["span"].as_str().unwrap().contains("sdk.rs:"));
 }
 
 #[test]
@@ -379,4 +279,12 @@ fn constant_perform_labels_are_evaluated() {
     ] {
         assert_known_labels(source, json!(["sleep"]));
     }
+}
+
+#[test]
+fn arbitrary_sdk_wrapper_is_inferred_from_its_body() {
+    assert_known_labels(
+        "pub fn entry() { renamed::arbitrary_wrapper(); }",
+        json!(["custom.arbitrary"]),
+    );
 }

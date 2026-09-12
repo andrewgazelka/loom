@@ -31,8 +31,8 @@ fn user_arguments<'tcx>(analysis: &Analysis<'tcx>, instance: Instance<'tcx>) -> 
     })
 }
 
-/// SDK rows cover the SDK's wire dispatch, but user serialization and
-/// deserialization implementations can perform additional effects.
+/// `perform` owns wire dispatch; its user serialization and deserialization
+/// implementations remain ordinary reachable code and may perform effects.
 pub(in super::super) fn scan_primitive<'tcx>(
     analysis: &Analysis<'tcx>,
     instance: Instance<'tcx>,

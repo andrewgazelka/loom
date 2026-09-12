@@ -249,7 +249,6 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
         let mut source_roots = vec![
             cache.to_owned(),
             root.join("crates/loom-guest-rs"),
-            root.join("crates/loom-guest-macros"),
             root.join("crates/loom-proto"),
             sysroot.join("lib/rustlib/src/rust/library"),
         ];

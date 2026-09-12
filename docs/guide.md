@@ -227,7 +227,7 @@ Effect rows are inferred. Calling `loom::sleep(100)` adds `sleep`; calling `loom
 
 A total `loom::handle(["sleep"], handler, body)` removes `sleep` from the body's row. Effects performed by the handler itself remain in the outer row. `handle_any` may forward, so it does not remove labels. A pinned `handle_with` uses the stored handler's residual row and any stored total-handling labels.
 
-Effect rows are inferred through the resolved call graph. `perform` accepts a string literal or a const evaluated by rustc, such as `const L: &str = "custom.label";`. Dynamic labels are rejected at the call site with `perform label must be a string literal or a const` and its file and line. Sandboxing is omission: total handlers remove handled labels from the residual host row, and the host refuses every effect absent from that inferred row.
+Effect rows are inferred through the resolved call graph. `perform` accepts a string literal or a const evaluated by rustc, such as `const L: &str = "custom.label";`. Dynamic labels are rejected at the call site with `effect label at <span> is not a literal or const; rows are inferred and need a static label`. Sandboxing is omission: total handlers remove handled labels from the residual host row, and the host refuses every effect absent from that inferred row.
 
 Caller permissions still apply. If the residual row omits `exec`, the guest cannot reach the host's exec implementation.
 

@@ -52,7 +52,6 @@ pub(super) fn check_rust_file(
                         effects: loom_proto::EffectSet {
                             labels: Vec::new(),
                             unknown: true,
-                            declared: None,
                         },
                     });
                 }

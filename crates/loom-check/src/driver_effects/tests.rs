@@ -22,7 +22,7 @@ fn output(labels: &[&str], unknown: serde_json::Value) -> String {
 }
 
 #[tokio::test]
-async fn no_declaration_needed_for_trait_dispatch() {
+async fn inferred_trait_dispatch() {
     let mut checked = check("trait Action { fn run(); } struct Used; impl Action for Used { fn run() { loom::sleep(1); } } struct Other; impl Action for Other { fn run() { loom::exec(\"other\"); } } fn invoke<T: Action>() { T::run(); } pub fn main() { invoke::<Used>(); }").await;
     assert!(checked.diagnostics.is_empty());
     assert!(
@@ -52,12 +52,16 @@ async fn unknown_label_error_names_call_site() {
     assert!(
         error
             .message
-            .contains("perform label must be a string literal or a const")
+            .contains("rows are inferred and need a static label")
     );
     assert!(
         error
             .message
-            .contains("src/helper.rs:17:9 (helper::dispatch)")
+            .contains("effect label at src/helper.rs:17:9 is not a literal or const")
+    );
+    assert_eq!(
+        error.message,
+        "effect label at src/helper.rs:17:9 is not a literal or const; rows are inferred and need a static label"
     );
     assert_eq!(error.file, "src/helper.rs");
     assert_eq!(error.line, 17);

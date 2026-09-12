@@ -1,5 +1,58 @@
 use super::*;
 
+pub(super) fn static_string<'tcx>(
+    analysis: &Analysis<'tcx>,
+    instance: Instance<'tcx>,
+    body: &Body<'tcx>,
+    operand: &Operand<'tcx>,
+) -> Option<String> {
+    let mut operand = operand;
+    let mut visited = std::collections::HashSet::new();
+    loop {
+        if matches!(operand, Operand::Constant(_)) {
+            return string(analysis, instance, operand);
+        }
+        let (Operand::Copy(place) | Operand::Move(place)) = operand else {
+            return None;
+        };
+        if !place.projection.is_empty() || !visited.insert(place.local) {
+            return None;
+        }
+        for block in body.basic_blocks.iter() {
+            if let TerminatorKind::Call { destination, .. } = &block.terminator().kind
+                && destination.local == place.local
+            {
+                return None;
+            }
+        }
+        let mut assignments = Vec::new();
+        for statement in body.basic_blocks.iter().flat_map(|block| &block.statements) {
+            let rustc_middle::mir::StatementKind::Assign(assignment) = &statement.kind else {
+                continue;
+            };
+            if assignment.0.local == place.local {
+                if assignment.0 != *place {
+                    return None;
+                }
+                assignments.push(&assignment.1);
+            }
+            if let rustc_middle::mir::Rvalue::Ref(
+                _,
+                rustc_middle::mir::BorrowKind::Mut { .. },
+                borrowed,
+            ) = &assignment.1
+                && borrowed.local == place.local
+            {
+                return None;
+            }
+        }
+        let [rustc_middle::mir::Rvalue::Use(source, _)] = assignments.as_slice() else {
+            return None;
+        };
+        operand = source;
+    }
+}
+
 pub(super) fn string<'tcx>(
     analysis: &Analysis<'tcx>,
     instance: Instance<'tcx>,

@@ -83,8 +83,8 @@ impl CheckedDef {
                     self.lang,
                     "LOOM_EFFECT_INFERENCE",
                     &format!(
-                        "{}: perform label must be a string literal or a const at {} ({})",
-                        export.name, site.span, site.item
+                        "effect label at {} is not a literal or const; rows are inferred and need a static label",
+                        site.span
                     ),
                 );
                 if let Some((file_line, col)) = site.span.rsplit_once(':')
@@ -97,7 +97,6 @@ impl CheckedDef {
                 }
                 self.diagnostics.push(error);
             }
-            export.effects.declared = None;
             export.effects.labels = labels.iter().cloned().collect();
             export.effects.unknown = !row.unknown.is_empty();
             aggregate.extend(labels);
@@ -106,7 +105,6 @@ impl CheckedDef {
         self.sig.effects = EffectSet {
             labels: aggregate.into_iter().collect(),
             unknown,
-            declared: None,
         };
         Ok(())
     }

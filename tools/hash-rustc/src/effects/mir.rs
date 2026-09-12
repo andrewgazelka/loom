@@ -200,20 +200,11 @@ fn selected_call<'tcx>(
             });
             if let Some(label) = args
                 .first()
-                .and_then(|arg| constants::string(analysis, instance, &arg.node))
+                .and_then(|arg| constants::static_string(analysis, instance, body, &arg.node))
             {
                 node.row.labels.insert(label);
             } else {
-                let location = analysis.tcx.sess.source_map().lookup_char_pos(span.lo());
-                node.row.unknown.insert(Unknown {
-                    item: crate::graph::item_path(analysis.tcx, instance.def_id()),
-                    span: format!(
-                        "{}:{}:{}",
-                        location.file.name.prefer_local_unconditionally(),
-                        location.line,
-                        location.col.0 + 1
-                    ),
-                });
+                dynamic_label(analysis.tcx, span);
             }
         }
         Some("$handle") if args.len() == 3 => {
@@ -231,7 +222,7 @@ fn selected_call<'tcx>(
         Some("$handle_with" | "$handle_pinned") => {
             let hash = args
                 .first()
-                .and_then(|arg| constants::string(analysis, instance, &arg.node))
+                .and_then(|arg| constants::static_string(analysis, instance, body, &arg.node))
                 .unwrap_or_else(|| {
                     analysis
                         .tcx
@@ -259,13 +250,6 @@ fn selected_call<'tcx>(
                 row.handled.clone(),
                 node,
             );
-        }
-        Some(label) if !label.starts_with('$') => {
-            node.row.labels.insert(label.to_owned());
-            node.edges.push(Edge {
-                callee,
-                handled: BTreeSet::new(),
-            });
         }
         Some(_) => analysis.tcx.dcx().span_fatal(
             span,

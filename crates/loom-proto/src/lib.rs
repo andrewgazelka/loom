@@ -34,16 +34,12 @@ pub struct TypeSig {
 pub struct EffectSet {
     pub labels: Vec<String>,
     pub unknown: bool,
-    /// Explicit host-supplied residual row, enforced at the root handler.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub declared: Option<Vec<String>>,
 }
 impl Default for EffectSet {
     fn default() -> Self {
         Self {
             labels: Vec::new(),
             unknown: true,
-            declared: None,
         }
     }
 }

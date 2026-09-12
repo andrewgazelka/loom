@@ -107,13 +107,18 @@ async fn recording_skips_permitted_call_but_records_denied_call() -> Result<()> 
 }
 
 #[test]
-fn declared_rows_intersect_capabilities_instead_of_expanding_them() {
+fn inferred_rows_intersect_capabilities_instead_of_expanding_them() {
     let effects = EffectContext::default()
         .delegated("def", Some(&["sleep".into(), "fs.read".into()]))
-        .with_declared(Some(&["sleep".into(), "exec".into()]));
+        .with_inferred(&["sleep".into(), "exec".into()]);
     assert!(effects.permits("sleep"));
     assert!(!effects.permits("fs.read"));
     assert!(!effects.permits("exec"));
+    let pure = EffectContext::default().with_inferred(&[]);
+    assert!(!pure.permits("sleep"));
+    let inferred = EffectContext::default().with_inferred(&["sleep".into()]);
+    assert!(inferred.permits("sleep"));
+    assert!(!inferred.permits("exec"));
 }
 
 #[tokio::test]

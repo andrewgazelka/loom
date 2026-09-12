@@ -118,7 +118,7 @@ impl Runtime {
             memory,
             effects: effects
                 .delegated(hash, definition.allowed_effects.as_deref())
-                .with_declared(definition.sig.effects.declared.as_deref()),
+                .with_inferred(&definition.sig.effects.labels),
             pure,
             jobs: Mutex::new(HashMap::new()),
             tasks: Mutex::new(Vec::new()),

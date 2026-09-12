@@ -153,21 +153,7 @@ impl<'tcx> Scan<'_, 'tcx> {
                 if let Some(label) = inputs.first().and_then(|expr| self.constant_label(expr)) {
                     self.node.row.labels.insert(label);
                 } else {
-                    let location = self
-                        .analysis
-                        .tcx
-                        .sess
-                        .source_map()
-                        .lookup_char_pos(expr.span.source_callsite().lo());
-                    self.node.row.unknown.insert(Unknown {
-                        item: crate::graph::item_path(self.analysis.tcx, self.instance.def_id()),
-                        span: format!(
-                            "{}:{}:{}",
-                            location.file.name.prefer_local_unconditionally(),
-                            location.line,
-                            location.col.0 + 1
-                        ),
-                    });
+                    dynamic_label(self.analysis.tcx, expr.span);
                 }
             }
             Some("$handle") if inputs.len() == 3 => {
@@ -196,13 +182,6 @@ impl<'tcx> Scan<'_, 'tcx> {
                 });
                 self.node.row.merge(&row.row, &BTreeSet::new());
                 self.callable(inputs[inputs.len() - 1], row.handled.clone());
-            }
-            Some(label) if !label.starts_with('$') => {
-                self.node.row.labels.insert(label.to_owned());
-                self.node.edges.push(Edge {
-                    callee,
-                    handled: BTreeSet::new(),
-                });
             }
             _ => self.node.edges.push(Edge {
                 callee,
