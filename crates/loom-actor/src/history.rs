@@ -8,6 +8,12 @@ use turso::{Connection, Value};
 
 /// Removes tracked paths unless `disarm` ran; guards fork staging files on every early return.
 struct Cleanup(Vec<PathBuf>);
+
+pub(crate) enum ReplayMode {
+    Historical,
+    Candidate,
+    Remote,
+}
 impl Cleanup {
     fn track(&mut self, path: PathBuf) {
         self.0.push(path);
@@ -69,7 +75,7 @@ impl Node {
         }
         tx.commit().await?;
         let replay = ReplayEffects::load(source).await?;
-        if let Some(verdict) = self.replay(source, &mut conn, id, at, &replay, true).await? {
+        if let Some(verdict) = self.replay(source, &mut conn, id, at, &replay, ReplayMode::Historical).await? {
             anyhow::bail!("historical replay failed: {verdict:?}");
         }
         let audit = actor::query(source, "SELECT seq,msg,error,at FROM dead_letters WHERE seq<=? ORDER BY seq", [at]).await?;
@@ -89,31 +95,43 @@ impl Node {
         if Path::new(&wal).exists() {
             std::fs::remove_file(wal)?;
         }
-        self.open(&fork_id).await
+        self.open_actor(&fork_id).await
     }
 
-    async fn replay(
+    pub(crate) async fn replay(
         &self,
         source: &Connection,
         conn: &mut Connection,
         id: &str,
         at: i64,
         effects: &ReplayEffects,
-        historical: bool,
+        mode: ReplayMode,
     ) -> Result<Option<Verdict>> {
         let identity = actor::meta(conn, "replay_source").await?;
-        let target_epoch = boundary(source, id, at).await?;
+        let target_epoch = if matches!(mode, ReplayMode::Remote) {
+            actor::meta(source, "commit_epoch").await?.parse()?
+        } else {
+            boundary(source, id, at).await?
+        };
         let start_epoch: i64 = actor::meta(conn, "commit_epoch").await?.parse()?;
         ensure!(start_epoch <= target_epoch, "actor {id} seq {at}: snapshot lies after replay boundary");
         for epoch in (start_epoch + 1)..=target_epoch {
+            if matches!(mode, ReplayMode::Remote) {
+                crate::supervisor_store::replay_host_spawns(source, conn, epoch - 1).await?;
+            }
+            if matches!(mode, ReplayMode::Remote)
+                && let Some(verdict) = self.replay_terminations(source, conn, epoch - 1, effects).await?
+            {
+                return Ok(Some(verdict));
+            }
             let seq: i64 = actor::meta(source, &format!("commit_order:{epoch}")).await?.parse()?;
-            ensure!(seq <= at, "actor {id} seq {seq}: replay crosses requested boundary {at}");
+            ensure!(matches!(mode, ReplayMode::Remote) || seq <= at, "actor {id} seq {seq}: replay crosses requested boundary {at}");
             let rows = actor::query(conn, "SELECT msg,sender,state FROM inbox WHERE seq=?", [seq]).await?;
             let row = rows.rows.first().with_context(|| format!("actor {id} seq {seq}: history inbox has a gap"))?;
             ensure!(row.get::<String>(2)? != "done", "actor {id} seq {seq}: history commits a message twice");
             let sender: String = row.get(1)?;
             let message = actor::Message { seq, msg: row.get(0)?, sender: if sender.starts_with("a0") { Some(sender) } else { None } };
-            if historical {
+            if !matches!(mode, ReplayMode::Candidate) {
                 let skipped = actor::query(source, "SELECT value FROM meta WHERE key=?", [format!("skipped:{}", message.seq)]).await?;
                 let revision: i64 = actor::meta(source, &format!("code_at:{}", message.seq)).await?.parse()?;
                 let changes = actor::query(
@@ -171,12 +189,39 @@ impl Node {
                 }
             }
         }
+        if matches!(mode, ReplayMode::Remote) {
+            crate::supervisor_store::replay_host_spawns(source, conn, target_epoch).await?;
+            if let Some(verdict) = self.replay_terminations(source, conn, target_epoch, effects).await? {
+                return Ok(Some(verdict));
+            }
+            let revision = actor::code(source).await?.revision;
+            let changes = actor::query(
+                source,
+                "SELECT behavior_hash,author,rationale FROM code_changes WHERE seq>? AND seq<=? ORDER BY seq",
+                turso::params![actor::code(conn).await?.revision, revision],
+            )
+            .await?;
+            for row in changes.rows {
+                let hash: String = row.get(0)?;
+                if let Some(verdict) = promote_replay(
+                    conn,
+                    actor::behavior(&self.registry, &hash)?.as_ref(),
+                    &row.get::<String>(1)?,
+                    &row.get::<String>(2)?,
+                    effects,
+                )
+                .await?
+                {
+                    return Ok(Some(verdict));
+                }
+            }
+        }
         ensure!(actor::cursor(conn).await? == at, "actor {id} seq {at}: replay did not reach its contiguous boundary");
         Ok(None)
     }
 
     pub(crate) async fn fork_inner(&self, id: &str, at: i64) -> Result<ActorId> {
-        let actor = self.open(id).await?;
+        let actor = self.open_actor(id).await?;
         let source = actor.conn.lock().await;
         self.fork_from(&source, id, at).await.map(|actor| actor.id).with_context(|| format!("actor {id} seq {at}: fork"))
     }
@@ -186,11 +231,12 @@ impl Node {
     }
 
     pub async fn validate_assertions(&self, id: &str, candidate: &str, k: i64, assertions: &[String]) -> Result<crate::ValidationResult> {
+        let _admission = self.admit().await?;
         self.validate_assertions_inner(id, candidate, k, assertions).await.with_context(|| format!("actor {id} seq -1: validation"))
     }
 
     async fn validate_assertions_inner(&self, id: &str, candidate: &str, k: i64, assertions: &[String]) -> Result<crate::ValidationResult> {
-        let actor = self.open(id).await?;
+        let actor = self.open_actor(id).await?;
         let source = actor.conn.lock().await;
         let cursor = actor::cursor(&source).await?;
         ensure!(k >= 0 && k <= cursor, "actor {id} seq {cursor}: validation window outside history");
@@ -201,7 +247,7 @@ impl Node {
         if let Some(verdict) = promote_replay(&mut conn, behavior.as_ref(), "validation", "candidate", &effects).await? {
             return Ok(crate::ValidationResult { verdict, assertions: Vec::new() });
         }
-        if let Some(verdict) = self.replay(&source, &mut conn, id, cursor, &effects, false).await? {
+        if let Some(verdict) = self.replay(&source, &mut conn, id, cursor, &effects, ReplayMode::Candidate).await? {
             return Ok(crate::ValidationResult { verdict, assertions: Vec::new() });
         }
         let original = table_hashes(&source).await?;
@@ -223,9 +269,8 @@ impl Node {
         };
         let mut results = Vec::new();
         for query in assertions {
-            let rows = actor::inspect_query(&conn, query, Vec::new())
-                .await
-                .with_context(|| format!("actor {id} seq {cursor}: validation assertion"))?;
+            let rows =
+                actor::inspect_query(&conn, query, ()).await.with_context(|| format!("actor {id} seq {cursor}: validation assertion"))?;
             let passed = rows.rows.len() == 1
                 && rows.columns.len() == 1
                 && match rows.rows[0].get_value(0)? {
@@ -239,7 +284,7 @@ impl Node {
     }
 }
 
-async fn promote_replay(
+pub(crate) async fn promote_replay(
     conn: &mut Connection,
     behavior: &dyn crate::Behavior,
     author: &str,
@@ -249,7 +294,7 @@ async fn promote_replay(
     let counter: i64 = actor::meta(conn, "hook_counter").await?.parse()?;
     let seq = counter.checked_add(1).and_then(i64::checked_neg).context("hook sequence overflow")?;
     effects.begin(seq).await;
-    let result = actor::promote(conn, behavior, author, rationale, effects).await;
+    let result = actor::promote(conn, behavior, author, rationale, effects, None).await;
     if let Some(verdict) = effects.finish(seq, result.is_ok()).await? {
         return Ok(Some(verdict));
     }

@@ -37,7 +37,7 @@ pub(crate) async fn complete(conn: &Connection, seq: i64) -> Result<()> {
     Ok(())
 }
 
-pub(crate) async fn defer(conn: &mut Connection, id: &str, seq: i64) -> Result<(), Trap> {
+pub(crate) async fn defer(conn: &mut Connection, id: &str, seq: i64, node: Option<&crate::Node>) -> Result<(), Trap> {
     let result: Result<bool> = async {
         let tx = conn.transaction().await?;
         let epoch: i64 = actor::meta(&tx, "commit_epoch").await?.parse()?;
@@ -45,13 +45,17 @@ pub(crate) async fn defer(conn: &mut Connection, id: &str, seq: i64) -> Result<(
         let row = rows.rows.first().context("deferred inbox row missing")?;
         let count = if row.get::<i64>(0)? == epoch { row.get::<i64>(1)?.checked_add(1).context("defer count overflow")? } else { 1 };
         tx.execute("UPDATE inbox SET state='deferred',defer_epoch=?,defer_count=? WHERE seq=?", turso::params![epoch, count, seq]).await?;
-        tx.commit().await?;
+        if let Some(node) = node {
+            node.commit_control(id, tx).await?;
+        } else {
+            tx.commit().await?;
+        }
         Ok(count >= 2)
     }
     .await;
     match result {
         Ok(false) => Ok(()),
         Ok(true) => Err(Trap::new(format!("actor {id} seq {seq}: deferred twice without an intervening commit"))),
-        Err(error) => Err(Trap { message: format!("actor {id} seq {seq}: {error:#}"), runtime: true }),
+        Err(error) => Err(Trap { message: format!("actor {id} seq {seq}: {error:#}"), runtime: true, durability: false }),
     }
 }

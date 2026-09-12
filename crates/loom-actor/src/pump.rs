@@ -19,8 +19,11 @@ impl Node {
         if self.complete_call(target, sender, key, msg).await? {
             return Ok(());
         }
-        let receiver = self.open(target).await?;
-        actor::inject(&*receiver.conn.lock().await, key, sender, msg).await?;
+        let receiver = self.open_actor(target).await?;
+        let mut conn = receiver.conn.lock().await;
+        let tx = conn.transaction().await?;
+        actor::inject(&tx, key, sender, msg).await?;
+        self.commit_control(target, tx).await?;
         self.wake.notify_one();
         Ok(())
     }
@@ -28,7 +31,7 @@ impl Node {
     /// A failed destination blocks its own later rows; other pairs keep moving.
     pub(crate) async fn pump_unlocked(&self, id: &str) -> Result<bool> {
         let _sender = self.guard(&format!("pump:{id}")).await;
-        let source = self.open(id).await?;
+        let source = self.open_actor(id).await?;
         let generation: i64;
         let mut deliveries = Vec::new();
         {
@@ -54,6 +57,7 @@ impl Node {
                 continue;
             }
             let delivery_key = format!("{incarnation}:{}:{}", entry.seq, entry.idx);
+            self.check_lease(id)?;
             let result = self
                 .deliver_outbox(id, generation, &incarnation, &entry, &delivery_key)
                 .await
@@ -65,12 +69,13 @@ impl Node {
                         progressed = true;
                         break;
                     }
+                    self.check_lease(id)?;
                     let tx = conn.transaction().await?;
                     if entry.target == "spawn" && matches!(serde_json::from_slice::<Spawn>(&entry.msg)?, Spawn::Restart { .. }) {
                         actor::set_meta(&tx, &format!("publish:{destination}"), "1").await?;
                     }
                     tx.execute("UPDATE outbox SET delivered=1 WHERE seq=? AND idx=?", turso::params![entry.seq, entry.idx]).await?;
-                    tx.commit().await?;
+                    self.commit_control(id, tx).await?;
                     progressed = true;
                 }
                 Ok(false) => {
@@ -91,8 +96,17 @@ impl Node {
             if blocked.contains(child) {
                 continue;
             }
-            actor::set_meta(&*self.open(child).await?.conn.lock().await, "ready", "true").await?;
-            source.conn.lock().await.execute("DELETE FROM meta WHERE key=?", [marker]).await?;
+            {
+                let published = self.open_actor(child).await?;
+                let mut conn = published.conn.lock().await;
+                let tx = conn.transaction().await?;
+                actor::set_meta(&tx, "ready", "true").await?;
+                self.commit_control(child, tx).await?;
+            }
+            let mut conn = source.conn.lock().await;
+            let tx = conn.transaction().await?;
+            tx.execute("DELETE FROM meta WHERE key=?", [marker]).await?;
+            self.commit_control(id, tx).await?;
             self.wake.notify_one();
         }
         self.sync_shutdowns(id).await?;
@@ -106,7 +120,7 @@ impl Node {
 
     /// Restart groups wait for every requested sibling shutdown to finish.
     async fn children_shutting_down(&self, parent: &str) -> Result<bool> {
-        let source = self.open(parent).await?;
+        let source = self.open_actor(parent).await?;
         Ok(!actor::query(&*source.conn.lock().await, "SELECT child FROM shutdowns LIMIT 1", ()).await?.rows.is_empty())
     }
 
@@ -115,15 +129,20 @@ impl Node {
             match serde_json::from_slice::<Spawn>(&entry.msg)? {
                 Spawn::Child { id: child, spec, origin_seq, origin_idx } => {
                     ensure!(child == ids::child(incarnation, origin_seq, origin_idx), "spawn id mismatch");
-                    self.create(&child, id, &spec.behavior_hash, &spec.init).await?;
+                    self.create(&child, id, &spec.behavior_hash, &spec.init, spec.durability).await?;
                     if spec.link {
                         self.relate(id, &child, "link", &[], key).await?;
                     }
                     if spec.monitor {
                         self.monitor(id, &child, &format!("spawn:{child}")).await?;
                     }
-                    let published = self.open(&child).await?;
-                    actor::set_meta(&*published.conn.lock().await, "ready", "true").await?;
+                    let published = self.open_actor(&child).await?;
+                    let mut conn = published.conn.lock().await;
+                    let tx = conn.transaction().await?;
+                    actor::set_meta(&tx, "durability", spec.durability.name()).await?;
+                    actor::set_meta(&tx, "ready", "true").await?;
+                    self.commit_control(&child, tx).await?;
+                    drop(conn);
                     self.sync_index(&child).await?;
                 }
                 Spawn::Restart { id: child, verb } => {

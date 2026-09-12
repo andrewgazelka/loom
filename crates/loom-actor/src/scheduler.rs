@@ -51,7 +51,7 @@ impl Node {
                         let result = node.step(&actor_id, &task_cancellation).await;
                         node.tasks.lock().await.remove(&actor_id);
                         let result = match result {
-                            Ok(moved) => node.pump(&actor_id).await.map(|pumped| Progress {
+                            Ok(moved) => node.pump_unlocked(&actor_id).await.map(|pumped| Progress {
                                 moved: moved || pumped,
                                 processed: usize::from(moved),
                                 deadline: None,
@@ -99,7 +99,7 @@ impl Node {
             let completed = tokio::select! {
                 completed = jobs.join_next() => completed,
                 _ = self.wake.notified(), if failure.is_none() => { idle.clear(); dirty.extend(running.iter().cloned()); timer_scan_needed = true; continue; },
-                _ = tokio::time::sleep(std::time::Duration::from_millis(5)), if failure.is_none() => {
+                _ = tokio::time::sleep(std::time::Duration::from_millis(5)), if failure.is_none() && !timer_running => {
                     timer_scan_needed = true;
                     continue;
                 },
