@@ -8,6 +8,7 @@ pub(super) async fn graph_shareable(
     isolated: bool,
     compiler_sysroot: Option<&Path>,
 ) -> Result<bool, BuildError> {
+    let toolchain = crate::resolve_guest_toolchain(root).await?;
     let mut command = if isolated {
         let mut command = Command::new(root.join("rustc/sandbox.sh"));
         command
@@ -18,7 +19,7 @@ pub(super) async fn graph_shareable(
             .arg(root);
         command
     } else {
-        let mut command = Command::new("cargo");
+        let mut command = Command::new(&toolchain.cargo);
         command.current_dir(directory).args([
             "metadata",
             "--locked",
@@ -28,6 +29,7 @@ pub(super) async fn graph_shareable(
         command
     };
     compiler_environment(&mut command);
+    toolchain.configure(&mut command)?;
     let output = run(command).await?;
     if !output.status.success() {
         return Err(rejected(String::from_utf8_lossy(&output.stderr)));

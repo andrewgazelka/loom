@@ -248,6 +248,9 @@ pub(crate) async fn reconcile(job: Rebuild<'_>) -> Result<(), BuildError> {
     // (for example serde 1.0.210 with a workspace locked to serde 1.0.229).
     // Metadata resolves dependencies but never executes a build script. User
     // path/git/registry configuration has already been rejected by materialize.
+    let toolchain = crate::resolve_guest_toolchain(job.root).await?;
+    let mut command = Command::new(&toolchain.cargo);
+    toolchain.configure(&mut command)?;
     let config = job.directory.join(".cargo");
     let saved = overlay.join("original-cargo-config");
     let has_config = config.exists();
@@ -256,7 +259,7 @@ pub(crate) async fn reconcile(job: Rebuild<'_>) -> Result<(), BuildError> {
     }
     let outcome = tokio::time::timeout(
         Duration::from_secs(300),
-        Command::new("cargo")
+        command
             .args(["metadata", "--format-version=1"])
             .current_dir(job.directory)
             .kill_on_drop(true)

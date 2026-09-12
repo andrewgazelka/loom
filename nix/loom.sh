@@ -5,6 +5,7 @@ export SSL_CERT_FILE='@certificates@'
 export NIX_SSL_CERT_FILE="$SSL_CERT_FILE"
 export LOOM_ROOT='@sources@'
 export RUSTC='@rustc@'
+export LOOM_HASH_RUSTC='@hashRustc@'
 if [[ ${1:-} == --help || ${1:-} == -h ]]; then
   exec '@daemon@' "$@"
 fi

@@ -1,18 +1,90 @@
 {
-  "version": "1.97.0",
-  "date": "2026-07-09",
-  "archives": {
-    "host-darwin": {
-      "url": "https://static.rust-lang.org/dist/2026-07-09/rust-1.97.0-aarch64-apple-darwin.tar.xz",
-      "hash": "sha256-RPNQiWBcirjK+30h40l6V8JK5I54lym1kk/ScZ2uA4g="
+  "toolchains": {
+    "host": {
+      "channel": "1.97.0",
+      "version": "1.97.0",
+      "date": "2026-07-09",
+      "archives": {
+        "aarch64-darwin": {
+          "rust": {
+            "url": "https://static.rust-lang.org/dist/2026-07-09/rust-1.97.0-aarch64-apple-darwin.tar.xz",
+            "hash": "sha256-RPNQiWBcirjK+30h40l6V8JK5I54lym1kk/ScZ2uA4g="
+          }
+        },
+        "x86_64-linux": {
+          "rust": {
+            "url": "https://static.rust-lang.org/dist/2026-07-09/rust-1.97.0-x86_64-unknown-linux-gnu.tar.xz",
+            "hash": "sha256-HPF+SQW4QdTI4/dkZ6wUjVX7P1S/ITyG8NKHo2Rx2QQ="
+          }
+        },
+        "shared": {
+          "rust-src": {
+            "url": "https://static.rust-lang.org/dist/2026-07-09/rust-src-1.97.0.tar.xz",
+            "hash": "sha256-8lMKzWtNolohFR41YNkIsx8ILt1paPltJoLIwsFcZrc="
+          }
+        }
+      }
     },
-    "host-linux": {
-      "url": "https://static.rust-lang.org/dist/2026-07-09/rust-1.97.0-x86_64-unknown-linux-gnu.tar.xz",
-      "hash": "sha256-HPF+SQW4QdTI4/dkZ6wUjVX7P1S/ITyG8NKHo2Rx2QQ="
-    },
-    "rust-src": {
-      "url": "https://static.rust-lang.org/dist/2026-07-09/rust-src-1.97.0.tar.xz",
-      "hash": "sha256-8lMKzWtNolohFR41YNkIsx8ILt1paPltJoLIwsFcZrc="
+    "guest": {
+      "channel": "nightly-2026-08-24",
+      "version": "1.100.0-nightly-2026-08-24",
+      "date": "2026-08-24",
+      "archives": {
+        "aarch64-darwin": {
+          "rustc": {
+            "url": "https://static.rust-lang.org/dist/2026-08-24/rustc-nightly-aarch64-apple-darwin.tar.xz",
+            "hash": "sha256-OJ1Zb5mvkLuKZZpYk96K0nzGvkNZd5rfBziwTMQNZW8="
+          },
+          "cargo": {
+            "url": "https://static.rust-lang.org/dist/2026-08-24/cargo-nightly-aarch64-apple-darwin.tar.xz",
+            "hash": "sha256-LNW8/dCw245MNNKaYZPJUa3/4GG57zMcW9D4IHP31r8="
+          },
+          "rust-std": {
+            "url": "https://static.rust-lang.org/dist/2026-08-24/rust-std-nightly-aarch64-apple-darwin.tar.xz",
+            "hash": "sha256-Uorkkrnj2M3Hbk41qFUTRiefhCx8d2NFckBhlqQL70k="
+          },
+          "rustc-dev": {
+            "url": "https://static.rust-lang.org/dist/2026-08-24/rustc-dev-nightly-aarch64-apple-darwin.tar.xz",
+            "hash": "sha256-v38hFJX3UBd0uNQVa9rK1VkYOlffL9UPglokGbn45V4="
+          },
+          "llvm-tools-preview": {
+            "url": "https://static.rust-lang.org/dist/2026-08-24/llvm-tools-nightly-aarch64-apple-darwin.tar.xz",
+            "hash": "sha256-tS63pCNJ0NX5bqUhdou1JMjO+3z27dztiBWK5H9MOLU="
+          }
+        },
+        "x86_64-linux": {
+          "rustc": {
+            "url": "https://static.rust-lang.org/dist/2026-08-24/rustc-nightly-x86_64-unknown-linux-gnu.tar.xz",
+            "hash": "sha256-Q/PVGHKB+rCugno+NRwTf/WQSwsrCBkeyS8z4or+GlM="
+          },
+          "cargo": {
+            "url": "https://static.rust-lang.org/dist/2026-08-24/cargo-nightly-x86_64-unknown-linux-gnu.tar.xz",
+            "hash": "sha256-Nq4uOHoVE3aHIvA50O8lIKxAKCW8H771VklO0+pZYmI="
+          },
+          "rust-std": {
+            "url": "https://static.rust-lang.org/dist/2026-08-24/rust-std-nightly-x86_64-unknown-linux-gnu.tar.xz",
+            "hash": "sha256-RUVj1qVUzpfR2nZNs2Z0NMfNRBLSDzBpoVFd/HIQVnc="
+          },
+          "rustc-dev": {
+            "url": "https://static.rust-lang.org/dist/2026-08-24/rustc-dev-nightly-x86_64-unknown-linux-gnu.tar.xz",
+            "hash": "sha256-UvWFZAqs7yuKZb+AGlFf6u6FbveH28c+JqhINLwQYA8="
+          },
+          "llvm-tools-preview": {
+            "url": "https://static.rust-lang.org/dist/2026-08-24/llvm-tools-nightly-x86_64-unknown-linux-gnu.tar.xz",
+            "hash": "sha256-tsT1JJMhhxdTikh1V6NtDBJFY58k6CRkW+F4FEV+iA4="
+          }
+        },
+        "shared": {
+          "rust-src": {
+            "url": "https://static.rust-lang.org/dist/2026-08-24/rust-src-nightly.tar.xz",
+            "hash": "sha256-MlQHt0CVgm/jYpk7of0FhIIZOAhUH8xrUP8xIzS2d4c="
+          },
+          "rust-std-wasm32-unknown-unknown": {
+            "url": "https://static.rust-lang.org/dist/2026-08-24/rust-std-nightly-wasm32-unknown-unknown.tar.xz",
+            "hash": "sha256-uq7PCh8yt2BBygJRIDlpzL7m7laT/epkUOoiZQCMqdM="
+          }
+        }
+      }
     }
   }
 }

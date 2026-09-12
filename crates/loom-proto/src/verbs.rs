@@ -225,6 +225,9 @@ impl Verb {
         let mut required = Vec::new();
         for argument in self.arguments {
             let mut schema = match argument.kind {
+                Kind::String | Kind::Source if !argument.required => {
+                    json!({"type":["string","null"]})
+                }
                 Kind::String | Kind::Source => json!({"type":"string"}),
                 Kind::Json => json!({}),
                 Kind::Integer => json!({"type":"integer"}),
@@ -300,6 +303,36 @@ mod tests {
             valid["k"] = invalid;
             assert!(lookup("validate").unwrap().normalize(&mut valid).is_err());
         }
+    }
+
+    #[test]
+    fn optional_strings_accept_null_in_schema_and_normalization() {
+        for name in ["tree", "spawn", "send", "add"] {
+            let verb = lookup(name).unwrap();
+            let schema = verb.schema();
+            let mut args = match name {
+                "spawn" => json!({"def":"counter"}),
+                "send" => json!({"id":"a", "msg":{}}),
+                "add" => json!({"source":"pub fn main() {}"}),
+                _ => json!({}),
+            };
+            for argument in verb
+                .arguments
+                .iter()
+                .filter(|argument| !argument.required && argument.kind == Kind::String)
+            {
+                assert_eq!(
+                    schema["properties"][argument.name]["type"],
+                    json!(["string", "null"])
+                );
+                args[argument.name] = Value::Null;
+            }
+            verb.normalize(&mut args).unwrap();
+        }
+        let mut args = json!({"id":null});
+        let verb = lookup("info").unwrap();
+        assert_eq!(verb.schema()["properties"]["id"]["type"], "string");
+        assert!(verb.normalize(&mut args).is_err());
     }
 
     #[test]

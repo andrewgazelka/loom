@@ -5,6 +5,8 @@ use artifact::{
     VENDOR_CONFIG, build_fingerprint, cargo_artifact, is_vendored, trusted_dependency,
     validate_component,
 };
+mod toolchain;
+pub use toolchain::{GuestToolchain, resolve_guest_toolchain};
 mod identity;
 #[cfg(test)]
 mod identity_tests;
@@ -35,22 +37,12 @@ async fn seed_build_lock(source: &Path, destination: &Path) -> Result<(), std::i
 // Fetching the compiler workspace resolves archives without executing build
 // scripts. Do this before cache lookup: prepared definition metadata can outlive
 // the host Cargo cache that supplies independently verified compiler sources.
-async fn prepare_compiler_dependencies() -> Result<(), BuildError> {
-    let compiler = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
-    let output = Command::new(compiler)
-        .args(["--print", "sysroot"])
-        .output()
-        .await?;
-    if !output.status.success() {
-        return Err(BuildError::Rejected(format!(
-            "compiler sysroot: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )));
-    }
-    let sysroot = String::from_utf8(output.stdout)
-        .map_err(|error| BuildError::Rejected(error.to_string()))?;
-    let manifest = Path::new(sysroot.trim()).join("lib/rustlib/src/rust/library/Cargo.toml");
-    let mut command = Command::new("cargo");
+async fn prepare_compiler_dependencies(root: &Path) -> Result<(), BuildError> {
+    let toolchain = resolve_guest_toolchain(root).await?;
+    let manifest = toolchain
+        .sysroot
+        .join("lib/rustlib/src/rust/library/Cargo.toml");
+    let mut command = Command::new(&toolchain.cargo);
     command.env_clear();
     for name in [
         "PATH",
@@ -67,6 +59,8 @@ async fn prepare_compiler_dependencies() -> Result<(), BuildError> {
     }
     command
         .env("RUSTC_BOOTSTRAP", "1")
+        .env("RUSTUP_TOOLCHAIN", &toolchain.channel)
+        .env("RUSTC", &toolchain.rustc)
         .args(["fetch", "--locked", "--manifest-path"])
         .arg(manifest);
     let output = tokio::time::timeout(
@@ -91,6 +85,7 @@ pub struct Builder {
     root: PathBuf,
     cache: PathBuf,
     gate: Mutex<()>,
+    driver_path: Option<PathBuf>,
 }
 #[derive(Debug)]
 pub struct BuildOutput {
@@ -119,7 +114,28 @@ impl Builder {
             root,
             cache,
             gate: Mutex::new(()),
+            driver_path: std::env::var_os("LOOM_HASH_RUSTC").map(PathBuf::from),
         }
+    }
+    pub fn with_driver_path(mut self, path: PathBuf) -> Self {
+        self.driver_path = Some(path);
+        self
+    }
+    pub fn for_store(&self, store: loom_store::Store) -> Self {
+        Self {
+            store,
+            root: self.root.clone(),
+            cache: self.cache.clone(),
+            gate: Mutex::new(()),
+            driver_path: self.driver_path.clone(),
+        }
+    }
+    pub async fn preflight(&self) -> Result<(), BuildError> {
+        self.driver().await.map(|_| ())
+    }
+    async fn driver(&self) -> Result<identity::Driver, BuildError> {
+        identity::Driver::prepare_with_path(&self.root, &self.cache, self.driver_path.as_deref())
+            .await
     }
     pub async fn build(&self, definition: &CheckedDef) -> Result<BuildOutput, BuildError> {
         self.build_with_dependencies(definition, &BTreeMap::new())
@@ -145,7 +161,7 @@ impl Builder {
         let directory = self.cache.join(&definition.hash);
         fs::create_dir_all(&directory).await?;
         let component_path = directory.join("component.wasm");
-        let driver = identity::Driver::prepare(&self.root, &self.cache).await?;
+        let driver = self.driver().await?;
         let inputs = format!(
             "{}:{}",
             build_fingerprint(&self.root)?,

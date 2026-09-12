@@ -57,6 +57,8 @@ The script starts `nix run --builders '' .#repl -- --bind 127.0.0.1:8793` with a
 
 See [the guide's Try it section](docs/guide.md#try-it) for transport details and response shapes.
 
+The package includes `nightly-2026-08-24` and the prebuilt content-hashing rustc driver. Guest compilation uses those tools through the launcher’s `RUSTC` and `LOOM_HASH_RUSTC` settings.
+
 ## Effects
 
 Effect rows are inferred from resolved calls, including concrete trait and generic calls. A runtime-selected `perform` label is rejected with its call site; use a literal or Rust constant label.
@@ -185,6 +187,8 @@ bun scripts/configure-codex-mcp.ts --token-file /path/to/loom/token
 
 Loom can identify Rust definitions by resolved HIR content with `tools/hash-rustc`.
 The driver uses the pinned `nightly-2026-08-24` compiler and its normal pipeline.
+The Nix package ships it prebuilt against that compiler and points the daemon at
+both through `LOOM_HASH_RUSTC` and `RUSTC`.
 Set `LOOM_ITEM_HASHES` and `LOOM_ITEM_PREIMAGES` for JSON identities and checkable bytes.
 Formatting, local renaming, and item reordering leave ordinary entry hashes unchanged.
 Changing a reachable helper changes the entry; changing an unrelated helper does not.

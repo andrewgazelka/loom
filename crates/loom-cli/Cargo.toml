@@ -23,3 +23,5 @@ tempfile = "3"
 loom-actor = { path = "../loom-actor" }
 async-trait = "0.1"
 loom-behavior = { path = "../loom-behavior" }
+loom-mcp = { path = "../loom-mcp" }
+rmcp = { version = "0.17", features = ["client", "transport-io"] }

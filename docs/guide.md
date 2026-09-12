@@ -48,7 +48,7 @@ MCP is also available over stdio with `nix run --builders '' .#repl -- --bind 12
 
 ## Run locally
 
-On Apple Silicon macOS or x86-64 Linux, Nix supplies the daemon, Svelte app, and Rust guest toolchain:
+On Apple Silicon macOS or x86-64 Linux, Nix supplies the daemon, Svelte app, the pinned Rust compiler that guest definitions are built with, and the content-hashing rustc driver, prebuilt:
 
 ```sh
 nix run .#repl
@@ -71,15 +71,21 @@ The package installs two programs. `loomd` is the daemon with its state director
 
 ### Development without Nix
 
-Install Rust 1.97, its `rust-src` component, and Bun 1.3.13. Linux machine execution also needs Bubblewrap. The builder rebuilds the standard library for `wasm32-unknown-unknown` with atomics enabled.
+Install Bun 1.3.13 and the pinned guest compiler, `nightly-2026-08-24`: definitions are built by that compiler and identified by the `tools/hash-rustc` driver, which is a rustc plugin and therefore only links against the compiler that runs it. The daemon compares `hash-rustc -vV` with `$RUSTC -vV` and refuses a mismatch. Linux machine execution also needs Bubblewrap. The builder rebuilds the standard library for `wasm32-unknown-unknown` with atomics enabled.
 
 ```sh
-rustup component add rust-src
-rustup target add wasm32-unknown-unknown
+rustup toolchain install nightly-2026-08-24 \
+  --component rustc-dev --component llvm-tools --component rust-src \
+  --target wasm32-unknown-unknown
+cargo +nightly-2026-08-24 build --release --manifest-path tools/hash-rustc/Cargo.toml
+export RUSTC="$(rustup which --toolchain nightly-2026-08-24 rustc)"
+export LOOM_HASH_RUSTC="$PWD/tools/hash-rustc/target/release/hash-rustc"
 (cd ui && bun install --frozen-lockfile && bun run build)
 export LOOM_TOKEN='replace-with-your-token'
 cargo run --release -p loomd -- --db loom.sqlite
 ```
+
+`loomd` itself builds with any recent Rust; only the two variables above decide what guests are compiled by. Under Nix, `nix/loom.sh` exports the same two, pointing at store paths.
 
 Open <http://127.0.0.1:8787> and enter the same token. The daemon serves the built Svelte application, HTTP API, WebSocket event stream, and MCP endpoint. The token authorizes the single owner; keep the listener on loopback unless network access is intended.
 
@@ -96,7 +102,7 @@ The CLI, HTTP commands, and MCP tools use the same definition operations. The CL
 
 | CLI | MCP tool | Result |
 | --- | --- | --- |
-| `add <file.rs> [--name n]` | `add` | Name, definition hash, entry item hash, Wasm hash, and item table |
+| `add <file.rs> [--name n]` | `add` | Name, definition hash, entry item hashes, Wasm hash, and item table |
 | `view <name-or-hash>` | `view` | Stored source and item table |
 | `update <name> <file.rs>` | `update` | New definition and name binding; old hash remains runnable |
 | `history <name>` | `history` | Hash chain, timestamps, and changed items between entries |
@@ -119,11 +125,11 @@ Guest Rust has no macros. Every crate-root `pub fn` is an entry. An optional sch
 pub fn sum(a: i64, b: i64) -> i64 { a + b }
 ```
 
-A source file may expose several entries. `run <name>` selects the matching public function in a named definition, or a unique entry with that name among currently named definitions. Ambiguous names report the matching definition hashes. `run <hash>` requires a sole entry and otherwise reports the candidate names. Private helpers and nested functions are not entries.
+A source file may expose several entries. `run <name>` selects the matching public function in a named definition, or a unique entry with that name among currently named definitions. Ambiguous names report the matching definition hashes. `run <definition hash>` requires a sole entry and otherwise reports the candidate names. Each entry hash is also addressable: `run <entry hash>` executes that entry, and `view <entry hash>` returns its owning definition and identifies the selected entry. An unchanged entry shared by several revisions retains its earliest published owner. Private helpers and nested functions are not entries.
 
 HTTP clients post `{ "command": "run", "args": { "target": "sum", "args": [20,22] } }` to `/v1/command` with the bearer token. `add` takes `source` and an optional `name`; `update` takes `name` and `source`. The remaining definition arguments are `target` for `view`, `name` for `history`, `old` and `new` for `diff`, `text` for `find`, and `hash` for `dependents`.
 
-Item hashes describe compiler-resolved definitions. Renaming a local variable or reformatting source leaves them unchanged. A changed helper can change its callers' hashes too. The definition hash is the driver’s resolved-HIR entry hash. Alpha-renaming a local leaves both the definition hash and history unchanged; changing a constant changes the hash. Source revisions have their own BLAKE3 hashes. A published definition pins its executable and schema; a conflicting publication is rejected. The Wasm and toolchain hashes identify its executable build. Builds require the `hash-rustc` driver and reject missing identity outputs. Stores without `defs.behavior_hash` are rejected by column name.
+Item hashes describe compiler-resolved definitions. Renaming a local variable or reformatting source leaves them unchanged. A changed helper can change its callers' hashes too. The definition hash is a BLAKE3 Merkle root over the sorted entry name/hash pairs from the driver. Every public entry contributes, so changing a secondary entry changes the definition hash while unchanged entries retain their own resolved-HIR hashes. Alpha-renaming a local leaves both the definition hash and history unchanged; changing a constant changes the hash. Source revisions have their own BLAKE3 hashes. A published definition pins its executable and schema; a conflicting publication is rejected. The Wasm and toolchain hashes identify its executable build. Builds require the `hash-rustc` driver and reject missing identity outputs. Stores without `defs.behavior_hash` are rejected by column name.
 
 Actor commands use the same names, argument schemas, admission checks, and response envelope on CLI, HTTP, and MCP:
 
@@ -155,7 +161,7 @@ All responses, including MCP actor responses and failures, use `{ok, seq, result
 
 ## DAG-CBOR and links
 
-Rust guests use deterministic DAG-CBOR at the core wasm effect boundary. Structured CAS values use the same codec; core wasm binaries, source bundles, and other raw bytes retain the raw codec. JSON clients represent a link as exactly `{ "$ref": "<CID>" }`. In DAG-CBOR this becomes tag 42 containing the zero-prefixed binary CID. Local links use CIDv1 with a BLAKE3-256 digest and distinguish DAG-CBOR (`0x71`) from raw bytes (`0x55`). Definition identities are resolved-HIR entry hashes; source revisions use separate source hashes.
+Rust guests use deterministic DAG-CBOR at the core wasm effect boundary. Structured CAS values use the same codec; core wasm binaries, source bundles, and other raw bytes retain the raw codec. JSON clients represent a link as exactly `{ "$ref": "<CID>" }`. In DAG-CBOR this becomes tag 42 containing the zero-prefixed binary CID. Local links use CIDv1 with a BLAKE3-256 digest and distinguish DAG-CBOR (`0x71`) from raw bytes (`0x55`). Definition identities are Merkle roots over sorted entry name/hash pairs; individual entries retain their resolved-HIR hashes, and source revisions use separate source hashes.
 
 Maps have string keys ordered by encoded length and then bytes. Decoders reject duplicate keys, nonminimal or indefinite encodings, other tags, malformed CIDs, undefined, nonfinite floats, and trailing bytes. Floats use 64 bits. The shared JSON value model encodes safe integral numbers as integers; Rust integers outside JavaScript's safe range are rejected instead of losing precision across languages.
 
@@ -242,7 +248,7 @@ The runner creates a separate 10,000-file fixture, starts Codex with only Loom c
 
 Calling an effect performs it: `loom::sleep(100)` suspends until its timer finishes, and `loom::perform::<T>(label, args)` performs a custom effect. Concurrent Rust work on the shared-core path uses `loom::scope`, `scope.spawn(|| ...)`, and `child.join()`. Use `loom::spawn(|| ...)` with `'static` captures for fire-and-forget work or a `JoinHandle` moved into another task. Dropping that handle leaves its task running; the host cancels unfinished detached tasks when the definition entry returns, without an implicit wait. Joining a trapped detached task returns its error; an unjoined detached failure is discarded. A synchronous `loom::call(DEF, args)` can run inside a scoped child.
 
-Definition signatures record the residual effect row: the labels that can reach the outermost host handler. The compiler infers this row through resolved calls, including the concrete implementations selected by trait and generic calls. The host-enforced `allowed_effects` policy is a separate permission limit. Omitting `allowed_effects` adds no policy restriction; `[]` permits none. A publication pins its policy with the executable; a different policy for the same entry hash is rejected. Cross-definition calls inherit the intersection of caller and callee permissions, including on cache hits. Scoped children inherit the caller's permissions.
+Definition signatures record the residual effect row: the labels that can reach the outermost host handler. The compiler infers this row through resolved calls, including the concrete implementations selected by trait and generic calls. The host-enforced `allowed_effects` policy is a separate permission limit. Omitting `allowed_effects` adds no policy restriction; `[]` permits none. A publication pins its policy with the executable; a different policy for the same definition hash is rejected. Cross-definition calls inherit the intersection of caller and callee permissions, including on cache hits. Scoped children inherit the caller's permissions.
 
 The Effects view shows individual invocations and their outcomes. To capture file content changes from a process, pass `capture_paths: ["note.txt"]` to `exec` or `process.start`. Paths are resolved within the process root; the capture records actual before/after bytes in CAS and displays created, modified, and deleted files as diffs. Capture is limited to 64 explicitly selected regular files, at most 1 MiB each. Symlinks, unsupported files, and unavailable reads are reported explicitly.
 

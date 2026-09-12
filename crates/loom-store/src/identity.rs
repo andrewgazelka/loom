@@ -54,8 +54,11 @@ mod tests {
         let store = Store::memory()?;
         let source = "pub fn main() {}";
         let deps = BTreeMap::new();
+        let entries =
+            BTreeMap::from([("main".to_owned(), store.put("item-preimage", b"behavior")?)]);
+        let root = store.put("entry-root", &loom_proto::entry_identity_preimage(&entries))?;
         let definition = Def {
-            hash: store.put("item-preimage", b"behavior")?,
+            hash: root.clone(),
             lang: loom_proto::Lang::Rust,
             component_hash: None,
             sig: Default::default(),
@@ -63,10 +66,13 @@ mod tests {
             observed_effects: Vec::new(),
         };
         let identity = loom_proto::BuildIdentity {
-            behavior_hash: store.put("blob", b"behavior")?,
+            behavior_hash: root,
             wasm_hash: store.put("blob", b"wasm")?,
             toolchain_hash: store.put("blob", b"toolchain")?,
-            item_hashes_ref: store.put("blob", b"{}")?,
+            item_hashes_ref: store.put(
+                "item-hashes",
+                &serde_json::to_vec(&serde_json::json!({"entry":entries}))?,
+            )?,
         };
         store.define_with_identity(&definition, Some("main"), source, &deps, Some(&identity))?;
         store.rebuild_views()?;

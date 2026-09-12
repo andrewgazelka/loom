@@ -74,6 +74,15 @@ impl Service {
         })
     }
 
+    pub fn with_driver_path(mut self, path: PathBuf) -> Self {
+        self.builder = Arc::new(
+            self.builder
+                .for_store(self.store.clone())
+                .with_driver_path(path),
+        );
+        self
+    }
+
     pub fn actor_registry(&self) -> Arc<dyn loom_actor::Registry> {
         Arc::new(loom_behavior::StoreRegistry::new(self.store.clone()))
     }
@@ -198,7 +207,7 @@ fn field<'a>(args: &'a Value, name: &str) -> Result<&'a str> {
         .with_context(|| format!("missing string argument {name}"))
 }
 /// Definition commands return their requested data directly; CAS browsing stays read-only.
-pub fn command_returns_direct(command: &str) -> bool {
+fn command_returns_direct(command: &str) -> bool {
     matches!(
         command,
         "add"
