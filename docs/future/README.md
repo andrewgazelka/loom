@@ -13,7 +13,7 @@ index loses the row.
 | [incremental-per-lineage.md](incremental-per-lineage.md) | one-function candidate compiles in seconds | none; small | measured median one-function change on `rust-preview` before and after |
 | [object-cache-default.md](object-cache-default.md) | build reuse across crates by content | measured win holds on the guest SDK (883 vs 1121 ms today) after admission widens | cache on by default; no regression on the micro fixture |
 | [s3-live-test.md](s3-live-test.md) | proves conditional PUT fencing against a real object store | a MinIO in `nix run` | two-node takeover test passes against MinIO |
-| [cells-and-distribution.md](cells-and-distribution.md) | actors move between machines; `monitor_node`; cross-node send | first workload larger than one machine | a message crosses nodes with the same delivery guarantees; lease takeover across machines |
+| [cells-and-distribution.md](cells-and-distribution.md) | actors move between machines; cross-node send | first workload larger than one machine; design in [../multi-node.md](../multi-node.md) | `cargo test -p loom-actor --test cluster` prints `8 passed`; `scripts/cluster-e2e.sh` prints `5/5` |
 | [tenant-isolation.md](tenant-isolation.md) | one VM per tenant as the outer blast radius | first untrusted tenant | a tenant cannot observe another's files or CPU |
 | [limits-enforcement.md](limits-enforcement.md) | fuel and memory limits per actor are real traps | none; wasm behaviors exist now | a spinning behavior is poisoned by fuel, not a stuck thread |
 | [repl-ui-actors.md](repl-ui-actors.md) | the REPL shows and drives actors through the MCP surface | old panel removed (round 4) | tree, inbox, lineage and validate verdicts visible in the UI, all through `actor_*` tools |
