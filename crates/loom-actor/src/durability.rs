@@ -155,7 +155,8 @@ impl Node {
         self.ship_inner(id).await
     }
     pub(crate) async fn ship_inner(&self, id: &str) -> Result<()> {
-        if self.remote.is_none() {
+        // Ephemeral (memory-VFS) actors have no publication state: nothing to ship, nothing to fence.
+        if self.remote.is_none() || self.is_memory(id)? {
             return Ok(());
         }
         let cached = self.connections.lock().await.get(id).cloned();

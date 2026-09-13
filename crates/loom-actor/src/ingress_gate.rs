@@ -23,7 +23,7 @@ impl Node {
     }
 
     pub(crate) async fn await_receiver_ship(&self, id: &str) -> Result<()> {
-        if self.remote.is_none() {
+        if self.remote.is_none() || self.is_memory(id)? {
             return Ok(());
         }
         let receiver = self.open_actor(id).await?;
