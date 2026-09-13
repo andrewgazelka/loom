@@ -89,6 +89,15 @@ parent's `children` row is the record that it existed, and the parent's supervis
 policy decides whether to respawn (`temporary` by default for ephemeral children).
 `Ephemeral` is also what forks and validation scratch actors use from now on.
 
+One consequence is a rule, not an accident: a durable actor answers an authority
+read (the capability check in front of `inspect`, `subscriptions`, `promote`) on a
+second connection to its file, but an ephemeral actor has no file, so that read
+shares the single connection its turn holds. It therefore waits for the turn to
+end rather than refusing, bounded by `MEMORY_AUTHORITY_WAIT` in `capability.rs` so
+that two ephemeral actors reading each other report instead of hanging. The
+browser gate (`scripts/ui-e2e.sh`, check 4) is the regression test: it reads a
+view's subscriber list immediately after a promote.
+
 ## The view actor
 
 A view is an ordinary actor running the builtin native behavior `view-v1`, always
