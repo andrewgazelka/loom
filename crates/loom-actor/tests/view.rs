@@ -1,5 +1,5 @@
 mod view_support;
-use loom_actor::{ChildSpec, ChildType, Config, Durability, Rights, Status, StoreConfig, Verdict};
+use loom_actor::{ChildSpec, ChildType, ClusterConfig, Config, Durability, Rights, Status, StoreConfig, Verdict};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use view_support::*;
@@ -77,7 +77,12 @@ async fn ephemeral_leaves_no_file_no_object_no_lease() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("node");
     let store = dir.path().join("store");
-    let config = Config { store: Some(StoreConfig::Local { path: store.clone() }), ..Config::default() };
+    // A store implies a cluster identity (docs/multi-node.md); this node is the cluster's only member.
+    let config = Config {
+        store: Some(StoreConfig::Local { path: store.clone() }),
+        cluster: Some(ClusterConfig { node_id: "view-node".into(), addr: "127.0.0.1:1".into(), key: [0x43; 32] }),
+        ..Config::default()
+    };
     let first = node(&path, config.clone()).await;
     drain(&first).await;
     first.ship(&first.root()).await.unwrap();

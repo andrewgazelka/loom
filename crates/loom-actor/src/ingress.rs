@@ -37,6 +37,12 @@ pub enum DeliveryOp {
     Demonitor { delivery: OutboxDelivery },
     Down { delivery: OutboxDelivery },
     Exit { delivery: OutboxDelivery },
+    // View-actor kinds (docs/ui-view-actor.md): `sub:<actor>` subscription ops applied on the
+    // source, `frame:<actor>` delta frames into a subscriber's inbox, `ws:<conn>` frames to a
+    // host-side WebSocket subscriber (local to the sender's node).
+    Subscription { delivery: OutboxDelivery },
+    Frame { delivery: OutboxDelivery },
+    Stream { delivery: OutboxDelivery },
     Publish { target: String },
     Relationship { target: String, write: crate::relation_delivery::RelationshipWrite },
     Release { target: String },
@@ -67,6 +73,9 @@ impl DeliveryOp {
                 Self::Demonitor { .. } => "demonitor",
                 Self::Down { .. } => "down",
                 Self::Exit { .. } => "exit",
+                Self::Subscription { .. } => "sub",
+                Self::Frame { .. } => "frame",
+                Self::Stream { .. } => "ws",
                 _ => anyhow::bail!("delivery payload without destination kind"),
             };
             ensure!(
@@ -94,7 +103,8 @@ impl DeliveryOp {
             | Self::Demonitor { delivery }
             | Self::Link { delivery }
             | Self::Unlink { delivery }
-            | Self::Monitor { delivery } => delivery.sender.clone(),
+            | Self::Monitor { delivery }
+            | Self::Stream { delivery } => delivery.sender.clone(),
             _ => {
                 let delivery = self.outbox().context("delivery has no outbox payload")?;
                 crate::pump::destination(&delivery.target, &delivery.msg)?
@@ -116,7 +126,10 @@ impl DeliveryOp {
             | Self::Monitor { delivery }
             | Self::Demonitor { delivery }
             | Self::Down { delivery }
-            | Self::Exit { delivery } => Some(delivery),
+            | Self::Exit { delivery }
+            | Self::Subscription { delivery }
+            | Self::Frame { delivery }
+            | Self::Stream { delivery } => Some(delivery),
             _ => None,
         }
     }
@@ -137,6 +150,9 @@ impl DeliveryOp {
             "demonitor" => Self::Demonitor { delivery },
             "down" => Self::Down { delivery },
             "exit" => Self::Exit { delivery },
+            "sub" => Self::Subscription { delivery },
+            "frame" => Self::Frame { delivery },
+            "ws" => Self::Stream { delivery },
             _ => {
                 crate::ids::check(&delivery.target)?;
                 Self::Message { target: delivery.target, key: delivery.key, sender: delivery.sender, msg: delivery.msg }
