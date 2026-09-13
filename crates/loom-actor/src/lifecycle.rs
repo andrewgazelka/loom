@@ -7,13 +7,30 @@ struct CompletedShutdown {
     request: String,
 }
 
+/// A completed sync consumes its dirty bit. Failure or cancellation restores it.
+struct ShutdownSync {
+    node: Node,
+    requester: String,
+    complete: bool,
+}
+impl Drop for ShutdownSync {
+    fn drop(&mut self) {
+        if !self.complete {
+            let mut state = self.node.scheduling.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.shutdown_dirty.insert(self.requester.clone());
+            state.woken.insert(self.requester.clone());
+            self.node.wake.notify_one();
+        }
+    }
+}
+
 impl Node {
     pub async fn stop(&self, id: &str, reason: &str) -> Result<()> {
         let _admission = self.admit().await?;
         self.stop_unlocked(id, reason, &format!("host:{}", ulid::Ulid::new()), "")
             .await
             .with_context(|| format!("actor {id} seq -1: stop"))?;
-        self.wake.notify_one();
+        self.wake_actor(id)?;
         Ok(())
     }
 
@@ -77,13 +94,32 @@ impl Node {
     }
 
     /// A completed target wakes requester pumps to release their own barriers.
-    pub(crate) async fn sync_shutdowns(&self, _id: &str) -> Result<()> {
-        self.wake.notify_one();
+    pub(crate) async fn sync_shutdowns(&self, id: &str) -> Result<()> {
+        self.scheduling()?.index_dirty.insert(id.into());
+        if self.scheduling()?.timer_deadlines.contains_key(id) {
+            self.request_timer_scan()?;
+        }
+        let requesters = self.scheduling()?.shutdown_requesters.get(id).cloned().unwrap_or_default();
+        for requester in requesters {
+            self.scheduling()?.shutdown_dirty.insert(requester.clone());
+            self.wake_actor(&requester)?;
+        }
+        self.wake_actor(id)?;
         Ok(())
     }
 
     /// The requester's pump removes its committed rows after target completion.
     pub(crate) async fn sync_shutdown_requests(&self, requester: &str) -> Result<bool> {
+        if !self.scheduling()?.shutdown_dirty.remove(requester) {
+            return Ok(false);
+        }
+        let mut sync = ShutdownSync { node: self.clone(), requester: requester.into(), complete: false };
+        let result = self.sync_shutdown_requests_inner(requester).await;
+        sync.complete = result.is_ok();
+        result
+    }
+
+    async fn sync_shutdown_requests_inner(&self, requester: &str) -> Result<bool> {
         let source = self.open_actor(requester).await?;
         let pending = actor::query(&*source.conn.lock().await, "SELECT child,request FROM shutdowns", ()).await?;
         let mut completed = Vec::new();
@@ -100,10 +136,26 @@ impl Node {
         }
         let mut conn = source.conn.lock().await;
         let tx = conn.transaction().await?;
+        let mut removed = Vec::new();
         for completion in completed {
-            tx.execute("DELETE FROM shutdowns WHERE child=? AND request=?", [completion.child, completion.request]).await?;
+            if tx
+                .execute("DELETE FROM shutdowns WHERE child=? AND request=?", [completion.child.as_str(), completion.request.as_str()])
+                .await?
+                != 0
+            {
+                removed.push(completion);
+            }
         }
         self.commit_control(requester, tx).await?;
+        let mut state = self.scheduling()?;
+        for completion in removed {
+            if let Some(owners) = state.shutdown_requesters.get_mut(&completion.child) {
+                owners.remove(requester);
+                if owners.is_empty() {
+                    state.shutdown_requesters.remove(&completion.child);
+                }
+            }
+        }
         Ok(true)
     }
 
@@ -124,6 +176,9 @@ impl Node {
             )
             .await?;
             self.commit_control(sender, tx).await?;
+            let mut state = self.scheduling()?;
+            state.shutdown_requesters.entry(id.into()).or_default().insert(sender.into());
+            state.shutdown_dirty.insert(sender.into());
         }
         if matches!(policy, Shutdown::Brutal) {
             return self.stop_unlocked(id, "kill", key, sender).await;
@@ -195,7 +250,8 @@ impl Node {
             );
         }
         drop(conn);
-        self.wake.notify_one();
+        self.request_timer_scan()?;
+        self.wake_actor(id)?;
         Ok(())
     }
 
@@ -212,7 +268,7 @@ impl Node {
         let tx = conn.transaction().await?;
         actor::set_meta(&tx, "ready", "true").await?;
         self.commit_control(id, tx).await?;
-        self.wake.notify_one();
+        self.wake_actor(id)?;
         Ok(())
     }
 
@@ -240,7 +296,17 @@ impl Node {
         }
         if verb == RestartVerb::Reset {
             self.reset(&mut conn, id, key).await?;
+            {
+                let mut state = self.scheduling()?;
+                state.index_dirty.insert(id.into());
+                state.shutdown_dirty.remove(id);
+                state.shutdown_requesters.retain(|_, owners| {
+                    owners.remove(id);
+                    !owners.is_empty()
+                });
+            }
             self.shutdown_deadlines.lock().await.retain(|_, timer| timer.target != id);
+            self.request_timer_scan()?;
             return Ok(true);
         }
         let tx = conn.transaction().await?;
@@ -265,6 +331,7 @@ impl Node {
         actor::set_meta(&tx, "reason", "").await?;
         actor::set_meta(&tx, &format!("applied:{key}"), "1").await?;
         self.commit_control(id, tx).await?;
+        self.scheduling()?.index_dirty.insert(id.into());
         self.shutdown_deadlines.lock().await.retain(|_, timer| timer.target != id);
         Ok(true)
     }

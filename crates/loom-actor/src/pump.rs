@@ -24,7 +24,7 @@ impl Node {
         let tx = conn.transaction().await?;
         actor::inject(&tx, key, sender, msg).await?;
         self.commit_control(target, tx).await?;
-        self.wake.notify_one();
+        self.wake_actor(target)?;
         Ok(())
     }
 
@@ -102,12 +102,12 @@ impl Node {
                 let tx = conn.transaction().await?;
                 actor::set_meta(&tx, "ready", "true").await?;
                 self.commit_control(child, tx).await?;
+                self.wake_actor(child)?;
             }
             let mut conn = source.conn.lock().await;
             let tx = conn.transaction().await?;
             tx.execute("DELETE FROM meta WHERE key=?", [marker]).await?;
             self.commit_control(id, tx).await?;
-            self.wake.notify_one();
         }
         progressed |= self.sync_shutdown_requests(id).await?;
         let sync_result = self.sync_index(id).await;
@@ -144,6 +144,7 @@ impl Node {
                     actor::set_meta(&tx, "ready", "true").await?;
                     self.commit_control(&child, tx).await?;
                     drop(conn);
+                    self.wake_actor(&child)?;
                     self.sync_index(&child).await?;
                 }
                 Spawn::Restart { id: child, verb } => {
@@ -153,6 +154,7 @@ impl Node {
                     if !self.restart_unlocked(&child, verb, key).await? {
                         return Ok(false);
                     }
+                    self.wake_actor(&child)?;
                     self.sync_index(&child).await?;
                 }
             }

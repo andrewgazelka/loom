@@ -13,6 +13,7 @@ pub struct Actor {
     pub(crate) id: String,
     pub(crate) conn: Arc<Mutex<Connection>>,
     pub(crate) managed: bool,
+    pub(crate) node: crate::Node,
 }
 
 pub(crate) async fn connect(path: &Path, io: crate::Io) -> Result<Connection> {
@@ -95,7 +96,29 @@ impl Actor {
         if self.managed {
             return inspect_query(&conn, sql, params).await;
         }
-        query(&conn, sql, params).await.with_context(|| format!("actor {} seq -1: SQL", self.id))
+        let before = query(&conn, "SELECT total_changes()", ()).await?.rows[0].get::<i64>(0)?;
+        let result = query(&conn, sql, params).await.with_context(|| format!("actor {} seq -1: SQL", self.id));
+        let after = query(&conn, "SELECT total_changes()", ()).await?.rows[0].get::<i64>(0)?;
+        if before != after {
+            // Host SQL is a supported mutation path, including lifecycle fixture
+            // barriers. Its actor gets the same wake as a committed runtime change.
+            let requests = query(&conn, "SELECT child FROM shutdowns", ()).await?;
+            {
+                let mut state = self.node.scheduling()?;
+                state.index_dirty.insert(self.id.clone());
+                state.shutdown_requesters.retain(|_, owners| {
+                    owners.remove(&self.id);
+                    !owners.is_empty()
+                });
+                for row in requests.rows {
+                    state.shutdown_requesters.entry(row.get::<String>(0)?).or_default().insert(self.id.clone());
+                }
+                state.shutdown_dirty.insert(self.id.clone());
+            }
+            self.node.wake_actor(&self.id)?;
+            self.node.request_timer_scan()?;
+        }
+        result
     }
     /// Inspect exactly one SELECT; reject writes before any statement executes.
     pub async fn inspect_sql(&self, sql: &str, params: Vec<turso::Value>) -> Result<Rows> {

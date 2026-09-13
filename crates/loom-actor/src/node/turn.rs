@@ -5,7 +5,11 @@ impl Node {
         let admission = self.guard(&format!("lifecycle:{id}")).await;
         let actor = self.open_actor(id).await?;
         let mut conn = actor.conn.lock().await;
-        if actor::status(&conn).await? != Status::Running || actor::meta(&conn, "ready").await? != "true" {
+        if actor::status(&conn).await? != Status::Running {
+            self.scheduling()?.index_dirty.insert(id.into());
+            return Ok(false);
+        }
+        if actor::meta(&conn, "ready").await? != "true" {
             return Ok(false);
         }
         drop(admission);
@@ -61,6 +65,9 @@ impl Node {
                     {
                         actor::snapshot(&conn, &self.snapshot_path(id, generation, cursor), cursor).await?;
                     }
+                    if actor::status(&conn).await? != Status::Running {
+                        self.scheduling()?.index_dirty.insert(id.into());
+                    }
                     return Ok(true);
                 }
                 Err(error) if error.durability => {
@@ -91,6 +98,9 @@ impl Node {
                             cause: error.message,
                         },
                     )?;
+                    if actor::status(&conn).await? != Status::Running {
+                        self.scheduling()?.index_dirty.insert(id.into());
+                    }
                     return Ok(true);
                 }
             }
@@ -111,6 +121,8 @@ impl Node {
         )
         .await
         .with_context(|| format!("actor {id} seq -1: promote"))?;
+        self.scheduling()?.index_dirty.insert(id.into());
+        self.wake_actor(id)?;
         self.sync_index(id).await
     }
 
@@ -125,6 +137,7 @@ impl Node {
         actor::set_meta(&tx, &format!("code_at:{}", message.seq), &actor::code(&tx).await?.revision.to_string()).await?;
         actor::set_meta(&tx, "status", "running").await?;
         self.commit_control(id, tx).await?;
+        self.wake_actor(id)?;
         Ok(())
     }
 }

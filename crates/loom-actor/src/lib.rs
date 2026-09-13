@@ -318,3 +318,7 @@ extern crate self as loom_actor;
 #[cfg(test)]
 #[path = "../tests/registry.rs"]
 mod test_registry;
+
+#[cfg(test)]
+#[path = "../tests/scheduler.rs"]
+mod scheduler_tests;

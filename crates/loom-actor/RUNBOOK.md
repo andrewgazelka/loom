@@ -160,7 +160,10 @@ restored: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 19 filtere
 The mutation failed at the assertion expecting `Differs`, with an incorrect `Matched` verdict, rather than at compilation or setup.
 
 - The node-wide delivery guard is replaced by per-sender pump guards and per-actor lifecycle/relationship guards; choosing a guard never retains the map lock while awaiting actor I/O or timers.
-- Actor turns and timer scans are independent scheduler tasks. Wakeups during an idle check mark that actor for another turn, preventing a later idle result from hiding newly arrived messages.
+- The scheduler admits actor tasks only from the shared actor-ID wake set. Delivery, publication, lifecycle changes, mutating host SQL and timer firing name their owner; a wake received during a turn remains pending until that task completes. Recovery seeds the set once. Progress never invalidates every idle actor.
+- Timer scans run on recovery, arming or the earliest armed deadline. A scanner that encounters an active handler records its owner for a rescan on completion; cached shutdown deadlines remain available to cancel that handler. There is no 5 ms poll.
+- Shutdown completion wakes its recorded requester pumps. Request creation and target completion dirty only their requester; clean pumps skip the shutdown query. Lifecycle/code changes dirty the node index; clean pumps skip index reads and writes, and dirty syncs compare observations under the actor lock.
+- `run_until_idle` drains runnable inboxes, deliverable outboxes and due timers through the wake set, and awaits future armed timers. Parked/deferred/fork/unpublished work retains its lifecycle admission rules. Unknown wake IDs fail actor opening instead of disappearing.
 - `terminate_child` emits shutdown without first inspecting a busy child; restart/delete retain their state checks.
 - `shutdown_wait_does_not_stall_node` waits for a real durable shutdown request against a child holding its transaction, then asserts Y commits and advances its cursor within 50 ms and before X's 300 ms kill.
 - Restart publication receipts preserve `ready=false` across interruption until monitor installation finishes, without a node-wide publication lock.

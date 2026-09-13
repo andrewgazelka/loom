@@ -125,6 +125,8 @@ impl Node {
             Some(self),
         )
         .await?;
+        self.scheduling()?.index_dirty.insert(id.into());
+        self.wake_actor(id)?;
         drop(conn);
         self.sync_index(id).await?;
         Ok(report)

@@ -21,6 +21,7 @@ pub struct Node {
     pub(crate) shipping: Arc<crate::durability::ShippingState>,
     pub(crate) background: Option<Arc<crate::durability_worker::Background>>,
     memory_ids: Arc<std::sync::Mutex<Vec<ActorId>>>,
+    pub(crate) scheduling: Arc<std::sync::Mutex<crate::scheduler::Scheduling>>,
     pub(crate) wake: Arc<tokio::sync::Notify>,
     pub(crate) shutdown_deadlines: Arc<Mutex<HashMap<String, crate::messaging::ShutdownTimer>>>,
     pub(crate) connections: Arc<Mutex<HashMap<ActorId, Arc<Mutex<Connection>>>>>,
@@ -29,6 +30,7 @@ pub struct Node {
     pub(crate) run_gate: Arc<Mutex<()>>,
     pub(crate) send_outcomes: crate::send_outcome::Outcomes,
     pub(crate) tasks: Arc<Mutex<HashMap<ActorId, Arc<tokio::sync::Notify>>>>,
+    pub(crate) indexed: Arc<Mutex<HashMap<ActorId, crate::directory::IndexedState>>>,
     pub(crate) names: Arc<Mutex<Option<Connection>>>,
 }
 
@@ -49,6 +51,9 @@ impl Node {
         let _admission = self.admit().await?;
         self.pump_inner(id).await.with_context(|| format!("actor {} seq {}: pump", id, -1))
     }
+    /// Drain all deliverable outbox rows, runnable messages and due timers via
+    /// actor-specific wakes. Deferred/parked messages require their lifecycle wake;
+    /// future armed timers are awaited, preserving the drain contract.
     pub async fn run_until_idle(&self) -> Result<usize> {
         let _admission = self.admit().await?;
         let _run = self.run_gate.lock().await;
@@ -92,6 +97,7 @@ impl Node {
             background: None,
             root_id: String::new(),
             memory_ids: Arc::new(std::sync::Mutex::new(Vec::new())),
+            scheduling: Default::default(),
             wake: Arc::new(tokio::sync::Notify::new()),
             shutdown_deadlines: Arc::new(Mutex::new(HashMap::new())),
             dir: std::fs::canonicalize(dir.as_ref()).context("actor <node> seq -1: canonicalize directory")?,
@@ -103,6 +109,7 @@ impl Node {
             run_gate: Arc::new(Mutex::new(())),
             send_outcomes: Default::default(),
             admission: Arc::new(tokio::sync::RwLock::new(())),
+            indexed: Default::default(),
             names: Arc::new(Mutex::new(names)),
             tasks: Arc::new(Mutex::new(HashMap::new())),
         };
@@ -127,6 +134,19 @@ impl Node {
             )
             .await?;
         }
+        // Recovery is the only roster scan: persisted work enters the same wake set.
+        for id in node.actor_ids()? {
+            node.scheduling()?.index_dirty.insert(id.clone());
+            node.wake_actor(&id)?;
+            let owner = node.open_actor(&id).await?;
+            let conn = owner.conn.lock().await;
+            for row in actor::query(&conn, "SELECT child FROM shutdowns", ()).await?.rows {
+                let mut state = node.scheduling()?;
+                state.shutdown_requesters.entry(row.get::<String>(0)?).or_default().insert(id.clone());
+                state.shutdown_dirty.insert(id.clone());
+            }
+        }
+        node.request_timer_scan()?;
         node.sync_index(&node.root_id).await?;
         Ok(node)
     }
@@ -177,7 +197,7 @@ impl Node {
                     *slot = actor::connect(&self.path(id), self.config.io).await?;
                 }
             }
-            return Ok(Actor { id: id.into(), conn, managed: self.remote.is_some() });
+            return Ok(Actor { id: id.into(), conn, managed: self.remote.is_some(), node: self.clone() });
         }
         crate::reset::recover(&self.path(id))?;
         self.restore_on_open(id).await?;
@@ -189,7 +209,7 @@ impl Node {
         self.initialize_durability(id, &conn).await?;
         let conn = Arc::new(Mutex::new(conn));
         self.connections.lock().await.insert(id.into(), conn.clone());
-        Ok(Actor { id: id.into(), conn, managed: self.remote.is_some() })
+        Ok(Actor { id: id.into(), conn, managed: self.remote.is_some(), node: self.clone() })
     }
 
     pub(crate) async fn create(&self, id: &str, parent: &str, hash: &str, msg: &[u8], durability: crate::Durability) -> Result<Actor> {
@@ -214,6 +234,8 @@ impl Node {
         }
         self.initialize_durability(id, &conn).await?;
         drop(conn);
+        self.scheduling()?.index_dirty.insert(id.into());
+        self.wake_actor(id)?;
         Ok(actor)
     }
 
@@ -307,7 +329,7 @@ impl Node {
         self.commit_control(parent, tx).await?;
         drop(conn);
         self.pump_unlocked(parent).await?;
-        self.wake.notify_one();
+        self.wake_actor(&id)?;
         Ok(id)
     }
 
@@ -317,7 +339,7 @@ impl Node {
         let tx = conn.transaction().await?;
         actor::inject(&tx, key, "external", msg).await.with_context(|| format!("actor {id} seq -1: send"))?;
         self.commit_control(id, tx).await?;
-        self.wake.notify_one();
+        self.wake_actor(id)?;
         Ok(())
     }
 }
