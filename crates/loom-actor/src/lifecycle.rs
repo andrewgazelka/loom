@@ -35,6 +35,9 @@ impl Node {
     }
 
     pub(crate) async fn stop_unlocked(&self, id: &str, reason: &str, key: &str, initiator: &str) -> Result<()> {
+        if id.starts_with("drv:") {
+            return self.close_drivers(None, Some(crate::drivers::target(id)?.id)).await;
+        }
         let _lifecycle = self.guard(&format!("lifecycle:{id}")).await;
         if reason == "kill"
             && let Some(task) = self.tasks.lock().await.get(id)
@@ -160,6 +163,9 @@ impl Node {
     }
 
     pub(crate) async fn shutdown(&self, sender: &str, id: &str, key: &str) -> Result<()> {
+        if id.starts_with("drv:") {
+            return self.close_drivers(None, Some(crate::drivers::target(id)?.id)).await;
+        }
         let source = self.open_actor(sender).await?;
         let target = self.open_actor(id).await?;
         let policy: Shutdown = {
@@ -295,6 +301,7 @@ impl Node {
             return Ok(false);
         }
         if verb == RestartVerb::Reset {
+            self.close_drivers(Some(id), None).await?;
             self.reset(&mut conn, id, key).await?;
             {
                 let mut state = self.scheduling()?;

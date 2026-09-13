@@ -12,6 +12,8 @@ mod capability;
 pub use capability::{Cap, Rights};
 pub mod builtin;
 mod directory;
+pub mod drivers;
+pub use drivers::{Driver, DriverAck, DriverContext, DriverDelivery};
 mod durability;
 mod durability_open;
 mod durability_worker;
@@ -64,6 +66,10 @@ use std::sync::Arc;
 pub trait Registry: Send + Sync {
     async fn resolve(&self, reference: &str) -> Result<Arc<dyn Behavior>>;
     async fn behaviors(&self) -> Result<Vec<builtin::BehaviorInfo>>;
+    /// Native resource code is a separate namespace from actor behaviors.
+    async fn resolve_driver(&self, hash: &str) -> Result<Arc<dyn Driver>> {
+        anyhow::bail!("unknown driver hash {hash}")
+    }
 }
 
 #[async_trait]

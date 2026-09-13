@@ -251,6 +251,9 @@ pub(crate) async fn poison(
     }
     notify(&tx, id, message.seq, "poison", Some(error), strategy == "stop", None).await?;
     node.commit_control(id, tx).await?;
+    if strategy == "stop" {
+        node.close_drivers(Some(id), None).await?;
+    }
     Ok(())
 }
 

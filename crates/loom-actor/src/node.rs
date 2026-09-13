@@ -13,6 +13,8 @@ use turso::Connection;
 pub struct Node {
     pub(crate) dir: PathBuf,
     pub(crate) registry: Arc<dyn Registry>,
+    pub(crate) drivers: Arc<crate::drivers::Drivers>,
+    pub(crate) driver_lifetime: Option<Arc<crate::drivers::DriverLifetime>>,
     pub(crate) effects: Arc<dyn EffectHandler>,
     pub(crate) config: Config,
     root_id: ActorId,
@@ -91,6 +93,8 @@ impl Node {
         let index = crate::directory::connection(&mut names, dir.as_ref(), config.io).await?;
         let capability_key = crate::capability::node_key(index).await?;
         let mut node = Self {
+            drivers: Arc::new(crate::drivers::Drivers::default()),
+            driver_lifetime: None,
             capability_key,
             remote,
             shipping: Arc::new(crate::durability::ShippingState::default()),
@@ -113,6 +117,7 @@ impl Node {
             names: Arc::new(Mutex::new(names)),
             tasks: Arc::new(Mutex::new(HashMap::new())),
         };
+        node.driver_lifetime = Some(Arc::new(crate::drivers::DriverLifetime(node.drivers.clone())));
         node.start_shipper();
         for id in node.actor_ids()? {
             let actor = node.open_actor(&id).await?;

@@ -158,6 +158,8 @@ impl Node {
                     self.sync_index(&child).await?;
                 }
             }
+        } else if entry.target.starts_with("drv:") {
+            self.deliver_driver(id, &entry.target, &entry.msg, key).await?;
         } else if let Some(target) = entry.target.strip_prefix("call:") {
             self.deliver_call(id, target, &entry.msg, key).await?;
         } else if let Some(kind) = entry.target.strip_prefix("effect:") {
@@ -180,6 +182,12 @@ impl Node {
 }
 
 fn destination(target: &str, msg: &[u8]) -> Result<String> {
+    if let Some(spawn) = target.strip_prefix("drv:spawn:") {
+        return Ok(spawn.to_owned());
+    }
+    if target.starts_with("drv:") {
+        return Ok(target.to_owned());
+    }
     if target == "spawn" {
         return Ok(match serde_json::from_slice::<Spawn>(msg)? {
             Spawn::Child { id, .. } | Spawn::Restart { id, .. } => id,
