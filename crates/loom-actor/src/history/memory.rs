@@ -115,10 +115,12 @@ impl Node {
         let rows = actor::query(conn, "SELECT id FROM names UNION SELECT id FROM groups UNION SELECT id FROM who_runs", ()).await?;
         for row in rows.rows {
             let id: String = row.get(0)?;
-            if live.contains(&id) || match &self.remote {
-                Some(store) => store.has_snapshot(&id).await?,
-                None => false,
-            } {
+            if live.contains(&id)
+                || match &self.remote {
+                    Some(store) => store.has_snapshot(&id).await?,
+                    None => false,
+                }
+            {
                 continue;
             }
             let tx = conn.transaction().await?;

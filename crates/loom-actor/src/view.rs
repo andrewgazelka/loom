@@ -167,7 +167,8 @@ impl Behavior for View {
         let init: ViewInit = load(cx, "view_init").await?;
         let frame: Frame = serde_json::from_slice(msg).map_err(|error| fail(cx, format!("frame: {error}")))?;
         if let Frame::Delta { cause, .. } = &frame
-            && !cause.is_null() && !cause.is_string()
+            && !cause.is_null()
+            && !cause.is_string()
         {
             return Err(fail(cx, "delta cause must be a string or null"));
         }

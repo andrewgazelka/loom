@@ -134,7 +134,8 @@ impl ActorService {
             "subscriptions" => {
                 access.require(Scope::Read)?;
                 let args: IdArgs = serde_json::from_value(args)?;
-                self.authority(&args.id, Rights::INSPECT, "subscriptions").await?;
+                self.authority(&args.id, Rights::INSPECT, "subscriptions")
+                    .await?;
                 json_value(self.node.subscriptions(&args.id).await.map_err(error)?)
             }
             "actors" => {
@@ -227,7 +228,8 @@ impl crate::Service {
         mut args: Value,
     ) -> anyhow::Result<Value> {
         use anyhow::Context;
-        self.access.require(crate::auth::request_scope(command, &args))?;
+        self.access
+            .require(crate::auth::request_scope(command, &args))?;
         let actors = self
             .actors
             .as_ref()

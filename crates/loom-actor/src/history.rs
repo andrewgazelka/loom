@@ -122,14 +122,8 @@ impl Node {
                 for row in changes.rows {
                     let hash: String = row.get(0)?;
                     let behavior = crate::view::behavior_on(&self.registry, conn, &hash).await?;
-                    if let Some(verdict) = promote_replay(
-                        conn,
-                        behavior.as_ref(),
-                        &row.get::<String>(1)?,
-                        &row.get::<String>(2)?,
-                        effects,
-                    )
-                    .await?
+                    if let Some(verdict) =
+                        promote_replay(conn, behavior.as_ref(), &row.get::<String>(1)?, &row.get::<String>(2)?, effects).await?
                     {
                         return Ok(Some(verdict));
                     }
@@ -187,14 +181,8 @@ impl Node {
             for row in changes.rows {
                 let hash: String = row.get(0)?;
                 let behavior = crate::view::behavior_on(&self.registry, conn, &hash).await?;
-                if let Some(verdict) = promote_replay(
-                    conn,
-                    behavior.as_ref(),
-                    &row.get::<String>(1)?,
-                    &row.get::<String>(2)?,
-                    effects,
-                )
-                .await?
+                if let Some(verdict) =
+                    promote_replay(conn, behavior.as_ref(), &row.get::<String>(1)?, &row.get::<String>(2)?, effects).await?
                 {
                     return Ok(Some(verdict));
                 }

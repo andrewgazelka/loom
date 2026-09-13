@@ -54,7 +54,9 @@ pub(crate) async fn record_origin(conn: &turso::Connection, id: &str, seq: i64) 
     let cause = match serde_json::from_slice::<Value>(&bytes) {
         Ok(frame) if frame.get("type").and_then(Value::as_str) == Some("delta") => {
             // Only the immediately handled delta's key propagates; never inherit its cause.
-            let key = frame.get("key").and_then(Value::as_str)
+            let key = frame
+                .get("key")
+                .and_then(Value::as_str)
                 .with_context(|| format!("actor {id} seq {seq}: delta origin missing string key"))?;
             json!(key)
         }
@@ -74,13 +76,23 @@ async fn snapshot(conn: &turso::Connection, source: &str, subscription: &Subscri
     let high = cdc::high_water(conn).await?;
     let seq = actor::cursor(conn).await?;
     if resnapshot {
-        enqueue(conn, &subscription.subscriber, &format!("resnapshot:{}:{high}", subscription.id),
-            json!({"type":"resnapshot","source":source,"seq":seq,"key":"control","table":subscription.table})).await?;
+        enqueue(
+            conn,
+            &subscription.subscriber,
+            &format!("resnapshot:{}:{high}", subscription.id),
+            json!({"type":"resnapshot","source":source,"seq":seq,"key":"control","table":subscription.table}),
+        )
+        .await?;
     }
     let rows = cdc::snapshot(conn, &subscription.table).await?;
-    enqueue(conn, &subscription.subscriber, &format!("snapshot:{}:{high}", subscription.id),
+    enqueue(
+        conn,
+        &subscription.subscriber,
+        &format!("snapshot:{}:{high}", subscription.id),
         json!({"type":"snapshot","source":source,"seq":seq,"key":"control","table":subscription.table,
-            "change_id":high,"rows":rows})).await?;
+            "change_id":high,"rows":rows}),
+    )
+    .await?;
     Ok(high)
 }
 
@@ -89,13 +101,19 @@ impl Node {
     pub(crate) async fn prune_subscribers(&self) -> Result<()> {
         for source in self.actor_ids()? {
             let owner = self.open_actor(&source).await?;
-            let rows = actor::query(&*owner.conn.lock().await,
+            let rows = actor::query(
+                &*owner.conn.lock().await,
                 "SELECT id,subscriber FROM subscribers WHERE subscriber LIKE 'ws:%'
-                 OR id IN (SELECT substr(key,15) FROM meta WHERE key LIKE 'ephemeral_sub:%')", ()).await?;
+                 OR id IN (SELECT substr(key,15) FROM meta WHERE key LIKE 'ephemeral_sub:%')",
+                (),
+            )
+            .await?;
             for row in rows.rows {
                 let id: String = row.get(0)?;
                 let subscriber: String = row.get(1)?;
-                if !subscriber.starts_with("ws:") && self.is_memory(&subscriber)? { continue; }
+                if !subscriber.starts_with("ws:") && self.is_memory(&subscriber)? {
+                    continue;
+                }
                 self.host_subscription(&source, Operation::Unsubscribe { id, subscriber }).await?;
             }
         }
@@ -108,7 +126,8 @@ impl Node {
         {
             let conn = owner.conn.lock().await;
             if actor::status(&conn).await? != crate::Status::Stopped
-                || !actor::query(&conn, "SELECT value FROM meta WHERE key='subscriptions_closed'", ()).await?.rows.is_empty() {
+                || !actor::query(&conn, "SELECT value FROM meta WHERE key='subscriptions_closed'", ()).await?.rows.is_empty()
+            {
                 return Ok(());
             }
         }
@@ -143,7 +162,8 @@ impl Node {
         self.check_cap(cap, Rights::INSPECT, "subscribe").await?;
         ensure!(self.streams.lock().await.contains_key(stream), "subscribe: unknown WebSocket subscriber");
         let id = format!("{}:{stream}:{}", cap.target, crate::ids::root());
-        self.host_subscription(&cap.target, Operation::Subscribe { id: id.clone(), subscriber: stream.into(), table: table.into() }).await?;
+        self.host_subscription(&cap.target, Operation::Subscribe { id: id.clone(), subscriber: stream.into(), table: table.into() })
+            .await?;
         self.pump(&cap.target).await?;
         Ok(id)
     }
@@ -194,15 +214,22 @@ impl Node {
                     actor::set_meta(&tx, &format!("applied:{key}"), "1").await?;
                     return self.commit_control(target, tx).await;
                 }
-                ensure!(!crate::schema::SYSTEM_TABLES.contains(&table.as_str()) && !table.starts_with("sqlite_")
-                    && !table.starts_with("turso_"), "subscribe refuses runtime table {table}");
+                ensure!(
+                    !crate::schema::SYSTEM_TABLES.contains(&table.as_str())
+                        && !table.starts_with("sqlite_")
+                        && !table.starts_with("turso_"),
+                    "subscribe refuses runtime table {table}"
+                );
                 let exists = actor::query(&tx, "SELECT name FROM sqlite_schema WHERE type='table' AND name=?", [table.as_str()]).await?;
                 ensure!(!exists.rows.is_empty(), "subscribe table {table} does not exist");
                 let subscription = Subscription { id, subscriber, table, after_change_id: 0 };
                 let high = snapshot(&tx, target, &subscription, false).await?;
                 // Unsubscribe and close_stream remove subscriber rows; fanout advances their cursor.
-                tx.execute("INSERT OR IGNORE INTO subscribers(id,subscriber,\"table\",after_change_id) VALUES (?,?,?,?)",
-                    turso::params![subscription.id.as_str(), subscription.subscriber.as_str(), subscription.table, high]).await?;
+                tx.execute(
+                    "INSERT OR IGNORE INTO subscribers(id,subscriber,\"table\",after_change_id) VALUES (?,?,?,?)",
+                    turso::params![subscription.id.as_str(), subscription.subscriber.as_str(), subscription.table, high],
+                )
+                .await?;
                 if self.is_memory(&subscription.subscriber)? {
                     // Unsubscribe removes this restart-cleanup marker with its subscriber row.
                     actor::set_meta(&tx, &format!("ephemeral_sub:{}", subscription.id), "true").await?;
@@ -225,13 +252,21 @@ impl Node {
     }
 
     pub(crate) async fn fanout_on(&self, id: &str, conn: &mut turso::Connection) -> Result<()> {
-        if actor::status(conn).await? == crate::Status::Fork { return Ok(()); }
+        if actor::status(conn).await? == crate::Status::Fork {
+            return Ok(());
+        }
         let subscribers = subscriptions(conn).await?;
-        if subscribers.is_empty() { return Ok(()); }
+        if subscribers.is_empty() {
+            return Ok(());
+        }
         let tx = conn.transaction().await?;
         let floor: i64 = actor::meta(&tx, "cdc_floor").await?.parse()?;
         let high = cdc::high_water(&tx).await?;
-        struct Batch { subscriber: String, txn: i64, rows: Vec<cdc::DeltaRow> }
+        struct Batch {
+            subscriber: String,
+            txn: i64,
+            rows: Vec<cdc::DeltaRow>,
+        }
         let mut batches: BTreeMap<String, Batch> = BTreeMap::new();
         let mut changed = false;
         for sub in subscribers {
@@ -241,18 +276,28 @@ impl Node {
                 changed = true;
                 continue;
             }
-            let rows = actor::query(&tx,
+            let rows = actor::query(
+                &tx,
                 "SELECT change_id,change_type,table_name,id,before,after,updates,change_txn_id FROM turso_cdc
                  WHERE change_id>? AND change_id<=? AND table_name=? AND change_type!=2 ORDER BY change_id",
-                turso::params![sub.after_change_id, high, sub.table]).await?;
-            if rows.rows.is_empty() { continue; }
+                turso::params![sub.after_change_id, high, sub.table],
+            )
+            .await?;
+            if rows.rows.is_empty() {
+                continue;
+            }
             changed = true;
             for row in rows.rows {
                 let txn: i64 = row.get(7)?;
-                let batch = batches.entry(format!("{txn:020}:{}", sub.subscriber)).or_insert_with(||
-                    Batch { subscriber: sub.subscriber.clone(), txn, rows: Vec::new() });
+                let batch = batches.entry(format!("{txn:020}:{}", sub.subscriber)).or_insert_with(|| Batch {
+                    subscriber: sub.subscriber.clone(),
+                    txn,
+                    rows: Vec::new(),
+                });
                 let delta = cdc::delta(&tx, &row).await?;
-                if !batch.rows.iter().any(|row| row.change_id == delta.change_id) { batch.rows.push(delta); }
+                if !batch.rows.iter().any(|row| row.change_id == delta.change_id) {
+                    batch.rows.push(delta);
+                }
             }
             tx.execute("UPDATE subscribers SET after_change_id=? WHERE id=?", turso::params![high, sub.id]).await?;
         }
@@ -285,7 +330,8 @@ struct Closing {
 
 async fn subscriptions(conn: &turso::Connection) -> Result<Vec<Subscription>> {
     let rows = actor::query(conn, "SELECT id,subscriber,\"table\",after_change_id FROM subscribers ORDER BY id", ()).await?;
-    rows.rows.into_iter().map(|row| Ok(Subscription {
-        id: row.get(0)?, subscriber: row.get(1)?, table: row.get(2)?, after_change_id: row.get(3)?,
-    })).collect()
+    rows.rows
+        .into_iter()
+        .map(|row| Ok(Subscription { id: row.get(0)?, subscriber: row.get(1)?, table: row.get(2)?, after_change_id: row.get(3)? }))
+        .collect()
 }

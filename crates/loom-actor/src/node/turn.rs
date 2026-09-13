@@ -101,7 +101,8 @@ impl Node {
     pub(crate) async fn promote_inner(&self, id: &str, hash: &str, author: &str, rationale: &str) -> Result<()> {
         let actor = self.open_actor(id).await?;
         let mut conn = actor.conn.lock().await;
-        let behavior = crate::view::behavior_on(&self.registry, &conn, hash).await.with_context(|| format!("actor {id} seq -1: promote"))?;
+        let behavior =
+            crate::view::behavior_on(&self.registry, &conn, hash).await.with_context(|| format!("actor {id} seq -1: promote"))?;
         let schema = Self::schema_fingerprint(&conn).await?;
         actor::promote(
             &mut conn,

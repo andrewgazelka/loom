@@ -40,8 +40,9 @@ pub(crate) async fn compact_cdc(conn: &Connection) -> Result<()> {
     // record_origin metadata once its transaction has no retained CDC row.
     // Freeze the floor before subscriber bookkeeping itself emits runtime CDC rows.
     let floor = crate::cdc::high_water(conn).await?;
-    let result = conn.execute_batch(format!(
-        "BEGIN; UPDATE subscribers SET after_change_id={floor} \
+    let result = conn
+        .execute_batch(format!(
+            "BEGIN; UPDATE subscribers SET after_change_id={floor} \
          WHERE after_change_id>=CAST((SELECT value FROM meta WHERE key='cdc_floor') AS INTEGER) \
          AND NOT EXISTS (SELECT 1 FROM turso_cdc WHERE table_name=subscribers.\"table\" \
          AND change_id>subscribers.after_change_id AND change_type!=2); \
@@ -50,8 +51,8 @@ pub(crate) async fn compact_cdc(conn: &Connection) -> Result<()> {
          DELETE FROM turso_cdc WHERE change_id<CAST((SELECT value FROM meta WHERE key='cdc_floor') AS INTEGER); \
          DELETE FROM meta WHERE key LIKE 'cdc_origin:%' AND CAST(substr(key,12) AS INTEGER) NOT IN \
          (SELECT DISTINCT change_txn_id FROM turso_cdc WHERE change_txn_id IS NOT NULL); COMMIT;",
-    ))
-    .await;
+        ))
+        .await;
     if let Err(error) = result {
         if !conn.is_autocommit()? {
             conn.execute("ROLLBACK", ()).await?;

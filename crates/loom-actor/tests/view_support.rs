@@ -32,8 +32,12 @@ struct Render {
 }
 #[async_trait]
 impl Template for Render {
-    fn hash(&self) -> &str { &self.hash }
-    fn effects(&self) -> &[String] { &self.effects }
+    fn hash(&self) -> &str {
+        &self.hash
+    }
+    fn effects(&self) -> &[String] {
+        &self.effects
+    }
     async fn render(&self, _cx: &mut Ctx<'_>, row: Value) -> Result<Value, Trap> {
         Ok(json!({"tag":"li","key":format!("row-{}",row["seq"]),
             "attrs":{"class":self.hash},"children":[row["seq"].to_string()]}))
@@ -42,8 +46,12 @@ impl Template for Render {
 struct Subscriber;
 #[async_trait]
 impl Behavior for Subscriber {
-    fn hash(&self) -> &str { "subscriber-test" }
-    fn schema(&self) -> &str { "CREATE TABLE frames(body BLOB); CREATE TABLE saved(id TEXT)" }
+    fn hash(&self) -> &str {
+        "subscriber-test"
+    }
+    fn schema(&self) -> &str {
+        "CREATE TABLE frames(body BLOB); CREATE TABLE saved(id TEXT)"
+    }
     async fn handle(&self, cx: &mut Ctx<'_>, msg: &[u8]) -> Result<(), Trap> {
         let value: Value = serde_json::from_slice(msg).map_err(|error| Trap::new(error.to_string()))?;
         if let Some(cap) = value.get("subscribe") {
@@ -87,8 +95,16 @@ pub async fn integer(actor: &Actor, sql: &str) -> i64 {
     actor.sql(sql, ()).await.unwrap().rows[0].get(0).unwrap()
 }
 pub async fn frames(node: &Node, id: &str) -> Vec<Value> {
-    node.open(id).await.unwrap().sql("SELECT body FROM frames ORDER BY rowid", ()).await.unwrap().rows
-        .iter().map(|row| serde_json::from_slice(&row.get::<Vec<u8>>(0).unwrap()).unwrap()).collect()
+    node.open(id)
+        .await
+        .unwrap()
+        .sql("SELECT body FROM frames ORDER BY rowid", ())
+        .await
+        .unwrap()
+        .rows
+        .iter()
+        .map(|row| serde_json::from_slice(&row.get::<Vec<u8>>(0).unwrap()).unwrap())
+        .collect()
 }
 pub async fn next(stream: &mut loom_actor::HostStream) -> Value {
     let bytes = tokio::time::timeout(Duration::from_secs(10), stream.receiver.recv()).await.unwrap().unwrap();

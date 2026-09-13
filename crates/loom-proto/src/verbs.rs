@@ -99,10 +99,18 @@ pub static VERBS: &[Verb] = &[
             arg!(allowed_effects, Json, optional)
         ]
     ),
-    verb!(view, Definition, Read, [
-        arg!(target, String, optional), arg!(actor, String, optional), arg!(table, String, optional),
-        arg!(template, String, optional), arg!(order_by, Json, optional)
-    ]),
+    verb!(
+        view,
+        Definition,
+        Read,
+        [
+            arg!(target, String, optional),
+            arg!(actor, String, optional),
+            arg!(table, String, optional),
+            arg!(template, String, optional),
+            arg!(order_by, Json, optional)
+        ]
+    ),
     verb!(
         update,
         Definition,
@@ -298,11 +306,21 @@ impl Verb {
             }
         }
         if self.name == "view" {
-            let definition = object.len() == 1 && object.get("target").is_some_and(Value::is_string);
-            let actor = object.len() == 4 && ["actor", "table", "template"].iter()
-                .all(|name| object.get(*name).is_some_and(Value::is_string))
-                && object.get("order_by").and_then(Value::as_array).is_some_and(|items| items.iter().all(Value::is_string));
-            if !definition && !actor { return Err("view requires either target or actor, table, template, order_by".into()); }
+            let definition =
+                object.len() == 1 && object.get("target").is_some_and(Value::is_string);
+            let actor = object.len() == 4
+                && ["actor", "table", "template"]
+                    .iter()
+                    .all(|name| object.get(*name).is_some_and(Value::is_string))
+                && object
+                    .get("order_by")
+                    .and_then(Value::as_array)
+                    .is_some_and(|items| items.iter().all(Value::is_string));
+            if !definition && !actor {
+                return Err(
+                    "view requires either target or actor, table, template, order_by".into(),
+                );
+            }
         }
         Ok(())
     }

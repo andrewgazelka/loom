@@ -19,7 +19,10 @@ impl Service {
         {
             return self.response(Err(anyhow::Error::msg(error)));
         }
-        if let Err(error) = self.access.require(auth::request_scope(&request.command, &request.args)) {
+        if let Err(error) = self
+            .access
+            .require(auth::request_scope(&request.command, &request.args))
+        {
             return self.response(Err(error));
         }
         self.response(self.command_inner(request).await)

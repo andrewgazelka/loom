@@ -17,7 +17,9 @@ async fn cdc_replay_reproduces_tables() {
     std::fs::copy(&path, &good_path).unwrap();
     std::fs::copy(&path, &bad_path).unwrap();
     drain(&node).await;
-    for seq in 2..=10 { command(&node, &id, &format!("message-{seq}"), b"effect").await; }
+    for seq in 2..=10 {
+        command(&node, &id, &format!("message-{seq}"), b"effect").await;
+    }
     assert_eq!(actor.cursor().await.unwrap(), 10);
     let source = connection(&node_path.join(format!("{id}.db"))).await;
     let good = connection(&good_path).await;
@@ -26,8 +28,10 @@ async fn cdc_replay_reproduces_tables() {
     // Counter has exactly one domain table; removing one native CDC image must break its table hash.
     let count = integer(&actor, "SELECT count(*) FROM turso_cdc WHERE table_name='entries'").await;
     assert_eq!(count, 10);
-    source.execute("DELETE FROM turso_cdc WHERE change_id=(SELECT MIN(change_id) FROM turso_cdc WHERE table_name='entries')", ())
-        .await.unwrap();
+    source
+        .execute("DELETE FROM turso_cdc WHERE change_id=(SELECT MIN(change_id) FROM turso_cdc WHERE table_name='entries')", ())
+        .await
+        .unwrap();
     let bad = connection(&bad_path).await;
     loom_actor::cdc::replay_domain_cdc(&source, &bad, 0).await.unwrap();
     assert_ne!(entries_hash(&source).await, entries_hash(&bad).await);
@@ -44,13 +48,16 @@ async fn cdc_compacts_at_snapshot_and_floor_is_recorded() {
     let mut stream = node.open_stream().await.unwrap();
     let sub = node.subscribe_stream(&stream.id, &cap, "entries").await.unwrap();
     assert_eq!(next(&mut stream).await["type"], "snapshot");
-    for seq in 2..=3 { command(&node, &id, &format!("message-{seq}"), b"effect").await; }
+    for seq in 2..=3 {
+        command(&node, &id, &format!("message-{seq}"), b"effect").await;
+    }
     while stream.receiver.try_recv().is_ok() {}
     let actor = node.open(&id).await.unwrap();
     let floor = integer(&actor, "SELECT CAST(value AS INTEGER) FROM meta WHERE key='cdc_floor'").await;
     assert!(floor > 0);
-    let below = integer(&actor,
-        "SELECT COUNT(*) FROM turso_cdc WHERE change_id < (SELECT CAST(value AS INTEGER) FROM meta WHERE key='cdc_floor')").await;
+    let below =
+        integer(&actor, "SELECT COUNT(*) FROM turso_cdc WHERE change_id < (SELECT CAST(value AS INTEGER) FROM meta WHERE key='cdc_floor')")
+            .await;
     assert_eq!(below, 0);
     actor.sql("UPDATE subscribers SET after_change_id=0 WHERE id=?", [sub]).await.unwrap();
     node.pump(&id).await.unwrap();
@@ -102,7 +109,9 @@ async fn ephemeral_supports_fork_and_validate() {
     let node = node(dir.path(), Config::default()).await;
     let id = spawn(&node, "counter-v1", b"one", Durability::Ephemeral).await;
     drain(&node).await;
-    for seq in 2..=4 { command(&node, &id, &format!("message-{seq}"), b"effect").await; }
+    for seq in 2..=4 {
+        command(&node, &id, &format!("message-{seq}"), b"effect").await;
+    }
     let verdict = node.validate(&id, "counter-v1", 3).await.unwrap();
     assert!(matches!(verdict, Verdict::Matched { .. }), "{verdict:?}");
     let fork = node.fork(&id, 3).await.unwrap();
@@ -125,7 +134,9 @@ async fn subscribe_snapshot_then_deltas_in_order() {
     drain(&node).await;
     let cap = node.cap_for(&source, Rights::INSPECT).await.unwrap();
     command(&node, &subscriber, "subscribe", &serde_json::to_vec(&json!({"subscribe":cap})).unwrap()).await;
-    for seq in 2..=4 { command(&node, &source, &format!("message-{seq}"), b"effect").await; }
+    for seq in 2..=4 {
+        command(&node, &source, &format!("message-{seq}"), b"effect").await;
+    }
     let frames = frames(&node, &subscriber).await;
     assert_eq!(frames.len(), 4);
     assert_eq!(frames[0]["type"], "snapshot");
@@ -143,7 +154,9 @@ async fn subscribe_snapshot_then_deltas_in_order() {
         let change = rows[0]["change_id"].as_i64().unwrap();
         assert!(change > previous);
         previous = change;
-        for field in ["change_type", "table", "id", "before", "after", "updates"] { assert!(rows[0].get(field).is_some()); }
+        for field in ["change_type", "table", "id", "before", "after", "updates"] {
+            assert!(rows[0].get(field).is_some());
+        }
     }
     command(&node, &subscriber, "unsubscribe", b"{\"unsubscribe\":true}").await;
     assert!(node.subscriptions(&source).await.unwrap().is_empty());
@@ -164,7 +177,9 @@ async fn subscribe_requires_inspect() {
     let errors = actor.sql("SELECT error FROM dead_letters", ()).await.unwrap();
     assert_eq!(errors.rows.len(), 1);
     let error: String = errors.rows[0].get(0).unwrap();
-    for text in [subscriber.as_str(), "seq 2", "subscribe", "missing right"] { assert!(error.contains(text), "{error}"); }
+    for text in [subscriber.as_str(), "seq 2", "subscribe", "missing right"] {
+        assert!(error.contains(text), "{error}");
+    }
     assert!(node.subscriptions(&source).await.unwrap().is_empty());
     node.close().await.unwrap();
 }
@@ -211,8 +226,8 @@ async fn view_renders_keyed_trees_and_promote_rerenders_in_place() {
     assert_eq!(keys, BTreeSet::from(["1", "2", "3"]));
     assert!(stream.receiver.try_recv().is_err(), "promote emits one commit frame");
     assert_eq!(integer(&actor, "SELECT COUNT(*) FROM turso_cdc WHERE table_name='tree' AND change_type=0").await, 3);
-    let transactions = integer(&actor,
-        "SELECT COUNT(DISTINCT change_txn_id) FROM turso_cdc WHERE table_name='tree' AND change_type=0").await;
+    let transactions =
+        integer(&actor, "SELECT COUNT(DISTINCT change_txn_id) FROM turso_cdc WHERE table_name='tree' AND change_type=0").await;
     assert_eq!(transactions, 1);
     let after = actor.sql("SELECT rowid,key,tree FROM tree ORDER BY key", ()).await.unwrap();
     for (old, new) in before.rows.iter().zip(&after.rows) {

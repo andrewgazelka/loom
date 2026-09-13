@@ -282,9 +282,7 @@ impl Node {
 
     pub async fn spawn(&self, parent: &str, spec: &crate::ChildSpec) -> Result<ActorId> {
         let _admission = self.admit().await?;
-        let pinned = crate::view::pin_spec(&self.registry, spec)
-            .await
-            .with_context(|| format!("actor {parent} seq -1: spawn"))?;
+        let pinned = crate::view::pin_spec(&self.registry, spec).await.with_context(|| format!("actor {parent} seq -1: spawn"))?;
         self.spawn_inner(parent, &pinned).await.with_context(|| format!("actor {parent} seq -1: spawn"))
     }
 

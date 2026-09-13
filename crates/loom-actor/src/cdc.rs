@@ -34,13 +34,17 @@ pub(crate) fn json_cell(value: turso::Value) -> Result<Value> {
 }
 
 pub fn decode_record(bytes: &[u8]) -> Result<Vec<turso::Value>> {
-    ValueIterator::new(bytes)?.map(|value| Ok(match value? {
-        ValueRef::Null => turso::Value::Null,
-        ValueRef::Numeric(Numeric::Integer(value)) => turso::Value::Integer(value),
-        ValueRef::Numeric(Numeric::Float(value)) => turso::Value::Real(value.into()),
-        ValueRef::Text(value) => turso::Value::Text(value.as_str().to_owned()),
-        ValueRef::Blob(value) => turso::Value::Blob(value.to_vec()),
-    })).collect()
+    ValueIterator::new(bytes)?
+        .map(|value| {
+            Ok(match value? {
+                ValueRef::Null => turso::Value::Null,
+                ValueRef::Numeric(Numeric::Integer(value)) => turso::Value::Integer(value),
+                ValueRef::Numeric(Numeric::Float(value)) => turso::Value::Real(value.into()),
+                ValueRef::Text(value) => turso::Value::Text(value.as_str().to_owned()),
+                ValueRef::Blob(value) => turso::Value::Blob(value.to_vec()),
+            })
+        })
+        .collect()
 }
 
 async fn object(conn: &turso::Connection, table: &str, record: turso::Value) -> Result<Value> {
@@ -62,17 +66,25 @@ async fn object(conn: &turso::Connection, table: &str, record: turso::Value) -> 
 pub(crate) async fn delta(conn: &turso::Connection, row: &turso::Row) -> Result<DeltaRow> {
     let table: String = row.get(2)?;
     Ok(DeltaRow {
-        change_id: row.get(0)?, change_type: row.get(1)?, id: json_cell(row.get_value(3)?)?,
+        change_id: row.get(0)?,
+        change_type: row.get(1)?,
+        id: json_cell(row.get_value(3)?)?,
         before: object(conn, &table, row.get_value(4)?).await?,
         after: object(conn, &table, row.get_value(5)?).await?,
         // Updates is the engine's sparse binary record, preserved as bytes.
-        updates: json_cell(row.get_value(6)?)?, table,
+        updates: json_cell(row.get_value(6)?)?,
+        table,
     })
 }
 
 pub(crate) async fn high_water(conn: &turso::Connection) -> Result<i64> {
-    actor::query(conn, "SELECT COALESCE(MAX(change_id),0) FROM turso_cdc", ()).await?
-        .rows.first().context("CDC missing high-water result")?.get(0).map_err(Into::into)
+    actor::query(conn, "SELECT COALESCE(MAX(change_id),0) FROM turso_cdc", ())
+        .await?
+        .rows
+        .first()
+        .context("CDC missing high-water result")?
+        .get(0)
+        .map_err(Into::into)
 }
 
 /// Apply engine row images to a snapshot with CDC disabled on the destination.
@@ -80,8 +92,7 @@ pub(crate) async fn high_water(conn: &turso::Connection) -> Result<i64> {
 pub async fn replay_domain_cdc(source: &turso::Connection, target: &turso::Connection, after_change_id: i64) -> Result<()> {
     let id = actor::meta(source, "id").await?;
     let seq = actor::cursor(source).await?;
-    replay_without_triggers(source, target, after_change_id).await
-        .with_context(|| format!("actor {id} seq {seq}: replay domain CDC"))
+    replay_without_triggers(source, target, after_change_id).await.with_context(|| format!("actor {id} seq {seq}: replay domain CDC"))
 }
 
 async fn replay_without_triggers(source: &turso::Connection, target: &turso::Connection, after_change_id: i64) -> Result<()> {
@@ -99,7 +110,9 @@ async fn replay_without_triggers(source: &turso::Connection, target: &turso::Con
     // triggers enabled would produce those changes twice. The restore loop leaves
     // this temporary schema state; on any error the caller rolls back its transaction.
     for trigger in &triggers {
-        target.execute(format!("DROP TRIGGER {}", quote(&trigger.name)), ()).await
+        target
+            .execute(format!("DROP TRIGGER {}", quote(&trigger.name)), ())
+            .await
             .with_context(|| format!("suspend replay trigger {}", trigger.name))?;
     }
     replay_rows(source, target, after_change_id).await?;
@@ -110,9 +123,12 @@ async fn replay_without_triggers(source: &turso::Connection, target: &turso::Con
 }
 
 async fn replay_rows(source: &turso::Connection, target: &turso::Connection, after_change_id: i64) -> Result<()> {
-    let rows = actor::query(source,
+    let rows = actor::query(
+        source,
         "SELECT change_type,table_name,id,after FROM turso_cdc WHERE change_id>? AND change_type!=2 ORDER BY change_id",
-        [after_change_id]).await?;
+        [after_change_id],
+    )
+    .await?;
     for row in rows.rows {
         let table: String = row.get(1)?;
         if crate::schema::SYSTEM_TABLES.contains(&table.as_str()) || table.starts_with("sqlite_") || table.starts_with("turso_") {
