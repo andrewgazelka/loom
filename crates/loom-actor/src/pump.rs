@@ -135,6 +135,14 @@ impl Node {
                         result.blocked = true;
                         break;
                     }
+                    // A busy engine (another connection mid-commit on the same file) is environmental, not a
+                    // delivery verdict: the row stays pending and the next pump pass retries it.
+                    Err(error) if format!("{error:#}").contains("database is locked") => {
+                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                        result.progressed = true;
+                        result.blocked = true;
+                        break;
+                    }
                     Err(error) => {
                         result.blocked = true;
                         result.failure = Some(error.context(format!("actor {id} seq {}: deliver outbox {}", entry.seq, entry.idx)));

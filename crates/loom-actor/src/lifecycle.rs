@@ -50,10 +50,16 @@ impl Node {
             self,
         )
         .await?;
-        if actor::status(&conn).await? == Status::Stopped {
+        let stopped = actor::status(&conn).await? == Status::Stopped;
+        if stopped {
             self.shutdown_deadlines.lock().await.retain(|_, timer| timer.target != id);
         }
         drop(conn);
+        // Names, groups and who_runs leave with the stop itself: a restart may follow in the same
+        // delivery pass, before any scheduler turn could observe the stopped state.
+        if stopped {
+            self.sync_index(id).await?;
+        }
         self.sync_shutdowns(id).await
     }
 
