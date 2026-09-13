@@ -140,12 +140,34 @@ function patch(el, oldT, newT) {
   if (typeof oldT === 'string' || el.nodeType !== 1 || el.tagName.toLowerCase() !== newT.tag) return replace(el, newT);
   for (const k of Object.keys(oldT.attrs ?? {})) if (!(k in (newT.attrs ?? {}))) { el.removeAttribute(k); log('dom', `  remove ${el.tagName.toLowerCase()}[${k}]`); }
   for (const [k, v] of Object.entries(newT.attrs ?? {})) setAttr(el, k, v);
+  // children: match by `key` when present, else by tag in order, else (text) by position; a matched node is moved, never rebuilt
   const oc = oldT.children ?? [], nc = newT.children ?? [];
-  for (let i = 0; i < nc.length; i++) { if (i < el.childNodes.length) patch(el.childNodes[i], oc[i], nc[i]); else { el.appendChild(build(nc[i])); log('dom', `  append ${typeof nc[i] === 'string' ? 'text' : nc[i].tag}`); } }
-  while (el.childNodes.length > nc.length) { el.lastChild.remove(); log('dom', `  remove trailing child`); }
+  const oldNodes = [...el.childNodes].map((node, i) => ({ node, tree: oc[i], used: false }));
+  const isTag = (t, tag) => typeof t === 'object' && t.tag === tag;
+  const placed = [];
+  for (const nt of nc) {
+    let m = null;
+    if (typeof nt === 'object' && nt.key != null) m = oldNodes.find(o => !o.used && typeof o.tree === 'object' && o.tree.key === nt.key);
+    else if (typeof nt === 'object') m = oldNodes.find(o => !o.used && isTag(o.tree, nt.tag) && o.tree.key == null);
+    else m = oldNodes.find(o => !o.used && typeof o.tree === 'string');
+    let node;
+    if (m) { m.used = true; node = patch(m.node, m.tree, nt); }
+    else { node = build(nt); log('dom', `  create ${typeof nt === 'string' ? 'text' : nt.tag}`); }
+    placed.push(node);
+  }
+  for (const o of oldNodes) if (!o.used && o.node.parentNode === el) { o.node.remove(); log('dom', `  remove ${o.node.nodeName.toLowerCase()}`); }
+  // ordering pass, after removals: a DOM move blurs, so the node holding focus never moves; whatever sits in its way moves behind it
+  placed.forEach((node, i) => {
+    while (el.childNodes[i] !== node) {
+      const at = el.childNodes[i];
+      if (node.parentNode !== el) { el.insertBefore(node, at ?? null); break; }
+      if (node.contains(document.activeElement)) { el.insertBefore(at, node.nextSibling); log('dom', `  move ${at.nodeName.toLowerCase()} behind the focused ${node.nodeName.toLowerCase()}`); }
+      else { el.insertBefore(node, at); log('dom', `  move ${node.nodeName.toLowerCase()} to position ${i}`); }
+    }
+  });
   return el;
 }
-function replace(el, t) { const n = build(t); el.replaceWith(n); log('dom', `  REPLACE node (tag changed) -> this is the only path that loses identity`); return n; }
+function replace(el, t) { const n = build(t); el.replaceWith(n); log('dom', `  REPLACE node (tag changed at the same key) -> the only path that loses identity`); return n; }
 function upsert(row, pendingKey) {
   const key = String(row.id);
   const entry = bound.get(key);

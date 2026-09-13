@@ -134,8 +134,10 @@ as ES modules and unit-tested under `bun test` with the DOM shim the existing
   `sort` order. `delta` rows: insert => build + `insertBefore` at the sort
   position; update => patch the existing node from `old tree -> new tree` (a per-row
   patch of two small JSON trees: attributes set/removed, text replaced, keyed
-  children matched by `key`, unkeyed by position; only unmatched nodes are created
-  or removed); delete => remove. A node is never replaced while its key lives, so
+  children matched by `key`, unkeyed element children by tag in document order,
+  text by position; only unmatched nodes are created or removed; ordering is a
+  second pass after removals, and the node that holds focus is never moved,
+  because a DOM move blurs: its neighbours move around it); delete => remove. A node is never replaced while its key lives, so
   focus, caret, scroll and in-flight transitions survive every update and every
   promote.
 - events: `attrs` whose name starts with `on` are wired to `opts.onEvent(key, name,
