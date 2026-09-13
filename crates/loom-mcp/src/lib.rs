@@ -44,7 +44,7 @@ impl ServerHandler for LoomMcp {
                 .map(|verb| {
                     Tool::new(
                         verb.name,
-                        format!("Run the {} command.", verb.name),
+                        command_description(verb.name),
                         verb.schema()
                             .as_object()
                             .expect("verb schema is an object")
@@ -73,7 +73,7 @@ impl ServerHandler for LoomMcp {
         Ok(CallToolResult::structured(envelope))
     }
     fn get_info(&self) -> ServerInfo {
-        ServerInfo{instructions:Some("Loom runs Rust core WebAssembly guests. All I/O goes through loom effects. Use add to check and build Rust source, view to read stored source, update to move names, and run to execute names or hashes. history and diff compare item identities; find searches names and dependents follows pinned dependencies. The actor tools inspect and drive the native actor network; behaviors lists spawnable hashes and tree shows the root supervisor.".into()),capabilities:ServerCapabilities::builder().enable_tools().enable_resources().enable_prompts().build(),..Default::default()}
+        ServerInfo{instructions:Some("Loom runs Rust core WebAssembly guests. All I/O goes through loom effects. Use add to check and build Rust source, view to read stored source, update to propagate changes atomically through callers, and run to execute names or hashes. history and diff compare item identities; find searches names and dependents follows pinned dependencies. The actor tools inspect and drive the native actor network; behaviors lists spawnable hashes and tree shows the root supervisor.".into()),capabilities:ServerCapabilities::builder().enable_tools().enable_resources().enable_prompts().build(),..Default::default()}
     }
     async fn list_prompts(
         &self,
@@ -96,7 +96,7 @@ impl ServerHandler for LoomMcp {
     ) -> Result<GetPromptResult, rmcp::ErrorData> {
         let text = match request.name.as_str() {
             "intro_rust" => {
-                "Use add {source,name?} to store and build a definition, view {target} to inspect its CAS source, and run {target,args?} to run it. update {name,source} moves a name; old hashes remain runnable. history {name} lists changes, diff {old,new} compares item hashes, find {text} searches names and items, and dependents {hash} lists pinned dependents. Write ordinary Rust using the loom SDK. Guest Rust has no macros. Every crate-root pub fn is an entry. Declare an optional schema with pub const LOOM_SCHEMA: &str. There are no effect declarations. The compiler driver infers effect rows; add reports them per entry in entries.<name>.effects (labels and unknown). perform(name, args) suspends the guest. handle/handle_any install deep guest handlers; callbacks perform in the outer context. scope.spawn and job.join run borrowed closures; call(def,args) calls another definition without inheriting handlers. fs::list(machine,path) returns typed DirEntry values with name, size, and kind: EntryKind::File, Directory, Symlink, Other. machine is a machine ID; path is relative to its pinned root. fs::walk adds bounded recursion. fs::read returns String, fs::read_optional returns Option<String>, fs::write writes UTF-8 content. preview::writes runs under a guest handler that returns filesystem diff previews without writing those files. No std::fs/net/time/env/process; use Loom effects. Cargo diagnostics include file,line,col,code and hint; build.ms is actual elapsed time. Guest effect values cross typed DAG-CBOR; MCP envelopes use JSON."
+                "Use add {source,name?} to store and build a definition, view {target} to inspect its CAS source, and run {target,args?} to run it. update {name,source,expected_hash?} rebuilds affected callers and publishes their names atomically; old hashes remain runnable. Read result.update.status: complete means published, needs_repair means live names are unchanged. Use update_view {id} to resume a durable session, update_repair {id,revision,changes} to submit a map of definition names to {source,deps?,allowed_effects?}, and update_abort {id,revision} to discard a pending session. Always pass the hash you read as expected_hash and the latest session revision when multiple agents collaborate. A conflict requires inspecting current state before retrying. update_rebase {id,revision} retries after unrelated namespace changes while preserving repairs; it refuses if an edited definition changed concurrently. history {name} lists changes, diff {old,new} compares item hashes, find {text} searches names and items, and dependents {hash} lists pinned dependents. Write ordinary Rust using the loom SDK. Guest Rust has no macros. Every crate-root pub fn is an entry. Declare an optional schema with pub const LOOM_SCHEMA: &str. There are no effect declarations. The compiler driver infers effect rows; add reports them per entry in entries.<name>.effects (labels and unknown). perform(name, args) suspends the guest. handle/handle_any install deep guest handlers; callbacks perform in the outer context. scope.spawn and job.join run borrowed closures; call(def,args) calls another definition without inheriting handlers. fs::list(machine,path) returns typed DirEntry values with name, size, and kind: EntryKind::File, Directory, Symlink, Other. machine is a machine ID; path is relative to its pinned root. fs::walk adds bounded recursion. fs::read returns String, fs::read_optional returns Option<String>, fs::write writes UTF-8 content. preview::writes runs under a guest handler that returns filesystem diff previews without writing those files. No std::fs/net/time/env/process; use Loom effects. Cargo diagnostics include file,line,col,code and hint; build.ms is actual elapsed time. Guest effect values cross typed DAG-CBOR; MCP envelopes use JSON."
             }
             _ => return Err(rmcp::ErrorData::invalid_params("unknown prompt", None)),
         };
@@ -215,4 +215,15 @@ pub fn router(service: Arc<Service>, node: loom_actor::Node) -> axum::Router {
         Default::default(),
     );
     axum::Router::new().nest_service("/mcp", transport)
+}
+
+fn command_description(name: &str) -> String {
+    match name {
+        "update" => "Publish revised Rust source and automatically rebuild callers. Pass expected_hash from the source you edited and a unique request_id to recover this exact session after transport failure. Inspect result.update.status: complete publishes atomically; needs_repair leaves names unchanged and returns repair sources and diagnostics.",
+        "update_view" => "Read a durable update session, its latest revision, affected definitions and compiler diagnostics.",
+        "update_repair" => "Apply a batch of source repairs to an update session and retry propagation. Supply the latest revision; stale submissions are rejected. Inspect result.update.status before treating this as published.",
+        "update_rebase" => "Replan a conflicted update against current names while retaining repairs. Refuses to overwrite concurrently edited definitions. Supply the latest session revision.",
+        "update_abort" => "Abort a pending, repair or conflicted update session without changing live definitions. Supply the latest revision.",
+        _ => return format!("Run the {name} command."),
+    }.to_owned()
 }

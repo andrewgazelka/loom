@@ -12,6 +12,7 @@
     string,
     type Json,
   } from "./schema";
+  import UpdateResult from "./UpdateResult.svelte";
   import Hash from "./Hash.svelte";
   import DataTable from "./DataTable.svelte";
   export let operation: string;
@@ -22,7 +23,10 @@
   ) => void;
 </script>
 
-{#if [V.view, V.add, V.update].some((verb) => verb === operation)}
+{#if [V.update, V.update_view, V.update_repair, V.update_abort, V.update_rebase].some((verb) => verb === operation)}
+  <UpdateResult {value} {navigate} />
+{/if}
+{#if [V.view, V.add, V.update, V.update_repair, V.update_view, V.update_rebase].some((verb) => verb === operation) && typeof object(value, "definition result").hash === "string"}
   {@const def = definitionView(value)}
   <div class="section-bar">
     <h2>{def.name ?? def.hash}</h2>

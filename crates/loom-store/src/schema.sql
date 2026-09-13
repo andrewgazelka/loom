@@ -28,3 +28,5 @@ LEFT JOIN cas d ON d.hash=json_extract(j.value,'$.descriptor_hash');
 CREATE VIEW effects AS SELECT * FROM definition_events WHERE json_extract(bytes,'$.type')='effect_recorded'
 UNION ALL SELECT * FROM trace_effects;
 CREATE TABLE IF NOT EXISTS machine_roots(id TEXT PRIMARY KEY,root TEXT NOT NULL,identity TEXT NOT NULL);
+
+CREATE TABLE IF NOT EXISTS update_sessions(id TEXT PRIMARY KEY,revision INTEGER NOT NULL CHECK(revision >= 0),state TEXT NOT NULL CHECK(json_valid(state)));

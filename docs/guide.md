@@ -104,7 +104,7 @@ The CLI, HTTP commands, and MCP tools use the same definition operations. The CL
 | --- | --- | --- |
 | `add <file.rs> [--name n]` | `add` | Name, definition hash, entry item hashes, Wasm hash, and item table |
 | `view <name-or-hash>` | `view` | Stored source and item table |
-| `update <name> <file.rs>` | `update` | New definition and name binding; old hash remains runnable |
+| `update <name> <file.rs> [--expected_hash hash]` | `update` | Atomic caller propagation or a durable repair session; old hashes remain runnable |
 | `history <name>` | `history` | Hash chain, timestamps, and changed items between entries |
 | `diff <old-hash> <new-hash>` | `diff` | Added, removed, and changed items, with their hashes |
 | `run <name-or-hash> [args-json]` | `run` | Output and recorded effects |
@@ -118,6 +118,8 @@ loom --token "$LOOM_TOKEN" view sum
 loom --token "$LOOM_TOKEN" update sum sum.rs
 loom --token "$LOOM_TOKEN" history sum
 ```
+
+Updates and repair sessions are described in [the scripting guide](../examples/evolution/README.md). Inspect `result.update.status`; an accepted command may still need repairs. `update_repair <id> <revision> <changes-json>` submits a batch, `update_view <id>` reads the latest revision, and `update_rebase <id> <revision>` retries after disjoint namespace changes.
 
 Guest Rust has no macros. Every crate-root `pub fn` is an entry. An optional schema is declared as `pub const LOOM_SCHEMA: &str`; effect rows are inferred by the compiler driver. There are no effect declarations. `add` reports each entry’s inferred row in `entries.<name>.effects`, with `labels` and `unknown` fields.
 

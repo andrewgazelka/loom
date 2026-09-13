@@ -325,3 +325,78 @@ export function validation(value: unknown): Validation {
     }),
   };
 }
+
+export interface UpdateSession {
+  id: string;
+  revision: number;
+  target: string;
+  status: "pending" | "complete" | "needs_repair" | "conflict" | "aborted";
+  changes: { names: string[]; old_hash: string; new_hash: string }[];
+  diagnostics: {
+    hash: string;
+    names: string[];
+    source: string;
+    diagnostics: Json[];
+    build: Row | null;
+  }[];
+}
+export function updateSession(value: unknown): UpdateSession {
+  const data = object(object(value, "update result").update, "update");
+  const status = string(data.status, "update.status");
+  if (
+    !["pending", "complete", "needs_repair", "conflict", "aborted"].includes(
+      status,
+    )
+  )
+    throw new Error(`update.status: unknown status ${status}`);
+  const revision = integer(data.revision, "update.revision");
+  if (revision < 0)
+    throw new Error("update.revision: expected nonnegative integer");
+  const names = (value: unknown) =>
+    array(value, "names").map((value) => string(value, "name"));
+  return {
+    id: string(data.id, "update.id"),
+    revision,
+    target: string(data.target, "update.target"),
+    status: status as UpdateSession["status"],
+    changes: array(data.changes, "update.changes").map((value) => {
+      const change = object(value, "update change");
+      return {
+        names: names(change.names),
+        old_hash: string(change.old_hash, "old_hash"),
+        new_hash: string(change.new_hash, "new_hash"),
+      };
+    }),
+    diagnostics: array(data.diagnostics, "update.diagnostics").map((value) => {
+      const diagnostic = object(value, "update diagnostic");
+      return {
+        hash: string(diagnostic.hash, "hash"),
+        names: names(diagnostic.names),
+        source: string(diagnostic.source, "source"),
+        diagnostics: array(diagnostic.diagnostics, "compiler diagnostics").map(
+          (value) => json(value, "compiler diagnostic"),
+        ),
+        build:
+          diagnostic.build === null
+            ? null
+            : (json(object(diagnostic.build, "build"), "build") as Row),
+      };
+    }),
+  };
+}
+export function repairFields(session: UpdateSession): Record<string, string> {
+  return {
+    id: session.id,
+    revision: String(session.revision),
+    changes: JSON.stringify(
+      Object.fromEntries(
+        session.diagnostics.map((item) => [
+          item.names[0] ?? item.hash,
+          { source: item.source },
+        ]),
+      ),
+      null,
+      2,
+    ),
+  };
+}

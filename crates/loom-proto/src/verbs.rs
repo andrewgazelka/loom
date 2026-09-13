@@ -120,8 +120,29 @@ pub static VERBS: &[Verb] = &[
             arg!(name, String),
             arg!(source, Source),
             arg!(deps, Json, optional),
-            arg!(allowed_effects, Json, optional)
+            arg!(allowed_effects, Json, optional),
+            arg!(expected_hash, String, optional),
+            arg!(request_id, String, optional)
         ]
+    ),
+    verb!(update_view, Definition, Read, [arg!(id, String)]),
+    verb!(
+        update_repair,
+        Definition,
+        Define,
+        [arg!(id, String), arg!(revision, Count), arg!(changes, Json)]
+    ),
+    verb!(
+        update_abort,
+        Definition,
+        Define,
+        [arg!(id, String), arg!(revision, Count)]
+    ),
+    verb!(
+        update_rebase,
+        Definition,
+        Define,
+        [arg!(id, String), arg!(revision, Count)]
     ),
     verb!(history, Definition, Read, [arg!(name, String)]),
     verb!(
@@ -267,6 +288,20 @@ impl Verb {
             }
         }
         let mut schema = json!({"type":"object","properties":properties,"required":required,"additionalProperties":false});
+        if self.name == "update_repair" {
+            schema["properties"]["changes"] = json!({
+                "type":"object",
+                "description":"Repairs keyed by a definition name from the update snapshot, or an unnamed failed definition hash. Submit all mutually dependent source fixes together.",
+                "additionalProperties": {
+                    "type":"object", "required":["source"], "additionalProperties":false,
+                    "properties": {
+                        "source":{"type":"string","description":"Complete Rust source or source bundle."},
+                        "deps":{"type":["object","null"],"additionalProperties":{"type":"string"}},
+                        "allowed_effects":{"type":["array","null"],"items":{"type":"string"}}
+                    }
+                }
+            });
+        }
         if self.name == "view" {
             schema["oneOf"] = json!([
                 {"required":["target"],"not":{"anyOf":[

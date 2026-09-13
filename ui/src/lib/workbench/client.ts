@@ -7,6 +7,7 @@ import {
   definition,
   definitionDiff,
   definitionView,
+  updateSession,
   history,
   integer,
   json,
@@ -110,7 +111,19 @@ export function parseResult(command: Command, value: unknown): Json {
     if (op === V.find) array(value, op).forEach(definition);
     else if (op === V.dependents)
       array(value, op).forEach((item) => string(item, `${op}[]`));
-    else if ([V.view, V.add, V.update].some((verb) => verb === op))
+    else if (
+      [
+        V.update,
+        V.update_view,
+        V.update_repair,
+        V.update_abort,
+        V.update_rebase,
+      ].some((verb) => verb === op)
+    ) {
+      updateSession(value);
+      if (object(value, "update result").hash !== undefined)
+        definitionView(value);
+    } else if ([V.view, V.add].some((verb) => verb === op))
       definitionView(value);
     else if (op === V.history) history(value);
     else if (op === V.diff) definitionDiff(value);

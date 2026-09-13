@@ -19,14 +19,18 @@ impl Store {
     }
     pub fn current_names(&self) -> Result<BTreeMap<String, String>> {
         let connection = self.lock()?;
-        let mut query = connection.prepare("SELECT name,hash FROM names n WHERE since_seq=(SELECT MAX(since_seq) FROM names WHERE name=n.name) ORDER BY name")?;
-        let mut rows = query.query([])?;
-        let mut names = BTreeMap::new();
-        while let Some(row) = rows.next()? {
-            names.insert(row.get(0)?, row.get(1)?);
-        }
-        Ok(names)
+        current_names(&connection)
     }
+}
+
+pub(super) fn current_names(connection: &Connection) -> Result<BTreeMap<String, String>> {
+    let mut query = connection.prepare("SELECT name,hash FROM names n WHERE since_seq=(SELECT MAX(since_seq) FROM names WHERE name=n.name) ORDER BY name")?;
+    let mut rows = query.query([])?;
+    let mut names = BTreeMap::new();
+    while let Some(row) = rows.next()? {
+        names.insert(row.get(0)?, row.get(1)?);
+    }
+    Ok(names)
 }
 
 #[cfg(test)]

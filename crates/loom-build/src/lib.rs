@@ -73,7 +73,7 @@ pub struct Builder {
     store: loom_store::Store,
     root: PathBuf,
     cache: PathBuf,
-    gate: Mutex<()>,
+    gate: std::sync::Arc<Mutex<()>>,
     driver_path: Option<PathBuf>,
 }
 #[derive(Debug)]
@@ -102,7 +102,7 @@ impl Builder {
             store,
             root,
             cache,
-            gate: Mutex::new(()),
+            gate: std::sync::Arc::new(Mutex::new(())),
             driver_path: std::env::var_os("LOOM_HASH_RUSTC").map(PathBuf::from),
         }
     }
@@ -115,11 +115,12 @@ impl Builder {
             store,
             root: self.root.clone(),
             cache: self.cache.clone(),
-            gate: Mutex::new(()),
+            gate: self.gate.clone(),
             driver_path: self.driver_path.clone(),
         }
     }
     pub async fn preflight(&self) -> Result<(), BuildError> {
+        let _guard = self.gate.lock().await;
         self.driver().await.map(|_| ())
     }
     async fn driver(&self) -> Result<identity::Driver, BuildError> {

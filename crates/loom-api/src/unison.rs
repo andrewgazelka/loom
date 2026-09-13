@@ -25,7 +25,7 @@ impl Service {
         }
         Ok(items)
     }
-    fn view_definition(&self, target: &str) -> Result<Value> {
+    pub(super) fn view_definition(&self, target: &str) -> Result<Value> {
         let def = self
             .store
             .resolve(target)?
@@ -134,37 +134,30 @@ impl Service {
     }
     pub(super) async fn unison(&self, operation: &str, args: &Value) -> Result<Value> {
         match operation {
-            "add" | "update" => {
-                let name = if operation == "update" {
-                    field(args, "name")?
-                } else {
-                    match args.get("name").filter(|value| !value.is_null()) {
-                        Some(value) => value.as_str().context("name must be a string")?,
-                        None => "main",
-                    }
+            "update" | "update_view" | "update_repair" | "update_abort" | "update_rebase" => {
+                self.evolution(operation, args).await
+            }
+            "add" => {
+                let name = match args.get("name").filter(|value| !value.is_null()) {
+                    Some(value) => value.as_str().context("name must be a string")?,
+                    None => "main",
                 };
                 ensure!(!name.is_empty(), "definition name is empty");
                 let _guard = self.definitions_gate.lock().await;
-                let previous = if operation == "update" {
-                    ensure!(
-                        self.store.current_names()?.contains_key(name),
-                        "name {name:?} not found"
-                    );
-                    self.store.resolve(name)?
-                } else {
-                    None
-                };
-                let deps = match args.get("deps") {
-                    Some(value) => serde_json::from_value(value.clone())?,
-                    None => match &previous {
-                        Some(definition) => self.store.definition_deps(&definition.hash)?,
-                        None => BTreeMap::new(),
-                    },
-                };
-                let allowed_effects = match args.get("allowed_effects") {
-                    Some(value) => serde_json::from_value(value.clone())?,
-                    None => previous.and_then(|definition| definition.allowed_effects),
-                };
+                ensure!(
+                    !self.store.current_names()?.contains_key(name),
+                    "name {name:?} already exists; use update to propagate changes"
+                );
+                let deps = args
+                    .get("deps")
+                    .map(|value| serde_json::from_value(value.clone()))
+                    .transpose()?
+                    .unwrap_or_default();
+                let allowed_effects = args
+                    .get("allowed_effects")
+                    .map(|value| serde_json::from_value(value.clone()))
+                    .transpose()?
+                    .flatten();
                 let response = self
                     .define_inner(DefineRequest {
                         lang: Lang::Rust,

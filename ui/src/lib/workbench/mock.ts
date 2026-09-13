@@ -84,7 +84,58 @@ export class MockTransport implements Transport {
       if (!def) throw new Error(`Mock view: unknown definition ${body.target}`);
       return def;
     }
-    if (op === V.add || op === V.update)
+    if (
+      [
+        V.update,
+        V.update_view,
+        V.update_repair,
+        V.update_abort,
+        V.update_rebase,
+      ].some((verb) => verb === op)
+    ) {
+      const def = fixture.definitions[0]!;
+      const complete =
+        op === V.update || op === V.update_repair || op === V.update_rebase;
+      return {
+        ...(complete ? { ...def, build: fixture.build } : {}),
+        update: {
+          id: String(body.id ?? "fixture-update"),
+          revision: Number(body.revision ?? 0) + 1,
+          target: def.name,
+          status: complete
+            ? "complete"
+            : op === V.update_abort
+              ? "aborted"
+              : "needs_repair",
+          expected_names: { [def.name]: def.hash },
+          edits: {},
+          changes: complete
+            ? [
+                {
+                  names: [def.name],
+                  old_hash: fixture.definitions[2]!.hash,
+                  new_hash: def.hash,
+                },
+              ]
+            : [],
+          diagnostics:
+            complete || op === V.update_abort
+              ? []
+              : [
+                  {
+                    hash: def.hash,
+                    names: [def.name],
+                    source: def.source,
+                    diagnostics: [
+                      { message: "Expected integer, found string" },
+                    ],
+                    build: null,
+                  },
+                ],
+        },
+      };
+    }
+    if (op === V.add)
       return { ...fixture.definitions[0], build: fixture.build };
     if (op === V.actors) return fixture.actors;
     if (op === V.tree) {

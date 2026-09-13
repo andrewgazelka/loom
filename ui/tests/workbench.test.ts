@@ -33,6 +33,7 @@ const defaults = {
   reason: "shutdown",
   seq: "40",
   group: "workers",
+  revision: "0",
   node_id: "01K4Y0000000000000000000N2",
 };
 function values(id: string): Record<string, string> {
@@ -44,14 +45,14 @@ function values(id: string): Record<string, string> {
   return values;
 }
 describe("operation contract", () => {
-  test("eight definition and twenty-two actor operations, all uniquely named", () => {
+  test("twelve definition and twenty-two actor operations, all uniquely named", () => {
     expect(
       new Set(
         commands
           .filter((command) => command.group === "Definitions")
           .map((command) => command.operation),
       ).size,
-    ).toBe(8);
+    ).toBe(12);
     expect(
       new Set(
         commands
@@ -310,7 +311,7 @@ describe("Rust verb table parity", () => {
         /verb!\(\s*(\w+),\s*(Definition|Actor),\s*(\w+),\s*\[([\s\S]*?)\]\s*\)/g,
       ),
     ];
-    expect(server.length).toBe(30);
+    expect(server.length).toBe(34);
     expect(
       commands
         .filter((command) => !command.query)

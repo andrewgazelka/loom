@@ -26,9 +26,17 @@ export function panelKey(
   if (command.id !== V.add) {
     for (const field of command.fields) {
       if (
-        ["target", "name", "id", "hash", "old", "new", "def", "group"].includes(
-          field.key,
-        )
+        [
+          "target",
+          "name",
+          "id",
+          "hash",
+          "old",
+          "new",
+          "def",
+          "group",
+          "revision",
+        ].includes(field.key)
       )
         identity[field.key] = defaults[field.key] ?? "";
     }
@@ -94,6 +102,7 @@ export class PanelSession {
       this.baseline = {
         ...snapshot.values,
         source: definitionView(result).source,
+        expected_hash: definitionView(result).hash,
       };
       this.state.update((value) => ({
         ...value,
@@ -166,6 +175,24 @@ export class PanelSession {
         actorId: String(body.id ?? ""),
         elapsed: Date.now() - startedAt,
       }));
+      const response =
+        result !== null && typeof result === "object" && !Array.isArray(result)
+          ? result
+          : null;
+      if (this.command.id === V.update && typeof response?.hash === "string") {
+        values.expected_hash = response.hash;
+        this.state.update((value) => ({ ...value, values: { ...values } }));
+      }
+      if (
+        [V.update_repair, V.update_rebase].some(
+          (verb) => verb === this.command.id,
+        ) &&
+        response?.update
+      ) {
+        const update = object(response.update, "update");
+        values.revision = String(update.revision);
+        this.state.update((value) => ({ ...value, values: { ...values } }));
+      }
       this.baseline = values;
       this.state.update((value) => ({ ...value, dirty: false }));
       this.save(undefined);

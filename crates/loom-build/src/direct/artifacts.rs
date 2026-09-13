@@ -163,7 +163,7 @@ pub(super) fn capture(
         });
     }
     let mut units = Vec::new();
-    let mut owners = BTreeMap::<PathBuf, String>::new();
+    let mut owners = BTreeMap::<PathBuf, Dependency>::new();
     let mut sources = BTreeMap::<PathBuf, String>::new();
     while !pending.is_empty() {
         let Some(index) = pending.iter().position(|unit| {
@@ -194,8 +194,8 @@ pub(super) fn capture(
             dependencies.insert(
                 path.to_string_lossy().into_owned(),
                 Dependency {
-                    key: owners[&path].clone(),
-                    hash: blake3::hash(&std::fs::read(&path)?).to_hex().to_string(),
+                    key: owners[&path].key.clone(),
+                    hash: owners[&path].hash.clone(),
                 },
             );
         }
@@ -220,7 +220,15 @@ pub(super) fn capture(
                 .put("rust-artifact", &std::fs::read(&path)?)
                 .map_err(rejected)?;
             let executable = executable(&path)?;
-            owners.insert(path.clone(), key.clone());
+            // Capture runs after compilation has completed under the builder lock.
+            // Reuse these exact output bytes' digest for every consuming unit.
+            owners.insert(
+                path.clone(),
+                Dependency {
+                    key: key.clone(),
+                    hash: hash.clone(),
+                },
+            );
             outputs.push(Output {
                 path,
                 hash,

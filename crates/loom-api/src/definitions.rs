@@ -22,12 +22,21 @@ impl Service {
         let mut intake = self.clone();
         intake.store = self.store.stage_intake()?;
         intake.builder = Arc::new(self.builder.for_store(intake.store.clone()));
-        intake.define_staged(request, &self.store, &progress).await
+        intake
+            .define_staged(request, Some(&self.store), &progress)
+            .await
     }
+    /// Compile one node directly into an already private update store.
+    pub(super) async fn define_update_node(&self, request: DefineRequest) -> Result<Response> {
+        let progress = self.build_progress.start(&request.name);
+        self.builder.preflight().await?;
+        self.define_staged(request, None, &progress).await
+    }
+
     async fn define_staged(
         &self,
         mut request: DefineRequest,
-        destination: &Store,
+        destination: Option<&Store>,
         progress: &build_progress::BuildGuard,
     ) -> Result<Response> {
         progress.stage("check");
@@ -107,20 +116,32 @@ impl Service {
             sig: checked.sig,
         };
         let build_event = json!({"type":"component_built","component_hash":component_hash,"logs_ref":logs_ref,"ms":built.ms,"size":built.component.len(),"rustc_invocations":built.rustc_invocations});
-        destination.commit_intake(
-            &self.store,
-            loom_store::IntakePublication {
-                def: &def,
-                name: Some(&request.name),
-                source: &request.source,
-                deps: &checked.deps,
-                identity: Some(identity),
-                build_event: &build_event,
-            },
-        )?;
+        let published = if let Some(destination) = destination {
+            destination.commit_intake(
+                &self.store,
+                loom_store::IntakePublication {
+                    def: &def,
+                    name: Some(&request.name),
+                    source: &request.source,
+                    deps: &checked.deps,
+                    identity: Some(identity),
+                    build_event: &build_event,
+                },
+            )?;
+            destination
+        } else {
+            self.store.define_with_identity(
+                &def,
+                Some(&request.name),
+                &request.source,
+                &checked.deps,
+                Some(identity),
+            )?;
+            &self.store
+        };
         Ok(Response {
             ok: true,
-            seq: destination.latest_seq()?,
+            seq: published.latest_seq()?,
             diagnostics: Vec::new(),
             result: json!({"def":def,"build":{"ms":built.ms,"component_hash":component_hash,"size":built.component.len(),"logs_ref":logs_ref,"rustc_invocations":built.rustc_invocations}}),
         })

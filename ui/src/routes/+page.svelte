@@ -51,6 +51,7 @@
     array,
     definition,
     definitionView,
+    object,
     flattenTree,
     type Actor,
     type Definition,
@@ -100,7 +101,7 @@
           new: selectedDefinition.hash,
         }
       : {}),
-    ...(currentActor
+    ...(currentActor && command.group === "Actors"
       ? { id: currentActor.id, def: currentActor.behavior_hash }
       : {}),
     ...(commandId === V.add ? { name: "" } : {}),
@@ -228,7 +229,12 @@
       return;
     }
     if (origin.group === "Definitions") {
-      if ([V.view, V.add, V.update].some((verb) => verb === commandId))
+      if (
+        [V.view, V.add, V.update, V.update_repair, V.update_rebase].some(
+          (verb) => verb === commandId,
+        ) &&
+        typeof object(result, "definition result").hash === "string"
+      )
         selectedDef = definitionView(result).hash;
       else if (typeof body.hash === "string") selectedDef = body.hash;
       else if (typeof body.name === "string")

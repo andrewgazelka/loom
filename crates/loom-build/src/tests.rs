@@ -193,3 +193,14 @@ fn parses_cargo_error_amid_benign_warnings() {
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(diagnostics[0].code, "E0308");
 }
+
+#[tokio::test]
+async fn staged_builders_share_the_compiler_workspace_lock() {
+    let store = loom_store::Store::memory().unwrap();
+    let builder = Builder::new(PathBuf::from("."), store.clone());
+    let staged = builder.for_store(store.stage_intake().unwrap());
+    let guard = builder.gate.lock().await;
+    assert!(staged.gate.try_lock().is_err());
+    drop(guard);
+    assert!(staged.gate.try_lock().is_ok());
+}

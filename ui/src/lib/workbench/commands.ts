@@ -3,6 +3,10 @@ const verbNames = [
   "add",
   "view",
   "update",
+  "update_view",
+  "update_repair",
+  "update_abort",
+  "update_rebase",
   "history",
   "diff",
   "run",
@@ -122,10 +126,12 @@ const definitionCommands: Command[] = [
     name: V.update,
     group: "Definitions",
     operation: V.update,
-    description: "Update a named definition",
+    description: "Update a definition and propagate through its callers",
     read: false,
     fields: [
       field("name", "Name"),
+      field("expected_hash", "Expected current hash", { optional: true }),
+      field("request_id", "Recovery request ID", { optional: true }),
       source,
       field("deps", "Dependency names → hashes", {
         kind: "json",
@@ -135,6 +141,55 @@ const definitionCommands: Command[] = [
         kind: "json",
         optional: true,
       }),
+    ],
+  },
+  {
+    id: V.update_view,
+    name: V.update_view,
+    group: "Definitions",
+    operation: V.update_view,
+    description: "Inspect an update session and its diagnostics",
+    read: true,
+    fields: [field("id", "Update session id")],
+  },
+  {
+    id: V.update_repair,
+    name: V.update_repair,
+    group: "Definitions",
+    operation: V.update_repair,
+    description: "Repair affected definitions and retry propagation atomically",
+    read: false,
+    fields: [
+      field("id", "Update session id"),
+      field("revision", "Expected session revision", { kind: "number" }),
+      field("changes", "Repairs by definition name", {
+        kind: "json",
+        initial: "{}",
+      }),
+    ],
+  },
+  {
+    id: V.update_abort,
+    name: V.update_abort,
+    group: "Definitions",
+    operation: V.update_abort,
+    description: "Abort an update session without publishing its changes",
+    read: false,
+    fields: [
+      field("id", "Update session id"),
+      field("revision", "Expected session revision", { kind: "number" }),
+    ],
+  },
+  {
+    id: V.update_rebase,
+    name: V.update_rebase,
+    group: "Definitions",
+    operation: V.update_rebase,
+    description: "Retry a conflicted update against the current namespace",
+    read: false,
+    fields: [
+      field("id", "Update session id"),
+      field("revision", "Expected session revision", { kind: "number" }),
     ],
   },
   {
@@ -431,6 +486,41 @@ export function parseFields(
     )
   )
     throw new Error("allowed_effects: expected effect labels");
+  if (
+    "revision" in result &&
+    (typeof result.revision !== "number" || result.revision < 0)
+  )
+    throw new Error(
+      "Expected session revision: expected a nonnegative integer",
+    );
+  if (command.operation === V.update_repair) {
+    for (const [name, change] of Object.entries(
+      object(result.changes, "changes"),
+    )) {
+      if (!name.trim())
+        throw new Error("changes: definition name must not be empty");
+      const repair = object(change, `changes.${name}`);
+      if (typeof repair.source !== "string")
+        throw new Error(`changes.${name}.source: expected Rust source`);
+      if (
+        repair.deps !== undefined && repair.deps !== null &&
+        Object.values(object(repair.deps, `changes.${name}.deps`)).some(
+          (value) => typeof value !== "string",
+        )
+      )
+        throw new Error(`changes.${name}.deps: expected dependency hashes`);
+      if (
+        repair.allowed_effects !== undefined &&
+        repair.allowed_effects !== null &&
+        array(repair.allowed_effects, `changes.${name}.allowed_effects`).some(
+          (value) => typeof value !== "string",
+        )
+      )
+        throw new Error(
+          `changes.${name}.allowed_effects: expected effect labels`,
+        );
+    }
+  }
   if ("spec" in result && result.spec !== null) object(result.spec, "spec");
   if (command.query) result.query = command.query;
   return result;

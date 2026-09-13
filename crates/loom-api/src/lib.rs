@@ -7,6 +7,7 @@ mod source;
 #[cfg(test)]
 mod tests;
 mod unison;
+mod evolution;
 pub use http::{protect, protect_public, router};
 use source::*;
 mod auth;
@@ -216,6 +217,10 @@ fn command_returns_direct(command: &str) -> bool {
         "add"
             | "view"
             | "update"
+            | "update_view"
+            | "update_repair"
+            | "update_abort"
+            | "update_rebase"
             | "history"
             | "diff"
             | "run"

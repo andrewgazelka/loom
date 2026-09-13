@@ -17,6 +17,8 @@ mod recording;
 #[cfg(test)]
 mod tests;
 mod trace;
+mod update;
+pub use update::UpdateSession;
 use anyhow::{Context, Result, anyhow, ensure};
 pub use intake::IntakePublication;
 use loom_proto::{Def, Event, Value};

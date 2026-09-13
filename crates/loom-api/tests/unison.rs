@@ -121,7 +121,7 @@ async fn diff_reports_item_level_changes() {
     for key in ["added", "removed", "changed"] {
         assert!(diff[key].as_array().unwrap().is_empty(), "{diff}");
     }
-    let new = add(&service, SECOND).await;
+    let new = command(&service, "update", json!({"name":"answer","source":SECOND})).await;
     assert_ne!(old["hash"], new["hash"]);
     let diff = command(
         &service,
@@ -155,7 +155,7 @@ async fn run_returns_output_and_effects() {
 }
 #[tokio::test]
 #[ignore = "requires Rust guest toolchain and LOOM_COMPILER_CACHE_OWNER"]
-async fn dependents_follow_pins() {
+async fn update_propagates_names_and_preserves_historical_pins() {
     let service = service();
     let old = add(&service, FIRST).await;
     let dependent = command(&service,"add",json!({"name":"caller","source":"pub fn main() -> i32 { answer::main() }","deps":{"answer":old["hash"]}})).await;
@@ -164,13 +164,19 @@ async fn dependents_follow_pins() {
         command(&service, "dependents", json!({"hash":old["hash"]})).await,
         json!([dependent["hash"]])
     );
+    let current = command(&service, "view", json!({"target":"caller"})).await;
+    assert_ne!(current["hash"], dependent["hash"]);
     assert_eq!(
         command(&service, "dependents", json!({"hash":new["hash"]})).await,
-        json!([])
+        json!([current["hash"]])
+    );
+    assert_eq!(
+        command(&service, "run", json!({"target":dependent["hash"]})).await["output"],
+        41
     );
     assert_eq!(
         command(&service, "run", json!({"target":"caller"})).await["output"],
-        41
+        42
     );
     let updated = command(
         &service,
@@ -183,11 +189,11 @@ async fn dependents_follow_pins() {
             .store
             .definition_deps(updated["hash"].as_str().unwrap())
             .unwrap()["answer"],
-        old["hash"].as_str().unwrap()
+        new["hash"].as_str().unwrap()
     );
     assert_eq!(
         command(&service, "run", json!({"target":"caller"})).await["output"],
-        42
+        43
     );
 }
 

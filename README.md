@@ -59,6 +59,32 @@ See [the guide's Try it section](docs/guide.md#try-it) for transport details and
 
 The package includes `nightly-2026-08-24` and the prebuilt content-hashing rustc driver. Guest compilation uses those tools through the launcher’s `RUSTC` and `LOOM_HASH_RUSTC` settings.
 
+## Updating functions and callers
+
+`update` rebuilds affected definitions in dependency order and publishes their names
+in one transaction. Historical hashes remain executable. If a caller stops
+typechecking, the response contains `update.status: "needs_repair"`, a durable
+session ID and revision, and the affected sources with compiler diagnostics. Live
+names retain their previous definitions until the entire update succeeds.
+
+Agents should pass `expected_hash` from the source they edited and a unique
+`request_id` that can recover the session after a timeout, then use
+`update_view` and `update_repair` with the latest session revision. Repairs are a
+JSON map of names to source edits, so a script can submit several fixes together.
+`update_rebase` retains repairs across disjoint namespace changes and refuses to
+overwrite a concurrently edited definition. `add` requires a new name.
+
+The CLI, HTTP, MCP and browser use these same commands. See
+[the scripting example](examples/evolution/README.md) for a runnable update and
+repair client. The native regression command is:
+
+```sh
+LOOM_URL=http://127.0.0.1:8817 LOOM_TOKEN_FILE=/path/to/disposable/token bun scripts/e2e-evolution.ts
+```
+
+It creates test definitions in the supplied daemon and reports `N/8`; use a
+disposable state directory. A pass requires `8/8` and exit status zero.
+
 ## Effects
 
 Effect rows are inferred from resolved calls, including concrete trait and generic calls. A runtime-selected `perform` label is rejected with its call site; use a literal or Rust constant label.
@@ -154,7 +180,9 @@ and return `{ok, seq, result, diagnostics}`, including failures. Omitted spawn
 
 | tool | does |
 | --- | --- |
-| `add(source, name?)` / `update(name, source)` | publish a definition and its inferred entry rows |
+| `add(source, name?)` / `update(name, source, expected_hash?)` | add a new name or atomically update it and its callers |
+| `update_view(id)` / `update_repair(id, revision, changes)` | inspect a durable update and submit a batch of source repairs |
+| `update_rebase(id, revision)` / `update_abort(id, revision)` | retry after disjoint namespace changes or abort pending work |
 | `view(target)` / `history(name)` | stored source and definition history |
 | `diff(old, new)` / `dependents(hash)` | item differences and pinned callers |
 | `run(target, args?)` / `find(text)` | execute or search definitions |
@@ -201,7 +229,7 @@ Mutually recursive items share one cycle hash and receive indexed member hashes.
 Inherent method calls resolve to one method; trait calls retain the trait method identity.
 Generic bodies hash once, and monomorphized implementations are outside that identity.
 Wasm and toolchain digests must separately identify each executable realization.
-The loom-build and storage seam is documented in docs/content-addressed-code.md and is not yet connected.
+The build pipeline verifies compiler identities and stores item preimages alongside executable identities; see docs/content-addressed-code.md.
 
 Details: [docs/content-addressed-code.md](docs/content-addressed-code.md).
 ## Layout

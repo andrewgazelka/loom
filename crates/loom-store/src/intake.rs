@@ -35,9 +35,7 @@ impl Store {
         let source = staged.lock()?;
         let mut destination = self.lock()?;
         let tx = destination.transaction()?;
-        copy_rows(&source, &tx, "cas", "hash,kind,bytes,created_at,codec")?;
-        copy_rows(&source, &tx, "cas_codecs", "hash,codec")?;
-        import_caches(&source, &tx)?;
+        import_build_objects(&source, &tx)?;
         let seq = publication::write(
             &tx,
             publication.def,
@@ -54,6 +52,34 @@ impl Store {
         tx.commit()?;
         Ok(seq)
     }
+}
+
+pub(super) fn import_build_objects(source: &Connection, destination: &Connection) -> Result<()> {
+    // Historical objects are immutable. Read their keys, not their potentially
+    // large payloads, when importing a staged build into its original store.
+    let mut keys = source.prepare("SELECT hash FROM cas")?;
+    let mut existing = destination.prepare("SELECT EXISTS(SELECT 1 FROM cas WHERE hash=?)")?;
+    let mut object = source.prepare("SELECT kind,bytes,created_at,codec FROM cas WHERE hash=?")?;
+    let mut insert = destination
+        .prepare("INSERT INTO cas(hash,kind,bytes,created_at,codec) VALUES (?,?,?,?,?)")?;
+    let mut rows = keys.query([])?;
+    while let Some(row) = rows.next()? {
+        let hash: String = row.get(0)?;
+        if existing.query_row([&hash], |row| row.get::<_, bool>(0))? {
+            continue;
+        }
+        let mut data = object.query([&hash])?;
+        let row = data.next()?.context("staged object disappeared")?;
+        insert.execute(params![
+            hash,
+            row.get::<_, String>(0)?,
+            row.get::<_, Vec<u8>>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, i64>(3)?
+        ])?;
+    }
+    copy_rows(source, destination, "cas_codecs", "hash,codec")?;
+    import_caches(source, destination)
 }
 
 struct CacheTable {

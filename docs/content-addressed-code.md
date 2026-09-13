@@ -96,17 +96,23 @@ There are also exclusions, which must not be mistaken for over-approximations. T
 
 The encoder fails explicitly on delegated type inference, unsupported local referent kinds, and missing compiler resolution states. Associated-type shorthand in signatures and bodies is supported as described below. It does not substitute source text, unresolved names, or a whole-crate hash. Other unhandled forms must receive an encoder and a fixture before the supported surface is widened. Changing the encoder schema requires a new stream version and rehashing stored definitions. Cross-nightly hash compatibility is not promised.
 
-## Seam for loom-build
+## Integration with loom-build
 
-This seam is specified here; it is not wired into storage or the build coordinator yet. Use the existing direct build path with `RUSTC=tools/hash-rustc/target/release/hash-rustc`, resolved to an absolute path before changing working directories. Set `LOOM_ITEM_HASHES` to a unique root-compilation output path and `LOOM_ITEM_PREIMAGES` to its preimage directory. Dependency builds and concurrent crates must not share that path. Preserve `LOOM_RUSTC_ARGUMENTS`, working directory, environment, target, and outputs when replaying a captured recipe.
+`loom-build::identity` validates the compiler document and rehashes item and cycle
+preimages before importing them into the CAS. The definition identity combines
+its public entry identities. Stored metadata keeps the behavior hash, Wasm hash,
+toolchain hash and item-document reference separate. `view` exposes these values.
 
-`direct.rs` currently has an isolated replay branch that selects `sysroot/bin/rustc`. Integration must preserve the configured driver there too; setting `RUSTC` alone does not establish this seam for every existing replay. Invalidate existing build-cache entries when adding the side-output contract, and require the JSON on cache hits. A successful root build without its requested JSON is an error, not permission to use the old identity.
+`loom-api` compiles new definitions in a private store and publishes them through
+`loom-store::commit_intake`. A graph update uses one private store for all affected
+definitions, then `commit_update` publishes their names and session outcome in one
+transaction. A failed caller leaves live names unchanged. Builder clones share
+the compiler workspace lock because their filesystem artifacts are mutable even
+when the definition stores are isolated.
 
-After the build succeeds, validate the JSON and rehash every referenced preimage, select the requested entry explicitly, and store the item preimages and cycle objects in the CAS under their verified hashes. Store item hashes and reference relationships as definition metadata. Store the JSON document under its own document-byte hash; inserting JSON bytes under an item digest would violate the CAS contract. The driver now exports all item preimages and cycle objects; wiring their verified ingestion into the existing CAS remains the integration task.
-
-Set `defs.behavior_hash` to the selected entry hash. Record the emitted Wasm's digest as `wasm_hash`; define `toolchain_hash` as BLAKE3 over length-framed fields containing the exact toolchain string, the verbatim `toolchain` text, the hash-rustc encoder/build identity, target, compiler arguments, and dependency/build-input identities. This distinguishes executable realizations that the HIR contract intentionally equates. Add `wasm_hash` and `toolchain_hash` to `code_changes`, and carry them through promotion, history, export/import, restore, and replay.
-
-The current `defs` schema has no `behavior_hash` column, and the actor `code_changes` schema has neither new column. Migration must preserve existing records, distinguish old artifact-based identities from verified HIR identities, recompile and verify existing definitions where source is available, and only then retire the old identity path. This driver does not perform that migration.
+This integration does not make HIR identity a complete executable identity. The
+exclusions above still require separate Wasm and toolchain digests. See
+[scripted updates](../examples/evolution/README.md) for propagation and recovery.
 
 ## Implemented loom-rt seam: a CAS-backed function compilation cache
 
