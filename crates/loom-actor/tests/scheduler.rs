@@ -65,3 +65,66 @@ async fn unknown_wake_is_an_error() {
     assert!(format!("{error:#}").contains("actor file does not exist"));
     assert!(node.scheduling().unwrap().woken.contains(&missing));
 }
+
+#[tokio::test]
+async fn one_hundred_messages_share_bounded_scheduler_batches() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut registry = Registry::new();
+    registry.insert("scheduler-noop".into(), Arc::new(Noop));
+    let node =
+        Node::new(dir.path(), Arc::new(registry), Arc::new(DefaultEffects), Config { io: Io::Memory, ..Config::default() }).await.unwrap();
+    let id = node.spawn_root("scheduler-noop", b"").await.unwrap();
+    node.run_until_idle().await.unwrap();
+    node.scheduling().unwrap().step_attempts.clear();
+    for n in 0..100 {
+        node.send(&id, &format!("batch:{n}"), b"message").await.unwrap();
+    }
+    assert_eq!(node.run_until_idle().await.unwrap(), 100);
+    assert_eq!(node.open(&id).await.unwrap().cursor().await.unwrap(), 100);
+    let actor = node.open(&id).await.unwrap();
+    let rows = actor.sql("SELECT COUNT(*) FROM inbox WHERE state='done'", ()).await.unwrap();
+    assert_eq!(rows.rows[0].get::<i64>(0).unwrap(), 100);
+    let attempts = node.scheduling().unwrap().step_attempts[&id];
+    assert!((2..=3).contains(&attempts), "100 messages used {attempts} scheduler tasks");
+}
+
+struct Selective;
+#[async_trait]
+impl Behavior for Selective {
+    fn hash(&self) -> &str {
+        "scheduler-selective"
+    }
+    fn schema(&self) -> &str {
+        "CREATE TABLE received(value TEXT)"
+    }
+    async fn handle(&self, cx: &mut Ctx<'_>, msg: &[u8]) -> Result<(), Trap> {
+        if msg == b"defer" && cx.sql("SELECT value FROM received WHERE value='release'", ()).await?.rows.is_empty() {
+            return cx.defer();
+        }
+        cx.sql("INSERT INTO received(value) VALUES (?)", [std::str::from_utf8(msg).unwrap()]).await?;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn deferral_ends_batch_then_retries_after_intervening_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut registry = Registry::new();
+    registry.insert("scheduler-selective".into(), Arc::new(Selective));
+    let node =
+        Node::new(dir.path(), Arc::new(registry), Arc::new(DefaultEffects), Config { io: Io::Memory, ..Config::default() }).await.unwrap();
+    let id = node.spawn_root("scheduler-selective", b"").await.unwrap();
+    node.run_until_idle().await.unwrap();
+    node.scheduling().unwrap().step_attempts.clear();
+    for msg in ["first", "defer", "release", "last"] {
+        node.send(&id, msg, msg.as_bytes()).await.unwrap();
+    }
+    // The deferred attempt counts as a processed turn, as before batching.
+    assert_eq!(node.run_until_idle().await.unwrap(), 5);
+    assert_eq!(node.scheduling().unwrap().step_attempts[&id], 2);
+    let actor = node.open(&id).await.unwrap();
+    assert_eq!(actor.cursor().await.unwrap(), 4);
+    let rows = actor.sql("SELECT value FROM received ORDER BY rowid", ()).await.unwrap();
+    let received: Vec<String> = rows.rows.iter().map(|row| row.get(0).unwrap()).collect();
+    assert_eq!(received, ["first", "release", "defer", "last"]);
+}
