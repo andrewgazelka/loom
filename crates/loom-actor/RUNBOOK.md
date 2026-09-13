@@ -303,3 +303,11 @@ The new path issues **6 per message**: mailbox selection, BEGIN, inbox completio
 Mechanism coverage in `tests/scheduler.rs` adds 100 exact completions in two to three scheduler tasks, and a mid-batch deferral which ends its task, commits the releasing message, then retries the deferred message in selective-receive order. No builds or tests were run in the write-only lane.
 
 Adjacent observations, left unchanged: mailbox selection still sorts unfinished rows by selective-receive priority; completion still aggregates the inbox on every message. Each outbox delivery still reads the source generation and uses a receiver transaction plus a source acknowledgment transaction. Capability authorization and outbox-position reads remain per send. These costs can become the next floor, especially for broadcast, after scheduler overhead falls.
+
+### Completion regression follow-up
+
+The coordinator's gate for integration commit `3fa9c5c` failed five targets; the integration target had 1 pass and 26 failures. Fresh-message domain writes were absent and actors were parked. Source tracing finds live admission reads, committed publication wakes and a root wake during Node initialization. Node initialization enqueues configure; it does not itself drain that message before host spawn.
+
+The new completion SQL is the remaining source-level suspect: a completion error is a runtime Trap, so retries roll back domain writes and exhausted retries poison/park the actor. Scheduler progress counts that poison attempt and the drain can return Ok. The follow-up replaces the correlated derived-table aggregate with a flat MIN/MAX/COUNT aggregate and replaces INSERT SELECT UNION ALL with bound multirow VALUES. Cursor, epoch and boundary semantics and the six-statement count are retained. The exact Turso error was not supplied with the gate result; this diagnosis and fix await the coordinator's rerun.
+
+`fresh_root_and_child_commit_all_three_messages` covers memory and syscall I/O without a warm-up drain. It checks root configure, three committed child domain rows, inbox completion, every commit-order/boundary/code-at receipt and an empty dead-letter table. Failures print the dead-letter errors before checking progress counts. No builds or tests ran in this write-only follow-up.
