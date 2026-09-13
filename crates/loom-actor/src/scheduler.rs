@@ -19,8 +19,50 @@ struct Progress {
     deadline: Option<i64>,
 }
 
+async fn service_stop(stop: &mut Option<tokio::sync::watch::Receiver<bool>>) {
+    let Some(stop) = stop else { return std::future::pending().await };
+    loop {
+        if *stop.borrow() { return; }
+        if stop.changed().await.is_err() { return; }
+    }
+}
+
 impl Node {
+    /// Daemon-owned scheduler; shutdown drains admitted turns without aborting them.
+    pub async fn run_service(&self, mut stop: tokio::sync::watch::Receiver<bool>) -> Result<()> {
+        loop {
+            let wake = self.wake.notified();
+            tokio::pin!(wake);
+            wake.as_mut().enable();
+            if *stop.borrow() || stop.has_changed().is_err() || self.shipping.closed.load(std::sync::atomic::Ordering::Acquire) {
+                return Ok(());
+            }
+            let result = {
+                let _admission = self.admit().await?;
+                let _run = self.run_gate.lock().await;
+                self.run_until_idle_service(Some(stop.clone())).await
+            };
+            if let Err(error) = result {
+                eprintln!("actor <node> seq -1: cluster scheduler: {error:#}");
+                // Failed destinations retry on this bounded tick; stop removes the wait.
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {},
+                    _ = stop.changed() => {},
+                }
+            } else {
+                tokio::select! {
+                    _ = wake => {},
+                    _ = stop.changed() => {},
+                }
+            }
+        }
+    }
+
     pub(crate) async fn run_until_idle_inner(&self) -> Result<usize> {
+        self.run_until_idle_service(None).await
+    }
+
+    async fn run_until_idle_service(&self, mut stop: Option<tokio::sync::watch::Receiver<bool>>) -> Result<usize> {
         let mut processed = 0;
         let mut jobs = tokio::task::JoinSet::new();
         let mut owners = HashMap::new();
@@ -32,7 +74,8 @@ impl Node {
         let mut timer_scan_needed = true;
         let mut failure = None;
         loop {
-            if failure.is_none() {
+            let stopping = stop.as_ref().is_some_and(|stop| *stop.borrow() || stop.has_changed().is_err());
+            if failure.is_none() && !stopping {
                 for id in self.actor_ids()? {
                     if running.contains(&id) || idle.contains(&id) {
                         continue;
@@ -85,11 +128,13 @@ impl Node {
                 if let Some(error) = failure {
                     return Err(error);
                 }
+                if stopping { return Ok(processed); }
                 if let Some(at) = deadline {
                     let delay = u64::try_from(i64::saturating_sub(at, crate::effects::now()?).max(0))?;
                     tokio::select! {
                         _ = tokio::time::sleep(std::time::Duration::from_millis(delay)) => {},
                         _ = self.wake.notified() => { idle.clear(); },
+                        _ = service_stop(&mut stop) => {},
                     }
                     timer_scan_needed = true;
                     continue;
@@ -98,8 +143,11 @@ impl Node {
             }
             let completed = tokio::select! {
                 completed = jobs.join_next() => completed,
-                _ = self.wake.notified(), if failure.is_none() => { idle.clear(); dirty.extend(running.iter().cloned()); timer_scan_needed = true; continue; },
-                _ = tokio::time::sleep(std::time::Duration::from_millis(5)), if failure.is_none() && !timer_running => {
+                _ = service_stop(&mut stop), if !stopping => { continue; },
+                _ = self.wake.notified(), if failure.is_none() && !stopping => {
+                    idle.clear(); dirty.extend(running.iter().cloned()); timer_scan_needed = true; continue;
+                },
+                _ = tokio::time::sleep(std::time::Duration::from_millis(5)), if failure.is_none() && !timer_running && !stopping => {
                     timer_scan_needed = true;
                     continue;
                 },

@@ -24,6 +24,7 @@ pub(crate) struct ShippingState {
     pub actors: Mutex<HashMap<String, Published>>,
     pub failures: Mutex<Vec<crate::ShippingFailure>>,
     pub closed: AtomicBool,
+    pub paused: AtomicBool,
 }
 impl ShippingState {
     pub fn get(&self, id: &str) -> Result<Published> {
@@ -153,6 +154,13 @@ impl Node {
             None => self.open_actor(id).await?.conn,
         };
         let mut conn = connection.lock().await;
+        // Do not hold the receiver lock while paused: ingress must be able to
+        // commit a row whose acknowledgement then waits for this publication.
+        if self.shipping.get(id)?.changes != Some(changes(&conn).await?) {
+            drop(conn);
+            self.wait_shipping_enabled(id).await?;
+            conn = connection.lock().await;
+        }
         let result = self.ship_connection(id, &conn, true).await;
         if let Err(error) = &result {
             self.record_shipping_failure(id, error);

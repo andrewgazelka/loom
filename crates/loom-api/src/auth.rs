@@ -53,6 +53,8 @@ pub struct TokenConfig {
 #[derive(Clone)]
 pub struct Authorizer {
     tokens: Arc<Vec<TokenConfig>>,
+    ingress: Option<String>,
+    pub(crate) public: bool,
 }
 impl Authorizer {
     pub fn single(token: String) -> Result<Self> {
@@ -74,6 +76,17 @@ impl Authorizer {
         }
         Ok(Self {
             tokens: Arc::new(tokens),
+            ingress: None,
+            public: false,
+        })
+    }
+    pub fn with_ingress_bearer(mut self, bearer: Option<String>) -> Self {
+        self.ingress = bearer;
+        self
+    }
+    pub(crate) fn is_ingress(&self, candidate: &str) -> bool {
+        self.ingress.as_ref().is_some_and(|bearer| {
+            bool::from(bearer.as_bytes().ct_eq(candidate.as_bytes()))
         })
     }
     pub fn authenticate(&self, candidate: &str) -> Option<Access> {

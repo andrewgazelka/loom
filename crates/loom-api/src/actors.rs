@@ -1,13 +1,14 @@
 mod args;
 mod inspection;
 mod operations;
+mod cluster;
 use crate::{Access, Scope};
 use args::*;
 use loom_actor::{Cap, ChildSpec, Node, Rights, Rows};
 use serde_json::{Value, json};
 #[derive(Clone)]
 pub struct ActorService {
-    node: Node,
+    pub(crate) node: Node,
 }
 fn error(error: impl std::fmt::Display) -> anyhow::Error {
     anyhow::anyhow!("{error:#}")
@@ -72,23 +73,18 @@ impl ActorService {
         Ok(cap)
     }
     async fn tree(&self, root: &str) -> anyhow::Result<Value> {
+        if let Some(value) = self.forward_command("tree", &json!({"root":root})).await? {
+            return Ok(value);
+        }
         self.authority(root, Rights::INSPECT, "tree")
             .await
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-        let entries = self.node.tree(root).await?;
-        let mut nodes = std::collections::HashMap::new();
-        for entry in entries.iter().rev() {
-            let info = self.node.info(&entry.id).await?;
-            let children: Vec<Value> = info
-                .children
-                .iter()
-                .filter_map(|id| nodes.remove(id))
-                .collect();
-            nodes.insert(entry.id.clone(), json!({"id":entry.id,"status":entry.status,"behavior_hash":entry.behavior_hash,"cursor":info.cursor,"children":children}));
+        let info = self.node.info(root).await?;
+        let mut children = Vec::new();
+        for child in &info.children {
+            children.push(Box::pin(self.tree(child)).await?);
         }
-        nodes
-            .remove(root)
-            .ok_or_else(|| anyhow::anyhow!("actor {root} seq -1: missing tree root"))
+        Ok(json!({"id":root,"status":info.status,"behavior_hash":info.behavior_hash,"cursor":info.cursor,"children":children}))
     }
     async fn rows(
         &self,
@@ -97,6 +93,9 @@ impl ActorService {
         query: &str,
         params: Vec<Value>,
     ) -> Result<Value, anyhow::Error> {
+        if let Some(value) = self.forward_command("sql", &json!({"id":id,"query":query,"params":params})).await? {
+            return Ok(value);
+        }
         let cap = self.authority(id, Rights::INSPECT, operation).await?;
         let actor = self.node.open(&cap.target).await.map_err(error)?;
         let params = sql_params(params).map_err(|e| error(format!("actor {id} seq -1: {e}")))?;
@@ -126,10 +125,16 @@ impl ActorService {
 }
 impl ActorService {
     async fn command(&self, access: &Access, command: &str, args: Value) -> anyhow::Result<Value> {
+        access.require(crate::auth::command_scope(command))?;
+        if let Some(result) = self.forward_command(command, &args).await? {
+            return Ok(result);
+        }
         match command {
+            "nodes" => json_value(self.node.nodes().await.map_err(error)?),
+            "move" => json_value(self.node.move_actor(crate::field(&args, "id")?, crate::field(&args, "node_id")?).await.map_err(error)?),
             "actors" => {
                 access.require(Scope::Read)?;
-                self.actor_list().await
+                self.cluster_actor_list(args["cluster"].as_bool().unwrap_or(false)).await
             }
             "tree" => {
                 access.require(Scope::Read)?;

@@ -462,7 +462,7 @@ The store layout is:
   version is the condition on every head update. `snapshot` holds the full object
   key (null before the initial snapshot), including the epoch that wrote it.
 - `actors/<id>/lease`: JSON `{owner, epoch, expires_at}`. Expiry is Unix time in
-  milliseconds; owner identities are generated per Node instance.
+  milliseconds; clustered owners use the persisted node identity described in [multi-node.md](multi-node.md).
 
 The durable revision `seq` is separate from the contiguous inbox cursor. Both
 advance together for an ordinary message stream; a control change, selective
@@ -593,9 +593,11 @@ the bare-id guest APIs above. A cap contains `target: ActorId`, `cap_id: u64`,
 `epoch: u64`, `rights: Rights`, and `mac: [u8; 32]`. Rights occupy seven bits:
 SEND, SPAWN, STOP, MONITOR, LINK, PROMOTE, and INSPECT. The MAC is
 `blake3::keyed_hash(node_key, target || cap_id || epoch || rights)`, with numeric
-fields encoded as eight little-endian bytes. The 32-byte key is generated at node
-initialization and retained in `_node.db.meta`; actor files and messages never
-receive it. A capability minted by another node therefore has no authority here.
+fields encoded as eight little-endian bytes. Standalone nodes generate and retain
+their key in `_node.db.meta`. Clustered nodes use `--cluster-key-file` and retain
+only its hash there; actor files and messages never receive the key. A capability
+minted by another cluster has no authority here. Nodes in the same cluster retain
+authority across actor movement, as specified in [multi-node.md](multi-node.md).
 
 `cx.send(&cap, msg)`, `stop`, `shutdown`, `monitor`, `link`, `unlink`, `restart`,
 `inspect`, `inspect_sql`, `promote`, `send_after`, `call`, and `reply` take capabilities. The host

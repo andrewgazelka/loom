@@ -132,6 +132,15 @@ impl Node {
 
     /// The sender pump serializes call delivery; the monitor is installed before the call envelope.
     pub(crate) async fn deliver_call(&self, sender: &str, target: &str, msg: &[u8], key: &str) -> Result<()> {
+        self.route_relationship(
+            sender,
+            crate::relation_delivery::RelationshipWrite::Call { target: target.into(), msg: msg.into(), key: key.into() },
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn deliver_call_local(&self, sender: &str, target: &str, msg: &[u8], key: &str) -> Result<()> {
         let request: CallRequest = serde_json::from_slice(msg)?;
         let source = self.open_actor(sender).await?;
         {
@@ -152,7 +161,12 @@ impl Node {
         let envelope = serde_json::to_vec(
             &serde_json::json!({"type":"call","ref":request.reference,"from":sender,"msg":request.msg,"reply_cap":request.reply_cap}),
         )?;
-        self.deliver_message(target, key, sender, &envelope).await?;
+        self.check_lease(sender)?;
+        let forwarding: std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool>> + Send + '_>> =
+            Box::pin(self.route_delivery(crate::DeliveryOp::Message {
+                target: target.into(), key: key.into(), sender: sender.into(), msg: envelope,
+            }));
+        ensure!(forwarding.await?, "actor {sender} seq -1: call delivery is still pending");
         let mut conn = source.conn.lock().await;
         let tx = conn.transaction().await?;
         tx.execute("UPDATE timers SET armed=1 WHERE ref=? AND kind='call'", [request.reference]).await?;

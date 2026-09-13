@@ -129,12 +129,30 @@ async fn verify(node: &Node, conn: &turso::Connection, cap: &Cap, right: Rights,
     }
     // A child capability is usable in the spawning transaction, before the pump
     // creates its file. The parent transaction is the owner of this pending state.
-    let pending =
-        actor::query(conn, "SELECT id FROM children WHERE id=?", [cap.target.as_str()]).await.map_err(EffectError::Environmental)?;
-    if !pending.rows.is_empty() && !node.path(&cap.target).exists() && !node.connections.lock().await.contains_key(&cap.target) {
+    let spawns = actor::query(conn, "SELECT msg FROM outbox WHERE target='spawn' AND delivered=0", ())
+        .await.map_err(EffectError::Environmental)?;
+    let mut pending = false;
+    for row in spawns.rows {
+        let bytes: Vec<u8> = row.get(0).map_err(|error| EffectError::Environmental(error.into()))?;
+        let spawn: crate::Spawn = serde_json::from_slice(&bytes).map_err(|error| EffectError::Environmental(error.into()))?;
+        if matches!(spawn, crate::Spawn::Child { id, .. } if id == cap.target) {
+            pending = true;
+            break;
+        }
+    }
+    let unowned = node.config.store.is_none()
+        || matches!(node.resolve(&cap.target).await.map_err(EffectError::Environmental)?, crate::Placement::Unowned);
+    if pending && let Some(store) = &node.remote {
+        // A published head means this child existed already; restore and verify its revocations.
+        pending = store.read::<serde_json::Value>(&format!("actors/{}/head", cap.target))
+            .await.map_err(EffectError::Environmental)?.is_none();
+    }
+    if pending && unowned && !node.path(&cap.target).exists() && !node.connections.lock().await.contains_key(&cap.target) {
         node.verify_cap_mac(cap, right, name)?;
         if cap.epoch != 0 {
-            return Err(EffectError::Deterministic(anyhow::anyhow!("{name} cap_id {}: pending child epoch must be zero", cap.cap_id)));
+            return Err(EffectError::Deterministic(anyhow::anyhow!(
+                "invalid authority: {name} cap_id {}: pending child epoch must be zero", cap.cap_id
+            )));
         }
         return Ok(());
     }
@@ -154,7 +172,7 @@ pub(crate) async fn execute(node: &Node, conn: &turso::Connection, key: &EffectK
             let revoked: Cap = serde_json::from_slice(&bytes).map_err(|e| EffectError::Environmental(e.into()))?;
             if revoked.cap_id == presented.cap.cap_id {
                 return Err(EffectError::Deterministic(anyhow::anyhow!(
-                    "{} cap_id {}: revoked in this transaction",
+                    "invalid authority: {} cap_id {}: revoked in this transaction",
                     presented.name,
                     presented.cap.cap_id
                 )));

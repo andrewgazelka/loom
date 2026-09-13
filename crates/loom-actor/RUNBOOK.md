@@ -181,3 +181,47 @@ Kill and shutdown deadlines cancel only the native handler future, then await th
 With an explicit syscall/io_uring VFS, Turso treats `:memory:` as a literal filename. Scratch connections used while replacing a cached connection therefore select `Io::Memory` explicitly, independently of the node’s persistent I/O selection. The reset regression passes without creating `:memory:` or `:memory:-wal` files.
 
 On Linux hosts with an 8 MiB locked-memory limit, concurrent io_uring-backed tests can fail with `io_uring_setup: out of memory` despite ample ordinary RAM. The 22 actor tests and 4 MCP tests pass with `RUST_TEST_THREADS=4 cargo test -p loom-actor -p loom-mcp` on such a host. Size test concurrency against ring-allocation headroom; keep the selected VFS unchanged.
+
+## Cluster (multi-node)
+
+This lane authored code and tests only. No builds, tests, formatters, Nix commands or scripts were run. The lead must run the consolidated gate from this worktree; neither 8/8 nor 5/5 is claimed.
+
+```sh
+cargo fmt --all -- --check
+cargo test -p loom-actor --test cluster
+cargo test -p loom-actor -p loom-api -p loom-mcp -p loom-cli -p loom-proto
+cargo clippy -p loom-actor -p loom-api -p loom-mcp -p loom-cli -p loom-proto -p loomd --all-targets -- -D warnings
+cargo build -p loomd -p loom-cli
+scripts/cluster-e2e.sh
+```
+
+The cluster target contains the eight exact spec names. The process script requires `jq`, the prebuilt binaries and the existing Rust guest toolchain. It admits `examples/unison/counter.rs` to both definition stores, prints `N/5`, and returns zero only for 5/5. Failed runs retain their isolated directory and logs; the gate owner removes them. Latency p50/p99 on local storage and MinIO, and measured takeover time, remain for the lead's execution gate.
+
+Deviations and implementation choices relative to `docs/multi-node.md`:
+
+- Supporting files split transport, publication waiting, movement, authority, relationships and test fixtures out of the code-map files to keep each changed Rust file below 400 lines. The shared destination implementation remains `Node::apply_delivery` and the existing delivery helpers.
+- The requested `src/initialize.rs` is actually `src/actor/initialize.rs`, which initializes actor files. `_node.db` cluster-key validation instead runs in `capability::node_key`, called by `Node::new`; no actor-file key migration was added.
+- Empty `ClusterConfig.node_id` selects the persisted/generated ULID. `--node-id` is optional as specified by its documented default, despite the conflicting sentence requiring all three flags. Explicit IDs use object-key-safe characters and must identify one node directory uniquely. Reusing a live node ID is not independently fenced by the spec's node-record format.
+- `_node.db.meta.root_id` retains the local supervisor identity across adoption of another node's actors. `HostSpawn` routes host spawning if that supervisor has moved. Stale local connections and migrated files are archived before fresh ownership is admitted.
+- Durable publication revisions are distinct from inbox/outbox sequence numbers in the existing implementation. The sender therefore flushes all pending changes before remote delivery rather than relying on `head.seq >= outbox.seq`. Receiver acknowledgements wait for the connection's `total_changes()` watermark to be covered by publication. Concurrent arrivals share the next shipment; waiters observe coverage every 5 ms.
+- `pause_shipping`/`resume_shipping` gate explicit and background Local shipment for the required negative controls. Remote transaction publication bypasses this gate. This reconciles the spec's paused-worker test with its explicit sender `Node::ship` requirement.
+- Destination jobs run concurrently within a sender pump, retaining ordered delivery and successful marking within each pair. The receiver-ack test includes a second destination that must progress while the first acknowledgement is held.
+- Existing links, monitors, calls and shutdowns modify multiple actor files. `RelationshipWrite` splits those writes by owner through the same delivery dispatcher. Calls, links and monitor registration orchestrate on their sender. Monitor-removal receipts prevent delayed registration retries from resurrecting removed monitors.
+- Ingress HTTP responses contain `{acks, applied}`; `applied` is the acknowledged successful prefix. `Ack.conflict` distinguishes HTTP 409 even when an expired lease has no replacement owner/address. The transport retains successful prefixes on a later server error, invalidates failed routes, disables redirects and bounds requests by `lease_ttl`.
+- Operator `Command` entries dispatch through the existing API `ActorService`, since `loom-actor` cannot depend on `loom-api`. Mutating commands ship before acknowledgement. `State`, `Children`, `Authority`, `Mint` and `Inspect` provide typed internal reads needed by supervision and capabilities. The same HTTP ingress carries them.
+- `actors --cluster` lists identity, owner and placement without acquiring unowned files merely to list them. Name-based `whereis` remains local. API/MCP/CLI commands use the shared verb registry.
+- A cluster-only daemon worker schedules newly received messages; creating a `Node` alone still permits deterministic explicit stepping. Shutdown signals the worker, drains admitted turns, then closes the node. It does not abort a transaction to meet a shutdown deadline.
+- The actor test's two-listener fixture shares the production bearer calculation but implements route classification locally to avoid an actor-to-API dependency cycle. `loom-api/src/tests/cluster_auth.rs` separately exercises the production middleware, rejected-write controls and a valid-ingress control. The wrong-cluster bearer is derived directly from another key. The stale-owner test uses a blocking forwarder so it actually attempts a send after expiry.
+- The architecture and capability addendum now describe clustered keys and stable lease owners. Future distribution rows remain because the required executed 8/8 result is not available.
+
+New direct dependencies, all already present in `Cargo.lock`: `reqwest 0.12` with JSON and without default features in `loom-actor`; `axum 0.8` and Tokio's `net` feature for actor tests; `url 2` in `loomd`. No new package version or heavy dependency family was introduced. Workspace package dependency lists in the lockfile were updated manually because Cargo execution was prohibited.
+
+Specific uncompiled assumptions for the lead:
+
+- `src/ingress.rs:165`, `src/pump.rs:115`, `src/relation_delivery.rs:19`: boxed recursive delivery futures satisfy `Send` through the scheduler and Axum handlers.
+- `src/cluster.rs:167` and `src/cluster.rs:185`: the existing object-store listing stream supports the `poll_fn`/`poll_next` calls used here.
+- `src/ingress_gate.rs:21`: publication's connection-local change watermark covers committed ingress writes; reset/reopen and cancellation interleavings need particular attention in the gate.
+- `src/authority_ingress.rs:23` and `../loom-api/src/actors/cluster.rs:21`: typed authority envelopes, operator result envelopes and the ingress acknowledgement contract agree across crate boundaries.
+- `src/scheduler.rs:32` and `../loomd/src/cluster_worker.rs:18`: Notify/watch APIs and cooperative shutdown compile with the workspace Tokio features and retain `Send` futures.
+- `../loomd/src/main.rs:148` and `../loom-cli/src/operation.rs:43`: Tokio file `take/read_to_end`, URL parsing, and Clap boolean extraction match their locked crate APIs.
+- `tests/cluster_support/mod.rs:91`: the in-process Axum handler is `Send`; the eight tests' shipping, process-drop and stale-file interleavings are authored but unexecuted. Formatting may move these line references; each entry identifies the relevant function or operation as well as its current location.

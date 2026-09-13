@@ -9,7 +9,15 @@ impl Node {
             return Ok(());
         }
         if self.shipping.get(id).is_ok() {
-            return Ok(());
+            match self.check_lease(id) {
+                Ok(()) => return Ok(()),
+                Err(error) if error.downcast_ref::<crate::remote_store::LeaseLost>().is_some() => {}
+                Err(error) => return Err(error),
+            }
+            self.shipping.actors.lock().map_err(|_| anyhow::anyhow!("shipping state poisoned"))?.remove(id);
+            if self.path(id).exists() {
+                self.archive_unowned_file(id).await?;
+            }
         }
         let result = self.restore_new_owner(id).await;
         if result.is_err() {
@@ -88,8 +96,7 @@ impl Node {
 
     /// Stale files are preserved by design; never listed; removed only by an operator.
     pub(crate) async fn archive_stale(&self, id: &str, conn: &mut Connection) -> Result<()> {
-        let store = self.remote.as_ref().context("lease loss without an object store")?;
-        let epoch = store.epoch(id)?;
+        let epoch: u64 = actor::meta(conn, "lease_epoch").await?.parse()?;
         let archive = self.dir.join(format!("{id}.stale.{epoch}.db"));
         if archive.exists() && actor::status(conn).await? == crate::Status::Stopped && actor::meta(conn, "reason").await? == "lease_lost" {
             return Ok(());
@@ -104,8 +111,15 @@ impl Node {
         *conn = actor::connect(&archive, self.config.io).await?;
         self.connections.lock().await.remove(id);
         self.shipping.actors.lock().map_err(|_| anyhow::anyhow!("shipping state poisoned"))?.remove(id);
+        self.invalidate_placement(id)?;
         eprintln!("actor {id}: lease_lost; preserved {}", archive.display());
         Ok(())
+    }
+
+    /// Startup only: no connection has been admitted for this losing local file.
+    pub(crate) async fn archive_unowned_file(&self, id: &str) -> Result<()> {
+        let mut conn = actor::connect(&self.path(id), self.config.io).await?;
+        self.archive_stale(id, &mut conn).await
     }
 }
 fn move_wal(from: &std::path::Path, to: &std::path::Path) -> Result<()> {

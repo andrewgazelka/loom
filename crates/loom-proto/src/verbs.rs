@@ -21,6 +21,7 @@ pub enum Kind {
     Json,
     Integer,
     Count,
+    Boolean,
 }
 pub struct Argument {
     pub name: &'static str,
@@ -170,7 +171,9 @@ pub static VERBS: &[Verb] = &[
         ]
     ),
     verb!(fork, Actor, Execute, [arg!(id, String), arg!(seq, Integer)]),
-    verb!(actors, Actor, Read, []),
+    verb!(actors, Actor, Read, [arg!(cluster, Boolean, optional)]),
+    verb!(nodes, Actor, Read, []),
+    verb!(move, Actor, Execute, [arg!(id, String), arg!(node_id, String)]),
     verb!(
         stop,
         Actor,
@@ -230,6 +233,7 @@ impl Verb {
                 }
                 Kind::String | Kind::Source => json!({"type":"string"}),
                 Kind::Json => json!({}),
+                Kind::Boolean => json!({"type":"boolean"}),
                 Kind::Integer => json!({"type":"integer"}),
                 Kind::Count => json!({"type":"integer","minimum":0,"maximum":ValidationCount::MAX}),
             };
@@ -271,6 +275,7 @@ impl Verb {
                     value.is_string() || (!argument.required && value.is_null())
                 }
                 Kind::Json => true,
+                Kind::Boolean => value.is_boolean(),
                 Kind::Integer => value.as_i64().is_some(),
                 Kind::Count => value
                     .as_u64()
@@ -287,6 +292,18 @@ impl Verb {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cluster_flag_is_boolean_and_move_requires_a_target_node() {
+        let actors = lookup("actors").unwrap();
+        assert_eq!(actors.schema()["properties"]["cluster"]["type"], "boolean");
+        actors.normalize(&mut json!({})).unwrap();
+        actors.normalize(&mut json!({"cluster": true})).unwrap();
+        assert!(actors.normalize(&mut json!({"cluster": "true"})).is_err());
+        assert!(lookup("move").unwrap().normalize(&mut json!({"id": "a0actor"})).is_err());
+        lookup("move").unwrap().normalize(&mut json!({"id": "a0actor", "node_id": "node2"})).unwrap();
+        lookup("nodes").unwrap().normalize(&mut json!({})).unwrap();
+    }
 
     #[test]
     fn spawn_defaults_and_validation_bounds_are_shared() {

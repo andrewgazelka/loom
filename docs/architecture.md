@@ -25,6 +25,7 @@ Each invariant names the code that enforces it today. "(round N)" marks a decisi
 13. **One control surface.** `loomd` serves MCP (stdio and HTTP) and the HTTP/WebSocket API from one `Service`; the REPL UI is a client of that same surface, not a second implementation. `crates/loom-mcp/src/lib.rs`, `crates/loom-api/src/lib.rs`. Actor tools (`actor_send`, `actor_spawn`, `actor_tree`, ...) and `actor://` resources call `loom-actor` through `crates/loom-mcp/src/actors.rs`. The REPL's retired actor-state panel has been removed.
 14. **Rust safety checks admit code; they do not prove isolation.** Denying `unsafe`, non-`Send` captures and escaping borrows is a correctness and admission check, not a formal soundness proof; sibling jobs sharing one execution's memory are one trust domain. `crates/loom-check/src/safety.rs`, stated in `docs/plan-unified-memory.md#memory-isolation-decision`.
 15. **One guest language.** Rust is the only supported guest language, and core wasm is the only guest execution model. The former guest SDK, checker, interface definitions, and component execution paths have been removed. `crates/loom-proto/src/core_protocol.rs` admits only current core-wasm artifacts; `crates/loom-store/src/language.rs` rejects non-Rust stores before migration.
+16. **Nothing crosses a node before it is durable in the object store.** A message leaves its node only after the transaction that produced it is in the object store, and ingress acknowledges only after the inbox row it wrote is in the object store. Same-node delivery retains its local commit boundary. `crates/loom-actor/src/pump.rs` enforces the sender's output gate; `crates/loom-actor/src/ingress.rs` holds receiver acknowledgments until shipping covers their writes. See [multi-node.md](multi-node.md#output-gate-nothing-crosses-a-node-before-it-is-durable-in-the-store).
 
 ## 3. Layers
 
@@ -55,8 +56,8 @@ graph TD
     end
     subgraph Storage
         Turso[Turso files: one per actor]
-        Obj["Object store: WAL segments, snapshots (round 3)"]
-        Leases["Leases: S3 conditional PUT (round 3)"]
+        Obj["Object store: logical segments, snapshots"]
+        Leases["Leases: conditional PUT"]
     end
 
     MCP --> Node
@@ -130,8 +131,8 @@ Lineage is `SELECT * FROM code_changes ORDER BY seq` on the actor's own file: it
 - **Trap vs runtime error.** A trap is a handler's returned `Err` or a caught panic: deterministic, attributed to guest code, and it drives supervision (`crates/loom-actor/src/actor.rs::attempt`, `Ctx::runtime`/`Ctx::effect_error` in `crates/loom-actor/src/lib.rs`). A runtime error (a Turso I/O failure, or an `EffectError::Environmental`) is environmental: the transaction rolls back and the message retries with backoff up to `Config.max_retries`, and only becomes a trap once that budget is exhausted (`crates/loom-actor/src/node.rs::step`).
 - **Restart verbs.** `resume` (retry the poison message), `skip` (move it to `dead_letters`, advance the cursor), `reset` (archive the file, recreate it at the same id with the same code_changes head, replay the init message). Chosen by the supervisor per child spec's `restart: permanent | transient | temporary`. `crates/loom-actor/src/supervisor.rs`, `docs/actors-turso.md` Addendum A.
 - **Strategies and intensity.** `one_for_one`, `one_for_all`, `rest_for_one`, and `dynamic` (simple-one-for-one); a supervisor tracks `max_restarts` in `max_seconds` and stops itself with reason `shutdown`, propagating up its own link, once exceeded. `crates/loom-actor/src/supervisor.rs`.
-- **Machine loss, durability tiers (round 3).** Per-actor durability `local` (commit is local; WAL segments and snapshots ship to an object store roughly every second; losing the machine loses at most that unshipped tail) or `remote` (commit waits for the object store's acknowledgment; no tail to lose). Neither tier exists in the tree yet; today durability is whatever the local Turso WAL file gives you.
-- **Stale-owner fencing (round 3).** A takeover writes a lease object keyed per actor with an epoch via S3 conditional PUT; a stale owner's segment-head write is rejected by the same conditional-PUT mechanism. Lease operations happen per takeover/renewal, never per message. Not yet implemented; there is currently no multi-machine takeover path for a `loom-actor` node.
+- **Machine loss, durability tiers (built).** Per-actor durability `local` commits locally and ships logical segments and snapshots at `Config.ship_interval`; losing a machine loses at most its unshipped tail. `remote` waits for the object store's acknowledgment before releasing the commit. `crates/loom-actor/src/durability.rs`, `durability_open.rs`, and `tests/durability.rs` implement and exercise shipping and restoration. Cross-node delivery additionally obeys invariant 16.
+- **Stale-owner fencing (built).** A takeover acquires a per-actor lease with a higher epoch through conditional PUT; the same conditional-write contract fences segment-head publication. `crates/loom-actor/src/remote_store.rs` owns lease acquisition, renewal and release; the actor and pump check ownership before writes and delivery. `durability_open.rs` restores actors after takeover and isolates stale local files.
 
 ## 7. Crate map
 
@@ -155,8 +156,8 @@ Lineage is `SELECT * FROM code_changes ORDER BY seq` on the actor's own file: it
 - **Priorities on messages.** One actor runs one message at a time, scheduled fairly by tokio; there is no per-message priority. Decided in `docs/actors-turso.md` Addendum B ("no priorities... deliberate").
 - **ETS-style shared mutable tables.** No table is shared across actors; a table an OTP process would keep in ETS is instead its own actor, addressed by id. `docs/actors-turso.md` Addendum B.
 - **Blocking receive mid-function.** A handler is one `receive`: the top of `handle`. There is no suspension across messages except through `cx.defer()` (selective receive) or a long effect; this is a CPS transform, not a missing feature. `docs/actors-turso.md` Addendum B.
-- **Distribution.** Ids reserve a cell-prefix byte for a future multi-node namespace, but cross-node delivery, `monitor_node`, and any wire protocol between Loom nodes are out of scope for this round. `docs/actors-turso.md` ("later" row, ids reserved as `"a0"` prefix).
-- **Capabilities today.** Every actor in a node can address every other by id; host-minted capability tokens (`{target, cap_id, epoch, rights, hmac}`) are a later round, not a v1 concept. `docs/actors-turso.md` ("What is deliberately not in v1").
+- **Distribution beyond one cluster.** [Multi-node Loom](multi-node.md) specifies one shared object store and cluster key, lease-based placement, HTTP ingress, output gates and manual moves. Cells, placement policy and cluster-wide names remain future work. The `a0` prefix stays fixed; actor takeover follows lease expiry, so there is no `monitor_node` verb.
+- **Cross-cluster authority.** Host-minted capabilities carry a target, cap id, epoch, rights and MAC. Nodes sharing a cluster key verify the same tokens after movement; another cluster's key grants no authority. `crates/loom-actor/src/capability.rs`, [multi-node.md](multi-node.md#capabilities-across-nodes).
 - **Raft or any consensus protocol.** Availability without a single point of failure comes from WAL-segment shipping to an object store plus lease fencing (round 3, §6), never from a replicated consensus log.
 
 ## 9. Roadmap
