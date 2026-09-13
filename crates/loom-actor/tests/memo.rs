@@ -57,7 +57,7 @@ impl Fixture {
         let input = serde_json::to_vec(&node.cap_for(&target, Rights::ALL).await.unwrap()).unwrap();
         let id = node.spawn_root("original", &input).await.unwrap();
         let cancellation = tokio::sync::Notify::new();
-        assert!(node.step(&id, &cancellation).await.unwrap());
+        assert_eq!(node.step(&id, &cancellation).await.unwrap().processed, 1);
         Self { dir, node, id, target, input, calls }
     }
     fn files(&self) -> BTreeSet<String> {

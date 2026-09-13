@@ -33,15 +33,21 @@ impl Node {
         let _sender = self.guard(&format!("pump:{id}")).await;
         let source = self.open_actor(id).await?;
         let generation: i64;
+        let mut publish_pending;
         let mut deliveries = Vec::new();
         {
             let conn = source.conn.lock().await;
-            if actor::status(&conn).await? == Status::Fork
-                || !actor::query(&conn, "SELECT value FROM meta WHERE key='replay_source'", ()).await?.rows.is_empty()
-            {
+            let metadata = actor::query(&conn,
+                "SELECT (SELECT value FROM meta WHERE key='status'), (SELECT value FROM meta WHERE key='generation'), EXISTS(SELECT 1 FROM meta WHERE key='replay_source'), EXISTS(SELECT 1 FROM meta WHERE key LIKE 'publish:%')", ()).await?;
+            let row = metadata.rows.first().context("missing pump metadata")?;
+            if Status::parse(&row.get::<String>(0)?)? == Status::Fork || row.get::<i64>(2)? != 0 {
                 return Ok(false);
             }
-            generation = actor::meta(&conn, "generation").await?.parse()?;
+            generation = row.get::<String>(1)?.parse()?;
+            // Lock-scoped observation of persisted receipts, including recovery.
+            // This pump's restart acknowledgment sets the bit below. Host SQL
+            // writes wake another batch; the next pump reloads persisted markers.
+            publish_pending = row.get::<i64>(3)? != 0;
             let rows = actor::query(&conn, "SELECT seq,idx,target,msg FROM outbox WHERE delivered=0 ORDER BY seq,idx", ()).await?;
             for row in rows.rows {
                 deliveries.push(Delivery { seq: row.get(0)?, idx: row.get(1)?, target: row.get(2)?, msg: row.get(3)? });
@@ -73,6 +79,7 @@ impl Node {
                     let tx = conn.transaction().await?;
                     if entry.target == "spawn" && matches!(serde_json::from_slice::<Spawn>(&entry.msg)?, Spawn::Restart { .. }) {
                         actor::set_meta(&tx, &format!("publish:{destination}"), "1").await?;
+                        publish_pending = true;
                     }
                     tx.execute("UPDATE outbox SET delivered=1 WHERE seq=? AND idx=?", turso::params![entry.seq, entry.idx]).await?;
                     self.commit_control(id, tx).await?;
@@ -89,25 +96,27 @@ impl Node {
                 }
             }
         }
-        let publications = actor::query(&*source.conn.lock().await, "SELECT key FROM meta WHERE key LIKE 'publish:%'", ()).await?;
-        for row in publications.rows {
-            let marker: String = row.get(0)?;
-            let child = marker.strip_prefix("publish:").context("invalid publication marker")?;
-            if blocked.contains(child) {
-                continue;
-            }
-            {
-                let published = self.open_actor(child).await?;
-                let mut conn = published.conn.lock().await;
+        if publish_pending {
+            let publications = actor::query(&*source.conn.lock().await, "SELECT key FROM meta WHERE key LIKE 'publish:%'", ()).await?;
+            for row in publications.rows {
+                let marker: String = row.get(0)?;
+                let child = marker.strip_prefix("publish:").context("invalid publication marker")?;
+                if blocked.contains(child) {
+                    continue;
+                }
+                {
+                    let published = self.open_actor(child).await?;
+                    let mut conn = published.conn.lock().await;
+                    let tx = conn.transaction().await?;
+                    actor::set_meta(&tx, "ready", "true").await?;
+                    self.commit_control(child, tx).await?;
+                    self.wake_actor(child)?;
+                }
+                let mut conn = source.conn.lock().await;
                 let tx = conn.transaction().await?;
-                actor::set_meta(&tx, "ready", "true").await?;
-                self.commit_control(child, tx).await?;
-                self.wake_actor(child)?;
+                tx.execute("DELETE FROM meta WHERE key=?", [marker]).await?;
+                self.commit_control(id, tx).await?;
             }
-            let mut conn = source.conn.lock().await;
-            let tx = conn.transaction().await?;
-            tx.execute("DELETE FROM meta WHERE key=?", [marker]).await?;
-            self.commit_control(id, tx).await?;
         }
         progressed |= self.sync_shutdown_requests(id).await?;
         let sync_result = self.sync_index(id).await;

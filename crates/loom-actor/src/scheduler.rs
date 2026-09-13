@@ -135,20 +135,14 @@ impl Node {
                         let result = node.step(&actor_id, &task_cancellation).await;
                         node.tasks.lock().await.remove(&actor_id);
                         let result = match result {
-                            Ok(moved) => async {
-                                node.check_timer_change(&actor_id).await?;
-                                let pumped = node.pump_unlocked(&actor_id).await?;
-                                let again = if moved || pumped {
-                                    let actor = node.open_actor(&actor_id).await?;
-                                    let conn = actor.conn.lock().await;
-                                    let rows = crate::actor::query(&conn,
-                                        "SELECT (EXISTS(SELECT 1 FROM inbox WHERE state!='done') AND (SELECT value FROM meta WHERE key='status')='running' AND (SELECT value FROM meta WHERE key='ready')='true') OR EXISTS(SELECT 1 FROM outbox WHERE delivered=0)", ()).await?;
-                                    rows.rows.first().ok_or_else(|| anyhow!("actor {actor_id}: missing work probe"))?.get::<i64>(0)? != 0
-                                } else {
-                                    false
-                                };
-                                Ok(Progress { moved: again, processed: usize::from(moved), deadline: None })
-                            }.await,
+                            Ok(batch) => {
+                                async {
+                                    node.check_timer_change(&actor_id).await?;
+                                    let pumped = node.pump_unlocked(&actor_id).await?;
+                                    Ok(Progress { moved: batch.again || pumped, processed: batch.processed, deadline: None })
+                                }
+                                .await
+                            }
                             Err(error) => Err(error),
                         };
                         Finished { task: tokio::task::id(), owner: task_owner, result }
