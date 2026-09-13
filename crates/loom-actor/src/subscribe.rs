@@ -147,7 +147,9 @@ impl Node {
         }
         // Reset deletes this marker with the old runtime state; stopped actors cannot subscribe again.
         actor::set_meta(&tx, "subscriptions_closed", "true").await?;
-        self.commit_control(id, tx).await
+        self.commit_control(id, tx).await?;
+        // The unsubscribe rows sit in this actor's outbox; its pump must run.
+        self.wake_actor(id)
     }
 
     /// The returned receiver owns one socket's frames; close_stream is its leaver.
@@ -242,7 +244,9 @@ impl Node {
             }
         }
         actor::set_meta(&tx, &format!("applied:{key}"), "1").await?;
-        self.commit_control(target, tx).await
+        self.commit_control(target, tx).await?;
+        // A new subscriber's snapshot frame sits in the target's outbox; its pump must run.
+        self.wake_actor(target)
     }
 
     pub(crate) async fn fanout(&self, id: &str) -> Result<()> {
@@ -314,7 +318,13 @@ impl Node {
                 "cause":origin["cause"],"rows":batch.rows});
             enqueue(&tx, &batch.subscriber, &format!("delta:{id}:{seq}:{}", batch.subscriber), frame).await?;
         }
-        if changed { self.commit_control(id, tx).await } else { tx.rollback().await.map_err(Into::into) }
+        if changed {
+            self.commit_control(id, tx).await?;
+            // Delta frames sit in this actor's outbox; when fanout runs outside a step, wake its pump.
+            self.wake_actor(id)
+        } else {
+            tx.rollback().await.map_err(Into::into)
+        }
     }
 }
 

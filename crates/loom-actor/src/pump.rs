@@ -48,15 +48,21 @@ impl Node {
         self.fanout(id).await?;
         let source = self.open_actor(id).await?;
         let generation: i64;
+        let mut publish_pending;
         let mut deliveries = Vec::new();
         {
             let conn = source.conn.lock().await;
-            if actor::status(&conn).await? == Status::Fork
-                || !actor::query(&conn, "SELECT value FROM meta WHERE key='replay_source'", ()).await?.rows.is_empty()
-            {
+            let metadata = actor::query(&conn,
+                "SELECT (SELECT value FROM meta WHERE key='status'), (SELECT value FROM meta WHERE key='generation'), EXISTS(SELECT 1 FROM meta WHERE key='replay_source'), EXISTS(SELECT 1 FROM meta WHERE key LIKE 'publish:%')", ()).await?;
+            let row = metadata.rows.first().context("missing pump metadata")?;
+            if Status::parse(&row.get::<String>(0)?)? == Status::Fork || row.get::<i64>(2)? != 0 {
                 return Ok(false);
             }
-            generation = actor::meta(&conn, "generation").await?.parse()?;
+            generation = row.get::<String>(1)?.parse()?;
+            // Lock-scoped observation of persisted receipts, including recovery.
+            // This pump's restart acknowledgment sets the bit below. Host SQL
+            // writes wake another batch; the next pump reloads persisted markers.
+            publish_pending = row.get::<i64>(3)? != 0;
             let rows = actor::query(&conn, "SELECT seq,idx,target,msg FROM outbox WHERE delivered=0 ORDER BY seq,idx", ()).await?;
             for row in rows.rows {
                 deliveries.push(Delivery { seq: row.get(0)?, idx: row.get(1)?, target: row.get(2)?, msg: row.get(3)? });

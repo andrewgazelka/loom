@@ -361,3 +361,131 @@ async fn node_restart_does_not_restore_attempted_driver_spawn() {
     assert!(TcpStream::connect(&addr).await.is_err());
     reopened.close().await.unwrap();
 }
+
+struct SafetyOwner {
+    driver: &'static str,
+}
+#[async_trait]
+impl Behavior for SafetyOwner {
+    fn hash(&self) -> &str {
+        "driver-safety-owner"
+    }
+    fn schema(&self) -> &str {
+        "CREATE TABLE IF NOT EXISTS driver_state(cap TEXT);"
+    }
+    async fn handle(&self, cx: &mut Ctx<'_>, msg: &[u8]) -> Result<(), Trap> {
+        if msg == b"start" {
+            let cap = cx.spawn_driver(self.driver, b"{}").await?;
+            cx.sql("INSERT INTO driver_state VALUES (?)", [serde_json::to_string(&cap).unwrap()]).await?;
+        } else {
+            Owner { trap: false, hash: "driver-safety-owner" }.handle(cx, msg).await?;
+        }
+        Ok(())
+    }
+}
+
+struct SafetyFixture {
+    _dir: tempfile::TempDir,
+    node: Node,
+    owner: String,
+    actor: Actor,
+    cap: Cap,
+}
+impl SafetyFixture {
+    async fn new(driver: Arc<dyn Driver>, hash: &'static str, io: Io) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let mut registry = registry::Registry::new();
+        registry.insert("driver-safety-owner".into(), Arc::new(SafetyOwner { driver: hash }));
+        registry.insert_driver(driver);
+        let node = Node::new(dir.path(), Arc::new(registry), Arc::new(DefaultEffects), Config { io, ..Config::default() }).await.unwrap();
+        // Empty init prevents reset from spawning a replacement driver.
+        let owner = node.spawn_root("driver-safety-owner", b"").await.unwrap();
+        node.send(&owner, "start-driver", b"start").await.unwrap();
+        node.run_until_idle().await.unwrap();
+        let actor = node.open(&owner).await.unwrap();
+        let rows = actor.sql("SELECT cap FROM driver_state", ()).await.unwrap();
+        let cap = serde_json::from_str(&rows.rows[0].get::<String>(0).unwrap()).unwrap();
+        Self { _dir: dir, node, owner, actor, cap }
+    }
+    async fn send(&self) {
+        let msg = serde_json::to_vec(&serde_json::json!({"type":"send","cap":self.cap})).unwrap();
+        self.node.send(&self.owner, "send-driver", &msg).await.unwrap();
+    }
+}
+
+struct LostAcknowledgement;
+#[async_trait]
+impl Driver for LostAcknowledgement {
+    fn hash(&self) -> &str {
+        "lost-acknowledgement-driver"
+    }
+    async fn run(&self, _: DriverContext, _: &[u8], mut deliveries: mpsc::Receiver<DriverDelivery>) -> anyhow::Result<()> {
+        while let Some(delivery) = deliveries.recv().await {
+            // Keep the receiver alive: a closed driver would produce a terminal drop.
+            drop(delivery);
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn lost_acknowledgement_is_an_error() {
+    let f = SafetyFixture::new(Arc::new(LostAcknowledgement), "lost-acknowledgement-driver", Io::Memory).await;
+    f.send().await;
+    let error = tokio::time::timeout(Duration::from_secs(5), f.node.run_until_idle())
+        .await
+        .expect("pump hung waiting for a lost acknowledgement")
+        .unwrap_err();
+    let text = format!("{error:#}");
+    assert!(text.contains("driver dropped acknowledgement; retry destination"), "{text}");
+    let rows = f.actor.sql("SELECT delivered FROM outbox WHERE target=?", [f.cap.target.as_str()]).await.unwrap();
+    assert_eq!(rows.rows.len(), 1);
+    assert_eq!(rows.rows[0].get::<i64>(0).unwrap(), 0);
+    assert_eq!(integer(&f.actor, "SELECT COUNT(*) FROM meta WHERE key LIKE 'driver_drop:%'").await, 0);
+    f.node.close().await.unwrap();
+}
+
+struct ControlledInjection {
+    contexts: mpsc::Sender<DriverContext>,
+}
+#[async_trait]
+impl Driver for ControlledInjection {
+    fn hash(&self) -> &str {
+        "controlled-injection-driver"
+    }
+    async fn run(&self, cx: DriverContext, _: &[u8], mut deliveries: mpsc::Receiver<DriverDelivery>) -> anyhow::Result<()> {
+        self.contexts.send(cx.clone()).await?;
+        while let Some(delivery) = deliveries.recv().await {
+            let result = cx.inject(cx.owner(), "after-owner-reset", b"stale frame").await;
+            delivery.acknowledge(result.map(|()| loom_actor::DriverAck::Delivered));
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn injection_after_owner_reset_is_refused() {
+    let (contexts, mut received) = mpsc::channel(1);
+    let f = SafetyFixture::new(Arc::new(ControlledInjection { contexts }), "controlled-injection-driver", Io::Syscall).await;
+    let stale = tokio::time::timeout(Duration::from_secs(5), received.recv()).await.unwrap().unwrap();
+    // lifecycle::restart_unlocked closes drivers before reset publishes the new
+    // incarnation; hooks::stop also closes them. Intentional close suppresses DOWN.
+    f.node.restart(&f.owner, loom_actor::RestartVerb::Reset).await.unwrap();
+    f.node.run_until_idle().await.unwrap();
+    assert_eq!(integer(&f.actor, "SELECT CAST(value AS INTEGER) FROM meta WHERE key='generation'").await, 1);
+    assert_eq!(integer(&f.actor, "SELECT COUNT(*) FROM meta WHERE key LIKE 'driver_spawn:%'").await, 0);
+    // Sending to the old handle witnesses worker closure through the pump.
+    f.send().await;
+    f.node.run_until_idle().await.unwrap();
+    assert_eq!(integer(&f.actor, "SELECT COUNT(*) FROM meta WHERE key LIKE 'driver_drop:%'").await, 1);
+    let error = tokio::time::timeout(Duration::from_secs(5), stale.inject(stale.owner(), "after-owner-reset", b"stale frame"))
+        .await
+        .expect("stale driver injection hung")
+        .unwrap_err();
+    let text = format!("{error:#}");
+    // Broker shutdown may already be complete; otherwise its generation guard
+    // rejects the request before inbox insertion.
+    assert!(text.contains("driver kernel closed") || text.contains("driver owner incarnation changed"), "{text}");
+    assert_eq!(integer(&f.actor, "SELECT COUNT(*) FROM inbox WHERE key='after-owner-reset'").await, 0);
+    f.node.close().await.unwrap();
+}

@@ -145,7 +145,12 @@ impl Node {
             let behavior = crate::view::behavior_on(&self.registry, conn, &code.hash).await?;
             for retry in 0..=self.config.max_retries {
                 effects.begin(message.seq).await;
-                let result = actor::attempt(conn, &identity, &message, behavior.as_ref(), code.revision, effects, None).await;
+                let state = actor::AttemptState {
+                    generation: actor::meta(conn, "generation").await?.parse()?,
+                    revision: code.revision,
+                    epoch: actor::meta(conn, "commit_epoch").await?.parse()?,
+                };
+                let result = actor::attempt(conn, &identity, &message, behavior.as_ref(), &state, effects, None).await;
                 let completed = actor::meta(conn, "commit_epoch").await?.parse::<i64>()? == epoch;
                 if let Some(verdict) = effects.finish(message.seq, result.is_ok() && completed).await? {
                     return Ok(Some(verdict));

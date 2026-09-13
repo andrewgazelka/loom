@@ -119,6 +119,10 @@ impl Node {
     }
 
     pub async fn resolve(&self, id: &str) -> Result<Placement> {
+        // Drivers are node-local resources (drivers.rs): never a placement question.
+        if id.starts_with("drv:") {
+            return Ok(Placement::Local);
+        }
         crate::ids::check(id)?;
         let Some(store) = &self.remote else { return Ok(Placement::Local) };
         // Locally owned actors bypass the placement cache; expiry fences local access.

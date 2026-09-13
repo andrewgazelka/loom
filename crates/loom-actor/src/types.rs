@@ -16,6 +16,10 @@ pub struct Config {
     /// Retries after the first attempt, before supervision receives the error.
     pub max_retries: usize,
     pub retry_backoff: Duration,
+    /// Messages one scheduler step may handle under the actor's connection lock
+    /// before it pumps and yields; other callers on that actor wait at most this many
+    /// transactions. Must be positive.
+    pub batch_limit: usize,
 }
 
 impl Default for Config {
@@ -30,6 +34,7 @@ impl Default for Config {
             snapshot_every: 64,
             max_retries: 3,
             retry_backoff: Duration::from_millis(10),
+            batch_limit: 64,
         }
     }
 }
