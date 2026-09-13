@@ -3,7 +3,7 @@ use crate::actor;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use turso_core::{ValueRef, numeric::Numeric, types::ValueIterator};
+use turso_core::{Numeric, ValueRef, types::ValueIterator};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DeltaRow {

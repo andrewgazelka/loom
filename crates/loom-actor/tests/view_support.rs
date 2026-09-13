@@ -74,6 +74,9 @@ pub async fn spawn(node: &Node, hash: &str, init: &[u8], durability: Durability)
     let mut spec = ChildSpec::new(hash, init, ChildType::Worker);
     spec.durability = durability;
     spec.link = false;
+    // Fixtures are temporary children: a trap parks them and stays parked, so tests can
+    // read the dead letter instead of racing the root supervisor's restart of a permanent child.
+    spec.restart = loom_actor::RestartPolicy::Temporary;
     node.spawn(&node.root(), &spec).await.unwrap()
 }
 pub async fn command(node: &Node, id: &str, key: &str, body: &[u8]) {

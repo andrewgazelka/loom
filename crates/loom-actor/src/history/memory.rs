@@ -22,7 +22,7 @@ fn quote(name: &str) -> String {
 }
 impl Image {
     pub(crate) async fn capture(conn: &Connection) -> Result<Self> {
-        let schema = actor::query(conn, "SELECT name,sql FROM sqlite_schema WHERE type='table' ORDER BY name", ()).await?;
+        let schema = actor::query(conn, "SELECT name,sql FROM sqlite_schema WHERE type='table' AND substr(name,1,16) <> '__turso_internal' AND substr(name,1,7) <> 'sqlite_' ORDER BY name", ()).await?;
         let mut tables = Vec::new();
         for entry in schema.rows {
             let name: String = entry.get(0)?;
@@ -40,7 +40,7 @@ impl Image {
             }
             tables.push(Table { schema: entry.get(1)?, name, columns: data.columns, rows });
         }
-        let objects = actor::query(conn, "SELECT sql FROM sqlite_schema WHERE type IN ('index','trigger','view') AND sql IS NOT NULL", ())
+        let objects = actor::query(conn, "SELECT sql FROM sqlite_schema WHERE type IN ('index','trigger','view') AND sql IS NOT NULL AND substr(name,1,16) <> '__turso_internal' AND substr(name,1,7) <> 'sqlite_'", ())
             .await?;
         let indexes = objects.rows.iter().map(|row| row.get::<String>(0)).collect::<turso::Result<Vec<_>>>()?;
         Ok(Self { tables, indexes })
