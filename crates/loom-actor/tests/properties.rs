@@ -416,10 +416,11 @@ async fn memory_io_is_wired() {
     assert_eq!(rows.rows.len(), 1);
     let envelope: serde_json::Value = serde_json::from_slice(&rows.rows[0].get::<Vec<u8>>(0).unwrap()).unwrap();
     assert_eq!(envelope["msg"], serde_json::json!(b"echo witness".to_vec()));
-    let fork_error = node.fork(&id, 0).await.unwrap_err();
-    assert!(format!("{fork_error:#}").contains("historical snapshots require persistent I/O"));
-    let validation_error = node.validate(&id, "counter-v1", 3).await.unwrap_err();
-    assert!(format!("{validation_error:#}").contains("historical snapshots require persistent I/O"));
+    // Memory I/O keeps history as logical in-memory images (docs/ui-view-actor.md, Durability::Ephemeral):
+    // fork and validate work without any file, and the directory stays empty.
+    let fork = node.fork(&id, 0).await.unwrap();
+    assert_eq!(node.open(&fork).await.unwrap().cursor().await.unwrap(), 0);
+    assert!(matches!(node.validate(&id, "counter-v1", 3).await.unwrap(), loom_actor::Verdict::Matched { .. }));
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
 
     #[cfg(not(target_os = "linux"))]

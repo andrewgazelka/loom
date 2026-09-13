@@ -201,7 +201,6 @@ pub(super) async fn key(source: &Connection, candidate: &str, at: i64, end: i64,
         "SELECT * FROM code_changes ORDER BY seq",
         "SELECT seq,key,sender,msg,received_at FROM inbox ORDER BY seq",
         "SELECT seq,idx,kind,request,result FROM effects ORDER BY seq,idx",
-        "SELECT * FROM turso_cdc ORDER BY change_id",
     ] {
         field(&mut hash, rows_hash(source, sql, ()).await?.as_bytes());
     }

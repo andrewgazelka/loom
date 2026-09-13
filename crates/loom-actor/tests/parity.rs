@@ -172,11 +172,16 @@ async fn pair_fifo_and_down_after_messages() {
     let running = tokio::spawn(async move { running_node.run_until_idle().await });
     tokio::time::timeout(Duration::from_secs(30), barrier.entered.notified()).await.expect("pump never reached its midpoint");
     let receiver = runtime.open(&b).await.unwrap();
+    // Destinations pump independently (per-pair FIFO, docs/multi-node.md): the blocked effect holds only
+    // its own pair, so every number reaches B in order while the barrier is still open. DOWN can only
+    // follow the exit, which follows the handler, so it is absent or last.
     let midpoint: Vec<Value> = inbox(&receiver).await.into_iter().filter(|msg| msg["type"] == "number" || msg["type"] == "down").collect();
-    assert_eq!(midpoint.len(), 5);
-    for (number, message) in midpoint.iter().enumerate() {
+    let numbers: Vec<&Value> = midpoint.iter().filter(|msg| msg["type"] == "number").collect();
+    assert_eq!(numbers.len(), 10);
+    for (number, message) in numbers.iter().enumerate() {
         assert_eq!(message["n"], number);
     }
+    assert!(midpoint.iter().position(|msg| msg["type"] == "down").is_none_or(|at| at == midpoint.len() - 1));
     running.abort();
     assert!(running.await.unwrap_err().is_cancelled());
     drop(receiver);

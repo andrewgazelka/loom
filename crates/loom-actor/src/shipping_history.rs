@@ -110,7 +110,10 @@ impl Segment {
             }
             let columns = table.columns.iter().map(|name| quote(name)).collect::<Vec<_>>().join(",");
             let placeholders = vec!["?"; table.columns.len()].join(",");
-            let sql = format!("INSERT INTO {} ({columns}) VALUES ({placeholders})", quote(&table.name));
+            // CDC rows are immutable and keyed by change_id: a snapshot taken after the rows were written
+            // and the segment that also carries them describe the same history, so re-applying is a no-op.
+            let verb = if table.name == "turso_cdc" { "INSERT OR IGNORE" } else { "INSERT" };
+            let sql = format!("{verb} INTO {} ({columns}) VALUES ({placeholders})", quote(&table.name));
             for row in &table.rows {
                 ensure!(row.len() == table.columns.len(), "history segment row width differs for {}", table.name);
                 tx.execute(&sql, row.iter().map(Cell::value).collect::<Vec<_>>()).await?;

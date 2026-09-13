@@ -91,20 +91,21 @@ impl Node {
         }
         let generation: i64 = actor::meta(conn, "generation").await?.parse()?;
         let revision = actor::code(conn).await?.revision;
-        if !self.is_memory(id)? {
+        // A schema change is a code-revision boundary, not a message boundary: the image below is the
+        // base for CDC replay (invariant 17) and is recorded in meta, never in `snapshots`, which fork,
+        // memo and validation read as "state after N messages under the code of that time".
+        let base = if !self.is_memory(id)? {
             let path = self.snapshot_path(id, generation, seq).with_extension(format!("code.{revision}.db"));
-            actor::replace_snapshot(conn, &path, seq).await?;
+            actor::write_snapshot_file(conn, &path).await?;
+            path.to_str().context("snapshot path is not UTF-8")?.to_owned()
         } else {
             actor::compact_cdc(conn).await?;
             let key = format!("memory:{id}:{generation}:{seq}:code:{revision}");
             let image = Image::capture(conn).await?;
             self.memory_snapshots.lock().await.insert(key.clone(), MemorySnapshot { image });
-            conn.execute(
-                "INSERT INTO snapshots(seq,path) VALUES (?,?) ON CONFLICT(seq) DO UPDATE SET path=excluded.path",
-                turso::params![seq, key],
-            )
-            .await?;
-        }
+            key
+        };
+        actor::set_meta(conn, "cdc_base", &base).await?;
         conn.execute("DELETE FROM meta WHERE key='schema_snapshot_pending'", ()).await?;
         Ok(())
     }

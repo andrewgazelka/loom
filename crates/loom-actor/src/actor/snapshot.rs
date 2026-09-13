@@ -11,6 +11,19 @@ pub(crate) async fn snapshot(conn: &Connection, path: &Path, seq: i64) -> Result
     replace_snapshot(conn, path, seq).await
 }
 
+/// The image file only: the caller decides what record points at it.
+pub(crate) async fn write_snapshot_file(conn: &Connection, path: &Path) -> Result<()> {
+    compact_cdc(conn).await?;
+    let path = path.to_str().context("snapshot path is not UTF-8")?;
+    let staging = format!("{path}.pending");
+    if Path::new(&staging).exists() {
+        std::fs::remove_file(&staging)?;
+    }
+    conn.execute(format!("VACUUM INTO '{}'", staging.replace('\'', "''")), ()).await?;
+    std::fs::rename(&staging, path)?;
+    Ok(())
+}
+
 pub(crate) async fn replace_snapshot(conn: &Connection, path: &Path, seq: i64) -> Result<()> {
     compact_cdc(conn).await?;
     let path = path.to_str().context("snapshot path is not UTF-8")?;

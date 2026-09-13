@@ -5,7 +5,7 @@ mod snapshot;
 use crate::{Behavior, Ctx, EffectHandler, Registry, Rows, Status, Trap};
 use anyhow::{Context, Result, anyhow, ensure};
 pub(crate) use initialize::initialize;
-pub(crate) use snapshot::{compact_cdc, replace_snapshot, snapshot};
+pub(crate) use snapshot::{compact_cdc, snapshot, write_snapshot_file};
 use std::{future::Future, panic::AssertUnwindSafe, path::Path, sync::Arc, task::Poll};
 use tokio::sync::Mutex;
 use turso::{Connection, IntoParams};

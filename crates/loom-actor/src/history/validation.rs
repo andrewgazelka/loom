@@ -122,8 +122,16 @@ impl Node {
 
     /// Invariant 17 is an independent verdict source before candidate behavior replay.
     async fn cdc_verdict(&self, source: &Connection) -> Result<Option<Verdict>> {
-        let snapshot = actor::query(source, "SELECT path FROM snapshots ORDER BY seq DESC LIMIT 1", ()).await?;
-        let path: String = snapshot.rows.first().context("CDC validation requires a snapshot")?.get(0)?;
+        // The CDC base is the newest image whose schema is current: the last schema-change image when one
+        // exists (meta cdc_base), otherwise the latest message-boundary snapshot.
+        let base = actor::query(source, "SELECT value FROM meta WHERE key='cdc_base'", ()).await?;
+        let path: String = match base.rows.first() {
+            Some(row) => row.get(0)?,
+            None => {
+                let snapshot = actor::query(source, "SELECT path FROM snapshots ORDER BY seq DESC LIMIT 1", ()).await?;
+                snapshot.rows.first().context("CDC validation requires a snapshot")?.get(0)?
+            }
+        };
         let mut target = self.snapshot_connection(&path).await?;
         actor::query(&target, "PRAGMA capture_data_changes_conn = 'off'", ()).await?;
         let boundary = actor::query(&target, "SELECT COALESCE(MAX(change_id),0) FROM turso_cdc", ()).await?;
