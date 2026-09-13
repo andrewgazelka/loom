@@ -5,6 +5,11 @@ use serde::{Deserialize, Serialize};
 use std::io::Read;
 use turso::Connection;
 
+/// How long an authority read waits for a memory actor's turn to release the one connection it
+/// has. Longer than any turn this runtime admits, short enough that a cycle reports rather than
+/// hangs.
+const MEMORY_AUTHORITY_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rights {
     pub bits: u64,
@@ -303,11 +308,19 @@ impl Node {
             None => self.open_actor(target).await.map_err(EffectError::Environmental)?.conn,
         };
         self.check_lease(target).map_err(EffectError::Environmental)?;
-        if let Ok(conn) = connection.try_lock_owned() {
+        if let Ok(conn) = connection.clone().try_lock_owned() {
             return Ok(CapabilityReader::Locked { conn });
         }
         if self.is_memory(target).map_err(EffectError::Environmental)? {
-            return Err(EffectError::Environmental(anyhow::anyhow!("capability target {target}: target is busy")));
+            // A memory actor has no file to open a second reader on, so this read shares the one
+            // connection its turn holds. Wait for that turn instead of reporting the race as a
+            // refusal; the bound keeps a cycle of memory actors reading each other from hanging.
+            return match tokio::time::timeout(MEMORY_AUTHORITY_WAIT, connection.lock_owned()).await {
+                Ok(conn) => Ok(CapabilityReader::Locked { conn }),
+                Err(_) => Err(EffectError::Environmental(anyhow::anyhow!(
+                    "capability target {target}: target is busy after {MEMORY_AUTHORITY_WAIT:?}"
+                ))),
+            };
         }
         let conn = actor::connect(&self.path(target), self.config.io).await.map_err(EffectError::Environmental)?;
         Ok(CapabilityReader::Independent { conn })

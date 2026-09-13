@@ -79,20 +79,44 @@ async function check<T>(name: string, body: () => Promise<T>): Promise<T> {
   return result;
 }
 const counterSource = `
+use loom::serde_json::{Map, Value};
 pub const LOOM_SCHEMA: &str = "CREATE TABLE entries(seq INTEGER, body TEXT)";
+fn param(kind: &str, value: Value) -> Value {
+    let mut object = Map::new();
+    object.insert("type".to_owned(), Value::String(kind.to_owned()));
+    object.insert("value".to_owned(), value);
+    Value::Object(object)
+}
 pub fn message(msg: Vec<u8>) {
-    let msg: loom::Value = loom::serde_json::from_slice(&msg).unwrap();
-    let request = loom::serde_json::json!({
-        "sql":"INSERT INTO entries(seq,body) VALUES (?,?)",
-        "params":[{"type":"integer","value":msg["seq"]},{"type":"text","value":msg["text"]}]
-    });
-    loom::perform::<loom::Value>("sql", request).unwrap();
+    let msg: Value = loom::serde_json::from_slice(&msg).unwrap();
+    let mut params = Vec::new();
+    params.push(param("integer", msg["seq"].clone()));
+    params.push(param("text", msg["text"].clone()));
+    let mut request = Map::new();
+    request.insert(
+        "sql".to_owned(),
+        Value::String("INSERT INTO entries(seq,body) VALUES (?,?)".to_owned()),
+    );
+    request.insert("params".to_owned(), Value::Array(params));
+    loom::perform::<Value>("sql", Value::Object(request)).unwrap();
 }`;
 function templateSource(version: string): string {
-  return `pub fn render(row: loom::Value) -> loom::Value {
-    loom::serde_json::json!({"tag":"li","key":format!("row-{}", row["seq"]),
-      "attrs":{"class":"${version}"},"children":[row["body"].as_str().unwrap().to_owned()]})
-  }`;
+  return `use loom::serde_json::{Map, Value};
+pub fn render(row: Value) -> Value {
+    let mut attrs = Map::new();
+    attrs.insert("class".to_owned(), Value::String("${version}".to_owned()));
+    let mut children = Vec::new();
+    children.push(Value::String(row["body"].as_str().unwrap().to_owned()));
+    let mut node = Map::new();
+    node.insert("tag".to_owned(), Value::String("li".to_owned()));
+    node.insert(
+        "key".to_owned(),
+        Value::String("row-".to_owned() + row["seq"].to_string().as_str()),
+    );
+    node.insert("attrs".to_owned(), Value::Object(attrs));
+    node.insert("children".to_owned(), Value::Array(children));
+    Value::Object(node)
+}`;
 }
 try {
   const ready = Date.now() + 30_000;
