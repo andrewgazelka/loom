@@ -79,6 +79,9 @@ impl Segment {
         self.apply_image(conn, true).await
     }
     async fn apply_image(&self, conn: &mut Connection, full: bool) -> Result<()> {
+        // Restore copies the engine's original CDC identities; recapturing runtime
+        // image writes would invent commits and collide with shipped change_id values.
+        actor::query(conn, "PRAGMA capture_data_changes_conn = 'off'", ()).await?;
         let tx = conn.transaction().await?;
         let mut seen = std::collections::BTreeSet::new();
         for table in &self.tables {
@@ -186,6 +189,8 @@ impl Node {
         std::fs::write(&target_path, snapshot)?;
         let mut source = actor::connect(&source_path, self.config.io).await?;
         let mut target = actor::connect(&target_path, self.config.io).await?;
+        actor::query(&source, "PRAGMA capture_data_changes_conn = 'off'", ()).await?;
+        actor::query(&target, "PRAGMA capture_data_changes_conn = 'off'", ()).await?;
         ensure!(actor::meta(&source, "id").await? == id, "actor {id}: snapshot identity mismatch");
         ensure!(
             actor::meta(&source, "durability_seq").await?.parse::<i64>()? == snapshot_revision,

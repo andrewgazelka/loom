@@ -47,6 +47,9 @@ impl Node {
     }
 
     pub(crate) fn check_lease(&self, id: &str) -> Result<()> {
+        if self.is_memory(id)? {
+            return Ok(());
+        }
         if let Some(store) = &self.remote {
             store.check(id)?;
         }
@@ -69,7 +72,7 @@ impl Node {
         Ok(())
     }
     pub(crate) fn request_snapshot(&self, id: &str) -> Result<()> {
-        if self.remote.is_some() {
+        if self.remote.is_some() && !self.is_memory(id)? {
             let mut published = self.shipping.get(id)?;
             published.snapshot = true;
             self.shipping.put(id, published)?;
@@ -77,13 +80,16 @@ impl Node {
         Ok(())
     }
     pub(crate) async fn reset_durability(&self, id: &str, conn: &Connection) -> Result<()> {
-        if self.remote.is_none() {
+        if self.remote.is_none() || self.is_memory(id)? {
             return Ok(());
         }
         self.check_lease(id)?;
         if actor::meta(conn, "durability").await? == "remote" { self.checkpoint_remote(id, conn).await } else { self.request_snapshot(id) }
     }
     pub(crate) async fn checkpoint_remote(&self, id: &str, conn: &Connection) -> Result<()> {
+        if self.is_memory(id)? {
+            return Ok(());
+        }
         let store = self.remote.as_ref().context("checkpoint requires object store")?;
         self.check_lease(id)?;
         let previous = self.shipping.get(id)?;
@@ -97,6 +103,7 @@ impl Node {
         reserved.allocated = seq;
         self.shipping.put(id, reserved)?;
         actor::set_meta(conn, "durability_seq", &seq.to_string()).await?;
+        actor::compact_cdc(conn).await?;
         let path = self.path(id).with_extension("shipping-snapshot");
         if path.exists() {
             std::fs::remove_file(&path)?;
@@ -120,6 +127,9 @@ impl Node {
         )
     }
     pub(crate) async fn prepare_commit(&self, id: &str, conn: &Connection) -> Result<()> {
+        if self.is_memory(id)? {
+            return Ok(());
+        }
         let Some(store) = &self.remote else {
             return Ok(());
         };
@@ -164,6 +174,9 @@ impl Node {
     }
 
     pub(crate) async fn ship_connection(&self, id: &str, conn: &Connection, fence: bool) -> Result<()> {
+        if self.is_memory(id)? {
+            return Ok(());
+        }
         let Some(store) = &self.remote else {
             return Ok(());
         };
@@ -204,6 +217,9 @@ impl Node {
     }
 
     pub(crate) async fn initialize_durability(&self, id: &str, conn: &Connection) -> Result<()> {
+        if self.is_memory(id)? {
+            return Ok(());
+        }
         for field in ["durability", "durability_seq"] {
             if actor::query(conn, "SELECT value FROM meta WHERE key=?", [field]).await?.rows.is_empty() {
                 actor::set_meta(conn, field, if field == "durability" { "local" } else { "0" }).await?;

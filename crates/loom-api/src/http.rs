@@ -140,6 +140,10 @@ async fn cas(
                 response
             };
             response.headers_mut().insert(
+                axum::http::header::CACHE_CONTROL,
+                axum::http::HeaderValue::from_static("public, max-age=31536000, immutable"),
+            );
+            response.headers_mut().insert(
                 axum::http::header::VARY,
                 axum::http::HeaderValue::from_static("Accept"),
             );
@@ -231,8 +235,103 @@ async fn stream_events(s: ApiState, mut socket: WebSocket) {
     {
         return;
     }
+    let Some(actors) = s.service.actors.as_ref() else {
+        if let Err(error) = definition_stream(&s, &mut socket, &mut subscription).await {
+            let _ = socket.send(Message::Text(json!({"error":format!("{error:#}")}).to_string().into())).await;
+        }
+        return;
+    };
+    let Ok(mut host) = actors.node.open_stream().await else { return };
+    // The socket loop owns this ws subscriber; close_stream removes its rows on every exit.
+    let result = actor_stream(&s, &mut socket, &mut subscription, &mut host).await;
+    let cleanup = actors.node.close_stream(&host.id).await;
+    if let Err(error) = result {
+        let _ = socket.send(Message::Text(json!({"error":format!("{error:#}")}).to_string().into())).await;
+    }
+    if let Err(error) = cleanup {
+        let _ = socket.send(Message::Text(json!({"error":format!("{error:#}")}).to_string().into())).await;
+    }
+}
+
+async fn definition_tick(s: &ApiState, socket: &mut WebSocket, subscription: &mut Subscription) -> Result<()> {
+    let events = s.service.store.definition_events(subscription.after, 1000)?;
+    s.service.store.flush()?;
+    for event in events {
+        subscription.after = event.seq;
+        socket.send(Message::Text(serde_json::to_string(&event)?.into())).await?;
+    }
+    Ok(())
+}
+
+async fn definition_stream(s: &ApiState, socket: &mut WebSocket, subscription: &mut Subscription) -> Result<()> {
     let mut interval = tokio::time::interval(Duration::from_millis(100));
     loop {
-        tokio::select! {_ = interval.tick()=>{let Ok(events)=s.service.store.definition_events(subscription.after,1000) else{return};if s.service.store.flush().is_err(){return};for event in events{subscription.after=event.seq;let Ok(text)=serde_json::to_string(&event)else{return};if socket.send(Message::Text(text.into())).await.is_err(){return}}},message=socket.recv()=>match message{Some(Ok(Message::Ping(bytes)))=>{if socket.send(Message::Pong(bytes)).await.is_err(){return}},Some(Ok(Message::Close(_)))|None|Some(Err(_))=>return,_=>{}}}
+        tokio::select! {
+            _ = interval.tick() => definition_tick(s, socket, subscription).await?,
+            message = socket.recv() => match message {
+                Some(Ok(Message::Text(_))) => anyhow::bail!("actor <none> seq -1: subscribe: actor node is not configured"),
+                Some(Ok(Message::Ping(bytes))) => socket.send(Message::Pong(bytes)).await?,
+                Some(Ok(Message::Close(_))) | None => return Ok(()),
+                Some(Err(error)) => return Err(error.into()),
+                _ => {}
+            }
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SubscribeFrame { subscribe: SubscribeTarget }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SubscribeTarget { actor: String, table: String, cap: String }
+
+#[cfg(test)]
+mod cap_wire_tests {
+    use super::*;
+    #[test]
+    fn subscription_cap_stays_opaque_until_host_decode() {
+        let cap = loom_actor::Cap {
+            target: "view".into(), cap_id: u64::MAX, epoch: u64::MAX,
+            rights: loom_actor::Rights::INSPECT, mac: [7; 32],
+        };
+        let token = serde_json::to_string(&cap).unwrap();
+        let wire = json!({"subscribe":{"actor":"view","table":"tree","cap":token}});
+        let frame: SubscribeFrame = serde_json::from_value(wire).unwrap();
+        assert_eq!(serde_json::from_str::<loom_actor::Cap>(&frame.subscribe.cap).unwrap(), cap);
+        assert!(serde_json::from_value::<SubscribeFrame>(
+            json!({"subscribe":{"actor":"view","table":"tree","cap":cap}})
+        ).is_err());
+    }
+}
+
+async fn actor_stream(
+    s: &ApiState, socket: &mut WebSocket, subscription: &mut Subscription, host: &mut loom_actor::HostStream,
+) -> Result<()> {
+    let node = &s.service.actors.as_ref().context("actor node is not configured")?.node;
+    let mut interval = tokio::time::interval(Duration::from_millis(100));
+    loop {
+        tokio::select! {
+            _ = interval.tick() => definition_tick(s, socket, subscription).await?,
+            frame = host.receiver.recv() => match frame {
+                Some(bytes) => socket.send(Message::Text(String::from_utf8(bytes)?.into())).await?,
+                None => return Ok(()),
+            },
+            message = socket.recv() => match message {
+                Some(Ok(Message::Text(text))) => {
+                    let request: SubscribeFrame = serde_json::from_str(&text)?;
+                    let target = request.subscribe;
+                    // Decode only at the host boundary; JavaScript transports this JSON token unchanged.
+                    let cap: loom_actor::Cap = serde_json::from_str(&target.cap)
+                        .with_context(|| format!("actor {} seq -1: subscribe cap token", target.actor))?;
+                    ensure!(target.actor == cap.target, "actor {} seq -1: subscribe cap target mismatch", target.actor);
+                    node.subscribe_stream(&host.id, &cap, &target.table).await?;
+                }
+                Some(Ok(Message::Ping(bytes))) => socket.send(Message::Pong(bytes)).await?,
+                Some(Ok(Message::Close(_))) | None => return Ok(()),
+                Some(Err(error)) => return Err(error.into()),
+                _ => {}
+            }
+        }
     }
 }

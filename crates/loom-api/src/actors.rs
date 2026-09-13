@@ -7,7 +7,7 @@ use loom_actor::{Cap, ChildSpec, Node, Rights, Rows};
 use serde_json::{Value, json};
 #[derive(Clone)]
 pub struct ActorService {
-    node: Node,
+    pub(crate) node: Node,
 }
 fn error(error: impl std::fmt::Display) -> anyhow::Error {
     anyhow::anyhow!("{error:#}")
@@ -127,6 +127,16 @@ impl ActorService {
 impl ActorService {
     async fn command(&self, access: &Access, command: &str, args: Value) -> anyhow::Result<Value> {
         match command {
+            "view" => {
+                access.require(Scope::Execute)?;
+                self.actor_view(serde_json::from_value(args)?).await
+            }
+            "subscriptions" => {
+                access.require(Scope::Read)?;
+                let args: IdArgs = serde_json::from_value(args)?;
+                self.authority(&args.id, Rights::INSPECT, "subscriptions").await?;
+                json_value(self.node.subscriptions(&args.id).await.map_err(error)?)
+            }
             "actors" => {
                 access.require(Scope::Read)?;
                 self.actor_list().await
@@ -217,13 +227,14 @@ impl crate::Service {
         mut args: Value,
     ) -> anyhow::Result<Value> {
         use anyhow::Context;
-        self.access.require(crate::auth::command_scope(command))?;
+        self.access.require(crate::auth::request_scope(command, &args))?;
         let actors = self
             .actors
             .as_ref()
             .context("actor node is not configured")?;
         let references: &[&str] = match command {
             "spawn" => &["def"],
+            "view" => &["template"],
             "promote" => &["hash"],
             "validate" => &["candidate"],
             "promote_where" => &["old", "new"],
@@ -231,6 +242,13 @@ impl crate::Service {
         };
         for field in references {
             let target = crate::field(&args, field)?;
+            if command == "spawn" && target == "view-v1" {
+                continue;
+            }
+            if let Some(definition) = self.store.resolve(target)? {
+                args[*field] = json!(definition.hash);
+                continue;
+            }
             let behavior = actors
                 .node
                 .behavior(target)

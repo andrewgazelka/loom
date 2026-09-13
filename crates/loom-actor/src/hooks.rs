@@ -169,7 +169,7 @@ impl crate::Node {
                 let hash: String = row.get(0)?;
                 if let Some(verdict) = crate::history::promote_replay(
                     conn,
-                    actor::behavior(&self.registry, &hash).await?.as_ref(),
+                    crate::view::behavior_on(&self.registry, conn, &hash).await?.as_ref(),
                     &row.get::<String>(1)?,
                     &row.get::<String>(2)?,
                     effects,
@@ -202,7 +202,7 @@ impl crate::Node {
                     &tx,
                     &identity,
                     &operation.reason,
-                    actor::behavior(&self.registry, &operation.behavior_hash).await?.as_ref(),
+                    crate::view::behavior_on(&self.registry, &tx, &operation.behavior_hash).await?.as_ref(),
                     effects,
                 )
                 .await;

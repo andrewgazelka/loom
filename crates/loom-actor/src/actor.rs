@@ -1,6 +1,8 @@
 mod inspection;
 pub(crate) use inspection::{inspect_query, inspect_statement};
 mod initialize;
+mod snapshot;
+pub(crate) use snapshot::{compact_cdc, replace_snapshot, snapshot};
 use crate::{Behavior, Ctx, EffectHandler, Registry, Rows, Status, Trap};
 use anyhow::{Context, Result, anyhow, ensure};
 pub(crate) use initialize::initialize;
@@ -21,6 +23,22 @@ pub(crate) async fn connect(path: &Path, io: crate::Io) -> Result<Connection> {
     let conn = db.connect()?;
     query(&conn, "PRAGMA journal_mode=WAL", ()).await?;
     query(&conn, "PRAGMA synchronous=NORMAL", ()).await?;
+    query(&conn, "PRAGMA capture_data_changes_conn = 'full'", ()).await?;
+    let cdc = query(&conn, "PRAGMA table_info(turso_cdc)", ()).await?;
+    ensure!(
+        cdc.rows.iter().any(|row| row.get::<String>(1).is_ok_and(|name| name == "change_txn_id")),
+        "actor {path} seq -1: capture_data_changes_conn requires CDC v2 change_txn_id"
+    );
+    let runtime = query(&conn, "SELECT name FROM sqlite_schema WHERE type='table' AND name='meta'", ()).await?;
+    if !runtime.rows.is_empty() {
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS subscribers(id TEXT PRIMARY KEY,subscriber TEXT NOT NULL,\"table\" TEXT NOT NULL,\
+             after_change_id INTEGER NOT NULL)",
+            (),
+        )
+        .await?;
+        conn.execute("INSERT OR IGNORE INTO meta(key,value) VALUES ('cdc_floor','0')", ()).await?;
+    }
     Ok(conn)
 }
 
@@ -138,6 +156,7 @@ pub(crate) async fn attempt(
     control: Option<&crate::durability::AttemptControl<'_>>,
 ) -> Result<bool, Trap> {
     let runtime = |e: anyhow::Error| Trap { message: format!("actor {id} seq {}: {e:#}", message.seq), runtime: true, durability: false };
+    let schema = crate::Node::schema_fingerprint(conn).await.map_err(runtime)?;
     let tx = conn.transaction().await.map_err(|e| runtime(e.into()))?;
     let mut cx = Ctx {
         conn: &tx,
@@ -176,6 +195,8 @@ pub(crate) async fn attempt(
     }
     crate::mailbox::complete(&tx, message.seq).await.map_err(runtime)?;
     set_meta(&tx, &format!("code_at:{}", message.seq), &revision.to_string()).await.map_err(runtime)?;
+    mark_schema_snapshot(&tx, &schema).await.map_err(runtime)?;
+    crate::subscribe::record_origin(&tx, id, message.seq).await.map_err(runtime)?;
     if let Some(control) = control
         && let Err(error) = control.node.prepare_commit(id, &tx).await
     {
@@ -239,6 +260,7 @@ pub(crate) async fn promote(
     effects: &dyn EffectHandler,
     node: Option<&crate::Node>,
 ) -> Result<()> {
+    let schema = crate::Node::schema_fingerprint(conn).await?;
     let tx = conn.transaction().await?;
     let status = status(&tx).await?;
     ensure!(status != Status::Stopped, "stopped actor cannot be promoted");
@@ -263,6 +285,7 @@ pub(crate) async fn promote(
     if status == Status::Parked {
         set_meta(&tx, "status", "running").await?;
     }
+    mark_schema_snapshot(&tx, &schema).await?;
     if let Some(node) = node {
         node.commit_control(&meta(&tx, "id").await?, tx).await?;
     } else {
@@ -271,20 +294,11 @@ pub(crate) async fn promote(
     Ok(())
 }
 
-pub(crate) async fn snapshot(conn: &Connection, path: &Path, seq: i64) -> Result<()> {
-    let known = query(conn, "SELECT path FROM snapshots WHERE seq=?", [seq]).await?;
-    if !known.rows.is_empty() {
-        return Ok(());
+async fn mark_schema_snapshot(conn: &Connection, before: &str) -> Result<()> {
+    if crate::Node::schema_fingerprint(conn).await? != before {
+        // Node::snapshot_schema_change clears this only after publishing a matching schema snapshot.
+        set_meta(conn, "schema_snapshot_pending", "1").await?;
     }
-    let path = path.to_str().context("snapshot path is not UTF-8")?;
-    let staging = format!("{path}.pending");
-    // A previous crash can leave this unreferenced staging copy.
-    if Path::new(&staging).exists() {
-        std::fs::remove_file(&staging)?;
-    }
-    conn.execute(format!("VACUUM INTO '{}'", staging.replace('\'', "''")), ()).await?;
-    std::fs::rename(&staging, path)?;
-    conn.execute("INSERT INTO snapshots(seq,path) VALUES (?,?)", turso::params![seq, path]).await?;
     Ok(())
 }
 

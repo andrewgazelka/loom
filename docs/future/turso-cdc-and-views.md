@@ -4,4 +4,4 @@ Design: [docs/ui-view-actor.md](../ui-view-actor.md) (2026-09-12) makes CDC the 
 
 Turso's change data capture (`PRAGMA capture_data_changes_conn`, stable since 0.5) gives a per-actor logical change log; DBSP materialized views maintain derived tables incrementally. The validator's logical diff could read `turso_cdc`; the doc's derived tables could be views.
 
-Done when: table-hash comparison in `validate` is replaced or cross-checked by the CDC log; one derived table in a builtin behavior is a materialized view with a test that it updates on insert.
+The authored validator now cross-checks table hashes with CDC replay; `view-v1` materializes `tree` rows through the same subscription pump. The write-only lane has not executed its gates. Keep this entry until `cargo test -p loom-actor --test view` reports nine passing tests and `scripts/ui-e2e.sh` reports 4/4. The implementation and deviations are recorded in [the actor runbook](../../crates/loom-actor/RUNBOOK.md#view-actors-and-cdc).

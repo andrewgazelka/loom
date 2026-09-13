@@ -19,7 +19,7 @@ impl Service {
         {
             return self.response(Err(anyhow::Error::msg(error)));
         }
-        if let Err(error) = self.access.require(auth::command_scope(&request.command)) {
+        if let Err(error) = self.access.require(auth::request_scope(&request.command, &request.args)) {
             return self.response(Err(error));
         }
         self.response(self.command_inner(request).await)
@@ -32,7 +32,7 @@ impl Service {
             if let Some(verb) = loom_proto::verbs::lookup(&command) {
                 verb.normalize(&mut args).map_err(anyhow::Error::msg)?;
             }
-            self.access.require(auth::command_scope(&command))?;
+            self.access.require(auth::request_scope(&command, &args))?;
             CommandRequest {
                 command,
                 args,
@@ -43,6 +43,7 @@ impl Service {
         };
         let args = &request.args;
         match request.command.as_str() {
+            "view" if args.get("actor").is_some() => self.actor_command("view", args.clone()).await,
             command
                 if loom_proto::verbs::lookup(command)
                     .is_some_and(|verb| verb.family == loom_proto::verbs::Family::Definition) =>

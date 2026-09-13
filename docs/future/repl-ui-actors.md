@@ -4,4 +4,4 @@ Design: [docs/ui-view-actor.md](../ui-view-actor.md) (2026-09-12): the DOM as a 
 
 The old actor panel was removed with the event-fold model. The UI should drive actors through the same MCP surface: tree, info, inbox and outbox, lineage, dead letters, validate verdicts, promote.
 
-Done when: every panel's data comes from an `actor_*` tool or `actor://` resource (no second API), keyboard-driven per the UI rules, verified with a headless run.
+The server view actor and plain TypeScript binding implementation are authored in the `r5-view` lane. Its unexecuted gates are `cargo test -p loom-actor --test view`, `bun test ui/tests/bind`, and `scripts/ui-e2e.sh`. Keep this roadmap entry until those commands report 9/9, 5/5, and 4/4.

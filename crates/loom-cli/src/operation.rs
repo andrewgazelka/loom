@@ -27,7 +27,7 @@ pub fn parser() -> clap::Command {
         let mut command = clap::Command::new(verb.name);
         for argument in verb.arguments {
             let mut arg = clap::Arg::new(argument.name).required(argument.required);
-            if argument.flag {
+            if argument.flag && !(verb.name == "view" && argument.name == "target") {
                 arg = arg.long(argument.name);
             }
             command = command.arg(arg);

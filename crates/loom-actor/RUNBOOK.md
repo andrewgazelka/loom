@@ -174,10 +174,58 @@ Every node registers `counter-v1` (records messages), `forwarder-v1` (sends `for
 
 `Node::spawn(parent, spec)` persists the child specification and spawn outbox before delivery. `actor_ids` includes forks; `run_until_idle` returns the number of actor turns processed, excluding outbox-only delivery and timer scans. MCP shares the daemon's node and existing authenticated HTTP or stdio endpoint. Use `--actors-dir` to choose its storage directory.
 
-`Config.io` selects `Auto`, `Syscall`, `IoUring`, or `Memory` through Turso's named VFS. Auto selects io_uring on Linux (the target dependency unifies Turso's feature), syscall elsewhere. An explicit io_uring request fails with the platform name on other systems. Memory keeps actor and directory-index databases in live connections and creates no database files; it has no disk snapshots or persistence across node lifetimes. Historical fork/validation and reset currently require persistent I/O. The `memory_io_is_wired` test exercises three messages and checks that the directory remains empty.
+`Config.io` selects `Auto`, `Syscall`, `IoUring`, or `Memory` through Turso's named VFS. Auto selects io_uring on Linux (the target dependency unifies Turso's feature), syscall elsewhere. An explicit io_uring request fails with the platform name on other systems. Memory keeps actor and directory-index databases in live connections and creates no database files; it has no disk snapshots or persistence across node lifetimes. In-memory logical snapshots now support fork, validation, and reset; this addition awaits the consolidated gate below. The `memory_io_is_wired` test exercises three messages and checks that the directory remains empty.
 
 Kill and shutdown deadlines cancel only the native handler future, then await the message transaction rollback. They do not abort BEGIN, COMMIT, snapshot publication, or lifecycle transactions. Turso 0.7.2 marks `Transaction::in_progress` false only after awaited COMMIT returns; dropping the task between the engine commit and that assignment queues an invalid rollback on the next connection access. The io_uring parity run exposed this completion window; the corrected cooperative cancellation path passed the full 22-test actor suite on Linux with Auto selecting io_uring, as well as the local macOS suite.
 
 With an explicit syscall/io_uring VFS, Turso treats `:memory:` as a literal filename. Scratch connections used while replacing a cached connection therefore select `Io::Memory` explicitly, independently of the node’s persistent I/O selection. The reset regression passes without creating `:memory:` or `:memory:-wal` files.
 
 On Linux hosts with an 8 MiB locked-memory limit, concurrent io_uring-backed tests can fail with `io_uring_setup: out of memory` despite ample ordinary RAM. The 22 actor tests and 4 MCP tests pass with `RUST_TEST_THREADS=4 cargo test -p loom-actor -p loom-mcp` on such a host. Size test concurrency against ring-allocation headroom; keep the selected VFS unchanged.
+
+## View actors and CDC
+
+Status: authored, not compiled or executed. The user’s 2026-08-25 test-at-end directive reserves all gates for the lead. Source inspection and `git diff --no-ext-diff --check` are the only verification performed here. Earlier passing results in this runbook do not cover this change.
+
+Run from the worktree root, resolving the new UI dependency and recording the resulting `ui/bun.lock` first:
+
+```sh
+(cd ui && bun install)
+cargo test -p loom-actor --test view
+bun test ui/tests/bind
+cargo test -p loom-actor -p loom-behavior -p loom-api -p loom-mcp -p loom-cli -p loom-proto
+cargo clippy -p loom-actor -p loom-behavior -p loom-api -p loom-mcp -p loom-cli -p loom-proto --all-targets -- -D warnings
+(cd ui && bun run check)
+cargo build -p loomd
+LOOMD=target/debug/loomd scripts/ui-e2e.sh
+```
+
+Required results are 9/9 named actor tests, 5/5 named binding tests, and `4/4` from the native daemon e2e script, plus the broader regression and type/lint gates above. The script copies the supplied daemon executable, owns its temporary directory and process, and checks its listening log before probing HTTP. The browser-node document’s wasm `cargo check` command is a phase-2 target, not a claim that this native implementation builds for wasm.
+
+Dependencies: `turso_core = "0.7.2"` becomes a general loom-actor dependency for the engine’s record decoder; the existing Linux io_uring feature dependency remains. This version already exists in Cargo.lock. UI tests add exactly pinned `happy-dom` 20.14.3 because the existing tests have no DOM shim. Its dependency graph and lockfile update remain for `bun install`; no dependency installation ran here. No other dependency was added.
+
+Deviations, elaborations, and limits:
+
+- Ephemeral history uses logical in-memory snapshots, including physical rowids and schema objects, so fork/validation/reset need no disk file. Public forks are registered ephemeral actors; validation scratch actors are not registered. Parent child rows persist, while startup removes stale ephemeral index/subscription entries.
+- Serving connections enable `PRAGMA capture_data_changes_conn = 'full'` with no table argument, as confirmed in Turso 0.7.2. Exact image restoration temporarily disables capture to avoid manufacturing CDC. Older CDC versions fail closed rather than being migrated implicitly.
+- CDC does not encode DDL. Schema-changing turns publish a replacement snapshot and persist a repair marker until publication completes; selective receive waits for a contiguous history cut. Template-only promotion retains normal row CDC. Validation checks the snapshot plus domain CDC independently of behavior replay, with trigger execution suspended inside the replay transaction.
+- Frames decode full before/after records into column objects, encode SQL blobs as byte arrays, and retain sparse `updates` as engine record bytes. Rowid tables are required by the existing history model. Virtual generated columns whose omitted CDC fields cause a schema-width mismatch fail closed; generalized generated-column replay is not implemented.
+- Actor commits retain their inbox sequence and key. Control transactions without an inbox origin use the negative CDC transaction ID as `seq`, avoiding delivery-key collisions between promotions at the same inbox cursor. Optional `causation` carries the original browser-send key through view commits. These are explicit wire extensions to the spec’s frame shape.
+- View source rows are cached in runtime metadata so promotion can rerender all rows without inverting rendered trees. The single domain table remains `tree`. The behavior bridge adds `LoomTemplate` around the existing `Runtime::call_with_effects` entry point; it requires a single Value argument/result and rejects unknown or nonempty effect rows at admission.
+- The existing definition-inspection `view(target)` verb remains as an exclusive overload of `view(actor, table, template, order_by)`. CLI actor-view arguments are named flags. HTTP, MCP, and CLI share the registry and execution permission checks.
+- Browser inspection capabilities are opaque serialized strings; JSON numeric capabilities would lose u64 precision. Host subscribers still use pump subscription operations. Normal socket closure queues unsubscribe; restart pruning handles process loss and ephemeral subscribers.
+- Confirmed HTTP send failure becomes a local dead-letter verdict for the binding. Pending execution and lost acknowledgements retain pending state. The shell marks the existing row pending rather than inventing application-specific optimistic edits.
+- The patcher refuses changes to a living root/keyed-child tag and rejects active content and executable attributes. Older browsers use `insertBefore` plus focus/selection/scroll restoration when `moveBefore` is unavailable; preservation of in-flight transitions on that fallback is unverified.
+- The redelivery test models the committed-receiver/unacknowledged-outbox boundary by resetting the delivered flag; it does not kill a process. Actor tests use native template fixtures; compiled guest templates are exercised by the authored e2e script. Roadmap documents remain unverified until the lead records the gates.
+
+Uncompiled assumptions requiring particular attention (paths relative to the repository root):
+
+- `crates/loom-actor/src/cdc.rs:37`: Turso’s exposed ValueIterator/ValueRef APIs and numeric conversion match the inspected artifact; exact row replay also assumes caller-owned transactions restore suspended triggers on failure.
+- `crates/loom-actor/src/history/memory.rs:64`: restoring explicit rowid alongside its INTEGER PRIMARY KEY alias is accepted; `:79` assumes schema_version changes identify transactional DDL.
+- `crates/loom-actor/src/actor/snapshot.rs:32`: CDC compaction, subscriber cursor advancement, and metadata cleanup commit together with the engine’s own CDC bookkeeping.
+- `crates/loom-behavior/src/template.rs:28`: the compiler reports pure JSON templates as Value-to-Value definitions with empty effects; `:55` assumes the existing runtime bridge accepts the one-element JSON argument array.
+- `crates/loom-api/src/http.rs:308`: the websocket select loop and cleanup future meet Axum’s Send requirements, and ordinary close reaches pump unsubscribe. Abrupt task cancellation relies on restart pruning.
+- `crates/loom-actor/tests/view_support.rs:95`: a second Turso connection observes the live WAL. `crates/loom-actor/tests/view.rs:77` assumes ephemeral spawn preserves baseline directory entries; `:198` assumes fresh counter inserts have rowids 1, 2, and 3.
+- `ui/tests/bind/fixture.ts:37`: Happy DOM implements the browser methods used through the explicit DOM type boundary; `ui/src/lib/bind/patch.ts:180` needs real-browser confirmation of fallback focus/caret/scroll preservation.
+- `ui/src/routes/view/+page.svelte:92`: the typed binding callback and asynchronous teardown satisfy Svelte checking and lifecycle behavior. `scripts/ui-e2e.sh` additionally depends on the real daemon’s compiler prerequisites and pure template effect inference.
+
+Every gate above remains unrun; these source-level assumptions are not successful compilation or production-integration evidence.

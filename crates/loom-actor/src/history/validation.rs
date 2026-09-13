@@ -30,15 +30,30 @@ impl Node {
         assertions: &[String],
         config: memo::MemoConfig,
     ) -> Result<memo::Record> {
-        ensure!(self.config.io != crate::Io::Memory, "actor {id}: historical snapshots require persistent I/O");
         i64::try_from(config.max_rows).context("validation_memo max_rows exceeds SQLite integer")?;
         let actor = self.open_actor(id).await?;
         let source = actor.conn.lock().await;
+        let schema = Self::schema_fingerprint(&source).await?;
+        self.snapshot_schema_change(&source, id, &schema).await?;
         let cursor = actor::cursor(&source).await?;
+        ensure!(
+            actor::query(&source, "SELECT value FROM meta WHERE key='schema_snapshot_pending'", ()).await?.rows.is_empty(),
+            "actor {id} seq {cursor}: CDC validation requires a contiguous schema snapshot boundary"
+        );
         ensure!(k >= 0 && k <= cursor, "actor {id} seq {cursor}: validation window outside history");
-        let behavior = actor::behavior(&self.registry, candidate).await?;
+        let behavior = crate::view::behavior_on(&self.registry, &source, candidate).await?;
         let key = memo::key(&source, candidate, cursor - k, cursor, assertions).await?;
         if let Some(record) = memo::lookup(self, &key).await? {
+            memo::store(self, &key, &record, config).await?;
+            return Ok(record);
+        }
+        if let Some(verdict) = self.cdc_verdict(&source).await? {
+            let record = memo::Record {
+                key: key.clone(),
+                result: crate::ValidationResult { verdict, assertions: Vec::new() },
+                tables: table_hashes(&source).await?,
+                outbox_hash: memo::outbox_hash(&source, cursor - k, cursor).await?,
+            };
             memo::store(self, &key, &record, config).await?;
             return Ok(record);
         }
@@ -105,6 +120,32 @@ impl Node {
         Ok(record)
     }
 
+    /// Invariant 17 is an independent verdict source before candidate behavior replay.
+    async fn cdc_verdict(&self, source: &Connection) -> Result<Option<Verdict>> {
+        let snapshot = actor::query(source, "SELECT path FROM snapshots ORDER BY seq DESC LIMIT 1", ()).await?;
+        let path: String = snapshot.rows.first().context("CDC validation requires a snapshot")?.get(0)?;
+        let mut target = self.snapshot_connection(&path).await?;
+        actor::query(&target, "PRAGMA capture_data_changes_conn = 'off'", ()).await?;
+        let boundary = actor::query(&target, "SELECT COALESCE(MAX(change_id),0) FROM turso_cdc", ()).await?;
+        let after: i64 = boundary.rows.first().context("CDC snapshot boundary query returned no row")?.get(0)?;
+        let tx = target.transaction().await?;
+        crate::cdc::replay_domain_cdc(source, &tx, after).await?;
+        tx.commit().await?;
+        let original = table_hashes(source).await?;
+        let replayed = table_hashes(&target).await?;
+        let mut differences = Vec::new();
+        for name in original.keys().chain(replayed.keys()).collect::<BTreeSet<_>>() {
+            if original.get(name) != replayed.get(name) {
+                differences.push(TableDifference {
+                    name: name.clone(),
+                    original_hash: original.get(name).cloned().unwrap_or_else(|| "absent".into()),
+                    fork_hash: replayed.get(name).cloned().unwrap_or_else(|| "absent".into()),
+                });
+            }
+        }
+        Ok((!differences.is_empty()).then_some(Verdict::Differs { tables: differences }))
+    }
+
     /// Validate and promote under the actor lock; the returned cutoff compares historical sends.
     pub async fn promote_report(&self, id: &str, hash: &str, k: i64) -> Result<memo::PromoteReport> {
         let _admission = self.admit().await?;
@@ -116,15 +157,18 @@ impl Node {
         let key = memo::key(&conn, hash, end - k, end, &[]).await?;
         ensure!(key == record.key, "promote_report: history changed after validation; retry");
         let report = self.promotion_cutoff(&conn, record, end - k, end).await?;
+        let behavior = crate::view::behavior_on(&self.registry, &conn, hash).await?;
+        let schema = Self::schema_fingerprint(&conn).await?;
         actor::promote(
             &mut conn,
-            self.behavior(hash).await?.as_ref(),
+            behavior.as_ref(),
             "promote_report",
             "validated candidate",
             &crate::effects::RuntimeEffects { node: self, external: self.effects.as_ref() },
             Some(self),
         )
         .await?;
+        self.snapshot_schema_change(&conn, id, &schema).await?;
         drop(conn);
         self.sync_index(id).await?;
         Ok(report)

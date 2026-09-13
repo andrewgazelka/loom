@@ -1,5 +1,8 @@
 //! The public command vocabulary and transport-independent argument schemas.
 use serde_json::{Value, json};
+#[cfg(test)]
+#[path = "verbs_view_tests.rs"]
+mod view_tests;
 
 pub type ValidationCount = u32;
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -96,7 +99,10 @@ pub static VERBS: &[Verb] = &[
             arg!(allowed_effects, Json, optional)
         ]
     ),
-    verb!(view, Definition, Read, [arg!(target, String)]),
+    verb!(view, Definition, Read, [
+        arg!(target, String, optional), arg!(actor, String, optional), arg!(table, String, optional),
+        arg!(template, String, optional), arg!(order_by, Json, optional)
+    ]),
     verb!(
         update,
         Definition,
@@ -131,7 +137,8 @@ pub static VERBS: &[Verb] = &[
             arg!(def, String),
             arg!(init, Json, "null"),
             arg!(parent, String, optional),
-            arg!(spec, Json, optional)
+            arg!(spec, Json, optional),
+            arg!(durability, String, optional)
         ]
     ),
     verb!(
@@ -146,6 +153,7 @@ pub static VERBS: &[Verb] = &[
     ),
     verb!(tree, Actor, Read, [arg!(root, String, optional)]),
     verb!(info, Actor, Read, [arg!(id, String)]),
+    verb!(subscriptions, Actor, Read, [arg!(id, String)]),
     verb!(lineage, Actor, Read, [arg!(id, String)]),
     verb!(
         validate,
@@ -241,7 +249,16 @@ impl Verb {
                 required.push(argument.name);
             }
         }
-        json!({"type":"object","properties":properties,"required":required,"additionalProperties":false})
+        let mut schema = json!({"type":"object","properties":properties,"required":required,"additionalProperties":false});
+        if self.name == "view" {
+            schema["oneOf"] = json!([
+                {"required":["target"],"not":{"anyOf":[
+                    {"required":["actor"]},{"required":["table"]},{"required":["template"]},{"required":["order_by"]}
+                ]}},
+                {"required":["actor","table","template","order_by"],"not":{"required":["target"]}}
+            ]);
+        }
+        schema
     }
     pub fn normalize(&self, args: &mut Value) -> Result<(), String> {
         let object = args
@@ -279,6 +296,13 @@ impl Verb {
             if !valid {
                 return Err(format!("{} invalid argument {}", self.name, argument.name));
             }
+        }
+        if self.name == "view" {
+            let definition = object.len() == 1 && object.get("target").is_some_and(Value::is_string);
+            let actor = object.len() == 4 && ["actor", "table", "template"].iter()
+                .all(|name| object.get(*name).is_some_and(Value::is_string))
+                && object.get("order_by").and_then(Value::as_array).is_some_and(|items| items.iter().all(Value::is_string));
+            if !definition && !actor { return Err("view requires either target or actor, table, template, order_by".into()); }
         }
         Ok(())
     }

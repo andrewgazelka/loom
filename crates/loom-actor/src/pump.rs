@@ -31,6 +31,8 @@ impl Node {
     /// A failed destination blocks its own later rows; other pairs keep moving.
     pub(crate) async fn pump_unlocked(&self, id: &str) -> Result<bool> {
         let _sender = self.guard(&format!("pump:{id}")).await;
+        self.close_actor_subscriptions(id).await?;
+        self.fanout(id).await?;
         let source = self.open_actor(id).await?;
         let generation: i64;
         let mut deliveries = Vec::new();
@@ -155,6 +157,16 @@ impl Node {
                     }
                     self.sync_index(&child).await?;
                 }
+            }
+        } else if let Some(target) = entry.target.strip_prefix("sub:") {
+            self.apply_subscription(id, target, &entry.msg, key).await?;
+        } else if let Some(target) = entry.target.strip_prefix("frame:") {
+            let envelope: crate::subscribe::Envelope = serde_json::from_slice(&entry.msg)?;
+            self.deliver_message(target, &envelope.key, id, &serde_json::to_vec(&envelope.frame)?).await?;
+        } else if entry.target.starts_with("ws:") {
+            let envelope: crate::subscribe::Envelope = serde_json::from_slice(&entry.msg)?;
+            if let Some(stream) = self.streams.lock().await.get(&entry.target) {
+                stream.send(serde_json::to_vec(&envelope.frame)?).context("WebSocket subscriber closed")?;
             }
         } else if let Some(target) = entry.target.strip_prefix("call:") {
             self.deliver_call(id, target, &entry.msg, key).await?;

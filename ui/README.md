@@ -76,3 +76,34 @@ replay conflicts, history export/clear, and navigating away during compilation.
 
 Restart a static preview after rebuilding so its entry script matches the
 current build. Keep the preview build fixed while capturing screenshots.
+
+## Binding core
+
+`src/lib/bind/{bind,patch,stream}.ts` is plain TypeScript without Svelte or Vite imports.
+`bind(container, stream, { onEvent, onError })` maintains keyed row elements and
+patches only changed attributes, text, and children. `pending(key, tree, messageKey)`
+marks an optimistic row; an authoritative delta clears it by `key` or `causation`,
+and a dead letter restores its last authoritative tree. A resnapshot preserves
+surviving nodes until the complete replacement snapshot arrives. Root and keyed
+child tag changes fail by key because a different element class cannot preserve identity.
+
+`stream.ts` decodes JSON blobs only at the tree-table boundary. WebSocket capabilities
+remain opaque strings so JavaScript cannot round their 64-bit fields. The `/view`
+shell authenticates, spawns a view, subscribes to its `tree` table, and sends event
+messages `{type: name, key: rowKey, payload}` to the source through the ordinary
+`send` command. Closing the page closes its subscription and requests that its
+ephemeral view stop. HTTP authentication and source SEND authority remain server checks.
+Events mark their row pending using its current tree. Confirmed failed sends become
+local dead-letter frames; a transport failure or pending server outcome leaves the
+marker until an authoritative verdict or reconnection. The shell does not retry sends.
+
+From the repository root:
+
+```sh
+bun test ui/tests/bind
+```
+
+The five tests use isolated `happy-dom` 20.14.3 windows with MutationObserver and
+focus/selection APIs. Existing UI tests had no DOM shim. This dependency is pinned
+in `package.json`; the lead must update `ui/bun.lock` and install it before the gate.
+No dependency installation or test execution ran in the write-only implementation lane.

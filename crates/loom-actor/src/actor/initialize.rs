@@ -13,6 +13,7 @@ pub(crate) async fn initialize(
     io: crate::Io,
     durability: crate::Durability,
 ) -> Result<Connection> {
+    let io = if durability == crate::Durability::Ephemeral { crate::Io::Memory } else { io };
     let staging = path.with_extension(format!("creating-{}", ulid::Ulid::new()));
     let mut conn = connect(&staging, io).await?;
     let tx = conn.transaction().await?;
@@ -27,6 +28,8 @@ pub(crate) async fn initialize(
     set_meta(&tx, "node_root", if parent.is_empty() { "true" } else { "false" }).await?;
     set_meta(&tx, "ready", if parent.is_empty() { "true" } else { "false" }).await?;
     set_meta(&tx, "cursor", "0").await?;
+    // actor::compact_cdc replaces the floor at each snapshot.
+    set_meta(&tx, "cdc_floor", "0").await?;
     set_meta(&tx, "capability_epoch", "0").await?;
     set_meta(&tx, "durability", durability.name()).await?;
     set_meta(&tx, "durability_seq", "0").await?;

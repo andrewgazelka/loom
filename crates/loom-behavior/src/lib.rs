@@ -2,7 +2,9 @@
 #![forbid(unsafe_code)]
 
 mod effects;
+mod template;
 mod wire;
+pub use template::LoomTemplate;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -74,6 +76,10 @@ impl StoreRegistry {
 }
 #[async_trait]
 impl Registry for StoreRegistry {
+    async fn template(&self, reference: &str) -> Result<Arc<dyn loom_actor::Template>> {
+        Ok(Arc::new(LoomTemplate::new(self.store.clone(), reference)?))
+    }
+
     async fn resolve(&self, reference: &str) -> Result<Arc<dyn Behavior>> {
         let definition = self
             .store

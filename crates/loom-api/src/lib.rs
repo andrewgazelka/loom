@@ -139,7 +139,7 @@ impl Service {
                 Response {
                     ok: false,
                     seq,
-                    result: json!({"code":"actor_message_failed","error":failure.to_string(),"id":failure.id,"seq":failure.seq,"cause":failure.cause}),
+                    result: json!({"code":failure.code(),"error":failure.to_string(),"id":failure.id,"seq":failure.seq,"cause":failure.cause}),
                     diagnostics: vec![],
                 }
             }

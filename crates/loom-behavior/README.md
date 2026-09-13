@@ -30,6 +30,21 @@ an absent export means empty SQL. The actor runtime runs that SQL during
 creation and promotion. Schema extraction does not create a legacy actor or
 invoke `run`, `fold`, `spawn`, `send`, or `state` on `loom_rt::Runtime`.
 
+## View templates
+
+`StoreRegistry::template(reference)` resolves a `LoomTemplate` implementing
+`loom_actor::Template`. A template has exactly one `render(row: loom::Value) ->
+loom::Value` entry. Both its definition and entry effect rows must be known and
+empty; admission names the first forbidden effect or the `unknown` flag.
+
+The native `view-v1` behavior calls this bridge inside its existing actor
+transaction. `LoomTemplate::render` uses `Runtime::call_with_effects` with one
+positional Value argument and returns its decoded Value. The call-local root
+handler refuses every escaped effect, including effects omitted by malformed
+metadata. No actor is created in `loom-store`, and runtime failures retain the
+actor retry classification. This is the added Value entry point; ordinary
+`LoomBehavior` keeps its byte-message entry point.
+
 ## Effect wire contract
 
 Descriptors use the existing `{ "op": name, "args": arguments }` Loom CBOR
@@ -48,6 +63,8 @@ trap with the operation's name.
 | `actor.promote` | `{cap, behavior_hash, author, rationale}` | null |
 | `actor.inspect_sql` | `{cap, sql, params}` | `{columns, rows}` |
 | `actor.send` | `{cap, msg}` | null |
+| `actor.subscribe` | `{cap, table}` | subscription ID (requires INSPECT) |
+| `actor.unsubscribe` | `{subscription_id}` | null |
 | `actor.spawn` | serialized `loom_actor::ChildSpec` | capability bytes |
 | `actor.stop` | `{cap, reason}` | null |
 | `actor.monitor` | `{cap}` | monitor reference |

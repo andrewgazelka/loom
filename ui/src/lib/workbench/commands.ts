@@ -12,6 +12,7 @@ const verbNames = [
   "send",
   "tree",
   "info",
+  "subscriptions",
   "lineage",
   "validate",
   "promote",
@@ -86,7 +87,13 @@ const definitionCommands: Command[] = [
     operation: V.view,
     description: "Source, item identities and inferred entry effects",
     read: true,
-    fields: [field("target", "Name or hash")],
+    fields: [
+      field("target", "Definition name or hash", { optional: true }),
+      field("actor", "Source actor", { optional: true }),
+      field("table", "Source table", { optional: true }),
+      field("template", "Template name or hash", { optional: true }),
+      field("order_by", "Order columns", { kind: "json", optional: true }),
+    ],
   },
   {
     id: V.add,
@@ -199,6 +206,7 @@ export const commands: Command[] = [
   ),
   actorCommand(V.actors, "Every actor in this node, including forks", [], true),
   actorCommand(V.info, "Lifecycle, cursor and relationships", [id], true),
+  actorCommand(V.subscriptions, "Subscribers and their CDC cursors", [id], true),
   actorCommand(
     V.lineage,
     "Behavior history and promotion rationale",
@@ -238,6 +246,7 @@ export const commands: Command[] = [
       }),
       field("parent", "Parent actor id", { optional: true }),
       field("spec", "Child spec JSON", { kind: "json", optional: true }),
+      field("durability", "Durability", { optional: true, options: ["local", "remote", "ephemeral"] }),
     ],
     false,
   ),

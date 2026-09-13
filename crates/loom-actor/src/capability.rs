@@ -269,7 +269,7 @@ impl Node {
         if let Ok(conn) = connection.try_lock_owned() {
             return Ok(CapabilityReader::Locked { conn });
         }
-        if self.config.io == crate::Io::Memory {
+        if self.is_memory(target).map_err(EffectError::Environmental)? {
             return Err(EffectError::Environmental(anyhow::anyhow!("capability target {target}: target is busy")));
         }
         let conn = actor::connect(&self.path(target), self.config.io).await.map_err(EffectError::Environmental)?;

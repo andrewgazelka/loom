@@ -38,12 +38,14 @@ pub enum Durability {
     #[default]
     Local,
     Remote,
+    Ephemeral,
 }
 impl Durability {
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Local => "local",
             Self::Remote => "remote",
+            Self::Ephemeral => "ephemeral",
         }
     }
 }
@@ -177,8 +179,7 @@ impl<'de> Deserialize<'de> for ChildSpec {
             durability: Durability,
             behavior_hash: String,
             init: Vec<u8>,
-            #[serde(default)]
-            restart: RestartPolicy,
+            restart: Option<RestartPolicy>,
             shutdown: Option<Shutdown>,
             #[serde(default = "linked")]
             link: bool,
@@ -196,7 +197,11 @@ impl<'de> Deserialize<'de> for ChildSpec {
             durability: fields.durability,
             behavior_hash: fields.behavior_hash,
             init: fields.init,
-            restart: fields.restart,
+            restart: fields.restart.unwrap_or(if fields.durability == Durability::Ephemeral {
+                RestartPolicy::Temporary
+            } else {
+                RestartPolicy::Permanent
+            }),
             shutdown,
             link: fields.link,
             monitor: fields.monitor,

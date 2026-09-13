@@ -13,6 +13,7 @@
     "@sveltejs/kit": "2.37.0",
     "@sveltejs/vite-plugin-svelte": "6.1.0",
     "@types/bun": "1.3.13",
+    "happy-dom": "20.14.3",
     "prettier": "3.6.2",
     "prettier-plugin-svelte": "3.4.0",
     "svelte": "5.38.7",

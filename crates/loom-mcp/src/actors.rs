@@ -10,6 +10,8 @@ fn error(error: impl std::fmt::Display) -> ErrorData {
     ErrorData::invalid_params(format!("{error:#}"), None)
 }
 impl ActorMcp {
+    // Actor commands, including view and subscriptions, use the shared verb registry
+    // through LoomMcp::call_tool so HTTP, MCP, and CLI enforce the same arguments.
     pub fn new(node: Node) -> Self {
         Self {
             service: loom_api::actors::ActorService::new(node),

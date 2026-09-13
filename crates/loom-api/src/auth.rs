@@ -105,3 +105,10 @@ pub fn command_scope(command: &str) -> Scope {
         _ => Scope::Execute,
     }
 }
+pub fn request_scope(command: &str, args: &serde_json::Value) -> Scope {
+    if command == "view" && args.get("actor").is_some() {
+        Scope::Execute
+    } else {
+        command_scope(command)
+    }
+}

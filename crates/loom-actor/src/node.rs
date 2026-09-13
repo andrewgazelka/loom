@@ -20,7 +20,11 @@ pub struct Node {
     pub(crate) remote: Option<Arc<crate::remote_store::RemoteStore>>,
     pub(crate) shipping: Arc<crate::durability::ShippingState>,
     pub(crate) background: Option<Arc<crate::durability_worker::Background>>,
-    memory_ids: Arc<std::sync::Mutex<Vec<ActorId>>>,
+    pub(crate) memory_ids: Arc<std::sync::Mutex<Vec<ActorId>>>,
+    // Node drop forgets ephemeral snapshots; reset replaces an actor's incarnation.
+    pub(crate) memory_snapshots: Arc<Mutex<HashMap<String, crate::history::MemorySnapshot>>>,
+    // Socket close removes its sender and subscribers through Node::close_stream.
+    pub(crate) streams: Arc<Mutex<HashMap<String, tokio::sync::mpsc::UnboundedSender<Vec<u8>>>>>,
     pub(crate) wake: Arc<tokio::sync::Notify>,
     pub(crate) shutdown_deadlines: Arc<Mutex<HashMap<String, crate::messaging::ShutdownTimer>>>,
     pub(crate) connections: Arc<Mutex<HashMap<ActorId, Arc<Mutex<Connection>>>>>,
@@ -92,6 +96,8 @@ impl Node {
             background: None,
             root_id: String::new(),
             memory_ids: Arc::new(std::sync::Mutex::new(Vec::new())),
+            memory_snapshots: Arc::new(Mutex::new(HashMap::new())),
+            streams: Default::default(),
             wake: Arc::new(tokio::sync::Notify::new()),
             shutdown_deadlines: Arc::new(Mutex::new(HashMap::new())),
             dir: std::fs::canonicalize(dir.as_ref()).context("actor <node> seq -1: canonicalize directory")?,
@@ -128,6 +134,8 @@ impl Node {
             .await?;
         }
         node.sync_index(&node.root_id).await?;
+        node.forget_missing_index().await?;
+        node.prune_subscribers().await?;
         Ok(node)
     }
 
@@ -150,6 +158,9 @@ impl Node {
         let _opening = self.guard(&format!("open:{id}")).await;
         let cached = self.connections.lock().await.get(id).cloned();
         if let Some(conn) = cached {
+            if self.is_memory(id)? {
+                return Ok(Actor { id: id.into(), conn, managed: self.remote.is_some() });
+            }
             if let Err(error) = self.check_lease(id) {
                 self.archive_stale(id, &mut *conn.lock().await).await?;
                 return Err(error);
@@ -180,6 +191,11 @@ impl Node {
             return Ok(Actor { id: id.into(), conn, managed: self.remote.is_some() });
         }
         crate::reset::recover(&self.path(id))?;
+        if !self.path(id).exists()
+            && let Some(store) = &self.remote
+        {
+            ensure!(store.has_snapshot(id).await?, "actor {id} seq -1: actor does not exist");
+        }
         self.restore_on_open(id).await?;
         ensure!(self.path(id).is_file(), "actor {id} seq -1: actor file does not exist");
         let conn = actor::connect(&self.path(id), self.config.io).await.with_context(|| format!("actor {id} seq -1: open"))?;
@@ -193,15 +209,20 @@ impl Node {
     }
 
     pub(crate) async fn create(&self, id: &str, parent: &str, hash: &str, msg: &[u8], durability: crate::Durability) -> Result<Actor> {
+        let durability = if hash == crate::view::HASH { crate::Durability::Ephemeral } else { durability };
         let _creation = self.guard(&format!("create:{id}")).await;
-        if !self.connections.lock().await.contains_key(id) {
+        if durability != crate::Durability::Ephemeral && !self.connections.lock().await.contains_key(id) {
             self.restore_on_open(id).await?;
         }
         if !self.path(id).exists() && !self.connections.lock().await.contains_key(id) {
-            let behavior = actor::behavior(&self.registry, hash).await?;
+            let spec = crate::ChildSpec::new(hash, msg, crate::ChildType::Worker);
+            let behavior = match crate::view::from_spec(&self.registry, &spec).await? {
+                Some(behavior) => behavior,
+                None => actor::behavior(&self.registry, hash).await?,
+            };
             let conn = actor::initialize(&self.path(id), id, parent, behavior.as_ref(), msg, self.config.io, durability).await?;
             self.connections.lock().await.insert(id.into(), Arc::new(Mutex::new(conn)));
-            if self.config.io == crate::Io::Memory {
+            if self.config.io == crate::Io::Memory || durability == crate::Durability::Ephemeral {
                 self.memory_ids.lock().map_err(|_| anyhow!("memory actor registry poisoned"))?.push(id.into());
             }
         }
@@ -209,8 +230,8 @@ impl Node {
         let conn = actor.conn.lock().await;
         ensure!(actor::meta(&conn, "parent").await? == parent, "actor {id} seq 0: parent mismatch");
         // A retry after publication but before snapshot registration finishes creation.
-        if self.config.io != crate::Io::Memory && actor::cursor(&conn).await? == 0 {
-            actor::snapshot(&conn, &self.snapshot_path(id, actor::meta(&conn, "generation").await?.parse()?, 0), 0).await?;
+        if actor::cursor(&conn).await? == 0 {
+            self.snapshot_actor(&conn, id, 0).await?;
         }
         self.initialize_durability(id, &conn).await?;
         drop(conn);
@@ -225,7 +246,7 @@ impl Node {
         if self.config.io == crate::Io::Memory {
             return Ok(self.memory_ids.lock().map_err(|_| anyhow!("memory actor registry poisoned"))?.clone());
         }
-        let mut actors = Vec::new();
+        let mut actors = self.memory_ids.lock().map_err(|_| anyhow!("memory actor registry poisoned"))?.clone();
         for entry in std::fs::read_dir(&self.dir)? {
             let path = entry?.path();
             if path.extension().and_then(|e| e.to_str()) != Some("db") {
@@ -250,6 +271,9 @@ impl Node {
 
     /// Host-created actors are temporary children of the node's durable supervisor.
     pub async fn spawn_root(&self, hash: &str, msg: &[u8]) -> Result<ActorId> {
+        if hash == crate::view::HASH {
+            return self.spawn(&self.root_id, &crate::ChildSpec::new(hash, msg, crate::ChildType::Worker)).await;
+        }
         let behavior = self.behavior(hash).await?;
         let mut spec = crate::ChildSpec::new(behavior.hash(), msg, behavior.child_type());
         spec.restart = crate::RestartPolicy::Temporary;
@@ -258,15 +282,15 @@ impl Node {
 
     pub async fn spawn(&self, parent: &str, spec: &crate::ChildSpec) -> Result<ActorId> {
         let _admission = self.admit().await?;
-        let behavior = self.behavior(&spec.behavior_hash).await?;
-        let mut pinned = spec.clone();
-        pinned.behavior_hash = behavior.hash().to_owned();
+        let pinned = crate::view::pin_spec(&self.registry, spec)
+            .await
+            .with_context(|| format!("actor {parent} seq -1: spawn"))?;
         self.spawn_inner(parent, &pinned).await.with_context(|| format!("actor {parent} seq -1: spawn"))
     }
 
     async fn spawn_inner(&self, parent: &str, spec: &crate::ChildSpec) -> Result<ActorId> {
         let _creation = self.guard("host-spawn").await;
-        actor::behavior(&self.registry, &spec.behavior_hash).await?;
+        crate::view::pin_spec(&self.registry, spec).await?;
         let root = self.open_actor(parent).await?;
         let mut conn = root.conn.lock().await;
         let tx = conn.transaction().await?;
@@ -297,7 +321,8 @@ impl Node {
             ],
         )
         .await?;
-        if self.behavior(&actor::code(&tx).await?.hash).await?.child_type() == crate::ChildType::Supervisor {
+        let parent_behavior = crate::view::behavior_on(&self.registry, &tx, &actor::code(&tx).await?.hash).await?;
+        if parent_behavior.child_type() == crate::ChildType::Supervisor {
             crate::supervisor::record_child(&tx, &cap, spec).await?;
             crate::supervisor_store::record_host_spawn(&tx, &cap, spec).await?;
         }
@@ -328,6 +353,11 @@ impl Node {
     }
 
     pub async fn behaviors(&self) -> Result<Vec<crate::builtin::BehaviorInfo>> {
-        self.registry.behaviors().await
+        let mut behaviors = self.registry.behaviors().await?;
+        behaviors.push(crate::builtin::BehaviorInfo {
+            hash: crate::view::HASH.to_owned(),
+            description: "Ephemeral materialized view; init selects a pure template definition.".to_owned(),
+        });
+        Ok(behaviors)
     }
 }

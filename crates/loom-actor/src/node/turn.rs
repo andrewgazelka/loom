@@ -9,26 +9,25 @@ impl Node {
             return Ok(false);
         }
         drop(admission);
-        if let Some(store) = &self.remote
-            && let Err(error) = store.check(id)
-        {
+        if let Err(error) = self.check_lease(id) {
             self.archive_stale(id, &mut conn).await?;
             return Err(error);
         }
+        let schema = Self::schema_fingerprint(&conn).await?;
+        self.snapshot_schema_change(&conn, id, &schema).await?;
         let generation: i64 = actor::meta(&conn, "generation").await?.parse()?;
         let cursor = actor::cursor(&conn).await?;
-        if self.config.io != crate::Io::Memory
-            && cursor > 0
+        if cursor > 0
             && cursor % self.config.snapshot_every == 0
             && actor::query(&conn, "SELECT seq FROM inbox WHERE state='done' AND seq>? LIMIT 1", [cursor]).await?.rows.is_empty()
         {
-            actor::snapshot(&conn, &self.snapshot_path(id, generation, cursor), cursor).await?;
+            self.snapshot_actor(&conn, id, cursor).await?;
         }
         let Some(message) = actor::next(&conn).await? else {
             return Ok(false);
         };
         let code = actor::code(&conn).await?;
-        let behavior = actor::behavior(&self.registry, &code.hash).await?;
+        let behavior = crate::view::behavior_on(&self.registry, &conn, &code.hash).await?;
         for retry in 0..=self.config.max_retries {
             match actor::attempt(
                 &mut conn,
@@ -43,6 +42,8 @@ impl Node {
             {
                 Ok(false) => return Ok(false),
                 Ok(true) => {
+                    self.fanout_on(id, &mut conn).await?;
+                    self.snapshot_schema_change(&conn, id, &schema).await?;
                     let cursor = actor::cursor(&conn).await?;
                     let state = actor::query(&conn, "SELECT state FROM inbox WHERE seq=?", [message.seq]).await?;
                     if state.rows.first().map(|row| row.get::<String>(0)).transpose()?.as_deref() == Some("done") {
@@ -51,20 +52,19 @@ impl Node {
                             crate::SendOutcome::Complete { id: id.into(), seq: message.seq, cursor },
                         )?;
                     }
-                    if self.config.io != crate::Io::Memory
-                        && cursor > 0
+                    if cursor > 0
                         && cursor % self.config.snapshot_every == 0
                         && actor::query(&conn, "SELECT seq FROM inbox WHERE state='done' AND seq>? LIMIT 1", [cursor])
                             .await?
                             .rows
                             .is_empty()
                     {
-                        actor::snapshot(&conn, &self.snapshot_path(id, generation, cursor), cursor).await?;
+                        self.snapshot_actor(&conn, id, cursor).await?;
                     }
                     return Ok(true);
                 }
                 Err(error) if error.durability => {
-                    if self.remote.as_ref().is_some_and(|store| store.check(id).is_err()) {
+                    if self.check_lease(id).is_err() {
                         self.archive_stale(id, &mut conn).await?;
                     }
                     return Err(error.into());
@@ -100,9 +100,11 @@ impl Node {
 
     pub(crate) async fn promote_inner(&self, id: &str, hash: &str, author: &str, rationale: &str) -> Result<()> {
         let actor = self.open_actor(id).await?;
-        let behavior = actor::behavior(&self.registry, hash).await.with_context(|| format!("actor {id} seq -1: promote"))?;
+        let mut conn = actor.conn.lock().await;
+        let behavior = crate::view::behavior_on(&self.registry, &conn, hash).await.with_context(|| format!("actor {id} seq -1: promote"))?;
+        let schema = Self::schema_fingerprint(&conn).await?;
         actor::promote(
-            &mut *actor.conn.lock().await,
+            &mut conn,
             behavior.as_ref(),
             author,
             rationale,
@@ -111,6 +113,8 @@ impl Node {
         )
         .await
         .with_context(|| format!("actor {id} seq -1: promote"))?;
+        self.snapshot_schema_change(&conn, id, &schema).await?;
+        drop(conn);
         self.sync_index(id).await
     }
 

@@ -1,4 +1,6 @@
 //! Native behavior fixtures for exercising the actor runtime.
+//! The `view-v1` builtin is implemented by [`crate::View`]; creation resolves its
+//! init template first so its code identity is the template's definition hash.
 use crate::{Behavior, Cap, Ctx, Trap};
 use async_trait::async_trait;
 

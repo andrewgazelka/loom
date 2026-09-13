@@ -26,6 +26,8 @@ Each invariant names the code that enforces it today. "(round N)" marks a decisi
 14. **Rust safety checks admit code; they do not prove isolation.** Denying `unsafe`, non-`Send` captures and escaping borrows is a correctness and admission check, not a formal soundness proof; sibling jobs sharing one execution's memory are one trust domain. `crates/loom-check/src/safety.rs`, stated in `docs/plan-unified-memory.md#memory-isolation-decision`.
 15. **One guest language.** Rust is the only supported guest language, and core wasm is the only guest execution model. The former guest SDK, checker, interface definitions, and component execution paths have been removed. `crates/loom-proto/src/core_protocol.rs` admits only current core-wasm artifacts; `crates/loom-store/src/language.rs` rejects non-Rust stores before migration.
 
+17. **The CDC log replayed onto the last snapshot reproduces domain tables byte for byte.** Every actor connection enables Turso full CDC. `crates/loom-actor/src/cdc.rs` decodes engine records; `history/validation.rs` cross-checks their replay independently of candidate behavior replay. Snapshots record `cdc_floor` and compact older rows. DDL forces a new schema baseline because the engine captures DML only. `tests/view.rs::cdc_replay_reproduces_tables` includes a dropped-row negative control. Invariant 16 is reserved by `docs/multi-node.md`.
+
 ## 3. Layers
 
 ```mermaid
@@ -151,6 +153,9 @@ Lineage is `SELECT * FROM code_changes ORDER BY seq` on the actor's own file: it
 | `loom-cli`, `loomd` | control surface | `crates/loom-cli/src/main.rs`, `crates/loomd/src/main.rs` — terminal client, server entrypoint |
 
 ## 8. What is deliberately not here
+
+- **Tree diffing for data changes.** Turso writes row deltas in the actor transaction. Subscriptions deliver them through the pump; `view-v1` materializes keyed trees, and `ui/src/lib/bind` patches only each affected row's tree. See [UI as a view actor](ui-view-actor.md).
+- **CRDTs for actor tables.** One actor is the single writer. Pending browser rows reconcile against committed message keys. A future collaborative-text column can hold a CRDT without changing subscription delivery.
 
 - **Priorities on messages.** One actor runs one message at a time, scheduled fairly by tokio; there is no per-message priority. Decided in `docs/actors-turso.md` Addendum B ("no priorities... deliberate").
 - **ETS-style shared mutable tables.** No table is shared across actors; a table an OTP process would keep in ETS is instead its own actor, addressed by id. `docs/actors-turso.md` Addendum B.

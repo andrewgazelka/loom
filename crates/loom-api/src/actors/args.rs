@@ -22,6 +22,15 @@ pub struct SpawnArgs {
     pub(super) parent: Option<String>,
     /// Optional restart, shutdown, link, monitor, and type fields from ChildSpec.
     pub(super) spec: Option<Value>,
+    pub(super) durability: Option<loom_actor::Durability>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ViewArgs {
+    pub(super) actor: String,
+    pub(super) table: String,
+    pub(super) template: String,
+    pub(super) order_by: Vec<String>,
 }
 #[derive(Deserialize)]
 pub struct StopArgs {

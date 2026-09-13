@@ -34,6 +34,7 @@ pub(super) async fn specs(cx: &mut Ctx<'_>) -> Result<Vec<SpecRow>, Trap> {
                 durability: match text(cx, &row, 9)?.as_str() {
                     "local" => crate::Durability::Local,
                     "remote" => crate::Durability::Remote,
+                    "ephemeral" => crate::Durability::Ephemeral,
                     _ => return Err(error(cx, "invalid child durability")),
                 },
                 behavior_hash: text(cx, &row, 2)?,

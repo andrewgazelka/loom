@@ -3,6 +3,11 @@
 #![forbid(unsafe_code)]
 
 mod actor;
+pub mod cdc;
+mod subscribe;
+pub use subscribe::{HostStream, Subscription};
+pub mod view;
+pub use view::{Template, View, ViewInit};
 mod cap_inspection;
 mod cap_ops;
 mod sql_value;
@@ -64,6 +69,9 @@ use std::sync::Arc;
 pub trait Registry: Send + Sync {
     async fn resolve(&self, reference: &str) -> Result<Arc<dyn Behavior>>;
     async fn behaviors(&self) -> Result<Vec<builtin::BehaviorInfo>>;
+    async fn template(&self, reference: &str) -> Result<Arc<dyn Template>> {
+        anyhow::bail!("template {reference}: registry does not resolve templates")
+    }
 }
 
 #[async_trait]
@@ -186,6 +194,8 @@ impl Ctx<'_> {
     }
 
     pub async fn spawn(&mut self, spec: &ChildSpec) -> Result<Cap, Trap> {
+        let prepared = self.cap_operation(crate::cap_ops::Operation::PrepareSpawn { spec: spec.clone() }).await?;
+        let spec: ChildSpec = serde_json::from_slice(&prepared).map_err(|error| self.runtime(error))?;
         let idx = self.next_index()?;
         let id = ids::child(&ids::incarnation(self.actor_id, self.generation), self.seq, idx);
         let cap = self.mint_child(&id).await?;
@@ -198,8 +208,12 @@ impl Ctx<'_> {
             RestartPolicy::Temporary => "temporary",
         };
         let shutdown = serde_json::to_string(&spec.shutdown).map_err(|e| self.runtime(e))?;
-        self.conn.execute("INSERT INTO children(id,spawned_seq,behavior_hash,init,restart,shutdown,link,monitor,child_type) VALUES (?,?,?,?,?,?,?,?,?)",
-            turso::params![id.as_str(), self.seq, spec.behavior_hash.as_str(), spec.init.as_slice(), restart, shutdown, spec.link, spec.monitor, serde_json::to_string(&spec.child_type).map_err(|e| self.runtime(e))?]).await.map_err(|e| self.runtime(e))?;
+        let child_type = serde_json::to_string(&spec.child_type).map_err(|e| self.runtime(e))?;
+        self.conn.execute(
+            "INSERT INTO children(id,spawned_seq,behavior_hash,init,restart,shutdown,link,monitor,child_type) VALUES (?,?,?,?,?,?,?,?,?)",
+            turso::params![id.as_str(), self.seq, spec.behavior_hash.as_str(), spec.init.as_slice(), restart,
+                shutdown, spec.link, spec.monitor, child_type],
+        ).await.map_err(|e| self.runtime(e))?;
         Ok(cap)
     }
 

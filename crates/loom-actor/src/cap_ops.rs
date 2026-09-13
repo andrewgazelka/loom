@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "operation")]
 pub(crate) enum Operation {
+    PrepareSpawn { spec: crate::ChildSpec },
     Check { cap: Cap, right: Rights, name: String },
     SelfCap,
     Spawn { target: String },
@@ -29,7 +30,7 @@ impl Operation {
             Self::Revoke { cap } => Presented { cap, name: "revoke" },
             Self::Inspect { cap } => Presented { cap, name: "inspect" },
             Self::InspectSql { cap, .. } => Presented { cap, name: "inspect_sql" },
-            Self::SelfCap | Self::Spawn { .. } => return None,
+            Self::SelfCap | Self::Spawn { .. } | Self::PrepareSpawn { .. } => return None,
         })
     }
 }
@@ -163,6 +164,10 @@ pub(crate) async fn execute(node: &Node, conn: &turso::Connection, key: &EffectK
     }
     let identity = format!("cap:{}:{}:{}:{}", key.actor_id, key.generation, key.seq, key.idx);
     let cap = match operation {
+        Operation::PrepareSpawn { spec } => {
+            let spec = crate::view::pin_spec(&node.registry, &spec).await.map_err(EffectError::Deterministic)?;
+            return serde_json::to_vec(&spec).map_err(|e| EffectError::Environmental(e.into()));
+        }
         Operation::Check { cap, right, name } => {
             verify(node, conn, &cap, right, &name).await?;
             return Ok(Vec::new());

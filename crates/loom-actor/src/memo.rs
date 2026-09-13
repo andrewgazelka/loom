@@ -175,7 +175,12 @@ pub(super) async fn key(source: &Connection, candidate: &str, at: i64, end: i64,
     let rows = actor::query(source, "SELECT seq,path FROM snapshots WHERE seq<=? ORDER BY seq DESC LIMIT 1", [at]).await?;
     let snapshot = rows.rows.first().context("validation_memo: no historical snapshot")?;
     let path: String = snapshot.get(1)?;
-    let bytes = std::fs::read(&path).with_context(|| format!("validation_memo snapshot {path}"))?;
+    let bytes = if path.starts_with("memory:") {
+        // Immutable node-local snapshot identity; the remaining key includes every replay input.
+        path.as_bytes().to_vec()
+    } else {
+        std::fs::read(&path).with_context(|| format!("validation_memo snapshot {path}"))?
+    };
     let mut hash = blake3::Hasher::new();
     field(&mut hash, b"loom-validation-memo-v1");
     field(&mut hash, candidate.as_bytes());
@@ -196,6 +201,7 @@ pub(super) async fn key(source: &Connection, candidate: &str, at: i64, end: i64,
         "SELECT * FROM code_changes ORDER BY seq",
         "SELECT seq,key,sender,msg,received_at FROM inbox ORDER BY seq",
         "SELECT seq,idx,kind,request,result FROM effects ORDER BY seq,idx",
+        "SELECT * FROM turso_cdc ORDER BY change_id",
     ] {
         field(&mut hash, rows_hash(source, sql, ()).await?.as_bytes());
     }

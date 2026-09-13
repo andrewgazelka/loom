@@ -188,6 +188,9 @@ impl RemoteStore {
             }
         }
     }
+    pub(crate) async fn has_snapshot(&self, id: &str) -> Result<bool> {
+        Ok(self.read::<Head>(&format!("actors/{id}/head")).await?.is_some_and(|head| head.value.snapshot.is_some()))
+    }
     pub async fn publish(&self, id: &str, head: Head) -> Result<()> {
         let guards = self.guards(id)?;
         let _head = guards.head.lock().await;

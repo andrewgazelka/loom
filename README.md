@@ -162,7 +162,9 @@ and return `{ok, seq, result, diagnostics}`, including failures. Omitted spawn
 | `tree(root?)` | nested tree from a root (default the node's root supervisor) |
 | `info(id)` | status, reason, cursor, deferred/inbox length, links, monitors, children |
 | `send(id, key?, msg)` | inject a keyed message; return cursor or a failed envelope with id, sequence, and trap cause |
-| `spawn(def, init?, parent?, spec?)` | spawn under a parent, return its id |
+| `spawn(def, init?, parent?, spec?, durability?)` | spawn under a parent; durability accepts `local`, `remote`, or `ephemeral` |
+| `view(actor, table, template, order_by)` | spawn an ephemeral view and return its id and opaque INSPECT cap string; CLI uses `view --actor ID --table TABLE --template HASH --order_by '["column"]'` |
+| `subscriptions(id)` | list the actor's subscribers and their CDC cursors |
 | `stop(id, reason)` | stop with a reason |
 | `restart(id, verb)` | `resume` \| `skip` \| `reset` |
 | `promote(id, hash, author, rationale)` | append a `code_changes` row |

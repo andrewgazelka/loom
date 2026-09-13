@@ -17,6 +17,7 @@ CREATE TABLE timers(ref TEXT PRIMARY KEY,target TEXT,msg BLOB,deadline INTEGER,k
 CREATE TABLE calls(ref TEXT PRIMARY KEY,target TEXT,timer_ref TEXT);
 CREATE TABLE shutdowns(child TEXT PRIMARY KEY,request TEXT NOT NULL);
 CREATE TABLE snapshots(seq INTEGER PRIMARY KEY, path TEXT);
+CREATE TABLE subscribers(id TEXT PRIMARY KEY,subscriber TEXT NOT NULL,\"table\" TEXT NOT NULL,after_change_id INTEGER NOT NULL);
 ";
 
 pub(crate) const SYSTEM_TABLES: &[&str] = &[
@@ -36,4 +37,7 @@ pub(crate) const SYSTEM_TABLES: &[&str] = &[
     "timers",
     "calls",
     "shutdowns",
+    "subscribers",
+    "turso_cdc",
+    "turso_cdc_version",
 ];

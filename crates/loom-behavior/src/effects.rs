@@ -10,6 +10,17 @@ struct Target {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct Subscribe {
+    cap: wire::Capability,
+    table: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Unsubscribe {
+    subscription_id: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Send {
     cap: wire::Capability,
     msg: Vec<u8>,
@@ -122,6 +133,15 @@ pub async fn dispatch(
         return Err(Trap::new("effect op must not be empty"));
     }
     match op.as_str() {
+        "actor.subscribe" => {
+            let request: Subscribe = parse(&op, args)?;
+            value(cx.subscribe(&request.cap.token, &request.table).await?)
+        }
+        "actor.unsubscribe" => {
+            let request: Unsubscribe = parse(&op, args)?;
+            cx.unsubscribe(&request.subscription_id).await?;
+            Ok(Value::Null)
+        }
         "sql" => {
             let request: wire::Sql = parse(&op, args)?;
             let params: Vec<SqlValue> = request.params.into_iter().map(Into::into).collect();

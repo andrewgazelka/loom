@@ -6,14 +6,18 @@ use turso::Connection;
 
 impl Node {
     pub(crate) async fn reset(&self, conn: &mut Connection, id: &str, key: &str) -> Result<()> {
-        anyhow::ensure!(self.config.io != crate::Io::Memory, "actor {id} seq -1: reset requires persistent I/O");
+        let memory = self.is_memory(id)?;
         self.check_lease(id)?;
         let generation = actor::meta(conn, "generation").await?.parse::<i64>()?.checked_add(1).context("generation overflow")?;
         let archive = self.dir.join(format!("{id}.reset.{generation}.db"));
-        vacuum(conn, &archive).await?;
+        if !memory {
+            vacuum(conn, &archive).await?;
+        }
         let build = self.dir.join(format!("{id}.reset-building"));
-        remove_database(&build)?;
-        let mut fresh = actor::connect(&build, self.config.io).await?;
+        if !memory {
+            remove_database(&build)?;
+        }
+        let mut fresh = actor::connect(&build, if memory { crate::Io::Memory } else { self.config.io }).await?;
         let tx = fresh.transaction().await?;
         tx.execute_batch(crate::SCHEMA).await?;
         actor::set_meta(&tx, "id", id).await?;
@@ -21,6 +25,7 @@ impl Node {
         actor::set_meta(&tx, "shutdown", &actor::meta(conn, "shutdown").await?).await?;
         actor::set_meta(&tx, "init", &actor::meta(conn, "init").await?).await?;
         actor::set_meta(&tx, "cursor", "0").await?;
+        actor::set_meta(&tx, "cdc_floor", "0").await?;
         actor::set_meta(&tx, "capability_epoch", &actor::meta(conn, "capability_epoch").await?).await?;
         actor::set_meta(&tx, "commit_epoch", "0").await?;
         actor::set_meta(&tx, "durability", &actor::meta(conn, "durability").await?).await?;
@@ -49,7 +54,7 @@ impl Node {
         for row in changes.rows {
             let hash: String = row.get(1)?;
             if seen.insert(hash.clone()) {
-                tx.execute_batch(actor::behavior(&self.registry, &hash).await?.schema()).await?;
+                tx.execute_batch(crate::view::behavior_on(&self.registry, conn, &hash).await?.schema()).await?;
             }
             let values = (0..row.column_count()).map(|i| row.get_value(i)).collect::<turso::Result<Vec<_>>>()?;
             tx.execute("INSERT INTO code_changes(seq,behavior_hash,parent_hash,author,rationale,schema_sql) VALUES (?,?,?,?,?,?)", values)
@@ -57,7 +62,7 @@ impl Node {
         }
         // Carry caps and revoked across reset to preserve delegated authority and
         // revocation continuity; only bump_epoch invalidates all existing caps.
-        for table in ["links", "monitors", "monitored_by", "caps", "revoked"] {
+        for table in ["links", "monitors", "monitored_by", "caps", "revoked", "subscribers"] {
             let rows = actor::query(conn, &format!("SELECT * FROM {table} ORDER BY rowid"), ()).await?;
             for row in rows.rows {
                 let values = (0..row.column_count()).map(|i| row.get_value(i)).collect::<turso::Result<Vec<_>>>()?;
@@ -72,7 +77,11 @@ impl Node {
         self.check_lease(id)?;
         tx.commit().await?;
         self.reset_durability(id, &fresh).await?;
-        actor::snapshot(&fresh, &self.snapshot_path(id, generation, 0), 0).await?;
+        self.snapshot_actor(&fresh, id, 0).await?;
+        if memory {
+            *conn = fresh;
+            return Ok(());
+        }
         let ready = self.dir.join(format!("{id}.reset-publish"));
         vacuum(&fresh, &ready).await?;
         drop(fresh);

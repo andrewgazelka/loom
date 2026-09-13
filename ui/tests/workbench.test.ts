@@ -309,7 +309,7 @@ describe("Rust verb table parity", () => {
         /verb!\(\s*(\w+),\s*(Definition|Actor),\s*(\w+),\s*\[([\s\S]*?)\]\s*\)/g,
       ),
     ];
-    expect(server.length).toBe(27);
+    expect(server.length).toBe(28);
     expect(
       commands
         .filter((command) => !command.query)

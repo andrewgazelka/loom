@@ -96,6 +96,9 @@ impl Node {
         self.shipping.failures.lock().expect("shipping failures mutex poisoned").clone()
     }
     async fn renew_actor(&self, id: &str) -> Result<()> {
+        if self.is_memory(id)? {
+            return Ok(());
+        }
         let Some(store) = &self.remote else {
             return Ok(());
         };

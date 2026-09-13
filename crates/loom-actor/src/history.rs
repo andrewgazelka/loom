@@ -3,45 +3,24 @@ pub mod memo;
 #[cfg(test)]
 #[path = "../tests/memo.rs"]
 mod memo_tests;
+mod memory;
 mod validation;
+pub(crate) use memory::MemorySnapshot;
 
 use crate::{Actor, ActorId, Node, TableDifference, TableHash, Verdict, actor, effects::ReplayEffects, ids};
 use anyhow::{Context, Result, ensure};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    path::{Path, PathBuf},
-};
+use std::collections::{BTreeMap, BTreeSet};
 use turso::{Connection, Value};
 
-/// Removes tracked paths unless `disarm` ran; guards fork staging files on every early return.
+/// Historical replay preserves recorded code; candidates replace it; remote replay includes controls.
 pub(crate) enum ReplayMode {
     Historical,
     Candidate,
     Remote,
 }
 
-struct Cleanup {
-    paths: Vec<PathBuf>,
-}
-impl Cleanup {
-    fn track(&mut self, path: PathBuf) {
-        self.paths.push(path);
-    }
-    fn disarm(&mut self) {
-        self.paths.clear();
-    }
-}
-impl Drop for Cleanup {
-    fn drop(&mut self) {
-        for path in self.paths.drain(..) {
-            let _ = std::fs::remove_file(path);
-        }
-    }
-}
-
 impl Node {
     async fn fork_from(&self, source: &Connection, id: &str, at: i64) -> Result<Actor> {
-        ensure!(self.config.io != crate::Io::Memory, "actor {id} seq {at}: historical snapshots require persistent I/O");
         ensure!(at >= 0 && at <= actor::cursor(source).await?, "actor {id} seq {at}: fork sequence outside history");
         let target_epoch = boundary(source, id, at).await?;
         let rows = actor::query(source, "SELECT seq,path FROM snapshots WHERE seq<=? ORDER BY seq DESC LIMIT 1", [at]).await?;
@@ -49,12 +28,7 @@ impl Node {
         let snapshot_seq: i64 = snapshot.get(0)?;
         let path: String = snapshot.get(1)?;
         let fork_id = ids::root();
-        let staging = self.path(&fork_id).with_extension("forking");
-        std::fs::copy(&path, &staging)?;
-        let mut cleanup = Cleanup { paths: Vec::new() };
-        cleanup.track(staging.clone());
-        cleanup.track(PathBuf::from(format!("{}-wal", staging.display())));
-        let mut conn = actor::connect(&staging, self.config.io).await?;
+        let mut conn = self.snapshot_connection(&path).await?;
         crate::capability::migrate(&conn).await?;
         self.migrate_authority(&conn).await?;
         let snapshot_cursor = actor::cursor(&conn).await?;
@@ -71,8 +45,13 @@ impl Node {
         actor::set_meta(&tx, "id", &fork_id).await?;
         actor::set_meta(&tx, "parent", id).await?;
         actor::set_meta(&tx, "status", "fork").await?;
+        actor::set_meta(&tx, "durability", "ephemeral").await?;
         actor::set_meta(&tx, "node_root", "false").await?;
-        tx.execute("INSERT OR IGNORE INTO snapshots(seq,path) VALUES (?,?)", turso::params![snapshot_seq, path]).await?;
+        tx.execute(
+            "INSERT INTO snapshots(seq,path) VALUES (?,?) ON CONFLICT(seq) DO UPDATE SET path=excluded.path",
+            turso::params![snapshot_seq, path],
+        )
+        .await?;
         let identity = actor::query(source, "SELECT value FROM meta WHERE key='replay_source'", ()).await?;
         let identity = match identity.rows.first() {
             Some(row) => row.get::<String>(0)?,
@@ -94,19 +73,8 @@ impl Node {
             let values = (0..row.column_count()).map(|i| row.get_value(i)).collect::<turso::Result<Vec<_>>>()?;
             conn.execute("INSERT OR IGNORE INTO dead_letters(seq,msg,error,at) VALUES (?,?,?,?)", values).await?;
         }
-        // Publish the replayed file through a complete, WAL-independent copy.
-        let ready = self.path(&fork_id).with_extension("ready");
-        cleanup.track(ready.clone());
-        conn.execute(format!("VACUUM INTO '{}'", ready.to_str().context("non-UTF8 fork path")?.replace('\'', "''")), ()).await?;
-        std::fs::rename(&ready, self.path(&fork_id))?;
-        drop(conn);
-        cleanup.disarm();
-        std::fs::remove_file(&staging)?;
-        let wal = format!("{}-wal", staging.display());
-        if Path::new(&wal).exists() {
-            std::fs::remove_file(wal)?;
-        }
-        self.open_actor(&fork_id).await
+        let conn = std::sync::Arc::new(tokio::sync::Mutex::new(conn));
+        Ok(Actor { id: fork_id, conn, managed: self.remote.is_some() })
     }
 
     pub(crate) async fn replay(
@@ -153,9 +121,10 @@ impl Node {
                 .await?;
                 for row in changes.rows {
                     let hash: String = row.get(0)?;
+                    let behavior = crate::view::behavior_on(&self.registry, conn, &hash).await?;
                     if let Some(verdict) = promote_replay(
                         conn,
-                        actor::behavior(&self.registry, &hash).await?.as_ref(),
+                        behavior.as_ref(),
                         &row.get::<String>(1)?,
                         &row.get::<String>(2)?,
                         effects,
@@ -175,7 +144,7 @@ impl Node {
                 }
             }
             let code = actor::code(conn).await?;
-            let behavior = actor::behavior(&self.registry, &code.hash).await?;
+            let behavior = crate::view::behavior_on(&self.registry, conn, &code.hash).await?;
             for retry in 0..=self.config.max_retries {
                 effects.begin(message.seq).await;
                 let result = actor::attempt(conn, &identity, &message, behavior.as_ref(), code.revision, effects, None).await;
@@ -217,9 +186,10 @@ impl Node {
             .await?;
             for row in changes.rows {
                 let hash: String = row.get(0)?;
+                let behavior = crate::view::behavior_on(&self.registry, conn, &hash).await?;
                 if let Some(verdict) = promote_replay(
                     conn,
-                    actor::behavior(&self.registry, &hash).await?.as_ref(),
+                    behavior.as_ref(),
                     &row.get::<String>(1)?,
                     &row.get::<String>(2)?,
                     effects,
@@ -237,7 +207,10 @@ impl Node {
     pub(crate) async fn fork_inner(&self, id: &str, at: i64) -> Result<ActorId> {
         let actor = self.open_actor(id).await?;
         let source = actor.conn.lock().await;
-        self.fork_from(&source, id, at).await.map(|actor| actor.id).with_context(|| format!("actor {id} seq {at}: fork"))
+        let fork = self.fork_from(&source, id, at).await.with_context(|| format!("actor {id} seq {at}: fork"))?;
+        self.memory_ids.lock().map_err(|_| anyhow::anyhow!("memory actor registry poisoned"))?.push(fork.id.clone());
+        self.connections.lock().await.insert(fork.id.clone(), fork.conn);
+        Ok(fork.id)
     }
 }
 
