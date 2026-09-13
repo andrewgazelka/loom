@@ -181,3 +181,107 @@ Kill and shutdown deadlines cancel only the native handler future, then await th
 With an explicit syscall/io_uring VFS, Turso treats `:memory:` as a literal filename. Scratch connections used while replacing a cached connection therefore select `Io::Memory` explicitly, independently of the node’s persistent I/O selection. The reset regression passes without creating `:memory:` or `:memory:-wal` files.
 
 On Linux hosts with an 8 MiB locked-memory limit, concurrent io_uring-backed tests can fail with `io_uring_setup: out of memory` despite ample ordinary RAM. The 22 actor tests and 4 MCP tests pass with `RUST_TEST_THREADS=4 cargo test -p loom-actor -p loom-mcp` on such a host. Size test concurrency against ring-allocation headroom; keep the selected VFS unchanged.
+
+## Drivers
+
+Drivers own resources outside actor transactions. Implement the native `Driver`
+trait and register it by overriding `Registry::resolve_driver(hash)`. The default
+resolver refuses unknown hashes. `Driver::hash()` must match the requested hash;
+`Ctx::spawn_driver(def_hash, init)` validates this through the recorded capability
+boundary, so an unknown hash traps the spawning message even if its handler
+ignores the error. Registry resolution must only look up code; it must not open
+resources. Replay uses the recorded resolution and capability result.
+
+`cx.spawn_driver(hash, init).await?` returns a root `Cap` with SEND and STOP rights
+and writes a spawn outbox row. The existing pump opens the resource after commit,
+through its single `drv:` arm. Spawn and message delivery share the ordinary
+per-destination FIFO rule. No TCP-specific code runs in the kernel.
+
+The two communication operations are:
+
+- `DriverContext::inject(cap, key, bytes)` inserts a keyed inbox row into the actor
+  named by a SEND capability. Sender is `drv:<driver id>:<handle>`. Duplicate keys
+  retain one inbox row, including across resource reopenings. `owner()` supplies
+  the owner's SEND capability; `for_handle(name)` only scopes the sender string.
+  Injection also stores a SEND capability for that sender in the receiving actor's
+  `caps` table. Live and replay mailbox decoding preserve driver senders. The
+  handler obtains the recorded capability with `cx.sender_cap().await?` and replies
+  with the existing `cx.send(&cap, bytes)`.
+- The pump delivers a `DriverDelivery { handle, key, bytes, .. }` to the receiver
+  passed to `Driver::run`. Call `delivery.acknowledge(Ok(DriverAck::Delivered))`
+  after applying it, or `Dropped` when the handle has gone. An error leaves the
+  outbox row pending and blocks only later rows for that same destination. A lost
+  acknowledgment is an error. Drivers must deduplicate the delivery key before
+  repeating resource I/O. The acknowledgment is the return half of delivery,
+  not a separate actor operation.
+
+Driver IDs have the form `<owner actor id>/<derived child id>`; targets are
+`drv:<driver id>:<handle>`. `root` is the driver's control handle. The derivation
+includes the owner's incarnation and spawn effect position. Driver capabilities
+use their owner's existing capability epoch and `revoked` table. Attenuation and
+revocation use the normal capability operations; no driver authority database
+exists. A closed handle's valid cap remains sendable so the pump can record its
+drop. The root cap can be stopped with `cx.stop(&cap, reason)` after commit.
+
+A `Dropped` acknowledgment, or delivery to an absent driver, creates a terminal
+`meta` entry in the sending actor named **`driver_drop:<delivery key>`**, whose value
+is the destination. The ordinary pump then sets `outbox.delivered=1`. The marker
+is an audit fact, has no retry transition, and stays with the owner's history.
+The outbox retains the original payload. A retry between marker commit and the
+normal delivered update is safe.
+
+Drivers are linked to their spawning owner. Owner stop, poison with stop policy,
+reset, and node close cancel them; dropping the last Node handle aborts them too.
+`Driver::run` must own every resource and child future and release them when
+cancelled. It must not detach resource tasks. Drivers use a private injection
+channel: aborting resource code cannot abort the kernel's admitted transaction or
+COMMIT. `run` returning an error or panicking closes the driver and injects one
+`{"type":"down","ref":"spawn:drv:<id>:root","from":"drv:<id>:root",...}` into
+its owner, with reason, event, generation, and initiator fields like actor DOWNs.
+Normal return emits DOWN with reason `normal`. Deliberate owner/node cancellation
+suppresses DOWN. Failed DOWN insertion retries while the node remains open.
+
+The owning actor's persisted policy decides whether to call `spawn_driver` again,
+using initialization assembled from its tables. The kernel does not invent a
+restart policy or retry a failed resource under its previous identity. A built-in
+Supervisor can restart the owning actor according to that actor's child spec;
+the owner's initialization then reopens its resources. Driver roots themselves
+are not entries in the built-in Supervisor's actor-only `children`/`spec` tables.
+
+Driver resources, sockets, handle maps, and delivery receipts are **not durable
+and never shipped**. The owner's tables are the source of truth. Node restart
+does not restore drivers automatically. A `driver_spawn:<id>` metadata receipt
+prevents an already-attempted spawn from opening again, including if the node died
+before the pump set its delivered bit. The owner's next message or supervisor
+restart must issue a new spawn. Pending sends to old handles are dropped. The
+receipt records an attempt, not proof that the resource is currently live;
+`driver_down:<id>` records a completed driver's reason. No DOWN is synthesized
+for a node crash. Resource-derived ingress keys must remain unique in the target
+inbox; the kernel does not prepend a driver ID to the caller's key.
+
+### TCP listener
+
+Register `drivers::tcp::TcpListenerDriver` under `drivers::tcp::HASH`
+(`tcp-listener-v1`), then spawn with `{"bind":"127.0.0.1:0"}`. Its first injection
+is `{"type":"listening","addr":"127.0.0.1:<bound port>"}`, with key
+`driver:<id>:listening`. Accepted sockets have unique ULID handles, and each frame
+is `u32` big-endian length followed by raw bytes. Ingress keys are
+`conn:<connection id>:<frame number>`, starting at 1. A newly accepted socket is a
+new resource even after restart; its ID is never reused. For drivers that reopen
+an existing resource, derive stable keys from that resource's own offsets or IDs.
+
+The TCP implementation limits frames to 16 MiB and has bounded delivery queues.
+It keeps the partial read future alive across outgoing sends. Outgoing frames
+are deduplicated by delivery key for the socket's lifetime; closing the socket
+makes all later sends terminal drops. EOF, framing failure, and write failure
+retire only that handle. The owner receives `{"type":"closed","handle":...,"reason":...}`
+with key `conn:<id>:closed` after the socket halves are dropped. A write error or
+five-second write timeout closes the stream because a partially written frame
+cannot safely be retried. A successful write means acceptance by the local socket,
+not an application-level receipt from the peer. Whole-driver failure reports DOWN.
+
+The `drivers` test target covers keyed ingress, commit-only replies, delivery
+deduplication, closed-handle drops with another live destination, owner-stop
+cleanup, unknown-hash refusal, reopening from owner state, capability revocation,
+and the node-restart spawn window. These tests were
+written in a write-only lane; the coordinator runs the integration gate.

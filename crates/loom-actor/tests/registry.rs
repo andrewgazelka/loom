@@ -4,6 +4,7 @@ use std::{collections::HashMap, sync::Arc};
 
 pub struct Registry {
     values: HashMap<String, Arc<dyn Behavior>>,
+    drivers: HashMap<String, Arc<dyn loom_actor::Driver>>,
 }
 
 impl Registry {
@@ -16,7 +17,12 @@ impl Registry {
         ] {
             values.insert(behavior.hash().to_owned(), behavior);
         }
-        Self { values }
+        Self { values, drivers: HashMap::new() }
+    }
+
+    #[allow(dead_code)] // Shared fixture also serves non-driver test targets.
+    pub fn insert_driver(&mut self, driver: Arc<dyn loom_actor::Driver>) {
+        self.drivers.insert(driver.hash().to_owned(), driver);
     }
 
     pub fn insert(&mut self, hash: String, behavior: Arc<dyn Behavior>) {
@@ -29,6 +35,10 @@ impl Registry {
 impl loom_actor::Registry for Registry {
     async fn resolve(&self, reference: &str) -> anyhow::Result<Arc<dyn Behavior>> {
         self.values.get(reference).cloned().ok_or_else(|| anyhow::anyhow!("unknown test behavior {reference}"))
+    }
+
+    async fn resolve_driver(&self, hash: &str) -> anyhow::Result<Arc<dyn loom_actor::Driver>> {
+        self.drivers.get(hash).cloned().ok_or_else(|| anyhow::anyhow!("unknown driver hash {hash}"))
     }
 
     async fn behaviors(&self) -> anyhow::Result<Vec<BehaviorInfo>> {

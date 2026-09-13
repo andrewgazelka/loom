@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 pub(crate) enum Operation {
     Check { cap: Cap, right: Rights, name: String },
     SelfCap,
+    SenderCap { sender: String },
+    DriverSpawn { target: String, hash: String },
     Spawn { target: String },
     Attenuate { cap: Cap, rights: Rights },
     Accept { cap: Cap },
@@ -29,7 +31,7 @@ impl Operation {
             Self::Revoke { cap } => Presented { cap, name: "revoke" },
             Self::Inspect { cap } => Presented { cap, name: "inspect" },
             Self::InspectSql { cap, .. } => Presented { cap, name: "inspect_sql" },
-            Self::SelfCap | Self::Spawn { .. } => return None,
+            Self::SelfCap | Self::SenderCap { .. } | Self::Spawn { .. } | Self::DriverSpawn { .. } => return None,
         })
     }
 }
@@ -124,7 +126,9 @@ pub(crate) struct Promotion {
 
 async fn verify(node: &Node, conn: &turso::Connection, cap: &Cap, right: Rights, name: &str) -> Result<(), EffectError> {
     let id = actor::meta(conn, "id").await.map_err(EffectError::Environmental)?;
-    if id == cap.target {
+    if id == cap.target
+        || (cap.target.starts_with("drv:") && crate::drivers::target(&cap.target).map_err(EffectError::Deterministic)?.owner == id)
+    {
         return node.verify_cap_on(conn, cap, right, name).await;
     }
     // A child capability is usable in the spawning transaction, before the pump
@@ -167,6 +171,15 @@ pub(crate) async fn execute(node: &Node, conn: &turso::Connection, key: &EffectK
             verify(node, conn, &cap, right, &name).await?;
             return Ok(Vec::new());
         }
+        Operation::SenderCap { sender } => {
+            let rows = actor::query(conn, "SELECT cap_id FROM caps WHERE target=? ORDER BY rowid DESC LIMIT 1", [sender])
+                .await
+                .map_err(EffectError::Environmental)?;
+            let row =
+                rows.rows.first().ok_or_else(|| EffectError::Deterministic(anyhow::anyhow!("sender supplied no reply capability")))?;
+            let id: i64 = row.get(0).map_err(|e| EffectError::Environmental(e.into()))?;
+            capability::load_cap(conn, id as u64).await.map_err(EffectError::Environmental)?
+        }
         Operation::SelfCap => {
             let epoch = actor::meta(conn, "capability_epoch")
                 .await
@@ -174,6 +187,23 @@ pub(crate) async fn execute(node: &Node, conn: &turso::Connection, key: &EffectK
                 .parse()
                 .map_err(|e| EffectError::Environmental(anyhow::anyhow!("invalid capability_epoch: {e}")))?;
             node.mint_cap_at(&key.actor_id, epoch, identity.as_bytes())
+        }
+        Operation::DriverSpawn { target, hash } => {
+            let driver = node
+                .registry
+                .resolve_driver(&hash)
+                .await
+                .map_err(|e| EffectError::Deterministic(anyhow::anyhow!("unknown driver hash {hash}: {e:#}")))?;
+            if driver.hash() != hash {
+                return Err(EffectError::Deterministic(anyhow::anyhow!("driver hash {hash}: registry identity mismatch")));
+            }
+            let epoch: u64 = actor::meta(conn, "capability_epoch")
+                .await
+                .map_err(EffectError::Environmental)?
+                .parse()
+                .map_err(|e| EffectError::Environmental(anyhow::anyhow!("invalid capability epoch: {e}")))?;
+            let cap = node.mint_cap_at(&target, epoch, identity.as_bytes());
+            node.attenuate_verified(&cap, Rights::SEND | Rights::STOP)?
         }
         Operation::Spawn { target } => node.mint_child_cap(&target, identity.as_bytes()),
         Operation::Attenuate { cap, rights } => {

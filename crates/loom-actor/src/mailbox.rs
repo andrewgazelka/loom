@@ -10,7 +10,11 @@ pub(crate) async fn next(conn: &Connection) -> Result<Option<actor::Message>> {
         .first()
         .map(|row| {
             let sender: String = row.get(2)?;
-            Ok(actor::Message { seq: row.get(0)?, msg: row.get(1)?, sender: if sender.starts_with("a0") { Some(sender) } else { None } })
+            Ok(actor::Message {
+                seq: row.get(0)?,
+                msg: row.get(1)?,
+                sender: if sender.starts_with("a0") || sender.starts_with("drv:") { Some(sender) } else { None },
+            })
         })
         .transpose()
 }
