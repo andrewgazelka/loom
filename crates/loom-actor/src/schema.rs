@@ -1,9 +1,20 @@
+// One definition for fresh schemas and opening copied/restored actor files.
+macro_rules! mailbox_indexes {
+    () => {
+        "CREATE INDEX IF NOT EXISTS inbox_state_seq ON inbox(state,seq);
+CREATE INDEX IF NOT EXISTS inbox_state_epoch_seq ON inbox(state,defer_epoch,seq);
+CREATE INDEX IF NOT EXISTS outbox_delivered_seq_idx ON outbox(delivered,seq,idx);"
+    };
+}
+
+pub(crate) const MAILBOX_INDEXES: &str = mailbox_indexes!();
+
 /// Runtime tables; domain schemas belong to registered behaviors.
-pub const SCHEMA: &str = "
+pub const SCHEMA: &str = concat!("
 CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE caps(cap_id INTEGER PRIMARY KEY,target TEXT NOT NULL,epoch TEXT NOT NULL,rights INTEGER NOT NULL,mac BLOB NOT NULL);
 CREATE TABLE revoked(cap_id INTEGER PRIMARY KEY);
-CREATE TABLE inbox(seq INTEGER PRIMARY KEY, key TEXT UNIQUE, sender TEXT, msg BLOB, received_at INTEGER, state TEXT NOT NULL DEFAULT 'pending', defer_epoch INTEGER NOT NULL DEFAULT -1, defer_count INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE inbox(seq INTEGER PRIMARY KEY, key TEXT UNIQUE, sender TEXT, msg BLOB, received_at INTEGER, state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','deferred','done')), defer_epoch INTEGER NOT NULL DEFAULT -1, defer_count INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE effects(seq INTEGER, idx INTEGER, kind TEXT, request BLOB, result BLOB, PRIMARY KEY(seq, idx));
 CREATE TABLE outbox(seq INTEGER, idx INTEGER, target TEXT, msg BLOB, delivered INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(seq, idx));
 CREATE TABLE code_changes(seq INTEGER PRIMARY KEY, behavior_hash TEXT NOT NULL, parent_hash TEXT, author TEXT, rationale TEXT, schema_sql TEXT);
@@ -18,7 +29,7 @@ CREATE TABLE calls(ref TEXT PRIMARY KEY,target TEXT,timer_ref TEXT);
 CREATE TABLE shutdowns(child TEXT PRIMARY KEY,request TEXT NOT NULL);
 CREATE TABLE snapshots(seq INTEGER PRIMARY KEY, path TEXT);
 CREATE TABLE subscribers(id TEXT PRIMARY KEY,subscriber TEXT NOT NULL,\"table\" TEXT NOT NULL,after_change_id INTEGER NOT NULL);
-";
+", mailbox_indexes!());
 
 pub(crate) const SYSTEM_TABLES: &[&str] = &[
     "meta",

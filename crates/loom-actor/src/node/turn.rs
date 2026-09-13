@@ -32,7 +32,7 @@ impl Node {
         let cursor = actor::cursor(&conn).await?;
         if cursor > 0
             && cursor % self.config.snapshot_every == 0
-            && actor::query(&conn, "SELECT seq FROM inbox WHERE state='done' AND seq>? LIMIT 1", [cursor]).await?.rows.is_empty()
+            && actor::query(&conn, crate::mailbox::DONE_ABOVE, [cursor]).await?.rows.is_empty()
         {
             self.snapshot_actor(&conn, id, cursor).await?;
         }

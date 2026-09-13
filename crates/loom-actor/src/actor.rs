@@ -26,6 +26,12 @@ pub(crate) async fn connect(path: &Path, io: crate::Io) -> Result<Connection> {
     let conn = db.connect()?;
     query(&conn, "PRAGMA journal_mode=WAL", ()).await?;
     query(&conn, "PRAGMA synchronous=NORMAL", ()).await?;
+    // Creation/reset apply SCHEMA after opening an empty file. Existing files,
+    // including fork and remote snapshot copies, retain their tables and acquire
+    // the same indexes here before any mailbox query can run.
+    if !query(&conn, "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='inbox'", ()).await?.rows.is_empty() {
+        conn.execute_batch(crate::schema::MAILBOX_INDEXES).await?;
+    }
     query(&conn, "PRAGMA capture_data_changes_conn = 'full'", ()).await?;
     let cdc = query(&conn, "PRAGMA table_info(turso_cdc)", ()).await?;
     ensure!(
