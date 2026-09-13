@@ -335,6 +335,14 @@
       "schema_sql": ""
     }
   ],
+  "subscriptions": [
+    {
+      "id": "a0ACTOR000000000000000000001:a0VIEW00000000000000000000002:3:0",
+      "subscriber": "a0VIEW00000000000000000000002",
+      "table": "counter",
+      "after_change_id": 41
+    }
+  ],
   "dead_letters": [
     {
       "seq": 12,

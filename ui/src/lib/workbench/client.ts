@@ -137,7 +137,9 @@ export function parseResult(command: Command, value: unknown): Json {
     rows(info.monitors, "info.monitors");
   } else if (op === V.validate) validation(value);
   else if (
-    [V.lineage, V.dead_letters, V.sql, V.behaviors].some((verb) => verb === op)
+    [V.lineage, V.dead_letters, V.subscriptions, V.sql, V.behaviors].some(
+      (verb) => verb === op,
+    )
   )
     rows(value, op);
   else if ([V.members, V.promote_where].some((verb) => verb === op))

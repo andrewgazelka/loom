@@ -43,7 +43,7 @@ function values(id: string): Record<string, string> {
   return values;
 }
 describe("operation contract", () => {
-  test("eight definition and nineteen actor operations, all uniquely named", () => {
+  test("eight definition and twenty actor operations, all uniquely named", () => {
     expect(
       new Set(
         commands
@@ -57,7 +57,7 @@ describe("operation contract", () => {
           .filter((command) => command.group === "Actors")
           .map((command) => command.operation),
       ).size,
-    ).toBe(19);
+    ).toBe(20);
     expect(new Set(commands.map((command) => command.id)).size).toBe(
       commands.length,
     );

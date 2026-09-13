@@ -118,6 +118,7 @@ export class MockTransport implements Transport {
       return fixture.verdicts[this.verdict as keyof typeof fixture.verdicts];
     if (op === V.lineage) return fixture.lineage;
     if (op === V.dead_letters) return fixture.dead_letters;
+    if (op === V.subscriptions) return fixture.subscriptions;
     if (op === V.promote) return fixture.lineage[1];
     if (op === V.sql) {
       for (const table of ["inbox", "outbox", "effects"] as const)
