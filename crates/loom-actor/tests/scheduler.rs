@@ -128,3 +128,44 @@ async fn deferral_ends_batch_then_retries_after_intervening_commit() {
     let received: Vec<String> = rows.rows.iter().map(|row| row.get(0).unwrap()).collect();
     assert_eq!(received, ["first", "release", "defer", "last"]);
 }
+
+/// Exercise a fresh root and a nonempty child initialization without a warm-up
+/// drain. Check committed domain rows and history, since poison also counts as
+/// scheduler progress and run_until_idle may return Ok after parking an actor.
+#[tokio::test]
+async fn fresh_root_and_child_commit_all_three_messages() {
+    for io in [Io::Memory, Io::Syscall] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut registry = Registry::new();
+        registry.insert("scheduler-selective".into(), Arc::new(Selective));
+        let node = Node::new(dir.path(), Arc::new(registry), Arc::new(DefaultEffects), Config { io, ..Config::default() }).await.unwrap();
+        let id = node.spawn_root("scheduler-selective", b"one").await.unwrap();
+        node.send(&id, "two", b"two").await.unwrap();
+        node.send(&id, "three", b"three").await.unwrap();
+        let processed = node.run_until_idle().await.unwrap();
+        for actor_id in [node.root(), id.clone()] {
+            let actor = node.open(&actor_id).await.unwrap();
+            let errors = actor.sql("SELECT error FROM dead_letters ORDER BY seq", ()).await.unwrap();
+            let errors: Vec<String> = errors.rows.iter().map(|row| row.get(0).unwrap()).collect();
+            assert!(errors.is_empty(), "actor {actor_id}: {errors:?}");
+            assert_eq!(actor.status().await.unwrap(), crate::Status::Running);
+        }
+        assert_eq!(processed, 4, "root configure plus three fresh child messages");
+        assert_eq!(node.open(&node.root()).await.unwrap().cursor().await.unwrap(), 1);
+        let actor = node.open(&id).await.unwrap();
+        assert_eq!(actor.cursor().await.unwrap(), 3);
+        let rows = actor.sql("SELECT value FROM received ORDER BY rowid", ()).await.unwrap();
+        let received: Vec<String> = rows.rows.iter().map(|row| row.get(0).unwrap()).collect();
+        assert_eq!(received, ["one", "two", "three"]);
+        let rows = actor.sql("SELECT seq FROM inbox WHERE state='done' ORDER BY seq", ()).await.unwrap();
+        let committed: Vec<i64> = rows.rows.iter().map(|row| row.get(0).unwrap()).collect();
+        assert_eq!(committed, [1, 2, 3]);
+        for seq in 1..=3 {
+            let conn = actor.conn.lock().await;
+            assert_eq!(crate::actor::meta(&conn, &format!("commit_order:{seq}")).await.unwrap(), seq.to_string());
+            assert_eq!(crate::actor::meta(&conn, &format!("boundary:{seq}")).await.unwrap(), seq.to_string());
+            assert_eq!(crate::actor::meta(&conn, &format!("code_at:{seq}")).await.unwrap(), "0");
+        }
+        assert_eq!(node.run_until_idle().await.unwrap(), 0);
+    }
+}
