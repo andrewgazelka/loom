@@ -2,7 +2,7 @@ use super::*;
 use loom_actor::{Ack, DeliveryOp, Placement};
 
 impl ActorService {
-    async fn forward_command(&self, verb: &str, args: &Value) -> anyhow::Result<Option<Value>> {
+    pub(crate) async fn forward_command(&self, verb: &str, args: &Value) -> anyhow::Result<Option<Value>> {
         if matches!(verb, "move" | "whereis" | "register") {
             return Ok(None);
         }
@@ -98,7 +98,7 @@ impl ActorService {
         })
     }
 
-    async fn cluster_actor_list(&self, cluster: bool) -> anyhow::Result<Value> {
+    pub(crate) async fn cluster_actor_list(&self, cluster: bool) -> anyhow::Result<Value> {
         if !cluster {
             let mut list = self.actor_list().await?;
             if let Some(rows) = list.as_array_mut() {
