@@ -11,6 +11,9 @@ use std::{
 };
 use tokio::sync::{mpsc, oneshot, watch};
 
+/// Upper bound on waiting for an aborted driver worker to finish.
+const CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Open entries leave when the worker finishes (run completion, explicit stop,
 /// owner stop, node close/drop): the broker removes the entry. Spawn retry never
 /// opens a second resource because the owner's `driver_spawn:<id>` receipt is
@@ -247,9 +250,14 @@ impl Node {
                 completions.push(driver.closed.clone());
             }
         }
+        // abort() lands at the worker's next await; a driver that never yields would
+        // hang every closer, so the wait is bounded and the hang becomes a named error.
         for mut closed in completions {
             if !*closed.borrow() {
-                closed.wait_for(|done| *done).await.context("driver completion lost")?;
+                tokio::time::timeout(CLOSE_TIMEOUT, closed.wait_for(|done| *done))
+                    .await
+                    .map_err(|_| anyhow::anyhow!("driver did not stop within {CLOSE_TIMEOUT:?}: Driver::run must yield at an await for cancellation"))?
+                    .context("driver completion lost")?;
             }
         }
         Ok(())

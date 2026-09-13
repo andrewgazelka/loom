@@ -1,6 +1,6 @@
 //! Independent actor turns and pump tasks keep a blocked actor local to its file.
 use crate::{ActorId, Node};
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// Wakes leave `woken` only when admitted to a step. A wake during a step stays
@@ -67,7 +67,10 @@ impl Node {
         self.scheduling.lock().map_err(|_| anyhow!("scheduler state poisoned"))
     }
 
+    /// Only actor ids enter the wake set: a malformed id (a driver id, a name)
+    /// fails here at the caller, never two calls later inside run_until_idle.
     pub(crate) fn wake_actor(&self, id: &str) -> Result<()> {
+        crate::ids::check(id).with_context(|| format!("wake_actor {id}"))?;
         self.scheduling()?.woken.insert(id.into());
         self.wake.notify_one();
         Ok(())
