@@ -9,10 +9,13 @@ test("pending_is_cleared_by_matching_key_and_reverted_by_dead_letter", () => {
     const node = f.binding.rows.get("a")!.node;
     f.binding.pending("a", tree("optimistic"), "browser:1");
     expect(node.getAttribute("data-pending")).toBe("browser:1");
-    f.stream.emit(delta([], "unrelated"));
+    f.stream.emit(delta([], "unrelated", "also-unrelated"));
     expect(node.hasAttribute("data-pending")).toBe(true);
     const accepted = row("a", 1, tree("accepted"));
-    f.stream.emit(delta([change(1, accepted, initial)], "delta:source:1:view", "browser:1"));
+    const verdict = delta([change(1, accepted, initial)], "delta:source:1:view", "browser:1");
+    expect(verdict.key).not.toBe("browser:1");
+    expect(verdict.cause).toBe("browser:1");
+    f.stream.emit(verdict);
     expect(node.textContent).toBe("accepted");
     expect(node.hasAttribute("data-pending")).toBe(false);
     f.binding.pending("a", tree("wrong"), "browser:2");

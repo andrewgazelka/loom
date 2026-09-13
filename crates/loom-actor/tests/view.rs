@@ -137,6 +137,7 @@ async fn subscribe_snapshot_then_deltas_in_order() {
         assert_eq!(frame["source"], source);
         assert_eq!(frame["seq"], seq);
         assert_eq!(frame["key"], format!("message-{seq}"));
+        assert_eq!(frame.get("cause"), Some(&Value::Null));
         let rows = frame["rows"].as_array().unwrap();
         assert_eq!(rows.len(), 1);
         let change = rows[0]["change_id"].as_i64().unwrap();
@@ -177,7 +178,21 @@ async fn view_renders_keyed_trees_and_promote_rerenders_in_place() {
     let init = view_init(&node, &source, "template-a").await;
     let view = spawn(&node, "view-v1", &init, Durability::Ephemeral).await;
     drain(&node).await;
-    for seq in 2..=3 { command(&node, &source, &format!("message-{seq}"), b"effect").await; }
+    let mut stream = node.open_stream().await.unwrap();
+    let cap = node.cap_for(&view, Rights::INSPECT).await.unwrap();
+    node.subscribe_stream(&stream.id, &cap, "tree").await.unwrap();
+    assert_eq!(next(&mut stream).await["type"], "snapshot");
+    for seq in 2..=3 {
+        // A source handling a delta has its own cause; the view must not inherit it.
+        let input = serde_json::to_vec(&json!({"type":"delta","key":"upstream-key","cause":"older-key"})).unwrap();
+        let key = format!("message-{seq}");
+        command(&node, &source, &key, &input).await;
+        let delta = next(&mut stream).await;
+        assert_eq!(delta["cause"], key);
+        assert_ne!(delta["key"], key);
+        assert_ne!(delta["cause"], "upstream-key");
+        assert_ne!(delta["cause"], "older-key");
+    }
     let actor = node.open(&view).await.unwrap();
     assert_eq!(integer(&actor, "SELECT COUNT(*) FROM tree").await, 3);
     let before = actor.sql("SELECT rowid,key,tree FROM tree ORDER BY key", ()).await.unwrap();
@@ -185,14 +200,11 @@ async fn view_renders_keyed_trees_and_promote_rerenders_in_place() {
         let tree: Value = serde_json::from_slice(&row.get::<Vec<u8>>(2).unwrap()).unwrap();
         assert_eq!(tree["attrs"]["class"], "template-a");
     }
-    let mut stream = node.open_stream().await.unwrap();
-    let cap = node.cap_for(&view, Rights::INSPECT).await.unwrap();
-    node.subscribe_stream(&stream.id, &cap, "tree").await.unwrap();
-    assert_eq!(next(&mut stream).await["type"], "snapshot");
     node.promote(&view, "template-b", "test", "rerender every key").await.unwrap();
     drain(&node).await;
     let delta = next(&mut stream).await;
     assert_eq!(delta["type"], "delta");
+    assert_eq!(delta.get("cause"), Some(&Value::Null));
     let rows = delta["rows"].as_array().unwrap();
     assert_eq!(rows.len(), 3);
     let keys: BTreeSet<_> = rows.iter().map(|row| row["after"]["key"].as_str().unwrap()).collect();

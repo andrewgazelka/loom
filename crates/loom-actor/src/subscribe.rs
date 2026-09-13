@@ -50,13 +50,17 @@ pub(crate) async fn record_origin(conn: &turso::Connection, id: &str, seq: i64) 
     let rows = actor::query(conn, "SELECT key,msg FROM inbox WHERE seq=?", [seq]).await?;
     let row = rows.rows.first().with_context(|| format!("actor {id} seq {seq}: CDC origin missing inbox"))?;
     let key: String = row.get(0)?;
-    let mut origin = json!({"seq":seq,"key":key});
-    if !actor::query(conn, "SELECT value FROM meta WHERE key='view_kind'", ()).await?.rows.is_empty() {
-        let bytes: Vec<u8> = row.get(1)?;
-        if let Ok(frame) = serde_json::from_slice::<Value>(&bytes) {
-            origin["causation"] = frame.get("causation").or_else(|| frame.get("key")).cloned().unwrap_or(Value::Null);
+    let bytes: Vec<u8> = row.get(1)?;
+    let cause = match serde_json::from_slice::<Value>(&bytes) {
+        Ok(frame) if frame.get("type").and_then(Value::as_str) == Some("delta") => {
+            // Only the immediately handled delta's key propagates; never inherit its cause.
+            let key = frame.get("key").and_then(Value::as_str)
+                .with_context(|| format!("actor {id} seq {seq}: delta origin missing string key"))?;
+            json!(key)
         }
-    }
+        _ => Value::Null,
+    };
+    let origin = json!({"seq":seq,"key":key,"cause":cause});
     actor::set_meta(conn, &format!("cdc_origin:{txn}"), &origin.to_string()).await
 }
 
@@ -261,10 +265,8 @@ impl Node {
                 None => json!({"seq":-batch.txn,"key":"control"}),
             };
             let seq = origin["seq"].as_i64().context("CDC origin missing seq")?;
-            let mut frame = json!({"type":"delta","source":id,"seq":seq,"key":origin["key"],"rows":batch.rows});
-            if let Some(causation) = origin.get("causation").filter(|value| !value.is_null()) {
-                frame["causation"] = causation.clone();
-            }
+            let frame = json!({"type":"delta","source":id,"seq":seq,"key":origin["key"],
+                "cause":origin["cause"],"rows":batch.rows});
             enqueue(&tx, &batch.subscriber, &format!("delta:{id}:{seq}:{}", batch.subscriber), frame).await?;
         }
         if changed { self.commit_control(id, tx).await } else { tx.rollback().await.map_err(Into::into) }

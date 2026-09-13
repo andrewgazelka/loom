@@ -42,7 +42,7 @@ type ObjectValue = Record<string, unknown>;
 interface Definition { hash: string; def: { component_hash: string } }
 interface ViewResult { id: string; cap: unknown }
 interface DeltaRow { change_id: number; change_type: number; after: { key: string; tree: number[] } }
-interface Delta { type: string; source: string; key: string; causation?: string; rows: DeltaRow[] }
+interface Delta { type: string; source: string; key: string; cause: string | null; rows: DeltaRow[] }
 let passed = 0;
 let socket: WebSocket | undefined;
 let failure: Error | undefined;
@@ -143,7 +143,7 @@ try {
       await command('send', { id: source, key, msg: { seq, text: `row ${seq}` } });
       const delta = await frame((value) => value.type === 'delta' && value.source === view.id, `delta ${seq}`) as unknown as Delta;
       assert(delta.rows.length === 1, `send ${seq} must change exactly one tree row`);
-      assert(delta.key.length > 0 && delta.causation === key, `send ${seq} lost exact key or originating message key`);
+      assert(delta.key.length > 0 && delta.cause === key, `send ${seq} lost exact key or immediate source message key`);
       const row = delta.rows[0]!;
       assert(row.change_type === 1 && row.after.key === String(seq), `send ${seq} inserted the wrong key`);
       assert(row.change_id > previousChange, 'CDC change IDs must increase');

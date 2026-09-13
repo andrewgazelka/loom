@@ -27,9 +27,8 @@ export function change(change_id: number, after: WireRow | null, before: WireRow
   return { change_id, change_type: after === null ? -1 : before === null ? 1 : 0, table: "tree", id: change_id,
     before, after, updates: null };
 }
-export function delta(rows: ReturnType<typeof change>[], key = "control", causation?: string) {
-  return { type: "delta", source: "view-1", seq: rows.at(-1)?.change_id ?? 1, key, rows,
-    ...(causation === undefined ? {} : { causation }) };
+export function delta(rows: ReturnType<typeof change>[], key = "control", cause: string | null = null) {
+  return { type: "delta", source: "view-1", seq: rows.at(-1)?.change_id ?? 1, key, cause, rows };
 }
 export function fixture() {
   // Existing tests have no DOM shim. Each new test owns a Window, closed by dispose().

@@ -1,4 +1,4 @@
-import { build, compatible, move, patch, preserveFocus, readTree, type OnEvent, type Tree } from "./patch";
+import { build, compatible, orderChildren, patch, preserveFocus, readTree, type OnEvent, type Tree } from "./patch";
 import type { DeltaStream, Frame, SortValue, TreeRow } from "./stream";
 
 interface Pending { messageKey: string }
@@ -64,7 +64,7 @@ export function bind(container: Element, stream: DeltaStream, options: BindOptio
   function order() {
     const ordered = [...rows.entries()].sort(([leftKey, left], [rightKey, right]) =>
       compare(left.sort, right.sort) || (leftKey < rightKey ? -1 : leftKey === rightKey ? 0 : 1));
-    ordered.forEach((entry, index) => move(container, entry[1].node, container.children[index] ?? null));
+    orderChildren(container, ordered.map((entry) => entry[1].node));
   }
   function clearPending(entry: BoundRow) {
     // Matching delta verdict, dead letter, or destroy() leaves pending state.
@@ -130,7 +130,7 @@ export function bind(container: Element, stream: DeltaStream, options: BindOptio
     }
     for (const [rowKey, entry] of rows) {
       const key = entry.pending?.messageKey;
-      if (key !== undefined && (key === frame.key || key === frame.causation)) {
+      if (key !== undefined && (key === frame.key || key === frame.cause)) {
         if (entry.authoritative) {
           upsert(entry.authoritative, true);
           clearPending(entry);

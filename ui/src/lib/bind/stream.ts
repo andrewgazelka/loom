@@ -10,9 +10,9 @@ export interface ChangedRow {
   before: TreeRow | null;
   after: TreeRow | null;
 }
-export interface FrameContext { source: string; seq: number; key: string; causation?: string }
+export interface FrameContext { source: string; seq: number; key: string }
 export interface Snapshot extends FrameContext { type: "snapshot"; change_id: number; rows: TreeRow[] }
-export interface Delta extends FrameContext { type: "delta"; rows: ChangedRow[] }
+export interface Delta extends FrameContext { type: "delta"; cause: string | null; rows: ChangedRow[] }
 export interface Resnapshot { type: "resnapshot"; source: string }
 export interface DeadLetter { type: "dead_letter"; key: string; error: string; source?: string }
 export type Frame = Snapshot | Delta | Resnapshot | DeadLetter;
@@ -56,7 +56,6 @@ function context(row: Record<string, unknown>): FrameContext {
   const result: FrameContext = {
     source: string(row.source, "frame.source"), seq: integer(row.seq, "frame.seq"), key: string(row.key, "frame.key"),
   };
-  if (row.causation !== undefined) result.causation = string(row.causation, "frame.causation");
   return result;
 }
 
@@ -82,7 +81,8 @@ export function parseFrame(value: unknown): Frame {
   }
   if (row.type !== "delta") throw new Error(`frame.type: unsupported flag ${row.type}`);
   return {
-    type: "delta", ...context(row), rows: array(row.rows, "delta.rows").map((value) => {
+    type: "delta", ...context(row), cause: row.cause === null ? null : string(row.cause, "frame.cause"),
+    rows: array(row.rows, "delta.rows").map((value) => {
       const item = object(value, "delta row");
       const operation = item.change_type;
       if (operation !== -1 && operation !== 0 && operation !== 1)

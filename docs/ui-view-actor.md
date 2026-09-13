@@ -56,10 +56,15 @@ target, the pump reads `turso_cdc` rows with `change_id > after_change_id` for
 subscribed tables and delivers them as ONE inbox message per subscriber per commit:
 
     {"type":"delta", "source":<actor>, "seq":<source seq>, "key":<inbox key of the
-     message that produced it, or "control">, "rows":[{change_id, change_type, table,
+     message that produced it, or "control">, "cause":<key of the delta message
+     the producing actor handled, or null>, "rows":[{change_id, change_type, table,
      id, before, after, updates}, ...]}
 
-keyed `delta:<source>:<seq>:<subscriber>`, so redelivery is a no-op like every
+`cause` uses only the immediately handled delta's `key`, never its `cause`.
+A view's tree delta therefore carries the source's message key as `cause`;
+correlation does not chain beyond source -> view -> browser.
+
+Frames are keyed `delta:<source>:<seq>:<subscriber>`, so redelivery is a no-op like every
 other send. The first message after subscribing is `{"type":"snapshot", ...rows}`
 for the table (built from `SELECT *`, tagged with the `change_id` it is current
 as of). A subscriber that falls behind the CDC floor (its `after_change_id` was
@@ -102,6 +107,8 @@ by a behavior (`cx.spawn` with `view-v1` and that init message):
   Deletes delete. Because `tree` is a domain table, the view's own `turso_cdc`
   carries `{key, sort, tree}` deltas, and the browser subscribes to THAT. The
   browser never sees the source table; it sees keyed trees.
+  The emitted tree delta's `cause` is the handled source delta's `key`, or null
+  for snapshot/control work; the handler does not forward an incoming `cause`.
 - on promote (new template hash): re-render every row of `tree` in one transaction.
   The browser receives one delta with every key updated and patches each node in
   place. This is the whole hot-reload path; there is no other.
@@ -130,15 +137,19 @@ as ES modules and unit-tested under `bun test` with the DOM shim the existing
   `sort` order. `delta` rows: insert => build + `insertBefore` at the sort
   position; update => patch the existing node from `old tree -> new tree` (a per-row
   patch of two small JSON trees: attributes set/removed, text replaced, keyed
-  children matched by `key`, unkeyed by position; only unmatched nodes are created
-  or removed); delete => remove. A node is never replaced while its key lives, so
+  children matched by `key`, unkeyed element children by tag in document order,
+  text nodes by position; only unmatched nodes are created or removed).
+  Ordering is a second pass after removals. The node holding `document.activeElement`
+  (or an ancestor of it) is never moved: its neighbours move around it with
+  `insertBefore`. This also applies to row ordering. Delete => remove.
+  A node is never replaced while its key lives, so
   focus, caret, scroll and in-flight transitions survive every update and every
   promote.
 - events: `attrs` whose name starts with `on` are wired to `opts.onEvent(key, name,
   payload)`; the shell turns them into `send(cap, msg)` with a client-generated
   message key.
 - optimistic rows: the shell may call `bind.pending(key, tree, messageKey)`; the node
-  renders with `data-pending`. The first `delta` whose frame `key` equals
+  renders with `data-pending`. The first `delta` whose frame `cause` or `key` equals
   `messageKey` clears it; a `dead_letter` frame for that key reverts to the last
   authoritative tree and surfaces the trap text. No merge logic exists: the source
   actor is the single writer and the delta is the verdict.
@@ -236,7 +247,8 @@ are computed moves.
    the changed attribute/text mutations, nothing else.
 3. `pending_is_cleared_by_matching_key_and_reverted_by_dead_letter`.
 4. `focus_and_caret_survive_promote`: an `<input>` inside a keyed row keeps
-   `document.activeElement` and `selectionStart` across a delta that updates every
-   key.
+   `document.activeElement` and `selectionStart` across a promote that removes
+   the first child and changes the input's child index. Neither the input nor
+   its containing row is moved; neighbours move around them with no blur.
 5. `resnapshot_rebuilds_without_losing_focused_row`: rows present in both snapshots
    keep their nodes.

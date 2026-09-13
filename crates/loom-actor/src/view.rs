@@ -117,7 +117,7 @@ struct ChangedRow {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Frame {
     Snapshot { source: String, rows: Vec<ChangedRow> },
-    Delta { source: String, rows: Vec<ChangedRow> },
+    Delta { source: String, cause: Value, rows: Vec<ChangedRow> },
     Resnapshot { source: String },
 }
 
@@ -166,6 +166,13 @@ impl Behavior for View {
         }
         let init: ViewInit = load(cx, "view_init").await?;
         let frame: Frame = serde_json::from_slice(msg).map_err(|error| fail(cx, format!("frame: {error}")))?;
+        if let Frame::Delta { cause, .. } = &frame
+            && !cause.is_null() && !cause.is_string()
+        {
+            return Err(fail(cx, "delta cause must be a string or null"));
+        }
+        // record_origin sets our tree delta's cause to this input delta's key,
+        // never to its cause: source -> view -> browser is the correlation bound.
         let source = match &frame {
             Frame::Snapshot { source, .. } | Frame::Delta { source, .. } | Frame::Resnapshot { source } => source,
         };

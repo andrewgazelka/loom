@@ -82,10 +82,16 @@ current build. Keep the preview build fixed while capturing screenshots.
 `src/lib/bind/{bind,patch,stream}.ts` is plain TypeScript without Svelte or Vite imports.
 `bind(container, stream, { onEvent, onError })` maintains keyed row elements and
 patches only changed attributes, text, and children. `pending(key, tree, messageKey)`
-marks an optimistic row; an authoritative delta clears it by `key` or `causation`,
+marks an optimistic row; an authoritative delta clears it by `key` or `cause`,
 and a dead letter restores its last authoritative tree. A resnapshot preserves
 surviving nodes until the complete replacement snapshot arrives. Root and keyed
 child tag changes fail by key because a different element class cannot preserve identity.
+Children match by key, unkeyed elements by tag in document order, and text by
+position. Ordering runs after removals, moving neighbours with `insertBefore`
+around the stationary focused node or its ancestor. This applies inside rows
+and between rows; focus is not restored after a blur. Removing a leading sibling
+preserves the unkeyed input. Causes carry only the handled delta's key, never
+its incoming cause.
 
 `stream.ts` decodes JSON blobs only at the tree-table boundary. WebSocket capabilities
 remain opaque strings so JavaScript cannot round their 64-bit fields. The `/view`

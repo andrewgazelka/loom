@@ -118,27 +118,74 @@ function childKey(tree: Tree | string | undefined): string | undefined {
   return typeof tree === "object" ? tree.key : undefined;
 }
 
+interface ChildMatch {
+  index: number;
+  next: Tree | string;
+  previousIndex?: number;
+  previous?: Tree | string;
+}
+interface TagQueue { indices: number[]; cursor: number }
+
+/** Keys own identity; unkeyed elements consume their tag's document-order queue. */
+function matchChildren(previous: Array<Tree | string>, next: Array<Tree | string>): ChildMatch[] {
+  const keyed = new Map<string, number>();
+  const tags = new Map<string, TagQueue>();
+  previous.forEach((child, index) => {
+    if (typeof child === "string") return;
+    if (child.key !== undefined) { keyed.set(child.key, index); return; }
+    let queue = tags.get(child.tag);
+    if (!queue) { queue = { indices: [], cursor: 0 }; tags.set(child.tag, queue); }
+    queue.indices.push(index);
+  });
+  const used = new Set<number>();
+  return next.map((child, index) => {
+    let previousIndex: number | undefined;
+    if (typeof child === "string") {
+      if (typeof previous[index] === "string") previousIndex = index;
+    } else if (child.key !== undefined) previousIndex = keyed.get(child.key);
+    else {
+      const queue = tags.get(child.tag);
+      if (queue) previousIndex = queue.indices[queue.cursor++];
+    }
+    if (previousIndex === undefined || used.has(previousIndex)) return { index, next: child };
+    used.add(previousIndex);
+    return { index, next: child, previousIndex, previous: previous[previousIndex] };
+  });
+}
+
 /** Fail before mutating if a living keyed node would need a different Element class. */
 export function compatible(oldTree: Tree | string, next: Tree | string, identity = false): void {
   if (identity && (typeof oldTree === "string" || typeof next === "string" || oldTree.tag !== next.tag))
     throw new Error(`tree key ${typeof oldTree === "object" ? oldTree.key ?? "row" : "text"}: tag change would replace a live node`);
   if (typeof oldTree === "string" || typeof next === "string" || oldTree.tag !== next.tag) return;
-  const oldChildren = oldTree.children ?? [];
-  const keyed = new Map<string, Tree>();
-  for (const child of oldChildren) if (typeof child === "object" && child.key !== undefined) keyed.set(child.key, child);
-  for (const [index, child] of (next.children ?? []).entries()) {
-    const key = childKey(child);
-    const before = key === undefined ? oldChildren[index] : keyed.get(key);
-    if (before !== undefined && (key !== undefined || childKey(before) === undefined))
-      compatible(before, child, key !== undefined);
+  for (const match of matchChildren(oldTree.children ?? [], next.children ?? [])) {
+    if (match.previous !== undefined)
+      compatible(match.previous, match.next, childKey(match.next) !== undefined);
   }
 }
 
-export function move(parent: Node, node: Node, before: Node | null) {
+function move(parent: Node, node: Node, before: Node | null) {
   if (node === before || (node.parentNode === parent && node.nextSibling === before)) return;
-  const movable = parent as Node & { moveBefore?: (node: Node, before: Node | null) => void };
-  if (movable.moveBefore && node.parentNode === parent && node.isConnected) movable.moveBefore(node, before);
-  else parent.insertBefore(node, before);
+  parent.insertBefore(node, before);
+}
+
+/** Run after removals. The focused child (including a containing subtree) stays attached. */
+export function orderChildren(parent: Node, desired: readonly Node[]) {
+  const active = parent.ownerDocument?.activeElement;
+  const anchor = active ? desired.findIndex((node) => node === active || node.contains(active)) : -1;
+  let before: Node | null = null;
+  for (let index = desired.length - 1; index > anchor; index--) {
+    const node = desired[index]!;
+    move(parent, node, before);
+    before = node;
+  }
+  if (anchor < 0) return;
+  before = desired[anchor]!;
+  for (let index = anchor - 1; index >= 0; index--) {
+    const node = desired[index]!;
+    move(parent, node, before);
+    before = node;
+  }
 }
 
 export function patch(node: Node, previous: Tree | string, next: Tree | string, cx: PatchContext): Node {
@@ -156,28 +203,24 @@ export function patch(node: Node, previous: Tree | string, next: Tree | string, 
   for (const name of Object.keys(previous.attrs ?? {}))
     if (!(name in attrs)) attribute(element, name, undefined, cx);
   for (const [name, value] of Object.entries(attrs)) attribute(element, name, value, cx);
-  const oldChildren = previous.children ?? [];
   const nodes = Array.from(element.childNodes);
-  const keyed = new Map<string, number>();
-  oldChildren.forEach((child, index) => { const key = childKey(child); if (key !== undefined) keyed.set(key, index); });
   const used = new Set<number>();
-  (next.children ?? []).forEach((child, index) => {
-    const key = childKey(child);
-    const oldIndex = key === undefined ? (childKey(oldChildren[index]) === undefined ? index : undefined) : keyed.get(key);
-    const oldNode = oldIndex === undefined ? undefined : nodes[oldIndex];
-    const oldTree = oldIndex === undefined ? undefined : oldChildren[oldIndex];
+  const ordered: Node[] = [];
+  for (const match of matchChildren(previous.children ?? [], next.children ?? [])) {
+    const oldNode = match.previousIndex === undefined ? undefined : nodes[match.previousIndex];
     let desired: Node;
-    if (oldIndex !== undefined && oldNode && oldTree !== undefined && !used.has(oldIndex)) {
-      used.add(oldIndex);
-      desired = patch(oldNode, oldTree, child, cx);
-    } else desired = build(element.ownerDocument, child, cx);
-    move(element, desired, element.childNodes[index] ?? null);
-  });
+    if (match.previousIndex !== undefined && oldNode && match.previous !== undefined) {
+      used.add(match.previousIndex);
+      desired = patch(oldNode, match.previous, match.next, cx);
+    } else desired = build(element.ownerDocument, match.next, cx);
+    ordered.push(desired);
+  }
   nodes.forEach((oldNode, index) => { if (!used.has(index) && oldNode.parentNode === element) element.removeChild(oldNode); });
+  orderChildren(element, ordered);
   return element;
 }
 
-/** insertBefore fallback can blur a moved subtree; restore only surviving focused nodes. */
+/** Preserve selection and scroll without refocusing: ordering must never blur a surviving editor. */
 export function preserveFocus(container: Element, action: () => void) {
   const active = container.ownerDocument.activeElement as HTMLElement | null;
   const contained = active !== null && container.contains(active);
@@ -190,7 +233,6 @@ export function preserveFocus(container: Element, action: () => void) {
     scroll.push({ node, top: node.scrollTop, left: node.scrollLeft });
   try { action(); } finally {
     if (contained && active && active.isConnected && container.contains(active)) {
-      if (container.ownerDocument.activeElement !== active) active.focus({ preventScroll: true });
       if (start !== null && end !== null && input?.setSelectionRange)
         input.setSelectionRange(start, end, direction ?? undefined);
       for (const item of scroll) { item.node.scrollTop = item.top; item.node.scrollLeft = item.left; }
