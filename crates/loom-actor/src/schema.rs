@@ -1,5 +1,16 @@
+// One definition for fresh schemas and opening copied/restored actor files.
+macro_rules! mailbox_indexes {
+    () => {
+        "CREATE INDEX IF NOT EXISTS inbox_state_seq ON inbox(state,seq);
+CREATE INDEX IF NOT EXISTS inbox_state_epoch_seq ON inbox(state,defer_epoch,seq);
+CREATE INDEX IF NOT EXISTS outbox_delivered_seq_idx ON outbox(delivered,seq,idx);"
+    };
+}
+
+pub(crate) const MAILBOX_INDEXES: &str = mailbox_indexes!();
+
 /// Runtime tables; domain schemas belong to registered behaviors.
-pub const SCHEMA: &str = "
+pub const SCHEMA: &str = concat!("
 CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE caps(cap_id INTEGER PRIMARY KEY,target TEXT NOT NULL,epoch TEXT NOT NULL,rights INTEGER NOT NULL,mac BLOB NOT NULL);
 CREATE TABLE revoked(cap_id INTEGER PRIMARY KEY);
@@ -17,7 +28,7 @@ CREATE TABLE timers(ref TEXT PRIMARY KEY,target TEXT,msg BLOB,deadline INTEGER,k
 CREATE TABLE calls(ref TEXT PRIMARY KEY,target TEXT,timer_ref TEXT);
 CREATE TABLE shutdowns(child TEXT PRIMARY KEY,request TEXT NOT NULL);
 CREATE TABLE snapshots(seq INTEGER PRIMARY KEY, path TEXT);
-";
+", mailbox_indexes!());
 
 pub(crate) const SYSTEM_TABLES: &[&str] = &[
     "meta",
