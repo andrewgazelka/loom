@@ -190,7 +190,11 @@ impl Ack {
 impl Node {
     /// Both ingress and local pump dispatch here; helpers own each actual write.
     pub async fn apply_delivery(&self, op: DeliveryOp) -> Result<bool> {
-        crate::ids::check(&op.target()?)?;
+        let target = op.target()?;
+        // Driver ids (drivers.rs) are node-local destinations, not actor ids.
+        if !target.starts_with("drv:") {
+            crate::ids::check(&target)?;
+        }
         if let Some(delivery) = op.outbox() {
             let incarnation = crate::ids::incarnation(&delivery.sender, delivery.generation);
             let entry =

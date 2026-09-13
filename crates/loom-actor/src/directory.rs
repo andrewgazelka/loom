@@ -200,7 +200,7 @@ impl Node {
         if !self.scheduling()?.index_dirty.contains(id) {
             return Ok(());
         }
-        let result = async {
+        async {
             let actor = self.open_actor(id).await?;
             let conn = actor.conn.lock().await;
             if !actor::query(&conn, "SELECT value FROM meta WHERE key='replay_source'", ()).await?.rows.is_empty()
@@ -234,8 +234,9 @@ impl Node {
             }
             self.scheduling()?.index_dirty.remove(id);
             Ok::<(), anyhow::Error>(())
-        }.await.with_context(|| format!("actor {id} seq -1: sync node index"));
-        result
+        }
+        .await
+        .with_context(|| format!("actor {id} seq -1: sync node index"))
     }
 }
 

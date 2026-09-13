@@ -390,34 +390,6 @@ struct SubscribeTarget {
     cap: String,
 }
 
-#[cfg(test)]
-mod cap_wire_tests {
-    use super::*;
-    #[test]
-    fn subscription_cap_stays_opaque_until_host_decode() {
-        let cap = loom_actor::Cap {
-            target: "view".into(),
-            cap_id: u64::MAX,
-            epoch: u64::MAX,
-            rights: loom_actor::Rights::INSPECT,
-            mac: [7; 32],
-        };
-        let token = serde_json::to_string(&cap).unwrap();
-        let wire = json!({"subscribe":{"actor":"view","table":"tree","cap":token}});
-        let frame: SubscribeFrame = serde_json::from_value(wire).unwrap();
-        assert_eq!(
-            serde_json::from_str::<loom_actor::Cap>(&frame.subscribe.cap).unwrap(),
-            cap
-        );
-        assert!(
-            serde_json::from_value::<SubscribeFrame>(
-                json!({"subscribe":{"actor":"view","table":"tree","cap":cap}})
-            )
-            .is_err()
-        );
-    }
-}
-
 async fn actor_stream(
     s: &ApiState,
     socket: &mut WebSocket,
@@ -454,5 +426,33 @@ async fn actor_stream(
                 _ => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod cap_wire_tests {
+    use super::*;
+    #[test]
+    fn subscription_cap_stays_opaque_until_host_decode() {
+        let cap = loom_actor::Cap {
+            target: "view".into(),
+            cap_id: u64::MAX,
+            epoch: u64::MAX,
+            rights: loom_actor::Rights::INSPECT,
+            mac: [7; 32],
+        };
+        let token = serde_json::to_string(&cap).unwrap();
+        let wire = json!({"subscribe":{"actor":"view","table":"tree","cap":token}});
+        let frame: SubscribeFrame = serde_json::from_value(wire).unwrap();
+        assert_eq!(
+            serde_json::from_str::<loom_actor::Cap>(&frame.subscribe.cap).unwrap(),
+            cap
+        );
+        assert!(
+            serde_json::from_value::<SubscribeFrame>(
+                json!({"subscribe":{"actor":"view","table":"tree","cap":cap}})
+            )
+            .is_err()
+        );
     }
 }
