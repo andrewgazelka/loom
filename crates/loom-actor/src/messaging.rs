@@ -164,7 +164,10 @@ impl Node {
         self.check_lease(sender)?;
         let forwarding: std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool>> + Send + '_>> =
             Box::pin(self.route_delivery(crate::DeliveryOp::Message {
-                target: target.into(), key: key.into(), sender: sender.into(), msg: envelope,
+                target: target.into(),
+                key: key.into(),
+                sender: sender.into(),
+                msg: envelope,
             }));
         ensure!(forwarding.await?, "actor {sender} seq -1: call delivery is still pending");
         let mut conn = source.conn.lock().await;

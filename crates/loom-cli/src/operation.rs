@@ -48,7 +48,10 @@ pub fn from_matches(matches: &clap::ArgMatches) -> anyhow::Result<Option<Command
     let mut arguments = serde_json::Map::new();
     for argument in verb.arguments {
         if argument.kind == Kind::Boolean {
-            arguments.insert(argument.name.into(), Value::Bool(matches.get_flag(argument.name)));
+            arguments.insert(
+                argument.name.into(),
+                Value::Bool(matches.get_flag(argument.name)),
+            );
             continue;
         }
         let Some(input) = matches.get_one::<String>(argument.name) else {
@@ -79,16 +82,26 @@ mod tests {
 
     #[test]
     fn cluster_commands_share_the_wire_vocabulary() {
-        let matches = parser().try_get_matches_from(["loom", "actors", "--cluster"]).unwrap();
+        let matches = parser()
+            .try_get_matches_from(["loom", "actors", "--cluster"])
+            .unwrap();
         let command = from_matches(&matches).unwrap().unwrap();
         assert_eq!(command.name, "actors");
         assert_eq!(command.args, serde_json::json!({"cluster": true}));
         let matches = parser().try_get_matches_from(["loom", "actors"]).unwrap();
-        assert_eq!(from_matches(&matches).unwrap().unwrap().args, serde_json::json!({"cluster": false}));
-        let matches = parser().try_get_matches_from(["loom", "move", "a0actor", "node2"]).unwrap();
+        assert_eq!(
+            from_matches(&matches).unwrap().unwrap().args,
+            serde_json::json!({"cluster": false})
+        );
+        let matches = parser()
+            .try_get_matches_from(["loom", "move", "a0actor", "node2"])
+            .unwrap();
         let command = from_matches(&matches).unwrap().unwrap();
         assert_eq!(command.name, "move");
-        assert_eq!(command.args, serde_json::json!({"id": "a0actor", "node_id": "node2"}));
+        assert_eq!(
+            command.args,
+            serde_json::json!({"id": "a0actor", "node_id": "node2"})
+        );
         let matches = parser().try_get_matches_from(["loom", "nodes"]).unwrap();
         assert_eq!(from_matches(&matches).unwrap().unwrap().name, "nodes");
     }

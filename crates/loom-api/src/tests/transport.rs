@@ -1,15 +1,16 @@
 use super::*;
 #[tokio::test]
 async fn auth_gates_every_operation_and_health_is_public() {
-    for path in ["/v1/command", "/v1/events", "/v1/cas/hash", "/v1/builds/active"] {
+    for path in [
+        "/v1/command",
+        "/v1/events",
+        "/v1/cas/hash",
+        "/v1/builds/active",
+    ] {
         let response = app()
             .oneshot(
                 Request::builder()
-                    .method(if path != "/v1/command" {
-                        "GET"
-                    } else {
-                        "POST"
-                    })
+                    .method(if path != "/v1/command" { "GET" } else { "POST" })
                     .uri(path)
                     .body(axum::body::Body::empty())
                     .unwrap(),

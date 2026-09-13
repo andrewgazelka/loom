@@ -173,7 +173,12 @@ pub static VERBS: &[Verb] = &[
     verb!(fork, Actor, Execute, [arg!(id, String), arg!(seq, Integer)]),
     verb!(actors, Actor, Read, [arg!(cluster, Boolean, optional)]),
     verb!(nodes, Actor, Read, []),
-    verb!(move, Actor, Execute, [arg!(id, String), arg!(node_id, String)]),
+    verb!(
+        move,
+        Actor,
+        Execute,
+        [arg!(id, String), arg!(node_id, String)]
+    ),
     verb!(
         stop,
         Actor,
@@ -300,8 +305,16 @@ mod tests {
         actors.normalize(&mut json!({})).unwrap();
         actors.normalize(&mut json!({"cluster": true})).unwrap();
         assert!(actors.normalize(&mut json!({"cluster": "true"})).is_err());
-        assert!(lookup("move").unwrap().normalize(&mut json!({"id": "a0actor"})).is_err());
-        lookup("move").unwrap().normalize(&mut json!({"id": "a0actor", "node_id": "node2"})).unwrap();
+        assert!(
+            lookup("move")
+                .unwrap()
+                .normalize(&mut json!({"id": "a0actor"}))
+                .is_err()
+        );
+        lookup("move")
+            .unwrap()
+            .normalize(&mut json!({"id": "a0actor", "node_id": "node2"}))
+            .unwrap();
         lookup("nodes").unwrap().normalize(&mut json!({})).unwrap();
     }
 

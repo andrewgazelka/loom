@@ -6,7 +6,12 @@ struct ApiState {
     authorizer: Authorizer,
 }
 pub fn router(service: Arc<Service>, authorizer: Authorizer) -> Router {
-    let authorizer = authorizer.with_ingress_bearer(service.actors.as_ref().and_then(|actors| actors.node.ingress_bearer()));
+    let authorizer = authorizer.with_ingress_bearer(
+        service
+            .actors
+            .as_ref()
+            .and_then(|actors| actors.node.ingress_bearer()),
+    );
     let state = ApiState {
         service,
         authorizer,
@@ -49,14 +54,23 @@ async fn authorize_token(
         .and_then(|value| value.strip_prefix("Bearer "));
     let ingress_route = request.uri().path() == "/v1/ingress";
     if token.is_some_and(|token| authorizer.is_ingress(token)) {
-        return if ingress_route { next.run(request).await } else { StatusCode::FORBIDDEN.into_response() };
+        return if ingress_route {
+            next.run(request).await
+        } else {
+            StatusCode::FORBIDDEN.into_response()
+        };
     }
     if authorizer.public || matches!(request.uri().path(), "/health" | "/v1/stream") {
         return next.run(request).await;
     }
     let access = token.and_then(|token| authorizer.authenticate(token));
     if ingress_route {
-        return if access.is_some() { StatusCode::FORBIDDEN } else { StatusCode::UNAUTHORIZED }.into_response();
+        return if access.is_some() {
+            StatusCode::FORBIDDEN
+        } else {
+            StatusCode::UNAUTHORIZED
+        }
+        .into_response();
     }
     let Some(access) = access else {
         return StatusCode::UNAUTHORIZED.into_response();
@@ -79,7 +93,9 @@ async fn ingress(State(s): State<ApiState>, Json(request): Json<IngressRequest>)
     let mut status = StatusCode::OK;
     for op in request.ops {
         let ack = match op {
-            loom_actor::DeliveryOp::Command { target, verb, args } => actors.ingress_command(target, verb, args).await,
+            loom_actor::DeliveryOp::Command { target, verb, args } => {
+                actors.ingress_command(target, verb, args).await
+            }
             op => {
                 let Some(ack) = actors.node.apply_ingress(vec![op]).await.into_iter().next() else {
                     return StatusCode::INTERNAL_SERVER_ERROR.into_response();
@@ -89,10 +105,16 @@ async fn ingress(State(s): State<ApiState>, Json(request): Json<IngressRequest>)
         };
         let failed = !ack.ok;
         if failed {
-            status = if ack.conflict { StatusCode::CONFLICT } else { StatusCode::INTERNAL_SERVER_ERROR };
+            status = if ack.conflict {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
         }
         acks.push(ack);
-        if failed { break; }
+        if failed {
+            break;
+        }
     }
     let mut response = Json(loom_actor::IngressResponse::new(acks)).into_response();
     *response.status_mut() = status;
@@ -266,9 +288,10 @@ async fn stream_events(s: ApiState, mut socket: WebSocket) {
     let Ok(mut subscription) = serde_json::from_str::<Subscription>(&text) else {
         return;
     };
-    if s.authorizer.is_ingress(&subscription.token) || s.authorizer
-        .authenticate(&subscription.token)
-        .is_none_or(|access| !access.allows(Scope::Read))
+    if s.authorizer.is_ingress(&subscription.token)
+        || s.authorizer
+            .authenticate(&subscription.token)
+            .is_none_or(|access| !access.allows(Scope::Read))
     {
         return;
     }

@@ -1,5 +1,5 @@
-mod static_files;
 mod cluster_worker;
+mod static_files;
 use anyhow::{Context, ensure};
 use axum::serve::ListenerExt;
 use clap::Parser;
@@ -97,13 +97,21 @@ async fn serve() -> anyhow::Result<()> {
             result = loom_mcp::stdio(service, node.clone()) => result,
             _ = shutdown.wait() => Ok(()),
         };
-        if let Some(worker) = worker { worker.finish(&node).await?; }
+        if let Some(worker) = worker {
+            worker.finish(&node).await?;
+        }
         return result;
     }
-    let mcp = loom_api::protect(loom_mcp::router(service.clone(), node.clone()), authorizer.clone());
+    let mcp = loom_api::protect(
+        loom_mcp::router(service.clone(), node.clone()),
+        authorizer.clone(),
+    );
     let app = loom_api::router(service, authorizer.clone())
         .merge(mcp)
-        .fallback_service(loom_api::protect_public(static_files::router(ui), authorizer));
+        .fallback_service(loom_api::protect_public(
+            static_files::router(ui),
+            authorizer,
+        ));
     let listener = tokio::net::TcpListener::bind(args.bind).await?;
     eprintln!("loomd listening on {}", listener.local_addr()?);
     // MCP streams headers before its result. Nagle plus delayed acknowledgments
@@ -117,7 +125,9 @@ async fn serve() -> anyhow::Result<()> {
     let result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown.wait())
         .await;
-    if let Some(worker) = worker { worker.finish(&node).await?; }
+    if let Some(worker) = worker {
+        worker.finish(&node).await?;
+    }
     result?;
     Ok(())
 }
@@ -127,26 +137,48 @@ impl Args {
         let Some(store) = &self.store else {
             return Ok(loom_actor::Config::default());
         };
-        let addr = self.advertise.as_ref().context("--advertise is required with --store")?;
-        let authority: axum::http::uri::Authority = addr.parse().context("--advertise must be host:port")?;
+        let addr = self
+            .advertise
+            .as_ref()
+            .context("--advertise is required with --store")?;
+        let authority: axum::http::uri::Authority =
+            addr.parse().context("--advertise must be host:port")?;
         ensure!(
-            authority.port_u16().is_some_and(|port| port != 0) && !authority.host().is_empty() && !addr.contains('@'),
+            authority.port_u16().is_some_and(|port| port != 0)
+                && !authority.host().is_empty()
+                && !addr.contains('@'),
             "--advertise must be host:port with a nonzero port"
         );
-        let key_path = self.cluster_key_file.as_ref().context("--cluster-key-file is required with --store")?;
+        let key_path = self
+            .cluster_key_file
+            .as_ref()
+            .context("--cluster-key-file is required with --store")?;
         let file = tokio::fs::File::open(key_path)
             .await
             .with_context(|| format!("--cluster-key-file: open {}", key_path.display()))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = file.metadata().await.context("--cluster-key-file: read permissions")?.permissions().mode();
-            ensure!(mode & 0o777 == 0o600, "--cluster-key-file must have mode 0600");
+            let mode = file
+                .metadata()
+                .await
+                .context("--cluster-key-file: read permissions")?
+                .permissions()
+                .mode();
+            ensure!(
+                mode & 0o777 == 0o600,
+                "--cluster-key-file must have mode 0600"
+            );
         }
         use tokio::io::AsyncReadExt;
         let mut bytes = Vec::new();
-        file.take(33).read_to_end(&mut bytes).await.context("--cluster-key-file: read key")?;
-        let key: [u8; 32] = bytes.try_into().map_err(|_| anyhow::anyhow!("--cluster-key-file must contain exactly 32 raw bytes"))?;
+        file.take(33)
+            .read_to_end(&mut bytes)
+            .await
+            .context("--cluster-key-file: read key")?;
+        let key: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("--cluster-key-file must contain exactly 32 raw bytes"))?;
         if let Some(id) = &self.node_id {
             ensure!(!id.is_empty(), "--node-id must not be empty");
         }
@@ -168,14 +200,25 @@ fn parse_store(value: &str) -> anyhow::Result<loom_actor::StoreConfig> {
         ensure!(!path.is_empty(), "--store local: requires a directory");
         return Ok(loom_actor::StoreConfig::Local { path: path.into() });
     }
-    let url = url::Url::parse(value).context("--store must be local:<dir> or s3://<bucket>?endpoint=&region=")?;
-    ensure!(url.scheme() == "s3", "--store must be local:<dir> or s3://<bucket>?endpoint=&region=");
+    let url = url::Url::parse(value)
+        .context("--store must be local:<dir> or s3://<bucket>?endpoint=&region=")?;
     ensure!(
-        url.username().is_empty() && url.password().is_none() && url.port().is_none() && url.fragment().is_none()
+        url.scheme() == "s3",
+        "--store must be local:<dir> or s3://<bucket>?endpoint=&region="
+    );
+    ensure!(
+        url.username().is_empty()
+            && url.password().is_none()
+            && url.port().is_none()
+            && url.fragment().is_none()
             && matches!(url.path(), "" | "/"),
         "--store s3 URL must contain only a bucket and endpoint/region query"
     );
-    let bucket = url.host_str().filter(|value| !value.is_empty()).context("--store s3 URL requires a bucket")?.to_owned();
+    let bucket = url
+        .host_str()
+        .filter(|value| !value.is_empty())
+        .context("--store s3 URL requires a bucket")?
+        .to_owned();
     let mut endpoint = None;
     let mut region = None;
     for (name, value) in url.query_pairs() {
@@ -184,16 +227,24 @@ fn parse_store(value: &str) -> anyhow::Result<loom_actor::StoreConfig> {
             "region" => &mut region,
             _ => anyhow::bail!("--store: unknown query field {name}"),
         };
-        ensure!(field.is_none() && !value.is_empty(), "--store: {name} must appear once with a nonempty value");
+        ensure!(
+            field.is_none() && !value.is_empty(),
+            "--store: {name} must appear once with a nonempty value"
+        );
         *field = Some(value.into_owned());
     }
     let endpoint = endpoint.context("--store s3 URL requires endpoint=")?;
-    let endpoint_url = url::Url::parse(&endpoint).context("--store endpoint must be an HTTP URL")?;
+    let endpoint_url =
+        url::Url::parse(&endpoint).context("--store endpoint must be an HTTP URL")?;
     ensure!(
         matches!(endpoint_url.scheme(), "http" | "https") && endpoint_url.host_str().is_some(),
         "--store endpoint must be an HTTP URL"
     );
-    Ok(loom_actor::StoreConfig::S3 { endpoint, bucket, region: region.context("--store s3 URL requires region=")? })
+    Ok(loom_actor::StoreConfig::S3 {
+        endpoint,
+        bucket,
+        region: region.context("--store s3 URL requires region=")?,
+    })
 }
 
 #[cfg(unix)]

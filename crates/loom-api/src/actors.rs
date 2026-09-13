@@ -1,7 +1,7 @@
 mod args;
+mod cluster;
 mod inspection;
 mod operations;
-mod cluster;
 use crate::{Access, Scope};
 use args::*;
 use loom_actor::{Cap, ChildSpec, Node, Rights, Rows};
@@ -84,7 +84,9 @@ impl ActorService {
         for child in &info.children {
             children.push(Box::pin(self.tree(child)).await?);
         }
-        Ok(json!({"id":root,"status":info.status,"behavior_hash":info.behavior_hash,"cursor":info.cursor,"children":children}))
+        Ok(
+            json!({"id":root,"status":info.status,"behavior_hash":info.behavior_hash,"cursor":info.cursor,"children":children}),
+        )
     }
     async fn rows(
         &self,
@@ -93,7 +95,10 @@ impl ActorService {
         query: &str,
         params: Vec<Value>,
     ) -> Result<Value, anyhow::Error> {
-        if let Some(value) = self.forward_command("sql", &json!({"id":id,"query":query,"params":params})).await? {
+        if let Some(value) = self
+            .forward_command("sql", &json!({"id":id,"query":query,"params":params}))
+            .await?
+        {
             return Ok(value);
         }
         let cap = self.authority(id, Rights::INSPECT, operation).await?;
@@ -131,10 +136,16 @@ impl ActorService {
         }
         match command {
             "nodes" => json_value(self.node.nodes().await.map_err(error)?),
-            "move" => json_value(self.node.move_actor(crate::field(&args, "id")?, crate::field(&args, "node_id")?).await.map_err(error)?),
+            "move" => json_value(
+                self.node
+                    .move_actor(crate::field(&args, "id")?, crate::field(&args, "node_id")?)
+                    .await
+                    .map_err(error)?,
+            ),
             "actors" => {
                 access.require(Scope::Read)?;
-                self.cluster_actor_list(args["cluster"].as_bool().unwrap_or(false)).await
+                self.cluster_actor_list(args["cluster"].as_bool().unwrap_or(false))
+                    .await
             }
             "tree" => {
                 access.require(Scope::Read)?;

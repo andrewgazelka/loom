@@ -22,8 +22,12 @@ struct Progress {
 async fn service_stop(stop: &mut Option<tokio::sync::watch::Receiver<bool>>) {
     let Some(stop) = stop else { return std::future::pending().await };
     loop {
-        if *stop.borrow() { return; }
-        if stop.changed().await.is_err() { return; }
+        if *stop.borrow() {
+            return;
+        }
+        if stop.changed().await.is_err() {
+            return;
+        }
     }
 }
 
@@ -128,7 +132,9 @@ impl Node {
                 if let Some(error) = failure {
                     return Err(error);
                 }
-                if stopping { return Ok(processed); }
+                if stopping {
+                    return Ok(processed);
+                }
                 if let Some(at) = deadline {
                     let delay = u64::try_from(i64::saturating_sub(at, crate::effects::now()?).max(0))?;
                     tokio::select! {

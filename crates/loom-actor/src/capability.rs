@@ -275,9 +275,11 @@ impl Node {
     pub(crate) async fn verify_cap(&self, cap: &Cap, right: Rights, operation: &str) -> Result<(), EffectError> {
         self.verify_cap_mac(cap, right, operation)?;
         if let crate::Placement::Remote { addr, .. } = self.resolve(&cap.target).await.map_err(EffectError::Environmental)? {
-            self.remote_authority(&addr, crate::DeliveryOp::Authority {
-                target: cap.target.clone(), cap: cap.clone(), right, operation: operation.into(),
-            }).await?;
+            self.remote_authority(
+                &addr,
+                crate::DeliveryOp::Authority { target: cap.target.clone(), cap: cap.clone(), right, operation: operation.into() },
+            )
+            .await?;
             return Ok(());
         }
         let reader = self.capability_reader(&cap.target).await.map_err(|error| match error {
@@ -305,7 +307,8 @@ impl Node {
     pub(crate) fn attenuate_verified(&self, cap: &Cap, rights: Rights) -> Result<Cap, EffectError> {
         if !cap.rights.contains(rights) {
             return Err(EffectError::Deterministic(anyhow::anyhow!(
-                "invalid authority: attenuate cap_id {}: rights are not a subset", cap.cap_id
+                "invalid authority: attenuate cap_id {}: rights are not a subset",
+                cap.cap_id
             )));
         }
         let mut identity = b"attenuate".to_vec();

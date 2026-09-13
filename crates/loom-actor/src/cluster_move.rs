@@ -4,7 +4,10 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct MoveResult { pub node_id: String, pub epoch: u64 }
+pub struct MoveResult {
+    pub node_id: String,
+    pub epoch: u64,
+}
 
 impl Node {
     pub(crate) async fn release_actor(&self, id: &str) -> Result<()> {
@@ -54,7 +57,10 @@ impl Node {
         }
         let acks = self.forward(&target.addr, &[DeliveryOp::Adopt { target: id.into() }]).await?;
         ensure!(acks.first().is_some_and(|ack| ack.ok), "actor {id} seq -1: move adopt refused");
-        let epoch = acks.first().and_then(|ack| ack.result.as_ref()).and_then(|value| value["epoch"].as_u64())
+        let epoch = acks
+            .first()
+            .and_then(|ack| ack.result.as_ref())
+            .and_then(|value| value["epoch"].as_u64())
             .context("move adopt response missing epoch")?;
         Ok(MoveResult { node_id: node_id.into(), epoch })
     }

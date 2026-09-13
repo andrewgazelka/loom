@@ -85,9 +85,9 @@ impl Authorizer {
         self
     }
     pub(crate) fn is_ingress(&self, candidate: &str) -> bool {
-        self.ingress.as_ref().is_some_and(|bearer| {
-            bool::from(bearer.as_bytes().ct_eq(candidate.as_bytes()))
-        })
+        self.ingress
+            .as_ref()
+            .is_some_and(|bearer| bool::from(bearer.as_bytes().ct_eq(candidate.as_bytes())))
     }
     pub fn authenticate(&self, candidate: &str) -> Option<Access> {
         let mut access = None;

@@ -32,29 +32,46 @@ impl Node {
         let result = async {
             let bearer = self.ingress_bearer().context("--cluster-key-file is required for ingress forwarding")?;
             let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(self.config.lease_ttl).build()?;
-            let response = client.post(format!("http://{addr}/v1/ingress"))
-                .bearer_auth(bearer).json(&IngressRequest { ops: ops.to_vec() }).send().await?;
+            let response = client
+                .post(format!("http://{addr}/v1/ingress"))
+                .bearer_auth(bearer)
+                .json(&IngressRequest { ops: ops.to_vec() })
+                .send()
+                .await?;
             let status = response.status();
-            ensure!(status.is_success() || status == reqwest::StatusCode::CONFLICT || status.is_server_error(),
-                "ingress {addr}: HTTP {status}");
+            ensure!(
+                status.is_success() || status == reqwest::StatusCode::CONFLICT || status.is_server_error(),
+                "ingress {addr}: HTTP {status}"
+            );
             let response: IngressResponse = response.json().await?;
-            ensure!(response.applied == response.acks.iter().take_while(|ack| ack.ok).count(),
-                "ingress {addr}: applied count does not match acknowledgements");
+            ensure!(
+                response.applied == response.acks.iter().take_while(|ack| ack.ok).count(),
+                "ingress {addr}: applied count does not match acknowledgements"
+            );
             let acks = response.acks;
             ensure!(!acks.is_empty() || ops.is_empty(), "ingress {addr}: empty acknowledgement");
             ensure!(acks.len() <= ops.len(), "ingress {addr}: too many acknowledgements");
             ensure!(acks.iter().take(acks.len().saturating_sub(1)).all(|ack| ack.ok), "ingress {addr}: non-prefix acknowledgement");
-            ensure!(acks.len() == ops.len() || acks.last().is_some_and(|ack| !ack.ok),
-                "ingress {addr}: truncated successful acknowledgement");
-            ensure!(status.is_success() || acks.last().is_some_and(|ack| !ack.ok),
-                "ingress {addr}: failure status with successful acknowledgement");
+            ensure!(
+                acks.len() == ops.len() || acks.last().is_some_and(|ack| !ack.ok),
+                "ingress {addr}: truncated successful acknowledgement"
+            );
+            ensure!(
+                status.is_success() || acks.last().is_some_and(|ack| !ack.ok),
+                "ingress {addr}: failure status with successful acknowledgement"
+            );
             if !status.is_success() || acks.iter().any(|ack| !ack.ok) {
-                for op in ops { self.invalidate_placement(&op.target()?)?; }
+                for op in ops {
+                    self.invalidate_placement(&op.target()?)?;
+                }
             }
             Ok(acks)
-        }.await;
+        }
+        .await;
         if result.is_err() {
-            for op in ops { self.invalidate_placement(&op.target()?)?; }
+            for op in ops {
+                self.invalidate_placement(&op.target()?)?;
+            }
         }
         result
     }

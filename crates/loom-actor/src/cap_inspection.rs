@@ -41,7 +41,9 @@ pub(crate) async fn state_on(conn: &turso::Connection, cap: &Cap) -> Result<Chil
 
 pub(crate) async fn state(node: &Node, current: &turso::Connection, key: &EffectKey, cap: &Cap) -> Result<Vec<u8>, EffectError> {
     node.verify_cap_mac(cap, Rights::INSPECT, "inspect")?;
-    if cap.target != key.actor_id && let Some(result) = remote(node, cap, None, Vec::new()).await? {
+    if cap.target != key.actor_id
+        && let Some(result) = remote(node, cap, None, Vec::new()).await?
+    {
         return Ok(result);
     }
     let reader;
@@ -65,7 +67,9 @@ pub(crate) async fn query(
     params: Vec<SqlValue>,
 ) -> Result<Vec<u8>, EffectError> {
     node.verify_cap_mac(cap, Rights::INSPECT, "inspect_sql")?;
-    if cap.target != key.actor_id && let Some(result) = remote(node, cap, Some(sql), params.clone()).await? {
+    if cap.target != key.actor_id
+        && let Some(result) = remote(node, cap, Some(sql), params.clone()).await?
+    {
         return Ok(result);
     }
     let reader;
@@ -103,8 +107,11 @@ async fn remote(node: &Node, cap: &Cap, query: Option<&str>, params: Vec<SqlValu
     let crate::Placement::Remote { addr, .. } = node.resolve(&cap.target).await.map_err(EffectError::Environmental)? else {
         return Ok(None);
     };
-    let value = node.remote_authority(&addr, crate::DeliveryOp::Inspect {
-        target: cap.target.clone(), cap: cap.clone(), query: query.map(str::to_owned), params,
-    }).await?;
+    let value = node
+        .remote_authority(
+            &addr,
+            crate::DeliveryOp::Inspect { target: cap.target.clone(), cap: cap.clone(), query: query.map(str::to_owned), params },
+        )
+        .await?;
     serde_json::to_vec(&value).map(Some).map_err(|error| EffectError::Environmental(error.into()))
 }

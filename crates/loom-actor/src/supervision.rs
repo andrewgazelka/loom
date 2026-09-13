@@ -1,4 +1,4 @@
-use crate::{ActorId, ChildState, Node, Status, TreeEntry, actor, relation_delivery::RelationshipWrite};
+use crate::{ActorId, ChildState, Node, TreeEntry, actor, relation_delivery::RelationshipWrite};
 use anyhow::{Context, Result, ensure};
 use std::collections::{BTreeSet, VecDeque};
 use turso::Connection;
@@ -25,9 +25,12 @@ impl Node {
                 let _relation = self.guard(&key_pair).await;
                 for owner in [sender, target] {
                     let peer = if owner == sender { target } else { sender };
-                    self.relationship_from(sender, owner, RelationshipWrite::Link {
-                        peer: peer.into(), key: key.into(), linked: kind == "link",
-                    }).await?;
+                    self.relationship_from(
+                        sender,
+                        owner,
+                        RelationshipWrite::Link { peer: peer.into(), key: key.into(), linked: kind == "link" },
+                    )
+                    .await?;
                 }
                 Ok(())
             }
@@ -64,8 +67,12 @@ impl Node {
             tx.execute("INSERT OR IGNORE INTO monitors(ref,target) VALUES (?,?)", [reference, target]).await?;
             self.commit_control(watcher, tx).await?;
         }
-        self.relationship_from(watcher, target, RelationshipWrite::RegisterMonitor { watcher: watcher.into(), reference: reference.into() })
-            .await?;
+        self.relationship_from(
+            watcher,
+            target,
+            RelationshipWrite::RegisterMonitor { watcher: watcher.into(), reference: reference.into() },
+        )
+        .await?;
         Ok(())
     }
 
@@ -154,7 +161,7 @@ impl Node {
             let acks = self.forward(&addr, &[crate::DeliveryOp::State { target: id.into() }]).await?;
             let ack = acks.first().context("child state ingress returned no acknowledgement")?;
             ensure!(ack.ok, "actor {id} seq -1: child state owner refused read");
-            return serde_json::from_value(ack.result.clone().context("child state ingress omitted result")?);
+            return Ok(serde_json::from_value(ack.result.clone().context("child state ingress omitted result")?)?);
         }
         let actor = self.open_actor(id).await?;
         let conn = actor.conn.lock().await;
@@ -178,7 +185,7 @@ impl Node {
             let acks = self.forward(&addr, &[crate::DeliveryOp::Children { target: id.into() }]).await?;
             let ack = acks.first().context("children ingress returned no acknowledgement")?;
             ensure!(ack.ok, "actor {id} seq -1: children owner refused read");
-            return serde_json::from_value(ack.result.clone().context("children ingress omitted result")?);
+            return Ok(serde_json::from_value(ack.result.clone().context("children ingress omitted result")?)?);
         }
         let owner = self.open_actor(id).await?;
         let rows = actor::query(&*owner.conn.lock().await, "SELECT id FROM children ORDER BY rowid", ()).await?;

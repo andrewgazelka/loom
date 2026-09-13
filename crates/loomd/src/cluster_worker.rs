@@ -13,13 +13,21 @@ impl ClusterWorker {
         let stop = channel.0;
         let receiver = channel.1;
         let node = node.clone();
-        Some(Self { stop, task: Some(tokio::spawn(async move { node.run_service(receiver).await })) })
+        Some(Self {
+            stop,
+            task: Some(tokio::spawn(
+                async move { node.run_service(receiver).await },
+            )),
+        })
     }
 
     pub async fn finish(mut self, node: &Node) -> anyhow::Result<()> {
         self.stop.send_replace(true);
         let drained = match self.task.take() {
-            Some(task) => task.await.map_err(anyhow::Error::from).and_then(|result| result),
+            Some(task) => task
+                .await
+                .map_err(anyhow::Error::from)
+                .and_then(|result| result),
             None => Ok(()),
         };
         let closed = node.close().await;

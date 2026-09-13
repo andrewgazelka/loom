@@ -1,7 +1,7 @@
-mod cas;
 mod build_progress;
-mod transport;
+mod cas;
 mod cluster_auth;
+mod transport;
 use super::*;
 #[tokio::test]
 async fn response_refuses_success_when_recording_cannot_commit() -> Result<()> {

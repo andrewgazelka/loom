@@ -44,9 +44,10 @@ impl Node {
     }
     pub async fn send(&self, id: &str, key: &str, msg: &[u8]) -> Result<()> {
         let _admission = self.admit().await?;
-        let applied = self.route_delivery(crate::DeliveryOp::Message {
-            target: id.into(), key: key.into(), sender: "external".into(), msg: msg.into(),
-        }).await.with_context(|| format!("actor {id} seq -1: send"))?;
+        let applied = self
+            .route_delivery(crate::DeliveryOp::Message { target: id.into(), key: key.into(), sender: "external".into(), msg: msg.into() })
+            .await
+            .with_context(|| format!("actor {id} seq -1: send"))?;
         ensure!(applied, "actor {id} seq -1: send remains pending");
         Ok(())
     }
@@ -132,9 +133,7 @@ impl Node {
             let actor = node.open_actor(&id).await?;
             let conn = actor.conn.lock().await;
             let marker = actor::query(&conn, "SELECT value FROM meta WHERE key='node_root'", ()).await?;
-            if persisted_root.is_none()
-                && marker.rows.first().map(|row| row.get::<String>(0)).transpose()?.as_deref() == Some("true")
-            {
+            if persisted_root.is_none() && marker.rows.first().map(|row| row.get::<String>(0)).transpose()?.as_deref() == Some("true") {
                 ensure!(node.root_id.is_empty(), "actor {id} seq -1: multiple node roots");
                 node.root_id = id;
             }
@@ -357,7 +356,6 @@ impl Node {
         self.wake.notify_one();
         Ok(id)
     }
-
 }
 
 impl Node {

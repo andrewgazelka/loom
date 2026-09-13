@@ -145,11 +145,16 @@ impl Node {
         if lease.value.owner == cluster.identity.node_id {
             return Ok(Placement::Local);
         }
-        let owner = store.read::<NodeRecord>(&format!("nodes/{}", lease.value.owner)).await?
+        let owner = store
+            .read::<NodeRecord>(&format!("nodes/{}", lease.value.owner))
+            .await?
             .with_context(|| format!("actor {id} seq -1: lease owner {} has no node address", lease.value.owner))?;
         // Address expiry does not change ownership: only the actor lease decides liveness.
         let placement = Placement::Remote { node_id: lease.value.owner, addr: owner.value.addr };
-        cluster.placements.lock().map_err(|_| anyhow::anyhow!("placement cache poisoned"))?
+        cluster
+            .placements
+            .lock()
+            .map_err(|_| anyhow::anyhow!("placement cache poisoned"))?
             .insert(id.into(), CachedPlacement { placement: placement.clone(), expires_at: lease.value.expires_at });
         Ok(placement)
     }
@@ -169,8 +174,11 @@ impl Node {
             let Some(node_id) = key.strip_prefix("nodes/") else { continue };
             let record = store.read::<NodeRecord>(&key).await?.context("listed node record disappeared")?.value;
             nodes.push(ClusterNode {
-                node_id: node_id.into(), addr: record.addr, started_at: record.started_at,
-                expires_at: record.expires_at, live: now < record.expires_at,
+                node_id: node_id.into(),
+                addr: record.addr,
+                started_at: record.started_at,
+                expires_at: record.expires_at,
+                live: now < record.expires_at,
             });
         }
         nodes.sort_by(|left, right| left.node_id.cmp(&right.node_id));

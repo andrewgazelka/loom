@@ -43,7 +43,10 @@ impl ActorService {
         )
     }
     pub(super) async fn actor_whereis(&self, args: NameArgs) -> anyhow::Result<Value> {
-        if args.name.len() == 28 && args.name.starts_with("a0") && args.name.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+        if args.name.len() == 28
+            && args.name.starts_with("a0")
+            && args.name.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        {
             return json_value(self.node.resolve(&args.name).await.map_err(error)?);
         }
         json_value(self.node.whereis(&args.name).await.map_err(error)?)

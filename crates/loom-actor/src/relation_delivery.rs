@@ -28,10 +28,20 @@ impl Node {
         })
     }
 
-    pub(crate) async fn relationship_from(&self, source: &str, target: &str, write: RelationshipWrite) -> Result<bool> {
-        let forwarding: std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool>> + Send + '_>> =
-            Box::pin(self.route_outbox(source, -1, crate::DeliveryOp::Relationship { target: target.into(), write }));
-        forwarding.await.with_context(|| format!("actor {source} seq -1: route relationship to {target}"))
+    // A boxed return type, not an `async fn`: this call sits on the delivery recursion cycle
+    // (route_outbox -> apply_delivery -> relate -> relationship_from), and rustc cannot prove
+    // `Send` for an opaque future that awaits itself through another opaque future.
+    pub(crate) fn relationship_from<'a>(
+        &'a self,
+        source: &'a str,
+        target: &'a str,
+        write: RelationshipWrite,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool>> + Send + 'a>> {
+        Box::pin(async move {
+            self.route_outbox(source, -1, crate::DeliveryOp::Relationship { target: target.into(), write })
+                .await
+                .with_context(|| format!("actor {source} seq -1: route relationship to {target}"))
+        })
     }
 
     pub(crate) async fn apply_relationship(&self, target: &str, write: &RelationshipWrite) -> Result<bool> {

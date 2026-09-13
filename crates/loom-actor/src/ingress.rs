@@ -54,24 +54,47 @@ impl DeliveryOp {
     pub fn target(&self) -> Result<String> {
         if let Some(delivery) = self.outbox() {
             let expected = match self {
-                Self::Spawn { .. } => "spawn", Self::Call { .. } => "call", Self::Effect { .. } => "effect",
-                Self::Revoke { .. } => "revoke", Self::Promote { .. } => "promote", Self::Stop { .. } => "stop",
-                Self::Shutdown { .. } => "shutdown", Self::Link { .. } => "link", Self::Unlink { .. } => "unlink",
-                Self::Monitor { .. } => "monitor", Self::Demonitor { .. } => "demonitor",
-                Self::Down { .. } => "down", Self::Exit { .. } => "exit",
+                Self::Spawn { .. } => "spawn",
+                Self::Call { .. } => "call",
+                Self::Effect { .. } => "effect",
+                Self::Revoke { .. } => "revoke",
+                Self::Promote { .. } => "promote",
+                Self::Stop { .. } => "stop",
+                Self::Shutdown { .. } => "shutdown",
+                Self::Link { .. } => "link",
+                Self::Unlink { .. } => "unlink",
+                Self::Monitor { .. } => "monitor",
+                Self::Demonitor { .. } => "demonitor",
+                Self::Down { .. } => "down",
+                Self::Exit { .. } => "exit",
                 _ => anyhow::bail!("delivery payload without destination kind"),
             };
-            ensure!(delivery.target.split(':').next() == Some(expected),
-                "actor {} seq {}: ingress destination kind mismatch", delivery.sender, delivery.seq);
+            ensure!(
+                delivery.target.split(':').next() == Some(expected),
+                "actor {} seq {}: ingress destination kind mismatch",
+                delivery.sender,
+                delivery.seq
+            );
         }
         Ok(match self {
-            Self::Message { target, .. } | Self::Publish { target } | Self::Relationship { target, .. }
-            | Self::Release { target } | Self::Adopt { target } | Self::State { target } | Self::Children { target }
+            Self::Message { target, .. }
+            | Self::Publish { target }
+            | Self::Relationship { target, .. }
+            | Self::Release { target }
+            | Self::Adopt { target }
+            | Self::State { target }
+            | Self::Children { target }
             | Self::HostSpawn { target, .. }
-            | Self::Authority { target, .. } | Self::Mint { target, .. } | Self::Inspect { target, .. }
+            | Self::Authority { target, .. }
+            | Self::Mint { target, .. }
+            | Self::Inspect { target, .. }
             | Self::Command { target, .. } => target.clone(),
-            Self::Call { delivery } | Self::Effect { delivery } | Self::Demonitor { delivery }
-            | Self::Link { delivery } | Self::Unlink { delivery } | Self::Monitor { delivery } => delivery.sender.clone(),
+            Self::Call { delivery }
+            | Self::Effect { delivery }
+            | Self::Demonitor { delivery }
+            | Self::Link { delivery }
+            | Self::Unlink { delivery }
+            | Self::Monitor { delivery } => delivery.sender.clone(),
             _ => {
                 let delivery = self.outbox().context("delivery has no outbox payload")?;
                 crate::pump::destination(&delivery.target, &delivery.msg)?
@@ -81,10 +104,19 @@ impl DeliveryOp {
 
     fn outbox(&self) -> Option<&OutboxDelivery> {
         match self {
-            Self::Spawn { delivery } | Self::Call { delivery } | Self::Effect { delivery } | Self::Revoke { delivery }
-            | Self::Promote { delivery } | Self::Stop { delivery } | Self::Shutdown { delivery } | Self::Link { delivery }
-            | Self::Unlink { delivery } | Self::Monitor { delivery } | Self::Demonitor { delivery }
-            | Self::Down { delivery } | Self::Exit { delivery } => Some(delivery),
+            Self::Spawn { delivery }
+            | Self::Call { delivery }
+            | Self::Effect { delivery }
+            | Self::Revoke { delivery }
+            | Self::Promote { delivery }
+            | Self::Stop { delivery }
+            | Self::Shutdown { delivery }
+            | Self::Link { delivery }
+            | Self::Unlink { delivery }
+            | Self::Monitor { delivery }
+            | Self::Demonitor { delivery }
+            | Self::Down { delivery }
+            | Self::Exit { delivery } => Some(delivery),
             _ => None,
         }
     }
@@ -139,9 +171,8 @@ impl Node {
         crate::ids::check(&op.target()?)?;
         if let Some(delivery) = op.outbox() {
             let incarnation = crate::ids::incarnation(&delivery.sender, delivery.generation);
-            let entry = crate::pump::Delivery {
-                seq: delivery.seq, idx: delivery.idx, target: delivery.target.clone(), msg: delivery.msg.clone(),
-            };
+            let entry =
+                crate::pump::Delivery { seq: delivery.seq, idx: delivery.idx, target: delivery.target.clone(), msg: delivery.msg.clone() };
             return Box::pin(self.deliver_outbox(&delivery.sender, delivery.generation, &incarnation, &entry, &delivery.key)).await;
         }
         match op {
@@ -156,34 +187,34 @@ impl Node {
                 self.wake.notify_one();
             }
             DeliveryOp::Release { target } => self.release_actor(&target).await?,
-            DeliveryOp::Adopt { target } => { self.open_actor(&target).await?; }
+            DeliveryOp::Adopt { target } => {
+                self.open_actor(&target).await?;
+            }
             _ => anyhow::bail!("read/control delivery must use ingress result dispatch"),
         }
         Ok(true)
     }
 
-    pub(crate) fn route_delivery(&self, op: DeliveryOp)
-        -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool>> + Send + '_>>
-    {
+    pub(crate) fn route_delivery(&self, op: DeliveryOp) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool>> + Send + '_>> {
         Box::pin(async move {
-        let target = op.target()?;
-        match self.resolve(&target).await? {
-            Placement::Remote { addr, .. } => {
-                if let DeliveryOp::Message { sender, .. } = &op {
-                    let locally_open = self.connections.lock().await.contains_key(sender);
-                    if locally_open {
-                        self.ship_inner(sender).await?;
-                        self.check_lease(sender)?;
+            let target = op.target()?;
+            match self.resolve(&target).await? {
+                Placement::Remote { addr, .. } => {
+                    if let DeliveryOp::Message { sender, .. } = &op {
+                        let locally_open = self.connections.lock().await.contains_key(sender);
+                        if locally_open {
+                            self.ship_inner(sender).await?;
+                            self.check_lease(sender)?;
+                        }
                     }
+                    let acks = self.forward(&addr, &[op]).await?;
+                    ensure!(acks.len() == 1, "actor {target} seq -1: ingress returned wrong ack count");
+                    let ack = &acks[0];
+                    ensure!(ack.ok, "actor {target} seq -1: ingress: {}", ack.error.as_deref().unwrap_or("ownership changed"));
+                    Ok(true)
                 }
-                let acks = self.forward(&addr, &[op]).await?;
-                ensure!(acks.len() == 1, "actor {target} seq -1: ingress returned wrong ack count");
-                let ack = &acks[0];
-                ensure!(ack.ok, "actor {target} seq -1: ingress: {}", ack.error.as_deref().unwrap_or("ownership changed"));
-                Ok(true)
+                Placement::Local | Placement::Unowned => Box::pin(self.apply_delivery(op)).await,
             }
-            Placement::Local | Placement::Unowned => Box::pin(self.apply_delivery(op)).await,
-        }
         })
     }
 
@@ -200,7 +231,9 @@ impl Node {
             let ack = result.unwrap_or_else(Ack::failure);
             let stop = !ack.ok;
             acks.push(ack);
-            if stop { break; }
+            if stop {
+                break;
+            }
         }
         acks
     }
@@ -213,12 +246,24 @@ impl Node {
             self.invalidate_placement(&target)?;
         }
         match self.resolve(&target).await? {
-            Placement::Remote { node_id, addr } => return Ok(Ack {
-                ok: false, conflict: true, owner: Some(node_id), addr: Some(addr), error: Some("placement changed".into()), result: None,
-            }),
+            Placement::Remote { node_id, addr } => {
+                return Ok(Ack {
+                    ok: false,
+                    conflict: true,
+                    owner: Some(node_id),
+                    addr: Some(addr),
+                    error: Some("placement changed".into()),
+                    result: None,
+                });
+            }
             Placement::Unowned if matches!(&op, DeliveryOp::Release { .. }) => {
                 return Ok(Ack {
-                    ok: false, conflict: true, owner: None, addr: None, error: Some("placement changed".into()), result: None,
+                    ok: false,
+                    conflict: true,
+                    owner: None,
+                    addr: None,
+                    error: Some("placement changed".into()),
+                    result: None,
                 });
             }
             Placement::Local | Placement::Unowned => {}

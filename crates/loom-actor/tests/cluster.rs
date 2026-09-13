@@ -3,7 +3,10 @@ mod registry;
 
 use cluster_support::*;
 use loom_actor::{DefaultEffects, Durability, Placement, Rights, Status};
-use std::{sync::{Arc, atomic::Ordering}, time::Duration};
+use std::{
+    sync::{Arc, atomic::Ordering},
+    time::Duration,
+};
 
 #[tokio::test]
 async fn two_nodes_pair_fifo() {
@@ -126,8 +129,13 @@ async fn ingress_rejects_wrong_cluster_key() {
     assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
     let response = client.post(&ingress).bearer_auth(USER_TOKEN).json(&ops).send().await.unwrap();
     assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
-    let response = client.post(format!("http://{}/v1/command", pair.n2.server.addr)).bearer_auth(&valid)
-        .json(&serde_json::json!({"verb":"actors"})).send().await.unwrap();
+    let response = client
+        .post(format!("http://{}/v1/command", pair.n2.server.addr))
+        .bearer_auth(&valid)
+        .json(&serde_json::json!({"verb":"actors"}))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
     assert_eq!(forwarded(&pair.n2.node, &pair.b).await, 0);
     let response = client.post(&ingress).bearer_auth(&valid).json(&ops).send().await.unwrap();
@@ -174,6 +182,9 @@ async fn stale_owner_cannot_forward() {
     let b = spawn(&n2.node, "blocked-forwarder-v1", b"init", Durability::Local).await;
     drain(&n2.node).await;
     n2.node.ship(&b).await.unwrap();
+    // The next send must stay an unshipped tail so takeover restores exactly the shipped history;
+    // the background shipper (ship_interval 20ms) would otherwise race the clock expiry.
+    n2.node.pause_shipping();
     let old_epoch = lease(&store, &b)["epoch"].as_u64().unwrap();
     let stale = n2.node.open(&b).await.unwrap();
     n2.node.send(&b, "blocked", &serde_json::to_vec(&target_cap).unwrap()).await.unwrap();

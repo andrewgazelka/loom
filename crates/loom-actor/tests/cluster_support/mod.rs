@@ -1,14 +1,23 @@
 use std::{
     path::Path,
-    sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
 use async_trait::async_trait;
-use axum::{Json, Router, extract::State, http::{HeaderMap, StatusCode}, response::{IntoResponse, Response}, routing::post};
+use axum::{
+    Json, Router,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+    routing::post,
+};
 use loom_actor::{
-    Actor, Behavior, Cap, ChildSpec, ChildType, Clock, ClusterConfig, Config, Ctx, DefaultEffects, Durability, EffectError,
-    EffectHandler, EffectKey, IngressRequest, Node, Rights, StoreConfig, Trap,
+    Actor, Behavior, Cap, ChildSpec, ChildType, Clock, ClusterConfig, Config, Ctx, DefaultEffects, Durability, EffectError, EffectHandler,
+    EffectKey, IngressRequest, Node, Rights, StoreConfig, Trap,
 };
 use serde_json::Value;
 use tokio::sync::Notify;
@@ -53,11 +62,17 @@ impl EffectHandler for GatedEffects {
 struct BlockThenForward;
 #[async_trait]
 impl Behavior for BlockThenForward {
-    fn hash(&self) -> &str { "blocked-forwarder-v1" }
-    fn schema(&self) -> &str { "CREATE TABLE received(msg BLOB)" }
+    fn hash(&self) -> &str {
+        "blocked-forwarder-v1"
+    }
+    fn schema(&self) -> &str {
+        "CREATE TABLE received(msg BLOB)"
+    }
     async fn handle(&self, cx: &mut Ctx<'_>, msg: &[u8]) -> Result<(), Trap> {
         cx.sql("INSERT INTO received VALUES (?)", [msg]).await?;
-        if msg == b"init" { return Ok(()); }
+        if msg == b"init" {
+            return Ok(());
+        }
         let cap: Cap = serde_json::from_slice(msg).map_err(|error| Trap::new(error.to_string()))?;
         cx.accept(cap.clone()).await?;
         cx.effect("echo", msg).await?;
@@ -68,8 +83,12 @@ impl Behavior for BlockThenForward {
 struct Fanout;
 #[async_trait]
 impl Behavior for Fanout {
-    fn hash(&self) -> &str { "fanout-v1" }
-    fn schema(&self) -> &str { "" }
+    fn hash(&self) -> &str {
+        "fanout-v1"
+    }
+    fn schema(&self) -> &str {
+        ""
+    }
     async fn handle(&self, cx: &mut Ctx<'_>, msg: &[u8]) -> Result<(), Trap> {
         let caps: Vec<Cap> = serde_json::from_slice(msg).map_err(|error| Trap::new(error.to_string()))?;
         for cap in caps {
@@ -89,8 +108,8 @@ struct IngressState {
 // The production middleware's route-exclusive auth controls are also tested in
 // loom-api: importing that crate here would create an actor -> API -> actor cycle.
 async fn ingress(State(state): State<IngressState>, headers: HeaderMap, Json(request): Json<IngressRequest>) -> Response {
-    let bearer = headers.get("authorization").and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer ")).unwrap_or("");
+    let bearer =
+        headers.get("authorization").and_then(|value| value.to_str().ok()).and_then(|value| value.strip_prefix("Bearer ")).unwrap_or("");
     if bearer == USER_TOKEN {
         return StatusCode::FORBIDDEN.into_response();
     }
@@ -109,8 +128,8 @@ async fn ingress(State(state): State<IngressState>, headers: HeaderMap, Json(req
 }
 
 async fn command(State(state): State<IngressState>, headers: HeaderMap) -> StatusCode {
-    let bearer = headers.get("authorization").and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer ")).unwrap_or("");
+    let bearer =
+        headers.get("authorization").and_then(|value| value.to_str().ok()).and_then(|value| value.strip_prefix("Bearer ")).unwrap_or("");
     if state.node.is_ingress_bearer(bearer) { StatusCode::FORBIDDEN } else { StatusCode::UNAUTHORIZED }
 }
 
@@ -142,7 +161,9 @@ pub async fn node(dir: &Path, store: &Path, id: &str, clock: Arc<ManualClock>, e
     registry.insert("blocked-forwarder-v1".into(), Arc::new(BlockThenForward));
     registry.insert("fanout-v1".into(), Arc::new(Fanout));
     let node = Node::new(
-        dir, Arc::new(registry), effects,
+        dir,
+        Arc::new(registry),
+        effects,
         Config {
             store: Some(StoreConfig::Local { path: store.to_owned() }),
             cluster: Some(ClusterConfig { node_id: id.into(), addr: addr.clone(), key: KEY }),
@@ -151,11 +172,17 @@ pub async fn node(dir: &Path, store: &Path, id: &str, clock: Arc<ManualClock>, e
             lease_clock: clock,
             ..Config::default()
         },
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
     let stopped = Arc::new(Notify::new());
-    let app = Router::new().route("/v1/ingress", post(ingress)).route("/v1/command", post(command))
+    let app = Router::new()
+        .route("/v1/ingress", post(ingress))
+        .route("/v1/command", post(command))
         .with_state(IngressState { node: node.clone(), stopped: stopped.clone() });
-    let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
     RunningNode { node, server: Server { addr, stopped, task } }
 }
 
@@ -199,7 +226,11 @@ pub async fn spawn(node: &Node, hash: &str, init: &[u8], durability: Durability)
     node.spawn(&node.root(), &spec).await.unwrap()
 }
 pub async fn drain(node: &Node) {
-    tokio::time::timeout(Duration::from_secs(30), node.run_until_idle()).await.unwrap().unwrap();
+    // Measured 2026-09-12 on hydra, debug build, local-directory store: one cross-node message costs a
+    // sender ship (60-100 ms) plus the receiver's ship-covered ack (80-250 ms), serial per pair, so the
+    // 100-message FIFO test drains in 75-105 s. Batching per destination is the follow-up
+    // (docs/future/ingress-batching.md); this budget is the measured number times two.
+    tokio::time::timeout(Duration::from_secs(240), node.run_until_idle()).await.unwrap().unwrap();
 }
 pub async fn integer(actor: &Actor, sql: &str) -> i64 {
     let rows = actor.sql(sql, ()).await.unwrap();
@@ -212,10 +243,14 @@ pub async fn forwarded(node: &Node, id: &str) -> i64 {
 pub async fn wait_forwarded(node: &Node, id: &str, count: i64) {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if forwarded(node, id).await == count { break; }
+            if forwarded(node, id).await == count {
+                break;
+            }
             tokio::task::yield_now().await;
         }
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }
 pub fn lease(store: &Path, id: &str) -> Value {
     serde_json::from_slice(&std::fs::read(store.join(format!("actors/{id}/lease"))).unwrap()).unwrap()

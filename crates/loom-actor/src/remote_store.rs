@@ -89,14 +89,7 @@ impl RemoteStore {
                     .build()?,
             ),
         };
-        Ok(Self {
-            store,
-            owner,
-            clock,
-            ttl,
-            owned: Mutex::new(HashMap::new()),
-            guards: Mutex::new(HashMap::new()),
-        })
+        Ok(Self { store, owner, clock, ttl, owned: Mutex::new(HashMap::new()), guards: Mutex::new(HashMap::new()) })
     }
     fn guards(&self, id: &str) -> Result<Arc<ActorGuards>> {
         Ok(self.guards.lock().map_err(|_| anyhow::anyhow!("actor guards poisoned"))?.entry(id.into()).or_default().clone())

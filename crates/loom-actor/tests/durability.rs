@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use loom_actor::{
-    Actor, Behavior, ChildSpec, ChildType, Clock, Config, Ctx, DefaultEffects, Durability, EffectError, EffectHandler, EffectKey, Node,
-    ClusterConfig, Status, StoreConfig, Trap,
+    Actor, Behavior, ChildSpec, ChildType, Clock, ClusterConfig, Config, Ctx, DefaultEffects, Durability, EffectError, EffectHandler,
+    EffectKey, Node, Status, StoreConfig, Trap,
 };
 use serde_json::Value;
 

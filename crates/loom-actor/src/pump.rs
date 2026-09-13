@@ -155,8 +155,13 @@ impl Node {
         self.check_lease(id)?;
         let incarnation = ids::incarnation(id, generation);
         let op = crate::DeliveryOp::from_outbox(crate::OutboxDelivery {
-            sender: id.into(), generation, seq: entry.seq, idx: entry.idx,
-            target: entry.target.clone(), key: format!("{incarnation}:{}:{}", entry.seq, entry.idx), msg: entry.msg.clone(),
+            sender: id.into(),
+            generation,
+            seq: entry.seq,
+            idx: entry.idx,
+            target: entry.target.clone(),
+            key: format!("{incarnation}:{}:{}", entry.seq, entry.idx),
+            msg: entry.msg.clone(),
         })?;
         if !self.route_outbox(id, entry.seq, op).await? {
             return Ok(DeliveryProgress::Pending);
@@ -195,10 +200,17 @@ impl Node {
                     ensure!(child == ids::child(incarnation, origin_seq, origin_idx), "spawn id mismatch");
                     self.create(&child, id, &spec.behavior_hash, &spec.init, spec.durability).await?;
                     if spec.link {
-                        let link = crate::DeliveryOp::Link { delivery: crate::OutboxDelivery {
-                            sender: id.into(), generation, seq: entry.seq, idx: entry.idx,
-                            target: format!("link:{child}"), key: key.into(), msg: Vec::new(),
-                        } };
+                        let link = crate::DeliveryOp::Link {
+                            delivery: crate::OutboxDelivery {
+                                sender: id.into(),
+                                generation,
+                                seq: entry.seq,
+                                idx: entry.idx,
+                                target: format!("link:{child}"),
+                                key: key.into(),
+                                msg: Vec::new(),
+                            },
+                        };
                         self.route_outbox(&child, entry.seq, link).await?;
                     }
                     if spec.monitor {
