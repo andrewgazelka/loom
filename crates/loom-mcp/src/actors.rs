@@ -4,6 +4,8 @@ use loom_api::Scope;
 use rmcp::{ErrorData, RoleServer, model::*, service::RequestContext};
 #[derive(Clone)]
 pub struct ActorMcp {
+    // Tool names and schemas, including nodes/whereis/move and actors.cluster, come from loom_proto::verbs.
+    // ActorService also resolves remote ownership for resources, keeping MCP and HTTP on one read path.
     service: loom_api::actors::ActorService,
 }
 fn error(error: impl std::fmt::Display) -> ErrorData {

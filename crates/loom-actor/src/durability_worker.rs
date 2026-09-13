@@ -34,10 +34,16 @@ impl Node {
             let worker_stop = Arc::new(tokio::sync::Notify::new());
             let renewal = node.config.lease_ttl / 3;
             let mut discover = tokio::time::interval(renewal.min(node.config.ship_interval));
+            let mut membership = tokio::time::interval(renewal);
             let mut renewing = std::collections::BTreeSet::new();
             loop {
                 tokio::select! {
                     _ = signal.notified() => break,
+                    _ = membership.tick() => {
+                        if let Err(error) = node.renew_node().await {
+                            node.record_shipping_failure("<node>", &error);
+                        }
+                    }
                     _ = discover.tick() => {
                         let ids = node.shipping.actors.lock().expect("shipping state poisoned").keys().cloned().collect::<Vec<_>>();
                         for id in ids {
@@ -120,6 +126,7 @@ impl Node {
     }
     pub async fn renew_leases(&self) -> Result<()> {
         let _admission = self.admit().await?;
+        self.renew_node().await?;
         let actors = self.connections.lock().await.keys().cloned().collect::<Vec<_>>();
         let mut workers = tokio::task::JoinSet::new();
         for id in actors {
@@ -148,6 +155,7 @@ impl Node {
                 self.ship_inner(id).await?;
             }
             self.shipping.closed.store(true, Ordering::Release);
+            self.wake.notify_waiters();
         }
         if let Some(background) = &self.background {
             background.stop.notify_one();

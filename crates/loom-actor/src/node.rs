@@ -17,6 +17,7 @@ pub struct Node {
     pub(crate) config: Config,
     root_id: ActorId,
     pub(crate) capability_key: [u8; 32],
+    pub(crate) cluster: Option<Arc<crate::cluster::ClusterState>>,
     pub(crate) remote: Option<Arc<crate::remote_store::RemoteStore>>,
     pub(crate) shipping: Arc<crate::durability::ShippingState>,
     pub(crate) background: Option<Arc<crate::durability_worker::Background>>,
@@ -47,7 +48,12 @@ impl Node {
     }
     pub async fn send(&self, id: &str, key: &str, msg: &[u8]) -> Result<()> {
         let _admission = self.admit().await?;
-        self.send_inner(id, key, msg).await.with_context(|| format!("actor {} seq {}: send", id, -1))
+        let applied = self
+            .route_delivery(crate::DeliveryOp::Message { target: id.into(), key: key.into(), sender: "external".into(), msg: msg.into() })
+            .await
+            .with_context(|| format!("actor {id} seq -1: send"))?;
+        ensure!(applied, "actor {id} seq -1: send remains pending");
+        Ok(())
     }
     pub async fn pump(&self, id: &str) -> Result<bool> {
         let _admission = self.admit().await?;
@@ -81,20 +87,31 @@ impl Node {
         std::fs::create_dir_all(dir.as_ref()).context("actor <node> seq -1: create directory")?;
         ensure!(!config.ship_interval.is_zero(), "ship_interval must be positive");
         ensure!(config.store.is_none() || config.io != crate::Io::Memory, "object-store shipping requires file I/O");
-        let remote = config
-            .store
-            .as_ref()
-            .map(|store| crate::remote_store::RemoteStore::new(store, config.lease_ttl, config.lease_clock.clone()).map(Arc::new))
-            .transpose()?;
+        ensure!(config.store.is_none() || config.cluster.is_some(), "--advertise and --cluster-key-file are required with --store");
+        ensure!(config.cluster.is_none() || config.store.is_some(), "--store is required with --cluster-key-file");
         let mut names = None;
         let index = crate::directory::connection(&mut names, dir.as_ref(), config.io).await?;
-        let capability_key = crate::capability::node_key(index).await?;
+        let capability_key = crate::capability::node_key(index, config.cluster.as_ref()).await?;
+        let root_rows = actor::query(index, "SELECT value FROM meta WHERE key='root_id'", ()).await?;
+        let persisted_root = root_rows.rows.first().map(|row| row.get::<String>(0)).transpose()?;
+        let cluster = match &config.cluster {
+            Some(cluster) => Some(Arc::new(crate::cluster::ClusterState::open(index, cluster, config.lease_clock.now_ms()?).await?)),
+            None => None,
+        };
+        let remote = match &config.store {
+            Some(store) => {
+                let owner = cluster.as_ref().context("--cluster-key-file is required with --store")?.identity().node_id;
+                Some(Arc::new(crate::remote_store::RemoteStore::new(store, config.lease_ttl, config.lease_clock.clone(), owner)?))
+            }
+            None => None,
+        };
         let mut node = Self {
             capability_key,
+            cluster,
             remote,
             shipping: Arc::new(crate::durability::ShippingState::default()),
             background: None,
-            root_id: String::new(),
+            root_id: persisted_root.clone().unwrap_or_default(),
             memory_ids: Arc::new(std::sync::Mutex::new(Vec::new())),
             memory_snapshots: Arc::new(Mutex::new(HashMap::new())),
             streams: Default::default(),
@@ -112,12 +129,17 @@ impl Node {
             names: Arc::new(Mutex::new(names)),
             tasks: Arc::new(Mutex::new(HashMap::new())),
         };
+        node.renew_node().await?;
         node.start_shipper();
         for id in node.actor_ids()? {
+            if matches!(node.resolve(&id).await?, crate::Placement::Remote { .. }) {
+                node.archive_unowned_file(&id).await?;
+                continue;
+            }
             let actor = node.open_actor(&id).await?;
             let conn = actor.conn.lock().await;
             let marker = actor::query(&conn, "SELECT value FROM meta WHERE key='node_root'", ()).await?;
-            if marker.rows.first().map(|row| row.get::<String>(0)).transpose()?.as_deref() == Some("true") {
+            if persisted_root.is_none() && marker.rows.first().map(|row| row.get::<String>(0)).transpose()?.as_deref() == Some("true") {
                 ensure!(node.root_id.is_empty(), "actor {id} seq -1: multiple node roots");
                 node.root_id = id;
             }
@@ -133,7 +155,15 @@ impl Node {
             )
             .await?;
         }
-        node.sync_index(&node.root_id).await?;
+        {
+            let mut names = node.names.lock().await;
+            let index = crate::directory::connection(&mut names, &node.dir, node.config.io).await?;
+            actor::set_meta(index, "root_id", &node.root_id).await?;
+        }
+        if !matches!(node.resolve(&node.root_id).await?, crate::Placement::Remote { .. }) {
+            node.open_actor(&node.root_id).await?;
+            node.sync_index(&node.root_id).await?;
+        }
         node.forget_missing_index().await?;
         node.prune_subscribers().await?;
         Ok(node)
@@ -162,8 +192,15 @@ impl Node {
                 return Ok(Actor { id: id.into(), conn, managed: self.remote.is_some() });
             }
             if let Err(error) = self.check_lease(id) {
+                if error.downcast_ref::<crate::remote_store::LeaseLost>().is_none() {
+                    return Err(error);
+                }
                 self.archive_stale(id, &mut *conn.lock().await).await?;
-                return Err(error);
+                if matches!(self.resolve(id).await?, crate::Placement::Remote { .. }) {
+                    return Err(error);
+                }
+                drop(_opening);
+                return Box::pin(self.open_inner(id)).await;
             }
             if let Some(store) = &self.remote {
                 let mut slot = conn.lock().await;
@@ -205,6 +242,7 @@ impl Node {
         self.initialize_durability(id, &conn).await?;
         let conn = Arc::new(Mutex::new(conn));
         self.connections.lock().await.insert(id.into(), conn.clone());
+        self.wake.notify_one();
         Ok(Actor { id: id.into(), conn, managed: self.remote.is_some() })
     }
 
@@ -283,10 +321,18 @@ impl Node {
     pub async fn spawn(&self, parent: &str, spec: &crate::ChildSpec) -> Result<ActorId> {
         let _admission = self.admit().await?;
         let pinned = crate::view::pin_spec(&self.registry, spec).await.with_context(|| format!("actor {parent} seq -1: spawn"))?;
+        if let crate::Placement::Remote { addr, .. } = self.resolve(parent).await? {
+            let acks = self.forward(&addr, &[crate::DeliveryOp::HostSpawn { target: parent.into(), spec: pinned }]).await?;
+            ensure!(acks.len() == 1, "actor {parent} seq -1: spawn ingress returned wrong ack count");
+            let ack = &acks[0];
+            ensure!(ack.ok, "actor {parent} seq -1: spawn ingress: {}", ack.error.as_deref().unwrap_or("ownership changed"));
+            return serde_json::from_value(ack.result.clone().context(format!("actor {parent} seq -1: spawn ingress missing id"))?)
+                .with_context(|| format!("actor {parent} seq -1: decode spawned actor id"));
+        }
         self.spawn_inner(parent, &pinned).await.with_context(|| format!("actor {parent} seq -1: spawn"))
     }
 
-    async fn spawn_inner(&self, parent: &str, spec: &crate::ChildSpec) -> Result<ActorId> {
+    pub(crate) async fn spawn_inner(&self, parent: &str, spec: &crate::ChildSpec) -> Result<ActorId> {
         let _creation = self.guard("host-spawn").await;
         crate::view::pin_spec(&self.registry, spec).await?;
         let root = self.open_actor(parent).await?;
@@ -332,16 +378,6 @@ impl Node {
         self.pump_unlocked(parent).await?;
         self.wake.notify_one();
         Ok(id)
-    }
-
-    async fn send_inner(&self, id: &str, key: &str, msg: &[u8]) -> Result<()> {
-        let actor = self.open_actor(id).await?;
-        let mut conn = actor.conn.lock().await;
-        let tx = conn.transaction().await?;
-        actor::inject(&tx, key, "external", msg).await.with_context(|| format!("actor {id} seq -1: send"))?;
-        self.commit_control(id, tx).await?;
-        self.wake.notify_one();
-        Ok(())
     }
 }
 

@@ -10,9 +10,23 @@ struct CompletedShutdown {
 impl Node {
     pub async fn stop(&self, id: &str, reason: &str) -> Result<()> {
         let _admission = self.admit().await?;
-        self.stop_unlocked(id, reason, &format!("host:{}", ulid::Ulid::new()), "")
-            .await
-            .with_context(|| format!("actor {id} seq -1: stop"))?;
+        let key = format!("host:{}", ulid::Ulid::new());
+        if matches!(self.resolve(id).await?, crate::Placement::Remote { .. }) {
+            let delivery = crate::OutboxDelivery {
+                sender: String::new(),
+                generation: 0,
+                seq: -1,
+                idx: 0,
+                target: format!("stop:{id}"),
+                key,
+                msg: reason.as_bytes().to_vec(),
+            };
+            let forwarding: std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool>> + Send + '_>> =
+                Box::pin(self.route_delivery(crate::DeliveryOp::Stop { delivery }));
+            ensure!(forwarding.await?, "actor {id} seq -1: stop is still pending");
+            return Ok(());
+        }
+        self.stop_unlocked(id, reason, &key, "").await.with_context(|| format!("actor {id} seq -1: stop"))?;
         self.wake.notify_one();
         Ok(())
     }
@@ -90,8 +104,7 @@ impl Node {
         for row in pending.rows {
             let child: String = row.get(0)?;
             let request: String = row.get(1)?;
-            let target = self.capability_reader(&child).await?;
-            if actor::status(&target).await? == Status::Stopped {
+            if self.child_state(&child).await?.status == Status::Stopped {
                 completed.push(CompletedShutdown { child, request });
             }
         }
@@ -108,23 +121,17 @@ impl Node {
     }
 
     pub(crate) async fn shutdown(&self, sender: &str, id: &str, key: &str) -> Result<()> {
-        let source = self.open_actor(sender).await?;
         let target = self.open_actor(id).await?;
         let policy: Shutdown = {
             let reader = self.capability_reader(id).await?;
             serde_json::from_str(&actor::meta(&reader, "shutdown").await?)
                 .with_context(|| format!("actor {id}: invalid shutdown policy"))?
         };
-        {
-            let mut conn = source.conn.lock().await;
-            let tx = conn.transaction().await?;
-            tx.execute(
-                "INSERT INTO shutdowns(child,request) VALUES (?,?) ON CONFLICT(child) DO UPDATE SET request=excluded.request",
-                [id, key],
-            )
-            .await?;
-            self.commit_control(sender, tx).await?;
-        }
+        self.route_relationship(
+            sender,
+            crate::relation_delivery::RelationshipWrite::ShutdownRequester { child: id.into(), request: key.into() },
+        )
+        .await?;
         if matches!(policy, Shutdown::Brutal) {
             return self.stop_unlocked(id, "kill", key, sender).await;
         }
@@ -201,11 +208,27 @@ impl Node {
 
     pub async fn restart(&self, id: &str, verb: RestartVerb) -> Result<()> {
         let _admission = self.admit().await?;
+        let key = format!("host:{}", ulid::Ulid::new());
+        if matches!(self.resolve(id).await?, crate::Placement::Remote { .. }) {
+            let delivery = crate::OutboxDelivery {
+                sender: String::new(),
+                generation: 0,
+                seq: -1,
+                idx: 0,
+                target: "spawn".into(),
+                key,
+                msg: serde_json::to_vec(&crate::Spawn::Restart { id: id.into(), verb })?,
+            };
+            let forwarding: std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool>> + Send + '_>> =
+                Box::pin(self.route_delivery(crate::DeliveryOp::Spawn { delivery }));
+            ensure!(forwarding.await?, "actor {id} seq -1: graceful shutdown or outbox delivery is still pending");
+            let publication: std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool>> + Send + '_>> =
+                Box::pin(self.route_delivery(crate::DeliveryOp::Publish { target: id.into() }));
+            ensure!(publication.await?, "actor {id} seq -1: restart publication is still pending");
+            return Ok(());
+        }
         self.pump_unlocked(id).await?;
-        let restarted = self
-            .restart_unlocked(id, verb, &format!("host:{}", ulid::Ulid::new()))
-            .await
-            .with_context(|| format!("actor {id} seq -1: restart"))?;
+        let restarted = self.restart_unlocked(id, verb, &key).await.with_context(|| format!("actor {id} seq -1: restart"))?;
         ensure!(restarted, "actor {id} seq -1: graceful shutdown or outbox delivery is still pending");
         let owner = self.open_actor(id).await?;
         let mut conn = owner.conn.lock().await;

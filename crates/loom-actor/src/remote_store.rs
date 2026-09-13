@@ -38,10 +38,10 @@ pub(crate) struct Head {
     pub segments: Vec<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct Lease {
-    owner: String,
-    epoch: u64,
-    expires_at: u64,
+pub(crate) struct Lease {
+    pub owner: String,
+    pub epoch: u64,
+    pub expires_at: u64,
 }
 #[derive(Debug, Clone)]
 struct Owned {
@@ -56,9 +56,9 @@ pub(crate) struct LeaseLost {
     pub actor: String,
     pub epoch: u64,
 }
-struct Stored<T> {
-    value: T,
-    version: UpdateVersion,
+pub(crate) struct Stored<T> {
+    pub value: T,
+    pub version: UpdateVersion,
 }
 #[derive(Default)]
 struct ActorGuards {
@@ -74,7 +74,7 @@ pub(crate) struct RemoteStore {
     guards: Mutex<HashMap<String, Arc<ActorGuards>>>,
 }
 impl RemoteStore {
-    pub fn new(config: &StoreConfig, ttl: Duration, clock: Arc<dyn Clock>) -> Result<Self> {
+    pub fn new(config: &StoreConfig, ttl: Duration, clock: Arc<dyn Clock>, owner: String) -> Result<Self> {
         let ttl: u64 = ttl.as_millis().try_into()?;
         ensure!(ttl >= 3, "lease TTL must be at least 3 ms");
         let store: Arc<dyn ObjectStore> = match config {
@@ -89,14 +89,7 @@ impl RemoteStore {
                     .build()?,
             ),
         };
-        Ok(Self {
-            store,
-            owner: ulid::Ulid::new().to_string(),
-            clock,
-            ttl,
-            owned: Mutex::new(HashMap::new()),
-            guards: Mutex::new(HashMap::new()),
-        })
+        Ok(Self { store, owner, clock, ttl, owned: Mutex::new(HashMap::new()), guards: Mutex::new(HashMap::new()) })
     }
     fn guards(&self, id: &str) -> Result<Arc<ActorGuards>> {
         Ok(self.guards.lock().map_err(|_| anyhow::anyhow!("actor guards poisoned"))?.entry(id.into()).or_default().clone())
@@ -120,7 +113,7 @@ impl RemoteStore {
         ensure!(self.clock.now_ms()? < owned.lease.expires_at, self.lost(id, owned.lease.epoch));
         Ok(())
     }
-    async fn read<T: serde::de::DeserializeOwned>(&self, key: &str) -> Result<Option<Stored<T>>> {
+    pub(crate) async fn read<T: serde::de::DeserializeOwned>(&self, key: &str) -> Result<Option<Stored<T>>> {
         let result = match self.store.get(&Path::from(key)).await {
             Ok(result) => result,
             Err(object_store::Error::NotFound { .. }) => return Ok(None),
@@ -130,7 +123,7 @@ impl RemoteStore {
         ensure!(version.e_tag.is_some() || version.version.is_some(), "object {key} has no conditional-write version");
         Ok(Some(Stored { value: serde_json::from_slice(&result.bytes().await?).with_context(|| format!("decode object {key}"))?, version }))
     }
-    async fn write<T: Serialize>(&self, key: &str, value: &T, mode: PutMode) -> Result<UpdateVersion> {
+    pub(crate) async fn write<T: Serialize>(&self, key: &str, value: &T, mode: PutMode) -> Result<UpdateVersion> {
         let result =
             self.store.put_opts(&Path::from(key), serde_json::to_vec(value)?.into(), PutOptions { mode, ..Default::default() }).await?;
         Ok(UpdateVersion { e_tag: result.e_tag, version: result.version })

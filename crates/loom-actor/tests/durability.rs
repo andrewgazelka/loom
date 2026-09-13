@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use loom_actor::{
-    Actor, Behavior, ChildSpec, ChildType, Clock, Config, Ctx, DefaultEffects, Durability, EffectError, EffectHandler, EffectKey, Node,
-    Status, StoreConfig, Trap,
+    Actor, Behavior, ChildSpec, ChildType, Clock, ClusterConfig, Config, Ctx, DefaultEffects, Durability, EffectError, EffectHandler,
+    EffectKey, Node, Status, StoreConfig, Trap,
 };
 use serde_json::Value;
 
@@ -42,6 +42,11 @@ async fn node_with_effects(dir: &Path, store: Option<&Path>, clock: Arc<ManualCl
         effects,
         Config {
             store: store.map(|path| StoreConfig::Local { path: path.to_owned() }),
+            cluster: store.map(|_| ClusterConfig {
+                node_id: dir.file_name().unwrap().to_str().unwrap().to_owned(),
+                addr: "127.0.0.1:1".into(),
+                key: [0x43; 32],
+            }),
             ship_interval: Duration::from_secs(3600),
             lease_ttl: Duration::from_secs(3600),
             lease_clock: clock,
@@ -344,6 +349,7 @@ async fn renewal_survives_blocked_handler(workspace: &Path) {
         effects.clone(),
         Config {
             store: Some(StoreConfig::Local { path: workspace.join("renewal-store") }),
+            cluster: Some(ClusterConfig { node_id: "renewal-node".into(), addr: "127.0.0.1:1".into(), key: [0x43; 32] }),
             ship_interval: Duration::from_millis(10),
             lease_ttl: Duration::from_millis(60),
             lease_clock: clock.clone(),

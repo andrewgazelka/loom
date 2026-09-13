@@ -30,6 +30,9 @@ pub fn parser() -> clap::Command {
             if argument.flag && !(verb.name == "view" && argument.name == "target") {
                 arg = arg.long(argument.name);
             }
+            if argument.kind == Kind::Boolean {
+                arg = arg.action(clap::ArgAction::SetTrue);
+            }
             command = command.arg(arg);
         }
         parser = parser.subcommand(command);
@@ -44,6 +47,13 @@ pub fn from_matches(matches: &clap::ArgMatches) -> anyhow::Result<Option<Command
     let verb = loom_proto::verbs::lookup(name).context("unknown command")?;
     let mut arguments = serde_json::Map::new();
     for argument in verb.arguments {
+        if argument.kind == Kind::Boolean {
+            arguments.insert(
+                argument.name.into(),
+                Value::Bool(matches.get_flag(argument.name)),
+            );
+            continue;
+        }
         let Some(input) = matches.get_one::<String>(argument.name) else {
             continue;
         };
@@ -53,7 +63,7 @@ pub fn from_matches(matches: &clap::ArgMatches) -> anyhow::Result<Option<Command
                 std::fs::read_to_string(input)
                     .with_context(|| format!("read definition {input}"))?,
             ),
-            Kind::Json | Kind::Integer | Kind::Count => serde_json::from_str(input)
+            Kind::Json | Kind::Integer | Kind::Count | Kind::Boolean => serde_json::from_str(input)
                 .with_context(|| format!("invalid JSON argument {}", argument.name))?,
         };
         arguments.insert(argument.name.into(), value);
@@ -64,4 +74,35 @@ pub fn from_matches(matches: &clap::ArgMatches) -> anyhow::Result<Option<Command
         name: verb.name,
         args,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cluster_commands_share_the_wire_vocabulary() {
+        let matches = parser()
+            .try_get_matches_from(["loom", "actors", "--cluster"])
+            .unwrap();
+        let command = from_matches(&matches).unwrap().unwrap();
+        assert_eq!(command.name, "actors");
+        assert_eq!(command.args, serde_json::json!({"cluster": true}));
+        let matches = parser().try_get_matches_from(["loom", "actors"]).unwrap();
+        assert_eq!(
+            from_matches(&matches).unwrap().unwrap().args,
+            serde_json::json!({"cluster": false})
+        );
+        let matches = parser()
+            .try_get_matches_from(["loom", "move", "a0actor", "node2"])
+            .unwrap();
+        let command = from_matches(&matches).unwrap().unwrap();
+        assert_eq!(command.name, "move");
+        assert_eq!(
+            command.args,
+            serde_json::json!({"id": "a0actor", "node_id": "node2"})
+        );
+        let matches = parser().try_get_matches_from(["loom", "nodes"]).unwrap();
+        assert_eq!(from_matches(&matches).unwrap().unwrap().name, "nodes");
+    }
 }

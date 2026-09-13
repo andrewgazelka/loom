@@ -6,41 +6,72 @@ struct ApiState {
     authorizer: Authorizer,
 }
 pub fn router(service: Arc<Service>, authorizer: Authorizer) -> Router {
+    let authorizer = authorizer.with_ingress_bearer(
+        service
+            .actors
+            .as_ref()
+            .and_then(|actors| actors.node.ingress_bearer()),
+    );
     let state = ApiState {
         service,
         authorizer,
     };
     Router::new()
         .route("/v1/command", post(command))
+        .route("/v1/ingress", post(ingress))
         .route("/v1/cas/{hash}", get(cas))
         .route("/v1/events", get(events))
         .route("/v1/defs/{name}", get(definition))
         .route("/v1/graph/deps/{hash}", get(deps))
         .route("/v1/builds/{hash}", get(build))
         .route("/v1/builds/active", get(active_build))
+        .route("/v1/stream", get(stream))
+        .route("/health", get(|| async { Json(json!({"ok":true})) }))
         .layer(DefaultBodyLimit::max(16 * 1024 * 1024))
         .route_layer(middleware::from_fn_with_state(
             state.authorizer.clone(),
             authorize_token,
         ))
-        .route("/v1/stream", get(stream))
-        .route("/health", get(|| async { Json(json!({"ok":true})) }))
         .with_state(state)
 }
 pub fn protect(router: Router, authorizer: Authorizer) -> Router {
     router.layer(middleware::from_fn_with_state(authorizer, authorize_token))
+}
+/// Public assets still reject credentials reserved for cluster ingress.
+pub fn protect_public(router: Router, mut authorizer: Authorizer) -> Router {
+    authorizer.public = true;
+    protect(router, authorizer)
 }
 async fn authorize_token(
     State(authorizer): State<Authorizer>,
     mut request: Request<axum::body::Body>,
     next: Next,
 ) -> HttpResponse {
-    let access = request
+    let token = request
         .headers()
         .get("authorization")
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .and_then(|token| authorizer.authenticate(token));
+        .and_then(|value| value.strip_prefix("Bearer "));
+    let ingress_route = request.uri().path() == "/v1/ingress";
+    if token.is_some_and(|token| authorizer.is_ingress(token)) {
+        return if ingress_route {
+            next.run(request).await
+        } else {
+            StatusCode::FORBIDDEN.into_response()
+        };
+    }
+    if authorizer.public || matches!(request.uri().path(), "/health" | "/v1/stream") {
+        return next.run(request).await;
+    }
+    let access = token.and_then(|token| authorizer.authenticate(token));
+    if ingress_route {
+        return if access.is_some() {
+            StatusCode::FORBIDDEN
+        } else {
+            StatusCode::UNAUTHORIZED
+        }
+        .into_response();
+    }
     let Some(access) = access else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
@@ -49,6 +80,45 @@ async fn authorize_token(
     }
     request.extensions_mut().insert(access);
     next.run(request).await
+}
+#[derive(Deserialize)]
+struct IngressRequest {
+    ops: Vec<loom_actor::DeliveryOp>,
+}
+async fn ingress(State(s): State<ApiState>, Json(request): Json<IngressRequest>) -> HttpResponse {
+    let Some(actors) = &s.service.actors else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let mut acks = Vec::new();
+    let mut status = StatusCode::OK;
+    for op in request.ops {
+        let ack = match op {
+            loom_actor::DeliveryOp::Command { target, verb, args } => {
+                actors.ingress_command(target, verb, args).await
+            }
+            op => {
+                let Some(ack) = actors.node.apply_ingress(vec![op]).await.into_iter().next() else {
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                };
+                ack
+            }
+        };
+        let failed = !ack.ok;
+        if failed {
+            status = if ack.conflict {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+        }
+        acks.push(ack);
+        if failed {
+            break;
+        }
+    }
+    let mut response = Json(loom_actor::IngressResponse::new(acks)).into_response();
+    *response.status_mut() = status;
+    response
 }
 fn protocol_response(response: Response) -> HttpResponse {
     let forbidden = response.result["code"] == "forbidden";
@@ -222,9 +292,10 @@ async fn stream_events(s: ApiState, mut socket: WebSocket) {
     let Ok(mut subscription) = serde_json::from_str::<Subscription>(&text) else {
         return;
     };
-    if s.authorizer
-        .authenticate(&subscription.token)
-        .is_none_or(|access| !access.allows(Scope::Read))
+    if s.authorizer.is_ingress(&subscription.token)
+        || s.authorizer
+            .authenticate(&subscription.token)
+            .is_none_or(|access| !access.allows(Scope::Read))
     {
         return;
     }

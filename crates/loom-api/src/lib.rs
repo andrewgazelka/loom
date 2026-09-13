@@ -7,7 +7,7 @@ mod source;
 #[cfg(test)]
 mod tests;
 mod unison;
-pub use http::{protect, router};
+pub use http::{protect, protect_public, router};
 use source::*;
 mod auth;
 mod build_progress;

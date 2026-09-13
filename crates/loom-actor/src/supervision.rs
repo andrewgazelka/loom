@@ -1,4 +1,4 @@
-use crate::{ActorId, ChildState, Node, Status, TreeEntry, actor};
+use crate::{ActorId, ChildState, Node, TreeEntry, actor, relation_delivery::RelationshipWrite};
 use anyhow::{Context, Result, ensure};
 use std::collections::{BTreeSet, VecDeque};
 use turso::Connection;
@@ -25,18 +25,12 @@ impl Node {
                 let _relation = self.guard(&key_pair).await;
                 for owner in [sender, target] {
                     let peer = if owner == sender { target } else { sender };
-                    let actor = self.open_actor(owner).await?;
-                    let mut conn = actor.conn.lock().await;
-                    let tx = conn.transaction().await?;
-                    if !applied(&tx, key).await? {
-                        if kind == "link" {
-                            tx.execute("INSERT OR IGNORE INTO links(peer) VALUES (?)", [peer]).await?;
-                        } else {
-                            tx.execute("DELETE FROM links WHERE peer=?", [peer]).await?;
-                        }
-                        actor::set_meta(&tx, &format!("applied:{key}"), "1").await?;
-                    }
-                    self.commit_control(owner, tx).await?;
+                    self.relationship_from(
+                        sender,
+                        owner,
+                        RelationshipWrite::Link { peer: peer.into(), key: key.into(), linked: kind == "link" },
+                    )
+                    .await?;
                 }
                 Ok(())
             }
@@ -47,12 +41,7 @@ impl Node {
                 let flush = payload["flush"].as_bool().context("demonitor flush missing")?;
                 self.demonitor(sender, target, destination).await?;
                 if flush {
-                    let owner = self.open_actor(sender).await?;
-                    let mut conn = owner.conn.lock().await;
-                    let tx = conn.transaction().await?;
-                    tx.execute("DELETE FROM inbox WHERE key=? AND state!='done'", [format!("down:{target}")]).await?;
-                    crate::mailbox::refresh_cursor(&tx).await?;
-                    self.commit_control(sender, tx).await?;
+                    self.route_relationship(sender, RelationshipWrite::FlushDown { reference: target.into() }).await?;
                 }
                 Ok(())
             }
@@ -62,9 +51,13 @@ impl Node {
     }
 
     pub(crate) async fn monitor(&self, watcher: &str, target: &str, reference: &str) -> Result<()> {
+        self.route_relationship(watcher, RelationshipWrite::Monitor { target: target.into(), reference: reference.into() }).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn monitor_local(&self, watcher: &str, target: &str, reference: &str) -> Result<()> {
         let _relation = self.guard(&format!("monitor:{watcher}:{reference}")).await;
         let a = self.open_actor(watcher).await?;
-        let b = self.open_actor(target).await?;
         {
             let mut conn = a.conn.lock().await;
             if applied(&conn, &format!("monitor:{reference}")).await? {
@@ -74,23 +67,21 @@ impl Node {
             tx.execute("INSERT OR IGNORE INTO monitors(ref,target) VALUES (?,?)", [reference, target]).await?;
             self.commit_control(watcher, tx).await?;
         }
-        let mut conn = b.conn.lock().await;
-        let tx = conn.transaction().await?;
-        tx.execute("INSERT OR IGNORE INTO monitored_by(ref,watcher) VALUES (?,?)", [reference, watcher]).await?;
-        let status = actor::status(&tx).await?;
-        if status == Status::Stopped {
-            let generation = actor::meta(&tx, "generation").await?;
-            let counter = actor::meta(&tx, "event_counter").await?;
-            let reason = actor::meta(&tx, "reason").await?;
-            let msg = serde_json::json!({"type":"down","ref":reference,"from":target,"reason":reason,
-                "generation":generation.parse::<i64>()?,"event":format!("{target}:{generation}:{counter}")});
-            actor::enqueue(&tx, actor::cursor(&tx).await?, &format!("down:{watcher}"), &serde_json::to_vec(&msg)?).await?;
-        }
-        self.commit_control(target, tx).await?;
+        self.relationship_from(
+            watcher,
+            target,
+            RelationshipWrite::RegisterMonitor { watcher: watcher.into(), reference: reference.into() },
+        )
+        .await?;
         Ok(())
     }
 
     pub(crate) async fn demonitor(&self, watcher: &str, reference: &str, target: &str) -> Result<()> {
+        self.route_relationship(watcher, RelationshipWrite::Demonitor { reference: reference.into(), target: target.into() }).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn demonitor_local(&self, watcher: &str, reference: &str, target: &str) -> Result<()> {
         let _relation = self.guard(&format!("monitor:{watcher}:{reference}")).await;
         let a = self.open_actor(watcher).await?;
         let mut conn = a.conn.lock().await;
@@ -117,11 +108,7 @@ impl Node {
         self.commit_control(watcher, tx).await?;
         drop(conn);
         if !target.is_empty() {
-            let owner = self.open_actor(&target).await?;
-            let mut conn = owner.conn.lock().await;
-            let tx = conn.transaction().await?;
-            tx.execute("DELETE FROM monitored_by WHERE ref=?", [reference]).await?;
-            self.commit_control(&target, tx).await?;
+            self.relationship_from(watcher, &target, RelationshipWrite::RemoveMonitor { reference: reference.into() }).await?;
         }
         Ok(())
     }
@@ -145,11 +132,7 @@ impl Node {
             }
             self.commit_control(target, tx).await?;
             drop(conn);
-            let owner = self.open_actor(sender).await?;
-            let mut conn = owner.conn.lock().await;
-            let tx = conn.transaction().await?;
-            tx.execute("DELETE FROM monitored_by WHERE ref=?", [reference]).await?;
-            self.commit_control(sender, tx).await?;
+            self.relationship_from(target, sender, RelationshipWrite::RemoveMonitor { reference: reference.into() }).await?;
         } else {
             if applied(&tx, key).await? {
                 self.commit_control(target, tx).await?;
@@ -174,6 +157,12 @@ impl Node {
     }
 
     pub(crate) async fn child_state(&self, id: &str) -> Result<ChildState> {
+        if let crate::Placement::Remote { addr, .. } = self.resolve(id).await? {
+            let acks = self.forward(&addr, &[crate::DeliveryOp::State { target: id.into() }]).await?;
+            let ack = acks.first().context("child state ingress returned no acknowledgement")?;
+            ensure!(ack.ok, "actor {id} seq -1: child state owner refused read");
+            return Ok(serde_json::from_value(ack.result.clone().context("child state ingress omitted result")?)?);
+        }
         let actor = self.open_actor(id).await?;
         let conn = actor.conn.lock().await;
         let code = actor::code(&conn).await?;
@@ -191,6 +180,18 @@ impl Node {
         })
     }
 
+    pub(crate) async fn child_ids(&self, id: &str) -> Result<Vec<String>> {
+        if let crate::Placement::Remote { addr, .. } = self.resolve(id).await? {
+            let acks = self.forward(&addr, &[crate::DeliveryOp::Children { target: id.into() }]).await?;
+            let ack = acks.first().context("children ingress returned no acknowledgement")?;
+            ensure!(ack.ok, "actor {id} seq -1: children owner refused read");
+            return Ok(serde_json::from_value(ack.result.clone().context("children ingress omitted result")?)?);
+        }
+        let owner = self.open_actor(id).await?;
+        let rows = actor::query(&*owner.conn.lock().await, "SELECT id FROM children ORDER BY rowid", ()).await?;
+        rows.rows.iter().map(|row| Ok(row.get::<String>(0)?)).collect()
+    }
+
     async fn tree_inner(&self, root: &str) -> Result<Vec<TreeEntry>> {
         struct Visit {
             id: ActorId,
@@ -202,10 +203,8 @@ impl Node {
         while let Some(visit) = queue.pop_front() {
             ensure!(seen.insert(visit.id.clone()), "actor {} seq -1: children contain a cycle", visit.id);
             let state = self.child_state(&visit.id).await?;
-            let actor = self.open_actor(&visit.id).await?;
-            let rows = actor::query(&*actor.conn.lock().await, "SELECT id FROM children ORDER BY rowid", ()).await?;
-            for row in rows.rows {
-                queue.push_back(Visit { id: row.get(0)?, depth: visit.depth + 1 });
+            for child in self.child_ids(&visit.id).await? {
+                queue.push_back(Visit { id: child, depth: visit.depth + 1 });
             }
             result.push(TreeEntry { depth: visit.depth, id: visit.id, status: state.status, behavior_hash: state.behavior_hash });
         }

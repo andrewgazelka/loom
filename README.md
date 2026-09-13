@@ -158,7 +158,10 @@ and return `{ok, seq, result, diagnostics}`, including failures. Omitted spawn
 | `view(target)` / `history(name)` | stored source and definition history |
 | `diff(old, new)` / `dependents(hash)` | item differences and pinned callers |
 | `run(target, args?)` / `find(text)` | execute or search definitions |
-| `actors()` | every actor: id, status, behavior hash, cursor, inbox length, parent |
+| `actors(cluster?)` | actors with their owner; `cluster: true` lists the shared store (`loom actors --cluster`) |
+| `nodes()` | cluster nodes: node id, advertised address, start time, and liveness |
+| `whereis(name)` | local name lookup, or placement and owner address when given an actor id |
+| `move(id, node_id)` | ship and release an actor on its owner, then restore it on the target node |
 | `tree(root?)` | nested tree from a root (default the node's root supervisor) |
 | `info(id)` | status, reason, cursor, deferred/inbox length, links, monitors, children |
 | `send(id, key?, msg)` | inject a keyed message; return cursor or a failed envelope with id, sequence, and trap cause |
@@ -174,7 +177,7 @@ and return `{ok, seq, result, diagnostics}`, including failures. Omitted spawn
 | `fork(id, seq)` | copy the actor's state as of `seq` into a new, undeliverable fork |
 | `validate(id, candidate, k, assertions?)` | replay the last `k` messages under `candidate_hash` on a fork, report `Matched`/`DivergedAt`/`Differs`/`Trapped` |
 | `sql(id, query, params?)` | read-only inspection; a write statement is refused |
-| `whereis` / `register` / `members` | name and group lookup |
+| `register` / `members` | name registration and group lookup |
 | `behaviors()` | stored definition hashes, one line each |
 | `drain()` | run every actor to idle, return messages processed |
 

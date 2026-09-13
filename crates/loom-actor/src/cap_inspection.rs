@@ -26,7 +26,7 @@ impl Ctx<'_> {
     }
 }
 
-async fn state_on(conn: &turso::Connection, cap: &Cap) -> Result<ChildState> {
+pub(crate) async fn state_on(conn: &turso::Connection, cap: &Cap) -> Result<ChildState> {
     let code = actor::code(conn).await?;
     let poison = actor::query(conn, "SELECT value FROM meta WHERE key='poison_revision'", ()).await?;
     Ok(ChildState {
@@ -41,6 +41,11 @@ async fn state_on(conn: &turso::Connection, cap: &Cap) -> Result<ChildState> {
 
 pub(crate) async fn state(node: &Node, current: &turso::Connection, key: &EffectKey, cap: &Cap) -> Result<Vec<u8>, EffectError> {
     node.verify_cap_mac(cap, Rights::INSPECT, "inspect")?;
+    if cap.target != key.actor_id
+        && let Some(result) = remote(node, cap, None, Vec::new()).await?
+    {
+        return Ok(result);
+    }
     let reader;
     let conn = if cap.target == key.actor_id {
         current
@@ -62,6 +67,11 @@ pub(crate) async fn query(
     params: Vec<SqlValue>,
 ) -> Result<Vec<u8>, EffectError> {
     node.verify_cap_mac(cap, Rights::INSPECT, "inspect_sql")?;
+    if cap.target != key.actor_id
+        && let Some(result) = remote(node, cap, Some(sql), params.clone()).await?
+    {
+        return Ok(result);
+    }
     let reader;
     let conn = if cap.target == key.actor_id {
         current
@@ -70,6 +80,10 @@ pub(crate) async fn query(
         &reader
     };
     node.verify_cap_on(conn, cap, Rights::INSPECT, "inspect_sql").await?;
+    query_on(conn, cap, sql, params).await
+}
+
+pub(crate) async fn query_on(conn: &turso::Connection, cap: &Cap, sql: &str, params: Vec<SqlValue>) -> Result<Vec<u8>, EffectError> {
     actor::inspect_statement(sql)
         .map_err(|error| EffectError::Deterministic(error.context(format!("inspect_sql cap_id {}", cap.cap_id))))?;
     let result = async {
@@ -87,4 +101,17 @@ pub(crate) async fn query(
     }
     .await;
     result.map_err(|error| EffectError::Environmental(error.context(format!("inspect_sql cap_id {}", cap.cap_id))))
+}
+
+async fn remote(node: &Node, cap: &Cap, query: Option<&str>, params: Vec<SqlValue>) -> Result<Option<Vec<u8>>, EffectError> {
+    let crate::Placement::Remote { addr, .. } = node.resolve(&cap.target).await.map_err(EffectError::Environmental)? else {
+        return Ok(None);
+    };
+    let value = node
+        .remote_authority(
+            &addr,
+            crate::DeliveryOp::Inspect { target: cap.target.clone(), cap: cap.clone(), query: query.map(str::to_owned), params },
+        )
+        .await?;
+    serde_json::to_vec(&value).map(Some).map_err(|error| EffectError::Environmental(error.into()))
 }

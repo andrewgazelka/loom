@@ -7,6 +7,7 @@ use std::time::Duration;
 #[derive(Clone, Debug)]
 pub struct Config {
     pub store: Option<crate::StoreConfig>,
+    pub cluster: Option<crate::ClusterConfig>,
     pub ship_interval: Duration,
     pub lease_ttl: Duration,
     pub lease_clock: std::sync::Arc<dyn crate::Clock>,
@@ -21,6 +22,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             store: None,
+            cluster: None,
             ship_interval: Duration::from_secs(1),
             lease_ttl: Duration::from_secs(10),
             lease_clock: std::sync::Arc::new(crate::SystemClock),

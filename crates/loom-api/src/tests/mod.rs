@@ -1,5 +1,6 @@
 mod build_progress;
 mod cas;
+mod cluster_auth;
 mod transport;
 use super::*;
 #[tokio::test]

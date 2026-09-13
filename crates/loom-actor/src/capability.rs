@@ -48,8 +48,22 @@ pub struct Cap {
     pub mac: [u8; 32],
 }
 
-pub(crate) async fn node_key(conn: &Connection) -> Result<[u8; 32]> {
+pub(crate) async fn node_key(conn: &Connection, cluster: Option<&crate::ClusterConfig>) -> Result<[u8; 32]> {
     conn.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT)", ()).await?;
+    const KEY_CHANGED: &str = "cluster key changed; this node's caps and ingress trust are void, start a new actors directory";
+    let stored = actor::query(conn, "SELECT value FROM meta WHERE key='cluster_key_hash'", ()).await?;
+    if let Some(cluster) = cluster {
+        let hash = blake3::hash(&cluster.key).to_hex().to_string();
+        if let Some(row) = stored.rows.first() {
+            ensure!(row.get::<String>(0)? == hash, KEY_CHANGED);
+        } else {
+            let old = actor::query(conn, "SELECT value FROM meta WHERE key='capability_key'", ()).await?;
+            ensure!(old.rows.is_empty(), KEY_CHANGED);
+            actor::set_meta(conn, "cluster_key_hash", &hash).await?;
+        }
+        return Ok(cluster.key);
+    }
+    ensure!(stored.rows.is_empty(), KEY_CHANGED);
     let mut entropy = [0; 32];
     std::fs::File::open("/dev/urandom")?.read_exact(&mut entropy)?;
     conn.execute("INSERT OR IGNORE INTO meta(key,value) VALUES ('capability_key',?)", [serde_json::to_string(&entropy)?]).await?;
@@ -194,7 +208,14 @@ impl Node {
     }
     pub async fn cap_for(&self, id: &str, rights: Rights) -> Result<Cap> {
         let _admission = self.admit().await?;
+        self.cap_for_inner(id, rights).await
+    }
+    pub(crate) async fn cap_for_inner(&self, id: &str, rights: Rights) -> Result<Cap> {
         ensure!(Rights::ALL.contains(rights), "cap_for actor {id}: unknown rights {}", rights.bits);
+        if let crate::Placement::Remote { addr, .. } = self.resolve(id).await? {
+            let value = self.remote_authority(&addr, crate::DeliveryOp::Mint { target: id.into(), rights }).await?;
+            return serde_json::from_value(value).context(format!("actor {id}: decode remote capability"));
+        }
         let actor = self.open_actor(id).await?;
         let conn = actor.conn.lock().await;
         let mut entropy = [0; 32];
@@ -226,7 +247,7 @@ impl Node {
             ensure!(cap.rights.contains(right), "missing right {}", right.bits);
             Ok(())
         })();
-        result.with_context(|| format!("{operation} cap_id {}", cap.cap_id)).map_err(EffectError::Deterministic)
+        result.with_context(|| format!("invalid authority: {operation} cap_id {}", cap.cap_id)).map_err(EffectError::Deterministic)
     }
     pub(crate) async fn verify_cap_on(&self, conn: &Connection, cap: &Cap, right: Rights, operation: &str) -> Result<(), EffectError> {
         self.verify_cap_mac(cap, right, operation)?;
@@ -244,7 +265,7 @@ impl Node {
             ensure!(revoked.rows.is_empty(), "revoked capability");
             Ok(())
         })();
-        result.with_context(|| format!("{operation} cap_id {}", cap.cap_id)).map_err(EffectError::Deterministic)
+        result.with_context(|| format!("invalid authority: {operation} cap_id {}", cap.cap_id)).map_err(EffectError::Deterministic)
     }
 
     pub async fn check_cap(&self, cap: &Cap, right: Rights, operation: &str) -> Result<()> {
@@ -253,6 +274,14 @@ impl Node {
     }
     pub(crate) async fn verify_cap(&self, cap: &Cap, right: Rights, operation: &str) -> Result<(), EffectError> {
         self.verify_cap_mac(cap, right, operation)?;
+        if let crate::Placement::Remote { addr, .. } = self.resolve(&cap.target).await.map_err(EffectError::Environmental)? {
+            self.remote_authority(
+                &addr,
+                crate::DeliveryOp::Authority { target: cap.target.clone(), cap: cap.clone(), right, operation: operation.into() },
+            )
+            .await?;
+            return Ok(());
+        }
         let reader = self.capability_reader(&cap.target).await.map_err(|error| match error {
             EffectError::Environmental(error) => EffectError::Environmental(error.context(format!("{operation} cap_id {}", cap.cap_id))),
             EffectError::Deterministic(error) => EffectError::Deterministic(error.context(format!("{operation} cap_id {}", cap.cap_id))),
@@ -277,7 +306,10 @@ impl Node {
     }
     pub(crate) fn attenuate_verified(&self, cap: &Cap, rights: Rights) -> Result<Cap, EffectError> {
         if !cap.rights.contains(rights) {
-            return Err(EffectError::Deterministic(anyhow::anyhow!("attenuate cap_id {}: rights are not a subset", cap.cap_id)));
+            return Err(EffectError::Deterministic(anyhow::anyhow!(
+                "invalid authority: attenuate cap_id {}: rights are not a subset",
+                cap.cap_id
+            )));
         }
         let mut identity = b"attenuate".to_vec();
         identity.extend_from_slice(&cap.mac);
