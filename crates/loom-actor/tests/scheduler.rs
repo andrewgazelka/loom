@@ -259,6 +259,15 @@ async fn mailbox_queries_use_ordered_index_searches() {
         let opcodes: Vec<String> = rows.rows.iter().map(|row| row.get(1).unwrap()).collect();
         assert!(!opcodes.iter().any(|opcode| opcode == "SorterOpen" || opcode == "OpenEphemeral"), "{sql}: {opcodes:?}");
     }
+    // The eligible-deferred query ranges over defer_epoch, so the planner may sort
+    // the matching rows (bounded by eligible deferred rows, never the whole inbox);
+    // it must still search the epoch index rather than scan the table.
+    let sql = crate::mailbox::NEXT_DEFERRED.replace('?', "1");
+    let rows = crate::actor::query(&conn, &format!("EXPLAIN QUERY PLAN {sql}"), ()).await.unwrap();
+    let plan: Vec<String> = rows.rows.iter().map(|row| row.get(3).unwrap()).collect();
+    let plan = plan.join("\n");
+    assert!(plan.contains("SEARCH") && plan.contains("inbox_state_epoch_seq"), "{sql}: {plan}");
+    assert!(!plan.contains("SCAN"), "{sql}: {plan}");
     // Missing indexes must be an error, never an unnoticed return to table scans.
     conn.execute("DROP INDEX inbox_state_seq", ()).await.unwrap();
     assert!(crate::actor::query(&conn, crate::mailbox::FIRST_PENDING, ()).await.is_err());
@@ -318,4 +327,22 @@ async fn opening_a_restored_actor_installs_missing_mailbox_indexes() {
         let rows = crate::actor::query(&conn, "SELECT name FROM sqlite_schema WHERE type='index' AND name IN ('inbox_state_seq','inbox_state_epoch_seq','outbox_delivered_seq_idx')", ()).await.unwrap();
         assert_eq!(rows.rows.len(), 3);
     }
+}
+
+/// The indexed selection and cursor queries enumerate the three states by name;
+/// a fourth state would be an unschedulable row the cursor skips, so the schema
+/// refuses it at the write.
+#[tokio::test]
+async fn inbox_state_domain_is_enforced() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut registry = Registry::new();
+    registry.insert("scheduler-noop".into(), Arc::new(Noop));
+    let node =
+        Node::new(dir.path(), Arc::new(registry), Arc::new(DefaultEffects), Config { io: Io::Memory, ..Config::default() }).await.unwrap();
+    let id = node.spawn_root("scheduler-noop", b"init").await.unwrap();
+    let actor = node.open(&id).await.unwrap();
+    let error = actor.sql("UPDATE inbox SET state='blocked' WHERE seq=1", ()).await.unwrap_err();
+    assert!(format!("{error:#}").to_lowercase().contains("check"), "expected a CHECK violation, got: {error:#}");
+    let rows = actor.sql("SELECT state FROM inbox WHERE seq=1", ()).await.unwrap();
+    assert_eq!(rows.rows[0].get::<String>(0).unwrap(), "pending");
 }

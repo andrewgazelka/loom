@@ -14,7 +14,7 @@ pub const SCHEMA: &str = concat!("
 CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE caps(cap_id INTEGER PRIMARY KEY,target TEXT NOT NULL,epoch TEXT NOT NULL,rights INTEGER NOT NULL,mac BLOB NOT NULL);
 CREATE TABLE revoked(cap_id INTEGER PRIMARY KEY);
-CREATE TABLE inbox(seq INTEGER PRIMARY KEY, key TEXT UNIQUE, sender TEXT, msg BLOB, received_at INTEGER, state TEXT NOT NULL DEFAULT 'pending', defer_epoch INTEGER NOT NULL DEFAULT -1, defer_count INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE inbox(seq INTEGER PRIMARY KEY, key TEXT UNIQUE, sender TEXT, msg BLOB, received_at INTEGER, state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','deferred','done')), defer_epoch INTEGER NOT NULL DEFAULT -1, defer_count INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE effects(seq INTEGER, idx INTEGER, kind TEXT, request BLOB, result BLOB, PRIMARY KEY(seq, idx));
 CREATE TABLE outbox(seq INTEGER, idx INTEGER, target TEXT, msg BLOB, delivered INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(seq, idx));
 CREATE TABLE code_changes(seq INTEGER PRIMARY KEY, behavior_hash TEXT NOT NULL, parent_hash TEXT, author TEXT, rationale TEXT, schema_sql TEXT);
