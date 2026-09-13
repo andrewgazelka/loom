@@ -2,6 +2,9 @@ use crate::{EffectKey, Node, Spawn, Status, actor, ids};
 use anyhow::{Context, Result, ensure};
 use std::collections::BTreeSet;
 
+pub(crate) const UNDELIVERED: &str =
+    "SELECT seq,idx,target,msg FROM outbox INDEXED BY outbox_delivered_seq_idx WHERE delivered=0 ORDER BY seq,idx";
+
 struct Delivery {
     seq: i64,
     idx: i64,
@@ -48,7 +51,7 @@ impl Node {
             // This pump's restart acknowledgment sets the bit below. Host SQL
             // writes wake another batch; the next pump reloads persisted markers.
             publish_pending = row.get::<i64>(3)? != 0;
-            let rows = actor::query(&conn, "SELECT seq,idx,target,msg FROM outbox WHERE delivered=0 ORDER BY seq,idx", ()).await?;
+            let rows = actor::query(&conn, UNDELIVERED, ()).await?;
             for row in rows.rows {
                 deliveries.push(Delivery { seq: row.get(0)?, idx: row.get(1)?, target: row.get(2)?, msg: row.get(3)? });
             }

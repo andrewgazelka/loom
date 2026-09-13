@@ -33,7 +33,7 @@ impl Node {
         if self.config.io != crate::Io::Memory
             && cursor > 0
             && cursor % self.config.snapshot_every == 0
-            && actor::query(&conn, "SELECT seq FROM inbox WHERE state='done' AND seq>? LIMIT 1", [cursor]).await?.rows.is_empty()
+            && actor::query(&conn, crate::mailbox::DONE_ABOVE, [cursor]).await?.rows.is_empty()
         {
             actor::snapshot(&conn, &self.snapshot_path(id, generation, cursor), cursor).await?;
         }
