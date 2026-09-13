@@ -24,7 +24,7 @@ impl Node {
         let tx = conn.transaction().await?;
         actor::inject(&tx, key, sender, msg).await?;
         self.commit_control(target, tx).await?;
-        self.wake.notify_one();
+        self.wake_actor(target)?;
         Ok(())
     }
 
@@ -102,12 +102,12 @@ impl Node {
                 let tx = conn.transaction().await?;
                 actor::set_meta(&tx, "ready", "true").await?;
                 self.commit_control(child, tx).await?;
+                self.wake_actor(child)?;
             }
             let mut conn = source.conn.lock().await;
             let tx = conn.transaction().await?;
             tx.execute("DELETE FROM meta WHERE key=?", [marker]).await?;
             self.commit_control(id, tx).await?;
-            self.wake.notify_one();
         }
         progressed |= self.sync_shutdown_requests(id).await?;
         let sync_result = self.sync_index(id).await;
@@ -144,6 +144,7 @@ impl Node {
                     actor::set_meta(&tx, "ready", "true").await?;
                     self.commit_control(&child, tx).await?;
                     drop(conn);
+                    self.wake_actor(&child)?;
                     self.sync_index(&child).await?;
                 }
                 Spawn::Restart { id: child, verb } => {
@@ -153,9 +154,12 @@ impl Node {
                     if !self.restart_unlocked(&child, verb, key).await? {
                         return Ok(false);
                     }
+                    self.wake_actor(&child)?;
                     self.sync_index(&child).await?;
                 }
             }
+        } else if entry.target.starts_with("drv:") {
+            self.deliver_driver(id, &entry.target, &entry.msg, key).await?;
         } else if let Some(target) = entry.target.strip_prefix("call:") {
             self.deliver_call(id, target, &entry.msg, key).await?;
         } else if let Some(kind) = entry.target.strip_prefix("effect:") {
@@ -178,6 +182,12 @@ impl Node {
 }
 
 fn destination(target: &str, msg: &[u8]) -> Result<String> {
+    if let Some(spawn) = target.strip_prefix("drv:spawn:") {
+        return Ok(spawn.to_owned());
+    }
+    if target.starts_with("drv:") {
+        return Ok(target.to_owned());
+    }
     if target == "spawn" {
         return Ok(match serde_json::from_slice::<Spawn>(msg)? {
             Spawn::Child { id, .. } | Spawn::Restart { id, .. } => id,

@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 turso = "0.7.2"
 turso_parser = "0.7.2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
 async-trait = "0.1"
 anyhow = "1"
 thiserror = "2"
@@ -36,3 +36,7 @@ turso_core = { version = "0.7.2", features = ["io_uring"] }
 [[test]]
 name = "caps"
 path = "tests/caps.rs"
+
+[[test]]
+name = "drivers"
+path = "tests/drivers.rs"

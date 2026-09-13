@@ -87,6 +87,8 @@ impl Node {
             actor::enqueue(&tx, actor::cursor(&tx).await?, &format!("down:{watcher}"), &serde_json::to_vec(&msg)?).await?;
         }
         self.commit_control(target, tx).await?;
+        // The DOWN for an already-stopped target sits in the target's outbox: its pump must run.
+        self.wake_actor(target)?;
         Ok(())
     }
 
@@ -169,7 +171,7 @@ impl Node {
                 self.commit_control(target, tx).await?;
             }
         }
-        self.wake.notify_one();
+        self.wake_actor(target)?;
         Ok(())
     }
 

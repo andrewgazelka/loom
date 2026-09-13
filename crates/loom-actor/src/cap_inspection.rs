@@ -45,7 +45,9 @@ pub(crate) async fn state(node: &Node, current: &turso::Connection, key: &Effect
     let conn = if cap.target == key.actor_id {
         current
     } else {
-        reader = node.capability_reader(&cap.target).await?;
+        // A driver cap's authority is its owning actor (same redirection as capability.rs).
+        let authority = if cap.target.starts_with("drv:") { crate::drivers::target(&cap.target).map_err(EffectError::Deterministic)?.owner } else { cap.target.as_str() };
+        reader = node.capability_reader(authority).await?;
         &reader
     };
     node.verify_cap_on(conn, cap, Rights::INSPECT, "inspect").await?;
@@ -66,7 +68,8 @@ pub(crate) async fn query(
     let conn = if cap.target == key.actor_id {
         current
     } else {
-        reader = node.capability_reader(&cap.target).await?;
+        let authority = if cap.target.starts_with("drv:") { crate::drivers::target(&cap.target).map_err(EffectError::Deterministic)?.owner } else { cap.target.as_str() };
+        reader = node.capability_reader(authority).await?;
         &reader
     };
     node.verify_cap_on(conn, cap, Rights::INSPECT, "inspect_sql").await?;

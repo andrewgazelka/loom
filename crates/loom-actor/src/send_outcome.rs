@@ -62,7 +62,7 @@ impl Node {
         self.send_outcomes.lock().map_err(|_| anyhow!("actor send outcomes poisoned"))?.insert(identity.clone(), initial);
         let watch = Watch { identity, outcomes: self.send_outcomes.clone() };
         drop(conn);
-        self.wake.notify_one();
+        self.wake_actor(id)?;
         let drained = self.run_until_idle_inner().await;
         let mut outcome = self
             .send_outcomes

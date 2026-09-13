@@ -76,6 +76,11 @@ async fn scenario(io: Io, label: &str, n: usize, fanout: usize) -> anyhow::Resul
     for r in &receivers { caps.push(node.cap_for(r, Rights::SEND).await?); }
     let b_cap = node.cap_for(&noop, Rights::SEND).await?;
     node.close().await?;
+    if io == Io::Memory {
+        // A second in-memory node on the same dir starts empty; the hop and broadcast
+        // cases need the receivers, so they run in file mode only.
+        return Ok(());
+    }
     reg.insert("counter-fwd".into(), Arc::new(Counter { hash: "counter-fwd", target: Some(b_cap), ..Counter::plain() }));
     reg.insert("broadcast-v1".into(), Arc::new(Broadcast { targets: caps }));
     let node = Node::new(dir.path(), Arc::new(Registry(reg)), Arc::new(DefaultEffects), config).await?;

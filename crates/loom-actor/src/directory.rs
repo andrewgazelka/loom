@@ -23,6 +23,12 @@ pub struct ActorInfo {
     pub children: Vec<ActorId>,
 }
 
+#[derive(PartialEq, Eq)]
+pub(crate) struct IndexedState {
+    stopped: bool,
+    hash: String,
+}
+
 impl Node {
     /// Names are unique: registering an occupied name fails rather than replacing it.
     pub async fn register(&self, name: &str, id: &str) -> Result<()> {
@@ -131,6 +137,8 @@ impl Node {
                 )
                 .await
                 .with_context(|| format!("actor {id} seq -1: promote_where stopped"))?;
+                self.scheduling()?.index_dirty.insert(id.clone());
+                self.wake_actor(&id)?;
                 drop(conn);
                 self.sync_index(&id).await?;
                 promoted.push(id);
@@ -188,13 +196,26 @@ impl Node {
     /// Actor lock precedes index lock, so a stale pre-stop observation cannot restore an index row.
     /// Forks never join the live index, including a fork subsequently marked stopped.
     pub(crate) async fn sync_index(&self, id: &str) -> Result<()> {
-        async {
+        if !self.scheduling()?.index_dirty.contains(id) {
+            return Ok(());
+        }
+        let result = async {
             let actor = self.open_actor(id).await?;
             let conn = actor.conn.lock().await;
             if !actor::query(&conn, "SELECT value FROM meta WHERE key='replay_source'", ()).await?.rows.is_empty()
-                || actor::status(&conn).await? == Status::Fork { return Ok::<(), anyhow::Error>(()); }
+                || actor::status(&conn).await? == Status::Fork {
+                self.scheduling()?.index_dirty.remove(id);
+                return Ok::<(), anyhow::Error>(());
+            }
             let stopped = actor::status(&conn).await? == Status::Stopped;
             let hash = actor::code(&conn).await?.hash;
+            let observed = IndexedState { stopped, hash: hash.clone() };
+            // The actor lock serializes observations and publication. Cache entries
+            // are replaced only after the corresponding index transaction commits.
+            if self.indexed.lock().await.get(id) == Some(&observed) {
+                self.scheduling()?.index_dirty.remove(id);
+                return Ok(());
+            }
             let mut slot = self.names.lock().await;
             let index = connection(&mut slot, &self.dir, self.config.io).await?;
             let tx = index.transaction().await?;
@@ -206,8 +227,14 @@ impl Node {
                 tx.execute("INSERT INTO who_runs(id,behavior_hash) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET behavior_hash=excluded.behavior_hash", [id, hash.as_str()]).await?;
             }
             tx.commit().await?;
+            self.indexed.lock().await.insert(id.into(), observed);
+            if stopped {
+                self.sync_shutdowns(id).await?;
+            }
+            self.scheduling()?.index_dirty.remove(id);
             Ok::<(), anyhow::Error>(())
-        }.await.with_context(|| format!("actor {id} seq -1: sync node index"))
+        }.await.with_context(|| format!("actor {id} seq -1: sync node index"));
+        result
     }
 }
 
