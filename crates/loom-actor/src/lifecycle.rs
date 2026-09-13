@@ -30,7 +30,10 @@ impl Node {
         self.stop_unlocked(id, reason, &format!("host:{}", ulid::Ulid::new()), "")
             .await
             .with_context(|| format!("actor {id} seq -1: stop"))?;
-        self.wake_actor(id)?;
+        // A driver id closes a driver (stop_unlocked); only actor ids enter the wake set.
+        if !id.starts_with("drv:") {
+            self.wake_actor(id)?;
+        }
         Ok(())
     }
 

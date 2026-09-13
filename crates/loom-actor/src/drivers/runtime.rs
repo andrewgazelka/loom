@@ -11,9 +11,10 @@ use std::{
 };
 use tokio::sync::{mpsc, oneshot, watch};
 
-/// Open entries leave through run completion, explicit stop, owner stop, or node
-/// close/drop. Tombstones remain for this node lifetime so spawn retry never opens
-/// a second resource. A new committed spawn gets a new ID.
+/// Open entries leave when the worker finishes (run completion, explicit stop,
+/// owner stop, node close/drop): the broker removes the entry. Spawn retry never
+/// opens a second resource because the owner's `driver_spawn:<id>` receipt is
+/// checked first; a new committed spawn gets a new ID.
 struct Running {
     owner: String,
     deliveries: mpsc::Sender<DriverDelivery>,
@@ -152,6 +153,12 @@ impl Node {
             while let Ok(request) = injections.try_recv() {
                 let result = node.inject_driver(&owner, generation, owner_epoch, &request).await;
                 let _ = request.ack.send(result);
+            }
+            // The worker is finished either way: this is the leaver for the `running`
+            // entry. The owner's `driver_spawn:<id>` receipt, not this map, is what
+            // stops a retried spawn row from opening a second resource.
+            if let Ok(mut running) = node.drivers.running.lock() {
+                running.remove(&spawn.id);
             }
             if intentional.load(Ordering::Acquire) {
                 return;

@@ -167,7 +167,28 @@ async fn monitor_delivers_down_once() {
 }
 
 #[tokio::test]
+async fn monitor_after_stop_delivers_down() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = node(dir.path()).await;
+    let b = node.spawn_root("probe-v1", &bytes(json!({"type":"init"}))).await.unwrap();
+    let a = node.spawn_root("probe-v1", &bytes(json!({"type":"init"}))).await.unwrap();
+    node.send(&b, "terminate", &bytes(json!({"type":"terminate"}))).await.unwrap();
+    drain(&node).await;
+    assert_eq!(node.open(&b).await.unwrap().status().await.unwrap(), Status::Stopped);
+    // Watching a target that is already stopped queues the DOWN in the target's outbox;
+    // only the target's own pump delivers it, so the target must be woken.
+    node.send(&a, "watch", &bytes(json!({"type":"watch","target":node.cap_for(&b, Rights::ALL).await.unwrap()}))).await.unwrap();
+    drain(&node).await;
+    let watcher = node.open(&a).await.unwrap();
+    let downs = messages(&watcher, "down").await;
+    assert_eq!(downs.len(), 1);
+    assert_eq!(downs[0]["from"], b);
+    assert_eq!(downs[0]["reason"], "normal");
+}
+
+#[tokio::test]
 async fn link_cascades_stop() {
+
     for trap_exits in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let node = node(dir.path()).await;

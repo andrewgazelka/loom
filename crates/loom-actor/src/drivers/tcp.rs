@@ -81,10 +81,12 @@ impl Driver for TcpListenerDriver {
                     let Some(delivery) = delivery else { return Ok(()); };
                     match connections.get(&delivery.handle) {
                         None => delivery.acknowledge(Ok(DriverAck::Dropped)),
-                        Some(connection) => match connection.try_send(delivery) {
+                        // A full per-connection queue applies backpressure here rather than
+                        // failing the pump: the writer drains it or the connection's write
+                        // timeout ends it (then the send fails and the row is dropped, visibly).
+                        Some(connection) => match connection.send(delivery).await {
                             Ok(()) => {},
-                            Err(mpsc::error::TrySendError::Closed(delivery)) => delivery.acknowledge(Ok(DriverAck::Dropped)),
-                            Err(mpsc::error::TrySendError::Full(delivery)) => delivery.acknowledge(Err(anyhow::anyhow!("TCP handle delivery queue full"))),
+                            Err(mpsc::error::SendError(delivery)) => delivery.acknowledge(Ok(DriverAck::Dropped)),
                         }
                     }
                 }

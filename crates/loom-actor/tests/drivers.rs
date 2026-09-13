@@ -198,7 +198,22 @@ async fn closed_handle_drops() {
 }
 
 #[tokio::test]
+async fn stop_by_driver_id_keeps_scheduler_usable() {
+    let f = Fixture::new().await;
+    let rows = f.actor.sql("SELECT sender FROM inbox WHERE sender LIKE 'drv:%' LIMIT 1", ()).await.unwrap();
+    let driver: String = rows.rows[0].get(0).unwrap();
+    let _control = TcpStream::connect(&f.addr).await.unwrap();
+    f.node.stop(&driver, "normal").await.unwrap();
+    // A driver id must not enter the actor wake set: the next drain still succeeds.
+    f.node.send(&f.owner, "after-stop", b"noop").await.unwrap();
+    f.node.run_until_idle().await.unwrap();
+    assert!(TcpStream::connect(&f.addr).await.is_err());
+    f.node.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn owner_stop_closes_driver() {
+
     let f = Fixture::new().await;
     let _control = TcpStream::connect(&f.addr).await.unwrap();
     f.node.stop(&f.owner, "normal").await.unwrap();
