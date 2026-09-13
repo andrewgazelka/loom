@@ -80,6 +80,7 @@ impl Node {
     pub async fn new(dir: impl AsRef<Path>, registry: Arc<dyn Registry>, effects: Arc<dyn EffectHandler>, config: Config) -> Result<Self> {
         config.io.name().context("actor <node> seq -1: I/O selection")?;
         ensure!(config.snapshot_every > 0, "actor <node> seq -1: snapshot_every must be positive");
+        ensure!(config.batch_limit > 0, "actor <node> seq -1: batch_limit must be positive");
         ensure!(u32::try_from(config.max_retries).is_ok(), "actor <node> seq -1: max_retries exceeds backoff range");
         std::fs::create_dir_all(dir.as_ref()).context("actor <node> seq -1: create directory")?;
         ensure!(!config.ship_interval.is_zero(), "ship_interval must be positive");

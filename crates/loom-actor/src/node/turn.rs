@@ -41,7 +41,7 @@ impl Node {
         let behavior = actor::behavior(&self.registry, &code.hash).await?;
         let mut state =
             actor::AttemptState { generation, revision: code.revision, epoch: actor::meta(&conn, "commit_epoch").await?.parse()? };
-        for _ in 0..64 {
+        for _ in 0..self.config.batch_limit {
             let Some(message) = crate::mailbox::next_at(&conn, state.epoch).await? else {
                 return Ok(batch);
             };
