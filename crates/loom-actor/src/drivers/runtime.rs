@@ -205,7 +205,7 @@ impl Node {
         actor::inject(&tx, &request.key, &request.sender, &request.bytes).await?;
         self.check_lease(owner)?;
         self.commit_control(&request.cap.target, tx).await?;
-        self.wake.notify_one();
+        self.wake_actor(&request.cap.target)?;
         Ok(())
     }
 
@@ -223,7 +223,7 @@ impl Node {
         actor::inject(&tx, &format!("down:{reference}"), &from, &msg).await?;
         actor::set_meta(&tx, &format!("driver_down:{id}"), reason).await?;
         self.commit_control(owner, tx).await?;
-        self.wake.notify_one();
+        self.wake_actor(owner)?;
         Ok(())
     }
 
