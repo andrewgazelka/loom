@@ -35,6 +35,7 @@
   .note { color:var(--dim); padding:8px 12px; border-bottom:1px solid var(--line) }
   code { font-family:ui-monospace, JetBrains Mono, monospace; font-size:11px }
   .v2 .row { border-left:3px solid var(--accent) }
+  button { -webkit-user-select:none; user-select:none }
   .v2 .row .k { display:none }
 </style>
 </head>
@@ -65,7 +66,7 @@
   </section>
   <section>
     <h2>Event log</h2>
-    <div class="note">inbox message &rarr; one transaction &rarr; CDC rows &rarr; delta frame to subscribers &rarr; view renders &rarr; <code>tree</code> delta &rarr; DOM patch. Green lines are DOM mutations; red is a trap (rollback + dead letter).</div>
+    <div class="note">inbox message &rarr; one transaction &rarr; CDC rows &rarr; delta frame to subscribers (carrying the message key) &rarr; view renders &rarr; <code>tree</code> delta (carrying that key as <code>cause</code>) &rarr; DOM patch. Green lines are DOM mutations; red is a trap (rollback + dead letter).</div>
     <div class="body log" id="log"></div>
   </section>
 </main>
@@ -82,7 +83,7 @@ function makeActor(name, tables) {
       catch (e) { this.tables = JSON.parse(snapshot); this.cdc.length = cdcLen; this.change_id = cid; log('trap', `${name} seq ${seq}: TRAP ${e.message}; rolled back; dead_letters += {seq:${seq}, key:${msg.key}}`); return { trap: e.message, seq, key: msg.key }; }
       const rows = this.cdc.filter(r => r.change_txn_id === this.txn);
       log('', `${name} seq ${seq} COMMIT (key ${msg.key}): ${rows.length} turso_cdc row(s)`);
-      for (const s of this.subscribers) s({ type: 'delta', source: name, seq, key: msg.key, rows });
+      for (const s of this.subscribers) s({ type: 'delta', source: name, seq, key: msg.key, cause: msg.cause ?? null, rows });
       return { ok: true, seq, key: msg.key };
     },
     ctx() { const a = this; return {
@@ -114,7 +115,8 @@ const view = makeActor('view-actor (ephemeral)', { tree: [] });
 view.template = 'v1';
 view.render = row => ({ id: row.id, sort: row.id, tree: templates[view.template](row) });
 items.subscribe(frame => {
-  view.handle({ key: `delta:items:${frame.seq ?? 'snap'}:view` }, cx => {
+  // a delta message carries the source's message key; the view forwards it as `cause` so a browser can match its own optimistic row
+  view.handle({ key: `delta:items:${frame.seq ?? 'snap'}:view`, cause: frame.key ?? null }, cx => {
     const rows = frame.type === 'snapshot' ? frame.rows.map(r => ({ change_type: 'insert', id: r.id, after: r })) : frame.rows;
     for (const r of rows) {
       const exists = view.tables.tree.some(t => t.id === r.id);
@@ -156,7 +158,7 @@ view.subscribe(frame => {
   for (const r of frame.rows) {
     if (r.change_type === 'delete') { const e = bound.get(String(r.id)); if (e) { e.node.remove(); bound.delete(String(r.id)); log('dom', `dom: removed key ${r.id}`); } continue; }
     upsert(r.after);
-    const e = bound.get(String(r.id)); if (e?.pendingKey && frame.key === e.pendingKey) { e.node.removeAttribute('data-pending'); e.pendingKey = null; log('dom', `dom: key ${r.id} pending cleared by delta with message key ${frame.key}`); }
+    const e = bound.get(String(r.id)); if (e?.pendingKey && (frame.cause === e.pendingKey || frame.key === e.pendingKey)) { e.node.removeAttribute('data-pending'); e.pendingKey = null; log('dom', `dom: key ${r.id} pending cleared by delta with cause ${frame.cause}`); }
   }
 }, 'tree');
 
@@ -185,6 +187,7 @@ function renderTables() {
   const cb = document.querySelector('#cdc tbody'); cb.replaceChildren(...items.cdc.slice(-14).reverse().map(r => { const tr = document.createElement('tr'); tr.innerHTML = `<td>${r.change_id}</td><td>${r.change_txn_id}</td><td>${r.change_type}</td><td>${r.table_name}</td><td>${r.id}</td><td class="trunc">${r.after ? JSON.stringify(r.after) : ''}</td>`; return tr; }));
 }
 new MutationObserver(renderTables).observe(container, { subtree: true, childList: true, attributes: true, characterData: true });
+document.addEventListener('mousedown', ev => { if (ev.target.closest('button')) ev.preventDefault(); }); // buttons never take focus: the identity claim is about the binding, not about clicking
 for (let i = 0; i < 3; i++) document.getElementById('add').click();
 renderTables();
 log('', 'ready. The middle pane is a debug mirror and rebuilds itself; the LEFT pane never rebuilds: watch the green lines.');

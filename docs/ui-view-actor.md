@@ -60,7 +60,11 @@ subscribed tables and delivers them as ONE inbox message per subscriber per comm
      id, before, after, updates}, ...]}
 
 keyed `delta:<source>:<seq>:<subscriber>`, so redelivery is a no-op like every
-other send. The first message after subscribing is `{"type":"snapshot", ...rows}`
+other send. A frame also carries `cause`: the `key` of the delta message the
+producing actor was handling, or null. A view's `tree` deltas therefore carry the
+source's message key as `cause`, and a browser reconciles its optimistic row on
+`cause` (one hop away) or `key` (direct subscriber). Causes do not chain further:
+two hops is the designed depth (source -> view -> browser). The first message after subscribing is `{"type":"snapshot", ...rows}`
 for the table (built from `SELECT *`, tagged with the `change_id` it is current
 as of). A subscriber that falls behind the CDC floor (its `after_change_id` was
 compacted) gets `{"type":"resnapshot"}` and a fresh snapshot: fail closed, never a
@@ -138,8 +142,8 @@ as ES modules and unit-tested under `bun test` with the DOM shim the existing
   payload)`; the shell turns them into `send(cap, msg)` with a client-generated
   message key.
 - optimistic rows: the shell may call `bind.pending(key, tree, messageKey)`; the node
-  renders with `data-pending`. The first `delta` whose frame `key` equals
-  `messageKey` clears it; a `dead_letter` frame for that key reverts to the last
+  renders with `data-pending`. The first `delta` whose frame `cause` or `key`
+  equals `messageKey` clears it; a `dead_letter` frame for that key reverts to the last
   authoritative tree and surfaces the trap text. No merge logic exists: the source
   actor is the single writer and the delta is the verdict.
 
