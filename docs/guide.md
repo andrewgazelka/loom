@@ -26,7 +26,7 @@ The proof checks these results in order:
 6. Adding `counter.rs`, spawning it, and sending three messages leaves its cursor at 3.
 7. Adding `counter-v2.rs` preserves the effect row. Validating three messages under that candidate returns `Differs` and unequal original/fork hashes for the `counter` table.
 8. Promotion with rationale `e2e` puts both behavior hashes in lineage. One more message moves the cursor to 4.
-9. The HTTP MCP companion repeats checks 1–8 under separate names and actors, then checks discovery of the eight definition tools and 19 actor tools. It prints its own `N/9`.
+9. The HTTP MCP companion repeats checks 1–8 under separate names and actors, then checks discovery of the eight definition tools and 20 actor tools. It prints its own `N/9`.
 
 Stop the daemon on the test port and commit your changes before running the automated version. This machine’s Nix requires a committed Git input:
 
