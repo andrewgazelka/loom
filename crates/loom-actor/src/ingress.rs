@@ -200,7 +200,7 @@ impl Node {
                 let tx = conn.transaction().await?;
                 actor::set_meta(&tx, "ready", "true").await?;
                 self.commit_control(&target, tx).await?;
-                self.wake.notify_one();
+                self.wake_actor(&target)?;
             }
             DeliveryOp::Release { target } => self.release_actor(&target).await?,
             DeliveryOp::Adopt { target } => {

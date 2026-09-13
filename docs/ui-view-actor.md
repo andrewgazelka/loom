@@ -60,12 +60,12 @@ subscribed tables and delivers them as ONE inbox message per subscriber per comm
      the producing actor handled, or null>, "rows":[{change_id, change_type, table,
      id, before, after, updates}, ...]}
 
-`cause` uses only the immediately handled delta's `key`, never its `cause`.
-A view's tree delta therefore carries the source's message key as `cause`;
-correlation does not chain beyond source -> view -> browser.
-
-Frames are keyed `delta:<source>:<seq>:<subscriber>`, so redelivery is a no-op like every
-other send. The first message after subscribing is `{"type":"snapshot", ...rows}`
+keyed `delta:<source>:<seq>:<subscriber>`, so redelivery is a no-op like every
+other send. A frame also carries `cause`: the `key` of the delta message the
+producing actor was handling, or null. A view's `tree` deltas therefore carry the
+source's message key as `cause`, and a browser reconciles its optimistic row on
+`cause` (one hop away) or `key` (direct subscriber). Causes do not chain further:
+two hops is the designed depth (source -> view -> browser). The first message after subscribing is `{"type":"snapshot", ...rows}`
 for the table (built from `SELECT *`, tagged with the `change_id` it is current
 as of). A subscriber that falls behind the CDC floor (its `after_change_id` was
 compacted) gets `{"type":"resnapshot"}` and a fresh snapshot: fail closed, never a
@@ -138,19 +138,17 @@ as ES modules and unit-tested under `bun test` with the DOM shim the existing
   position; update => patch the existing node from `old tree -> new tree` (a per-row
   patch of two small JSON trees: attributes set/removed, text replaced, keyed
   children matched by `key`, unkeyed element children by tag in document order,
-  text nodes by position; only unmatched nodes are created or removed).
-  Ordering is a second pass after removals. The node holding `document.activeElement`
-  (or an ancestor of it) is never moved: its neighbours move around it with
-  `insertBefore`. This also applies to row ordering. Delete => remove.
-  A node is never replaced while its key lives, so
+  text by position; only unmatched nodes are created or removed; ordering is a
+  second pass after removals, and the node that holds focus is never moved,
+  because a DOM move blurs: its neighbours move around it); delete => remove. A node is never replaced while its key lives, so
   focus, caret, scroll and in-flight transitions survive every update and every
   promote.
 - events: `attrs` whose name starts with `on` are wired to `opts.onEvent(key, name,
   payload)`; the shell turns them into `send(cap, msg)` with a client-generated
   message key.
 - optimistic rows: the shell may call `bind.pending(key, tree, messageKey)`; the node
-  renders with `data-pending`. The first `delta` whose frame `cause` or `key` equals
-  `messageKey` clears it; a `dead_letter` frame for that key reverts to the last
+  renders with `data-pending`. The first `delta` whose frame `cause` or `key`
+  equals `messageKey` clears it; a `dead_letter` frame for that key reverts to the last
   authoritative tree and surfaces the trap text. No merge logic exists: the source
   actor is the single writer and the delta is the verdict.
 

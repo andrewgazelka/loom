@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Loom: the DOM as a view of an actor</title>
+<style>
+  :root { color-scheme: light dark; --bg:#111214; --panel:#191b1f; --line:#2a2d33; --fg:#e6e6e6; --dim:#8a8f98; --bad:#3a1f22; --good:#1e3326; --accent:#4c8dff; }
+  @media (prefers-color-scheme: light) { :root { --bg:#f6f7f9; --panel:#fff; --line:#dfe2e7; --fg:#16181c; --dim:#6b7280; --bad:#fde8e8; --good:#e3f5e8; } }
+  * { box-sizing:border-box }
+  body { margin:0; background:var(--bg); color:var(--fg); font:13px/1.45 Inter, system-ui, sans-serif; }
+  header { padding:10px 14px; border-bottom:1px solid var(--line); display:flex; gap:16px; align-items:baseline }
+  header h1 { font-size:14px; margin:0; font-weight:600 }
+  header span { color:var(--dim) }
+  main { display:grid; grid-template-columns: 1.1fr 1fr 1fr; height:calc(100vh - 41px); }
+  section { border-right:1px solid var(--line); display:flex; flex-direction:column; min-width:0 }
+  section:last-child { border-right:0 }
+  h2 { font-size:12px; font-weight:600; margin:0; padding:8px 12px; border-bottom:1px solid var(--line); color:var(--dim); text-transform:uppercase; letter-spacing:.04em }
+  .body { padding:10px 12px; overflow:auto; flex:1 }
+  .row { display:flex; gap:8px; align-items:center; padding:4px 6px; border:1px solid var(--line); border-radius:6px; margin-bottom:4px; background:var(--panel) }
+  .row[data-pending] { opacity:.55; border-style:dashed }
+  .row .k { color:var(--dim); width:64px; font-family:ui-monospace, JetBrains Mono, monospace; font-size:11px }
+  .row input { flex:1; background:transparent; border:1px solid var(--line); border-radius:4px; color:var(--fg); padding:2px 6px; font:inherit }
+  .row .n { width:40px; text-align:right; font-variant-numeric:tabular-nums }
+  .row button, .bar button { background:var(--panel); border:1px solid var(--line); color:var(--fg); border-radius:4px; padding:2px 8px; font:inherit; cursor:pointer }
+  .bar button.primary { border-color:var(--accent); color:var(--accent) }
+  .bar { display:flex; gap:6px; padding:8px 12px; border-bottom:1px solid var(--line); flex-wrap:wrap; align-items:center }
+  .bar label { color:var(--dim) }
+  table { border-collapse:collapse; width:100%; font-family:ui-monospace, JetBrains Mono, monospace; font-size:11px }
+  td, th { text-align:left; padding:2px 6px; border-bottom:1px solid var(--line); vertical-align:top; white-space:nowrap }
+  th { color:var(--dim); font-weight:500 }
+  td.trunc { max-width:260px; overflow:hidden; text-overflow:ellipsis }
+  .log div { padding:2px 0; border-bottom:1px dashed var(--line); font-family:ui-monospace, JetBrains Mono, monospace; font-size:11px; white-space:pre-wrap }
+  .log .dom { background:var(--good) }
+  .log .trap { background:var(--bad) }
+  .note { color:var(--dim); padding:8px 12px; border-bottom:1px solid var(--line) }
+  code { font-family:ui-monospace, JetBrains Mono, monospace; font-size:11px }
+  .v2 .row { border-left:3px solid var(--accent) }
+  button { -webkit-user-select:none; user-select:none }
+  .v2 .row .k { display:none }
+</style>
+</head>
+<body>
+<header><h1>Loom UI model, simulated in one file</h1><span>left: what the browser renders (keyed DOM nodes, never replaced). middle: the actor's tables and its <code>turso_cdc</code> log. right: every step, in order.</span></header>
+<main>
+  <section>
+    <h2>Browser: view <code>tree</code> bound to the DOM</h2>
+    <div class="bar">
+      <button class="primary" id="add">send add</button>
+      <button id="bump">send bump(random)</button>
+      <button id="trap">send bad (traps)</button>
+      <button id="promote">promote template v2</button>
+      <button id="revert">promote template v1</button>
+      <label>identity check: type in any box, then click buttons; focus and caret stay.</label>
+    </div>
+    <div class="note">Each row below is one <code>tree</code> row of the view actor, keyed by <code>items.id</code>. Updates patch attributes and text on the existing element. A dashed row is optimistic (pending); it turns solid when the delta carrying its message key arrives, or reverts on a dead letter.</div>
+    <div class="body" id="dom"></div>
+  </section>
+  <section>
+    <h2>Actor <code>items</code> (single writer) and its CDC log</h2>
+    <div class="note">Domain table <code>items(id, label, n)</code>; every DML statement appends to <code>turso_cdc</code> inside the same transaction. The view subscribes to <code>items</code>, renders each changed row with the template definition, and writes <code>tree(key, sort, tree)</code>; the browser subscribes to <code>tree</code>.</div>
+    <div class="body">
+      <table id="items"><thead><tr><th>id</th><th>label</th><th>n</th></tr></thead><tbody></tbody></table>
+      <br>
+      <table id="cdc"><thead><tr><th>change_id</th><th>txn</th><th>type</th><th>table</th><th>id</th><th>after</th></tr></thead><tbody></tbody></table>
+    </div>
+  </section>
+  <section>
+    <h2>Event log</h2>
+    <div class="note">inbox message &rarr; one transaction &rarr; CDC rows &rarr; delta frame to subscribers (carrying the message key) &rarr; view renders &rarr; <code>tree</code> delta (carrying that key as <code>cause</code>) &rarr; DOM patch. Green lines are DOM mutations; red is a trap (rollback + dead letter).</div>
+    <div class="body log" id="log"></div>
+  </section>
+</main>
+<script type="module">
+// ---------- a tiny actor runtime: one writer, one transaction per message, CDC ----------
+const log = (cls, text) => { const d = document.createElement('div'); if (cls) d.className = cls; d.textContent = text; const el = document.getElementById('log'); el.prepend(d); };
+function makeActor(name, tables) {
+  return { name, seq: 0, tables, cdc: [], change_id: 0, txn: 0, subscribers: [],
+    // one message = one transaction; a thrown error rolls back everything, including the CDC rows
+    handle(msg, body) {
+      const snapshot = JSON.stringify(this.tables), cdcLen = this.cdc.length, cid = this.change_id;
+      this.seq += 1; this.txn += 1; const seq = this.seq;
+      try { body(this.ctx()); }
+      catch (e) { this.tables = JSON.parse(snapshot); this.cdc.length = cdcLen; this.change_id = cid; log('trap', `${name} seq ${seq}: TRAP ${e.message}; rolled back; dead_letters += {seq:${seq}, key:${msg.key}}`); return { trap: e.message, seq, key: msg.key }; }
+      const rows = this.cdc.filter(r => r.change_txn_id === this.txn);
+      log('', `${name} seq ${seq} COMMIT (key ${msg.key}): ${rows.length} turso_cdc row(s)`);
+      for (const s of this.subscribers) s({ type: 'delta', source: name, seq, key: msg.key, cause: msg.cause ?? null, rows });
+      return { ok: true, seq, key: msg.key };
+    },
+    ctx() { const a = this; return {
+      sql: { insert(t, row) { a.tables[t].push({ ...row }); a.log(t, 'insert', row.id, null, row); },
+             update(t, id, patch) { const r = a.tables[t].find(x => x.id === id); if (!r) throw new Error(`no ${t} row ${id}`); const before = { ...r }; Object.assign(r, patch); a.log(t, 'update', id, before, r); },
+             delete(t, id) { const i = a.tables[t].findIndex(x => x.id === id); if (i < 0) throw new Error(`no ${t} row ${id}`); const [before] = a.tables[t].splice(i, 1); a.log(t, 'delete', id, before, null); } } }; },
+    log(table, type, id, before, after) { this.change_id += 1; this.cdc.push({ change_id: this.change_id, change_txn_id: this.txn, change_type: type, table_name: table, id, before, after: after && { ...after } }); },
+    subscribe(fn, table) { this.subscribers.push(fn); fn({ type: 'snapshot', source: name, table, rows: this.tables[table].map(r => ({ ...r })) }); }
+  };
+}
+
+// ---------- the source actor and the view actor (ephemeral) ----------
+const items = makeActor('items-actor', { items: [] });
+let nextId = 1, msgKey = 0;
+const templates = {
+  v1: row => ({ tag: 'div', attrs: { class: 'row' }, children: [
+    { tag: 'span', attrs: { class: 'k' }, children: [`items/${row.id}`] },
+    { tag: 'input', attrs: { value: row.label, onInput: 'rename' } },
+    { tag: 'span', attrs: { class: 'n' }, children: [String(row.n)] },
+    { tag: 'button', attrs: { onClick: 'bump' }, children: ['+1'] },
+    { tag: 'button', attrs: { onClick: 'delete' }, children: ['x'] } ] }),
+  v2: row => ({ tag: 'div', attrs: { class: 'row', title: `n=${row.n}` }, children: [
+    { tag: 'input', attrs: { value: row.label, onInput: 'rename', placeholder: 'label' } },
+    { tag: 'span', attrs: { class: 'n' }, children: [`${row.n} pts`] },
+    { tag: 'button', attrs: { onClick: 'bump' }, children: ['bump'] },
+    { tag: 'button', attrs: { onClick: 'delete' }, children: ['remove'] } ] })
+};
+const view = makeActor('view-actor (ephemeral)', { tree: [] });
+view.template = 'v1';
+view.render = row => ({ id: row.id, sort: row.id, tree: templates[view.template](row) });
+items.subscribe(frame => {
+  // a delta message carries the source's message key; the view forwards it as `cause` so a browser can match its own optimistic row
+  view.handle({ key: `delta:items:${frame.seq ?? 'snap'}:view`, cause: frame.key ?? null }, cx => {
+    const rows = frame.type === 'snapshot' ? frame.rows.map(r => ({ change_type: 'insert', id: r.id, after: r })) : frame.rows;
+    for (const r of rows) {
+      const exists = view.tables.tree.some(t => t.id === r.id);
+      if (r.change_type === 'delete') cx.sql.delete('tree', r.id);
+      else if (exists) cx.sql.update('tree', r.id, view.render(r.after));
+      else cx.sql.insert('tree', view.render(r.after));
+    }
+  });
+}, 'items');
+function promote(t) { view.template = t; log('', `view-actor: promote template ${t} (code_changes += 1); re-render every tree row in ONE transaction`);
+  view.handle({ key: `control:promote:${t}` }, cx => { for (const row of items.tables.items) cx.sql.update('tree', row.id, view.render(row)); });
+  document.getElementById('dom').classList.toggle('v2', t === 'v2'); }
+
+// ---------- browser: keyed DOM binding, per-row patch, never replaces a live node ----------
+const container = document.getElementById('dom');
+const bound = new Map(); // key -> { node, tree, pendingKey }
+function build(tree) { if (typeof tree === 'string') return document.createTextNode(tree); const el = document.createElement(tree.tag); for (const [k, v] of Object.entries(tree.attrs ?? {})) setAttr(el, k, v); for (const c of tree.children ?? []) el.appendChild(build(c)); return el; }
+function setAttr(el, k, v) { if (k.startsWith('on')) { el[k.toLowerCase()] = ev => onEvent(el.closest('[data-key]').dataset.key, v, ev); return; } if (k === 'value') { if (el.value !== v && document.activeElement !== el) el.value = v; return; } if (el.getAttribute(k) !== v) { el.setAttribute(k, v); log('dom', `  set ${el.tagName.toLowerCase()}[${k}]="${v}"`); } }
+function patch(el, oldT, newT) {
+  if (typeof newT === 'string') { if (el.nodeType !== 3) return replace(el, newT); if (el.data !== newT) { el.data = newT; log('dom', `  text "${oldT}" -> "${newT}"`); } return el; }
+  if (typeof oldT === 'string' || el.nodeType !== 1 || el.tagName.toLowerCase() !== newT.tag) return replace(el, newT);
+  for (const k of Object.keys(oldT.attrs ?? {})) if (!(k in (newT.attrs ?? {}))) { el.removeAttribute(k); log('dom', `  remove ${el.tagName.toLowerCase()}[${k}]`); }
+  for (const [k, v] of Object.entries(newT.attrs ?? {})) setAttr(el, k, v);
+  // children: match by `key` when present, else by tag in order, else (text) by position; a matched node is moved, never rebuilt
+  const oc = oldT.children ?? [], nc = newT.children ?? [];
+  const oldNodes = [...el.childNodes].map((node, i) => ({ node, tree: oc[i], used: false }));
+  const isTag = (t, tag) => typeof t === 'object' && t.tag === tag;
+  const placed = [];
+  for (const nt of nc) {
+    let m = null;
+    if (typeof nt === 'object' && nt.key != null) m = oldNodes.find(o => !o.used && typeof o.tree === 'object' && o.tree.key === nt.key);
+    else if (typeof nt === 'object') m = oldNodes.find(o => !o.used && isTag(o.tree, nt.tag) && o.tree.key == null);
+    else m = oldNodes.find(o => !o.used && typeof o.tree === 'string');
+    let node;
+    if (m) { m.used = true; node = patch(m.node, m.tree, nt); }
+    else { node = build(nt); log('dom', `  create ${typeof nt === 'string' ? 'text' : nt.tag}`); }
+    placed.push(node);
+  }
+  for (const o of oldNodes) if (!o.used && o.node.parentNode === el) { o.node.remove(); log('dom', `  remove ${o.node.nodeName.toLowerCase()}`); }
+  // ordering pass, after removals: a DOM move blurs, so the node holding focus never moves; whatever sits in its way moves behind it
+  placed.forEach((node, i) => {
+    while (el.childNodes[i] !== node) {
+      const at = el.childNodes[i];
+      if (node.parentNode !== el) { el.insertBefore(node, at ?? null); break; }
+      if (node.contains(document.activeElement)) { el.insertBefore(at, node.nextSibling); log('dom', `  move ${at.nodeName.toLowerCase()} behind the focused ${node.nodeName.toLowerCase()}`); }
+      else { el.insertBefore(node, at); log('dom', `  move ${node.nodeName.toLowerCase()} to position ${i}`); }
+    }
+  });
+  return el;
+}
+function replace(el, t) { const n = build(t); el.replaceWith(n); log('dom', `  REPLACE node (tag changed at the same key) -> the only path that loses identity`); return n; }
+function upsert(row, pendingKey) {
+  const key = String(row.id);
+  const entry = bound.get(key);
+  if (entry) { patch(entry.node, entry.tree, row.tree); entry.tree = row.tree; if (pendingKey) entry.pendingKey = pendingKey; log('dom', `dom: patched key ${key} in place (same Element object: ${entry.node === container.querySelector(`[data-key="${key}"]`)})`); }
+  else { const node = build(row.tree); node.dataset.key = key; const after = [...container.children].find(c => Number(c.dataset.key) > row.sort); container.insertBefore(node, after ?? null); bound.set(key, { node, tree: row.tree, pendingKey }); log('dom', `dom: inserted key ${key} before ${after ? after.dataset.key : 'end'}`); }
+  if (pendingKey) bound.get(key).node.setAttribute('data-pending', pendingKey);
+}
+view.subscribe(frame => {
+  if (frame.type === 'snapshot') { for (const r of frame.rows) upsert(r); return; }
+  for (const r of frame.rows) {
+    if (r.change_type === 'delete') { const e = bound.get(String(r.id)); if (e) { e.node.remove(); bound.delete(String(r.id)); log('dom', `dom: removed key ${r.id}`); } continue; }
+    upsert(r.after);
+    const e = bound.get(String(r.id)); if (e?.pendingKey && (frame.cause === e.pendingKey || frame.key === e.pendingKey)) { e.node.removeAttribute('data-pending'); e.pendingKey = null; log('dom', `dom: key ${r.id} pending cleared by delta with cause ${frame.cause}`); }
+  }
+}, 'tree');
+
+// ---------- input: DOM events become messages to the single writer; optimistic first ----------
+function send(kind, id, patchFn, optimistic) {
+  const key = `browser:${++msgKey}`;
+  if (optimistic) { const row = items.tables.items.find(r => r.id === id); if (row) { const guess = { ...row, ...optimistic }; upsert(view.render(guess), key); log('', `browser: optimistic ${kind} on ${id} (pending key ${key})`); } }
+  log('', `browser -> items-actor: send(cap, {${kind}, id:${id ?? '-'}}) key ${key}`);
+  const r = items.handle({ key }, patchFn);
+  if (r.trap) { const e = bound.get(String(id)); if (e?.pendingKey === key) { const auth = view.tables.tree.find(t => t.id === id); if (auth) upsert(auth); e.node.removeAttribute('data-pending'); e.pendingKey = null; log('dom', `dom: key ${id} reverted to authoritative tree after dead letter ${key}`); } }
+}
+function onEvent(key, name, ev) { const id = Number(key);
+  if (name === 'bump') send('bump', id, cx => cx.sql.update('items', id, { n: items.tables.items.find(r => r.id === id).n + 1 }), { n: items.tables.items.find(r => r.id === id).n + 1 });
+  if (name === 'delete') send('delete', id, cx => cx.sql.delete('items', id));
+  if (name === 'rename') send('rename', id, cx => cx.sql.update('items', id, { label: ev.target.value }), { label: ev.target.value });
+}
+document.getElementById('add').onclick = () => { const id = nextId++; send('add', id, cx => cx.sql.insert('items', { id, label: `item ${id}`, n: 0 })); };
+document.getElementById('bump').onclick = () => { const rows = items.tables.items; if (!rows.length) return; const id = rows[Math.floor(Math.random() * rows.length)].id; onEvent(String(id), 'bump'); };
+document.getElementById('trap').onclick = () => send('bad', 999, cx => cx.sql.update('items', 999, { n: 1 }));
+document.getElementById('promote').onclick = () => promote('v2');
+document.getElementById('revert').onclick = () => promote('v1');
+
+// ---------- mirrors of the actor tables for the middle pane ----------
+function renderTables() {
+  const tb = document.querySelector('#items tbody'); tb.replaceChildren(...items.tables.items.map(r => { const tr = document.createElement('tr'); tr.innerHTML = `<td>${r.id}</td><td>${r.label}</td><td>${r.n}</td>`; return tr; }));
+  const cb = document.querySelector('#cdc tbody'); cb.replaceChildren(...items.cdc.slice(-14).reverse().map(r => { const tr = document.createElement('tr'); tr.innerHTML = `<td>${r.change_id}</td><td>${r.change_txn_id}</td><td>${r.change_type}</td><td>${r.table_name}</td><td>${r.id}</td><td class="trunc">${r.after ? JSON.stringify(r.after) : ''}</td>`; return tr; }));
+}
+new MutationObserver(renderTables).observe(container, { subtree: true, childList: true, attributes: true, characterData: true });
+document.addEventListener('mousedown', ev => { if (ev.target.closest('button')) ev.preventDefault(); }); // buttons never take focus: the identity claim is about the binding, not about clicking
+for (let i = 0; i < 3; i++) document.getElementById('add').click();
+renderTables();
+log('', 'ready. The middle pane is a debug mirror and rebuilds itself; the LEFT pane never rebuilds: watch the green lines.');
+</script>
+</body>
+</html>

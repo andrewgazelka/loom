@@ -138,6 +138,7 @@ pub(crate) async fn stop(
     let reason = if reason == "kill" { "killed" } else { reason };
     actor::stop_state(&tx, id, reason, key, initiator).await?;
     node.commit_control(id, tx).await?;
+    node.close_drivers(Some(id), None).await?;
     Ok(())
 }
 

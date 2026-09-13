@@ -127,6 +127,7 @@ impl Node {
         let tx = conn.transaction().await?;
         tx.execute("UPDATE timers SET armed=1 WHERE ref=? AND kind='message'", [request.timer_ref]).await?;
         self.commit_control(sender, tx).await?;
+        self.request_timer_scan()?;
         Ok(true)
     }
 
@@ -174,6 +175,7 @@ impl Node {
         let tx = conn.transaction().await?;
         tx.execute("UPDATE timers SET armed=1 WHERE ref=? AND kind='call'", [request.reference]).await?;
         self.commit_control(sender, tx).await?;
+        self.request_timer_scan()?;
         Ok(())
     }
 
@@ -234,7 +236,8 @@ impl Node {
         self.commit_control(caller, tx).await?;
         drop(conn);
         self.demonitor(caller, reference, &target).await?;
-        self.wake.notify_one();
+        self.request_timer_scan()?;
+        self.wake_actor(caller)?;
         Ok(true)
     }
 
@@ -252,12 +255,24 @@ impl Node {
 
     pub(crate) async fn fire_timers(&self) -> Result<TimerProgress> {
         let mut progress = TimerProgress { progressed: self.fire_shutdowns().await?, next_deadline: None };
+        // Cached shutdown deadlines remain visible even while a handler owns its connection.
+        for timer in self.shutdown_deadlines.lock().await.values() {
+            progress.next_deadline = Some(progress.next_deadline.map_or(timer.deadline, |old| old.min(timer.deadline)));
+        }
         for id in self.actor_ids()? {
             let source = self.open_actor(&id).await?;
             let timers = {
-                let Ok(conn) = source.conn.try_lock() else {
-                    continue;
+                let conn = match source.conn.try_lock() {
+                    Ok(conn) => conn,
+                    Err(_) => {
+                        if self.tasks.lock().await.contains_key(&id) {
+                            self.scheduling()?.timer_deferred.insert(id.clone());
+                            continue;
+                        }
+                        source.conn.lock().await
+                    }
                 };
+                self.scheduling()?.timer_deferred.remove(&id);
                 if actor::status(&conn).await? == Status::Fork
                     || !actor::query(&conn, "SELECT value FROM meta WHERE key='replay_source'", ()).await?.rows.is_empty()
                 {
@@ -292,6 +307,12 @@ impl Node {
                     }
                     timers.push(timer);
                 }
+                let mut state = self.scheduling()?;
+                if let Some(first) = timers.first() {
+                    state.timer_deadlines.insert(id.clone(), first.deadline);
+                } else {
+                    state.timer_deadlines.remove(&id);
+                }
                 timers
             };
             for timer in timers {
@@ -308,6 +329,9 @@ impl Node {
                             actor::enqueue(&tx, actor::cursor(&tx).await?, &timer.target, &timer.msg).await?;
                         }
                         self.commit_control(&id, tx).await?;
+                        if removed != 0 {
+                            self.wake_actor(&id)?;
+                        }
                         progress.progressed |= removed != 0;
                     }
                     "call" => {

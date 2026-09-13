@@ -113,7 +113,7 @@ impl Node {
             }
         }
         self.commit_control(target, tx).await?;
-        self.wake.notify_one();
+        self.wake_actor(target)?;
         Ok(true)
     }
 }

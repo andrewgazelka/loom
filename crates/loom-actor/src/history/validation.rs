@@ -177,6 +177,8 @@ impl Node {
         )
         .await?;
         self.snapshot_schema_change(&conn, id, &schema).await?;
+        self.scheduling()?.index_dirty.insert(id.into());
+        self.wake_actor(id)?;
         drop(conn);
         self.sync_index(id).await?;
         Ok(report)

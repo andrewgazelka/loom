@@ -74,7 +74,7 @@ impl Node {
             conn.execute("INSERT OR IGNORE INTO dead_letters(seq,msg,error,at) VALUES (?,?,?,?)", values).await?;
         }
         let conn = std::sync::Arc::new(tokio::sync::Mutex::new(conn));
-        Ok(Actor { id: fork_id, conn, managed: self.remote.is_some() })
+        Ok(Actor { id: fork_id, conn, managed: self.remote.is_some(), node: self.clone() })
     }
 
     pub(crate) async fn replay(
@@ -109,7 +109,11 @@ impl Node {
             let row = rows.rows.first().with_context(|| format!("actor {id} seq {seq}: history inbox has a gap"))?;
             ensure!(row.get::<String>(2)? != "done", "actor {id} seq {seq}: history commits a message twice");
             let sender: String = row.get(1)?;
-            let message = actor::Message { seq, msg: row.get(0)?, sender: if sender.starts_with("a0") { Some(sender) } else { None } };
+            let message = actor::Message {
+                seq,
+                msg: row.get(0)?,
+                sender: if sender.starts_with("a0") || sender.starts_with("drv:") { Some(sender) } else { None },
+            };
             if !matches!(mode, ReplayMode::Candidate) {
                 let skipped = actor::query(source, "SELECT value FROM meta WHERE key=?", [format!("skipped:{}", message.seq)]).await?;
                 let revision: i64 = actor::meta(source, &format!("code_at:{}", message.seq)).await?.parse()?;

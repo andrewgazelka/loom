@@ -260,7 +260,8 @@ impl Node {
             .map_err(|error| environmental(error.into()))?;
         let revoked = actor::query(conn, "SELECT cap_id FROM revoked WHERE cap_id=?", [cap.cap_id as i64]).await.map_err(environmental)?;
         let result = (|| {
-            ensure!(target == cap.target, "target identity mismatch");
+            let authority = if cap.target.starts_with("drv:") { crate::drivers::target(&cap.target)?.owner } else { &cap.target };
+            ensure!(target == authority, "target identity mismatch");
             ensure!(epoch == cap.epoch, "revoked epoch");
             ensure!(revoked.rows.is_empty(), "revoked capability");
             Ok(())
@@ -274,15 +275,22 @@ impl Node {
     }
     pub(crate) async fn verify_cap(&self, cap: &Cap, right: Rights, operation: &str) -> Result<(), EffectError> {
         self.verify_cap_mac(cap, right, operation)?;
-        if let crate::Placement::Remote { addr, .. } = self.resolve(&cap.target).await.map_err(EffectError::Environmental)? {
-            self.remote_authority(
-                &addr,
-                crate::DeliveryOp::Authority { target: cap.target.clone(), cap: cap.clone(), right, operation: operation.into() },
-            )
-            .await?;
-            return Ok(());
-        }
-        let reader = self.capability_reader(&cap.target).await.map_err(|error| match error {
+        // Drivers are node-local resources owned by an actor: authority is the owner's file, never a
+        // placement question.
+        let authority = if cap.target.starts_with("drv:") {
+            crate::drivers::target(&cap.target).map_err(EffectError::Deterministic)?.owner
+        } else {
+            if let crate::Placement::Remote { addr, .. } = self.resolve(&cap.target).await.map_err(EffectError::Environmental)? {
+                self.remote_authority(
+                    &addr,
+                    crate::DeliveryOp::Authority { target: cap.target.clone(), cap: cap.clone(), right, operation: operation.into() },
+                )
+                .await?;
+                return Ok(());
+            }
+            &cap.target
+        };
+        let reader = self.capability_reader(authority).await.map_err(|error| match error {
             EffectError::Environmental(error) => EffectError::Environmental(error.context(format!("{operation} cap_id {}", cap.cap_id))),
             EffectError::Deterministic(error) => EffectError::Deterministic(error.context(format!("{operation} cap_id {}", cap.cap_id))),
         })?;
@@ -321,12 +329,17 @@ impl Node {
     }
     pub(crate) async fn revoke_cap(&self, cap: &Cap) -> Result<(), EffectError> {
         self.verify_cap_mac(cap, Rights::NONE, "revoke")?;
-        let actor = self.open_actor(&cap.target).await.map_err(EffectError::Environmental)?;
+        let authority = if cap.target.starts_with("drv:") {
+            crate::drivers::target(&cap.target).map_err(EffectError::Deterministic)?.owner
+        } else {
+            &cap.target
+        };
+        let actor = self.open_actor(authority).await.map_err(EffectError::Environmental)?;
         let mut conn = actor.conn.lock().await;
         let tx = conn.transaction().await.map_err(|error| EffectError::Environmental(error.into()))?;
         tx.execute("INSERT OR IGNORE INTO revoked(cap_id) VALUES (?)", [cap.cap_id as i64])
             .await
             .map_err(|error| EffectError::Environmental(error.into()))?;
-        self.commit_control(&cap.target, tx).await.map_err(EffectError::Environmental)
+        self.commit_control(authority, tx).await.map_err(EffectError::Environmental)
     }
 }

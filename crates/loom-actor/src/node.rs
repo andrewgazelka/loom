@@ -13,6 +13,8 @@ use turso::Connection;
 pub struct Node {
     pub(crate) dir: PathBuf,
     pub(crate) registry: Arc<dyn Registry>,
+    pub(crate) drivers: Arc<crate::drivers::Drivers>,
+    pub(crate) driver_lifetime: Option<Arc<crate::drivers::DriverLifetime>>,
     pub(crate) effects: Arc<dyn EffectHandler>,
     pub(crate) config: Config,
     root_id: ActorId,
@@ -26,6 +28,7 @@ pub struct Node {
     pub(crate) memory_snapshots: Arc<Mutex<HashMap<String, crate::history::MemorySnapshot>>>,
     // Socket close removes its sender and subscribers through Node::close_stream.
     pub(crate) streams: Arc<Mutex<HashMap<String, tokio::sync::mpsc::UnboundedSender<Vec<u8>>>>>,
+    pub(crate) scheduling: Arc<std::sync::Mutex<crate::scheduler::Scheduling>>,
     pub(crate) wake: Arc<tokio::sync::Notify>,
     pub(crate) shutdown_deadlines: Arc<Mutex<HashMap<String, crate::messaging::ShutdownTimer>>>,
     pub(crate) connections: Arc<Mutex<HashMap<ActorId, Arc<Mutex<Connection>>>>>,
@@ -34,6 +37,7 @@ pub struct Node {
     pub(crate) run_gate: Arc<Mutex<()>>,
     pub(crate) send_outcomes: crate::send_outcome::Outcomes,
     pub(crate) tasks: Arc<Mutex<HashMap<ActorId, Arc<tokio::sync::Notify>>>>,
+    pub(crate) indexed: Arc<Mutex<HashMap<ActorId, crate::directory::IndexedState>>>,
     pub(crate) names: Arc<Mutex<Option<Connection>>>,
 }
 
@@ -59,6 +63,9 @@ impl Node {
         let _admission = self.admit().await?;
         self.pump_inner(id).await.with_context(|| format!("actor {} seq {}: pump", id, -1))
     }
+    /// Drain all deliverable outbox rows, runnable messages and due timers via
+    /// actor-specific wakes. Deferred/parked messages require their lifecycle wake;
+    /// future armed timers are awaited, preserving the drain contract.
     pub async fn run_until_idle(&self) -> Result<usize> {
         let _admission = self.admit().await?;
         let _run = self.run_gate.lock().await;
@@ -106,6 +113,8 @@ impl Node {
             None => None,
         };
         let mut node = Self {
+            drivers: Arc::new(crate::drivers::Drivers::default()),
+            driver_lifetime: None,
             capability_key,
             cluster,
             remote,
@@ -115,6 +124,7 @@ impl Node {
             memory_ids: Arc::new(std::sync::Mutex::new(Vec::new())),
             memory_snapshots: Arc::new(Mutex::new(HashMap::new())),
             streams: Default::default(),
+            scheduling: Default::default(),
             wake: Arc::new(tokio::sync::Notify::new()),
             shutdown_deadlines: Arc::new(Mutex::new(HashMap::new())),
             dir: std::fs::canonicalize(dir.as_ref()).context("actor <node> seq -1: canonicalize directory")?,
@@ -126,10 +136,12 @@ impl Node {
             run_gate: Arc::new(Mutex::new(())),
             send_outcomes: Default::default(),
             admission: Arc::new(tokio::sync::RwLock::new(())),
+            indexed: Default::default(),
             names: Arc::new(Mutex::new(names)),
             tasks: Arc::new(Mutex::new(HashMap::new())),
         };
         node.renew_node().await?;
+        node.driver_lifetime = Some(Arc::new(crate::drivers::DriverLifetime(node.drivers.clone())));
         node.start_shipper();
         for id in node.actor_ids()? {
             if matches!(node.resolve(&id).await?, crate::Placement::Remote { .. }) {
@@ -166,6 +178,20 @@ impl Node {
         }
         node.forget_missing_index().await?;
         node.prune_subscribers().await?;
+        // Recovery is the only roster scan: persisted work enters the same wake set.
+        for id in node.actor_ids()? {
+            node.scheduling()?.index_dirty.insert(id.clone());
+            node.wake_actor(&id)?;
+            let owner = node.open_actor(&id).await?;
+            let conn = owner.conn.lock().await;
+            for row in actor::query(&conn, "SELECT child FROM shutdowns", ()).await?.rows {
+                let mut state = node.scheduling()?;
+                state.shutdown_requesters.entry(row.get::<String>(0)?).or_default().insert(id.clone());
+                state.shutdown_dirty.insert(id.clone());
+            }
+        }
+        node.request_timer_scan()?;
+        node.sync_index(&node.root_id).await?;
         Ok(node)
     }
 
@@ -189,7 +215,7 @@ impl Node {
         let cached = self.connections.lock().await.get(id).cloned();
         if let Some(conn) = cached {
             if self.is_memory(id)? {
-                return Ok(Actor { id: id.into(), conn, managed: self.remote.is_some() });
+                return Ok(Actor { id: id.into(), conn, managed: self.remote.is_some(), node: self.clone() });
             }
             if let Err(error) = self.check_lease(id) {
                 if error.downcast_ref::<crate::remote_store::LeaseLost>().is_none() {
@@ -225,7 +251,7 @@ impl Node {
                     *slot = actor::connect(&self.path(id), self.config.io).await?;
                 }
             }
-            return Ok(Actor { id: id.into(), conn, managed: self.remote.is_some() });
+            return Ok(Actor { id: id.into(), conn, managed: self.remote.is_some(), node: self.clone() });
         }
         crate::reset::recover(&self.path(id))?;
         if !self.path(id).exists()
@@ -242,8 +268,8 @@ impl Node {
         self.initialize_durability(id, &conn).await?;
         let conn = Arc::new(Mutex::new(conn));
         self.connections.lock().await.insert(id.into(), conn.clone());
-        self.wake.notify_one();
-        Ok(Actor { id: id.into(), conn, managed: self.remote.is_some() })
+        self.wake_actor(id)?;
+        Ok(Actor { id: id.into(), conn, managed: self.remote.is_some(), node: self.clone() })
     }
 
     pub(crate) async fn create(&self, id: &str, parent: &str, hash: &str, msg: &[u8], durability: crate::Durability) -> Result<Actor> {
@@ -273,6 +299,8 @@ impl Node {
         }
         self.initialize_durability(id, &conn).await?;
         drop(conn);
+        self.scheduling()?.index_dirty.insert(id.into());
+        self.wake_actor(id)?;
         Ok(actor)
     }
 
@@ -376,7 +404,7 @@ impl Node {
         self.commit_control(parent, tx).await?;
         drop(conn);
         self.pump_unlocked(parent).await?;
-        self.wake.notify_one();
+        self.wake_actor(&id)?;
         Ok(id)
     }
 }

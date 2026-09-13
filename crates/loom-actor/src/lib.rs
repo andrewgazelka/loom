@@ -29,6 +29,8 @@ pub use ingress_transport::{IngressRequest, IngressResponse};
 pub use relation_delivery::RelationshipWrite;
 pub mod builtin;
 mod directory;
+pub mod drivers;
+pub use drivers::{Driver, DriverAck, DriverContext, DriverDelivery};
 mod durability;
 mod durability_open;
 mod durability_worker;
@@ -83,6 +85,10 @@ pub trait Registry: Send + Sync {
     async fn behaviors(&self) -> Result<Vec<builtin::BehaviorInfo>>;
     async fn template(&self, reference: &str) -> Result<Arc<dyn Template>> {
         anyhow::bail!("template {reference}: registry does not resolve templates")
+    }
+    /// Native resource code is a separate namespace from actor behaviors.
+    async fn resolve_driver(&self, hash: &str) -> Result<Arc<dyn Driver>> {
+        anyhow::bail!("unknown driver hash {hash}")
     }
 }
 
@@ -344,3 +350,7 @@ extern crate self as loom_actor;
 #[cfg(test)]
 #[path = "../tests/registry.rs"]
 mod test_registry;
+
+#[cfg(test)]
+#[path = "../tests/scheduler.rs"]
+mod scheduler_tests;

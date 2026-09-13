@@ -73,6 +73,8 @@ impl Node {
             RelationshipWrite::RegisterMonitor { watcher: watcher.into(), reference: reference.into() },
         )
         .await?;
+        // The DOWN for an already-stopped target sits in the target's outbox: its pump must run.
+        self.wake_actor(target)?;
         Ok(())
     }
 
@@ -152,7 +154,7 @@ impl Node {
                 self.commit_control(target, tx).await?;
             }
         }
-        self.wake.notify_one();
+        self.wake_actor(target)?;
         Ok(())
     }
 

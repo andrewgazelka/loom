@@ -26,7 +26,9 @@ impl Node {
         if self.remote.is_none() {
             return;
         }
-        let node = self.clone(); // No Background in this clone: its owner can drop.
+        let mut node = self.clone();
+        node.driver_lifetime = None; // The shipper cannot keep resource workers alive.
+        // No Background in this clone: its owner can drop.
         let stop = Arc::new(tokio::sync::Notify::new());
         let signal = stop.clone();
         let task = tokio::spawn(async move {
@@ -157,6 +159,7 @@ impl Node {
             self.shipping.closed.store(true, Ordering::Release);
             self.wake.notify_waiters();
         }
+        self.close_drivers(None, None).await?;
         if let Some(background) = &self.background {
             background.stop.notify_one();
             let task = background.task.lock().map_err(|_| anyhow::anyhow!("shipper task mutex poisoned"))?.take();
