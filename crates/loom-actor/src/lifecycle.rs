@@ -81,6 +81,7 @@ impl Node {
         // Names, groups and who_runs leave with the stop itself: a restart may follow in the same
         // delivery pass, before any scheduler turn could observe the stopped state.
         if stopped {
+            self.scheduling()?.index_dirty.insert(id.into());
             self.sync_index(id).await?;
         }
         self.sync_shutdowns(id).await
