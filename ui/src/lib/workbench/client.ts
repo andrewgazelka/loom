@@ -137,12 +137,21 @@ export function parseResult(command: Command, value: unknown): Json {
     rows(info.monitors, "info.monitors");
   } else if (op === V.validate) validation(value);
   else if (
-    [V.lineage, V.dead_letters, V.subscriptions, V.sql, V.behaviors].some(
-      (verb) => verb === op,
-    )
+    [
+      V.lineage,
+      V.dead_letters,
+      V.subscriptions,
+      V.sql,
+      V.behaviors,
+      V.nodes,
+    ].some((verb) => verb === op)
   )
     rows(value, op);
-  else if ([V.members, V.promote_where].some((verb) => verb === op))
+  else if (op === V.move) {
+    const moved = object(value, op);
+    string(moved.node_id, `${op}.node_id`);
+    integer(moved.epoch, `${op}.epoch`);
+  } else if ([V.members, V.promote_where].some((verb) => verb === op))
     array(value, op).forEach((value) => string(value, `${op}[]`));
   else if (op === V.whereis) nullableString(value, op);
   else if (op === V.send) {

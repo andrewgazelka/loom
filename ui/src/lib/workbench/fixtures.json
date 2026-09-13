@@ -335,6 +335,22 @@
       "schema_sql": ""
     }
   ],
+  "nodes": [
+    {
+      "node_id": "01K4Y0000000000000000000N1",
+      "addr": "127.0.0.1:8801",
+      "started_at": 1789152000000,
+      "expires_at": 1789152010000,
+      "live": true
+    },
+    {
+      "node_id": "01K4Y0000000000000000000N2",
+      "addr": "127.0.0.1:8802",
+      "started_at": 1789152000000,
+      "expires_at": 1789151000000,
+      "live": false
+    }
+  ],
   "subscriptions": [
     {
       "id": "a0ACTOR000000000000000000001:a0VIEW00000000000000000000002:3:0",
@@ -436,6 +452,10 @@
       "id": "a0-fork-40"
     },
     "registeredActor": "a0-counter",
+    "moved": {
+      "node_id": "01K4Y0000000000000000000N2",
+      "epoch": 3
+    },
     "registration": {
       "id": "a0-counter",
       "name": "counter"

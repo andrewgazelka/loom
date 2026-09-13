@@ -119,6 +119,8 @@ export class MockTransport implements Transport {
     if (op === V.lineage) return fixture.lineage;
     if (op === V.dead_letters) return fixture.dead_letters;
     if (op === V.subscriptions) return fixture.subscriptions;
+    if (op === V.nodes) return fixture.nodes;
+    if (op === V.move) return fixture.responses.moved;
     if (op === V.promote) return fixture.lineage[1];
     if (op === V.sql) {
       for (const table of ["inbox", "outbox", "effects"] as const)

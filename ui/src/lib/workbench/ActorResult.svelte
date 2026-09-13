@@ -139,7 +139,7 @@
     label="Supervision tree"
     rows={treeRows(actorTree(value))}
   />
-{:else if [V.actors, V.lineage, V.dead_letters, V.subscriptions, V.sql, V.behaviors].some((verb) => verb === operation)}<DataTable
+{:else if [V.actors, V.lineage, V.dead_letters, V.subscriptions, V.nodes, V.sql, V.behaviors].some((verb) => verb === operation)}<DataTable
     label={operation.replaceAll("_", " ")}
     rows={rows(value, operation)}
   />

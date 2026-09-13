@@ -28,6 +28,8 @@ const verbNames = [
   "behaviors",
   "promote_where",
   "drain",
+  "nodes",
+  "move",
 ] as const;
 export type Verb = (typeof verbNames)[number];
 export const V = Object.fromEntries(verbNames.map((name) => [name, name])) as {
@@ -43,7 +45,7 @@ export type Group = "Definitions" | "Actors";
 export interface Field {
   key: string;
   label: string;
-  kind?: "json" | "source" | "number";
+  kind?: "json" | "source" | "number" | "boolean";
   optional?: boolean;
   initial?: string;
   default?: string;
@@ -204,9 +206,32 @@ export const commands: Command[] = [
     [field("root", "Root actor id", { optional: true })],
     true,
   ),
-  actorCommand(V.actors, "Every actor in this node, including forks", [], true),
+  actorCommand(
+    V.actors,
+    "Every actor in this node, including forks; cluster lists every node's actors with their owner",
+    [
+      field("cluster", "Whole cluster", {
+        kind: "boolean",
+        optional: true,
+        options: ["true", "false"],
+      }),
+    ],
+    true,
+  ),
+  actorCommand(V.nodes, "Cluster nodes: id, address, liveness", [], true),
+  actorCommand(
+    V.move,
+    "Move an actor to another node (release on the owner, adopt on the target)",
+    [id, field("node_id", "Target node id")],
+    false,
+  ),
   actorCommand(V.info, "Lifecycle, cursor and relationships", [id], true),
-  actorCommand(V.subscriptions, "Subscribers and their CDC cursors", [id], true),
+  actorCommand(
+    V.subscriptions,
+    "Subscribers and their CDC cursors",
+    [id],
+    true,
+  ),
   actorCommand(
     V.lineage,
     "Behavior history and promotion rationale",
@@ -246,7 +271,10 @@ export const commands: Command[] = [
       }),
       field("parent", "Parent actor id", { optional: true }),
       field("spec", "Child spec JSON", { kind: "json", optional: true }),
-      field("durability", "Durability", { optional: true, options: ["local", "remote", "ephemeral"] }),
+      field("durability", "Durability", {
+        optional: true,
+        options: ["local", "remote", "ephemeral"],
+      }),
     ],
     false,
   ),
@@ -365,6 +393,11 @@ export function parseFields(
           `${field.label}: expected a nonnegative count at most 4294967295`,
         );
       result[field.key] = number;
+    } else if (field.kind === "boolean") {
+      const text = value.trim();
+      if (text !== "true" && text !== "false")
+        throw new Error(`${field.label}: expected true or false`);
+      result[field.key] = text === "true";
     } else result[field.key] = field.kind === "source" ? value : value.trim();
   }
   if (

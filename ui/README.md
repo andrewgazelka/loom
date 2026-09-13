@@ -1,7 +1,7 @@
 # Loom REPL UI
 
 A static SvelteKit workspace for Rust definitions and durable actors. Definitions
-and all 19 MCP actor operations use the HTTP contract in [API.md](API.md).
+and all 22 MCP actor operations use the HTTP contract in [API.md](API.md).
 
 ```sh
 bun install --frozen-lockfile
