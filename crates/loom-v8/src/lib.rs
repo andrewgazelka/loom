@@ -7,7 +7,7 @@ mod transpile;
 pub use transpile::{transpile_typescript, typescript_abi};
 
 /// Immutable guest contract and engine version used by definition identities.
-pub const ABI_VERSION: &str = "loom-v8/2/v8-152.2.0";
+pub const ABI_VERSION: &str = "loom-v8/3/v8-152.2.0";
 
 use anyhow::{Result, ensure};
 use loom_sandbox::{CallEffects, GuestFailure, Sandbox};

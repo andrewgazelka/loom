@@ -34,6 +34,11 @@ impl Store {
             .query_row("SELECT bytes FROM cas WHERE hash=?", [hash], |r| r.get(0))
             .optional()?
         {
+            let bytes: Vec<u8> = bytes;
+            ensure!(
+                blake3::hash(&bytes).to_hex().as_str() == hash,
+                "CAS content hash mismatch"
+            );
             return Ok(Some(bytes));
         }
         Ok(None)

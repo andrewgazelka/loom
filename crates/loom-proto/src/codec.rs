@@ -68,7 +68,13 @@ pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
     }
     let mut value = value;
     from_wire(&mut value)?;
-    ipld_core::serde::from_ipld(value).map_err(|error| error.to_string())
+    // IPLD dispatches every integer as i128. Serde's buffering visitor for
+    // internally tagged/untagged enums rejects i128 before the destination's
+    // u32/i64 visitor sees it. Our validated wire domain is JSON-safe already;
+    // normalize that typed boundary once so all Serde shapes receive supported
+    // integer widths, without changing canonical bytes or CID translation.
+    let value: Value = ipld_core::serde::from_ipld(value).map_err(|error| error.to_string())?;
+    serde_json::from_value(value).map_err(|error| error.to_string())
 }
 
 fn validate_number(value: &Ipld) -> Result<(), String> {

@@ -1,0 +1,9 @@
+# Loom Linux VM runner
+
+`loom-vm-runner --config /absolute/launch.json --library /absolute/libkrun.so` runs one Linux VM and exits with its guest process status. The host supplies a `loom_proto::VmLaunch`, a pinned libkrun 1.19 library and its runtime closure. Other host platforms fail explicitly.
+
+The actor driver owns confinement, KVM access, network denial, memory and CPU limits, a size-limited writable tmpfs, and the lifetime deadline. The runner copies the immutable image tree into that empty tmpfs without following image symlinks, checks the guest executable and working directory, then enters libkrun. The original image remains unchanged. Arguments in the public specification exclude `argv[0]`; environment comes only from the launch specification. The runner writes a new, reserved `/.loom-vm-launch.json` in the private copy and uses libkrun’s native JSON launch support. This preserves Unicode, quoting, empty arguments and large argument lists without placing them in the ASCII-only kernel command line. Existing image entries at that path are rejected.
+
+The C ABI follows the pinned `libkrun.h`. CString owners, the fully allocated 4096-slot environment pointer array required by libkrun 1.19, the context, and the loaded library remain alive throughout the call. A successful `krun_start_enter` exits the process; returning without an error is treated as a failure. Native FFI and KVM require real Linux hardware verification; rootfs preparation has independent Rust tests.
+
+The pinned backend includes fixes to JSON string decoding, object-key traversal, and workload environment installation. Guest `KRUN_*` environment names remain workload data and cannot override the configured executable or working directory. Focused upstream config controls run under ASan and UBSan; real KVM tests verify the runner and actor paths.

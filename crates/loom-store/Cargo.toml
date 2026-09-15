@@ -6,7 +6,7 @@ edition = "2024"
 loom-proto = { path = "../loom-proto" }
 anyhow = "1"
 blake3 = "1"
-rusqlite = { version = "0.32", features = ["bundled", "functions", "backup"] }
+rusqlite = { version = "0.32", features = ["bundled", "functions", "backup", "blob"] }
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 [dev-dependencies]

@@ -52,6 +52,22 @@
         if (typeof value !== 'string') throw new TypeError('Expected text');
         return value;
     };
+    const casReference = value => {
+        if (!value || typeof value !== 'object' || isArray(value)) throw new TypeError('Expected a CAS reference');
+        const keys = Object.keys(value);
+        if (keys.length !== 1 || keys[0] !== '$ref') throw new TypeError('CAS reference must contain only $ref');
+        const cid = text(value.$ref);
+        if (cid.length === 0) throw new TypeError('CAS reference must not be empty');
+        // CID parsing, codec checks and tenant-local lookup belong to the
+        // store. A copied reference never contains a host filesystem path.
+        return freeze({$ref: cid});
+    };
+    const cas = freeze({
+        put: freeze(async value => casReference(await perform('cas.put_bytes', {bytes: bytes(value)}))),
+        get: freeze(async reference => bytes(await perform('cas.get_bytes', {reference: casReference(reference)}))),
+        putJson: freeze(async value => casReference(await perform('cas.put', value))),
+        getJson: freeze(reference => perform('cas.get', {hash: casReference(reference).$ref})),
+    });
     const capability = value => bytes(isArray(value) ? value : value?.cap);
     const spawn = freeze(async spec => {
         if (!spec || typeof spec !== 'object' || isArray(spec)) throw new TypeError('Expected actor specification');
@@ -145,6 +161,55 @@
             // Docker connection, mounts and privileges belong to the host.
             // Native validation applies tenant policy and the final limits.
             const actor = await spawn({behavior: 'container-v1', init});
+            return processRef(actor.cap);
+        }),
+    });
+    const guestPath = value => {
+        const path = text(value);
+        if (!path.startsWith('/') || path.includes('\0')) throw new TypeError('Expected an absolute guest path');
+        return path;
+    };
+    const vms = freeze({
+        spawn: freeze(async spec => {
+            if (!spec || typeof spec !== 'object' || isArray(spec)) throw new TypeError('Expected VM specification');
+            const allowed = new Set(['image', 'command', 'args', 'env', 'cwd', 'limits', 'ttlMs', 'subscriber', 'network']);
+            for (const key of Object.keys(spec)) {
+                if (!allowed.has(key)) throw new TypeError(`Unknown VM option: ${key}`);
+            }
+            const vm = {image: casReference(spec.image), command: guestPath(spec.command)};
+            if (spec.cwd !== undefined) vm.cwd = guestPath(spec.cwd);
+            if (spec.network !== undefined) {
+                if (spec.network !== 'none') throw new TypeError('VM network must be none');
+                vm.network = spec.network;
+            }
+            if (spec.args !== undefined) {
+                if (!isArray(spec.args)) throw new TypeError('VM args must be an array of strings');
+                vm.args = spec.args.map(text);
+            }
+            if (spec.env !== undefined) {
+                if (!spec.env || typeof spec.env !== 'object' || isArray(spec.env)) throw new TypeError('VM env must be a string map');
+                vm.env = Object.create(null);
+                for (const key of Object.keys(spec.env)) vm.env[key] = text(spec.env[key]);
+            }
+            if (spec.limits !== undefined) {
+                if (!spec.limits || typeof spec.limits !== 'object' || isArray(spec.limits)) throw new TypeError('Expected VM limits');
+                for (const key of Object.keys(spec.limits)) {
+                    const value = spec.limits[key];
+                    if ((key !== 'memoryMb' && key !== 'cpus' && key !== 'rootfsMb') || !Number.isSafeInteger(value) || value <= 0) {
+                        throw new TypeError(`Invalid VM limit: ${key}`);
+                    }
+                    vm[key] = value;
+                }
+            }
+            if (spec.ttlMs !== undefined) {
+                if (!Number.isSafeInteger(spec.ttlMs) || spec.ttlMs <= 0) throw new TypeError('VM ttlMs must be a positive safe integer');
+                vm.ttlMs = spec.ttlMs;
+            }
+            const init = {vm};
+            if (spec.subscriber !== undefined) init.subscriber = capability(spec.subscriber);
+            // The tenant store resolves the rootfs manifest. Runner binaries,
+            // host mounts and device access come only from host configuration.
+            const actor = await spawn({behavior: 'vm-v1', init});
             return processRef(actor.cap);
         }),
     });
@@ -256,8 +321,10 @@
             actors,
             processes,
             containers,
+            vms,
             websockets,
             messages,
+            cas,
             now: freeze(() => perform('now', null)),
             random: freeze(n => perform('random', {n})),
             sql,

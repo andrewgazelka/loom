@@ -2,6 +2,8 @@
 #![forbid(unsafe_code)]
 
 mod effects;
+mod store_effects;
+pub use store_effects::StoreEffects;
 mod template;
 mod wire;
 pub use template::LoomTemplate;

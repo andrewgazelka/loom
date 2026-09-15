@@ -1,3 +1,4 @@
+mod upload;
 use super::*;
 pub(crate) use crate::tenant::TenantService;
 
@@ -17,6 +18,7 @@ pub fn router(directory: impl Into<ServiceDirectory>, authorizer: Authorizer) ->
         .route("/v1/command", post(command))
         .route("/v1/ingress", post(ingress))
         .route("/v1/cas/{hash}", get(cas))
+        .route("/v1/cas", post(upload::upload))
         .route("/v1/events", get(events))
         .route("/v1/defs/{name}", get(definition))
         .route("/v1/graph/deps/{hash}", get(deps))

@@ -182,3 +182,27 @@ Darwin uses a deny-by-default Seatbelt profile. Bundling retains network access
 for admission-time imports; guest isolates execute the stored bundle without
 module fetching. Tool installation and package scripts are separate from module
 resolution: the native helper is pinned and lifecycle scripts are disabled.
+
+## Linux virtual machines
+
+Linux builds embed `LOOM_VM_RUNNER`, `LOOM_VM_LIBRARY`, `LOOM_VM_BWRAP` and
+`LOOM_VM_RUNTIME_ROOTS_FILE` in the daemon. The runner has a separate Cargo target
+graph so supplying its path to the daemon cannot create a build dependency
+cycle. `pkgs.libkrun` comes from the existing nixpkgs lock and includes its Linux
+kernel; guests supply a filesystem image rather than another kernel.
+
+Nix generates the exact transitive runner and libkrun closure as a newline-delimited
+path file. The host sandbox binds those package paths read-only, exposes `/dev/kvm`,
+disables host networking, and copies the
+admitted image into a private, size-limited `/guest` tmpfs. Native verification
+covered Linux boot, Unicode stdin/stdout, separate stderr, exit status, and a
+guest write failing with `ENOSPC` at the tmpfs limit. No macOS VM backend is
+configured by this package.
+
+`libkrun.nix` applies two local fixes to the nixpkgs-pinned release: exact JSON
+launch configuration (Unicode, arguments, environment and working directory)
+and accounting for the embedded kernel inside the requested RAM. Its build runs
+five parser controls with ASan/UBSan and two focused memory-layout regressions.
+When updating the nixpkgs lock, rebase these patches against that release and run
+the package checks plus the native VM gate before removing or changing either
+patch. Version and source hashes remain owned by nixpkgs.

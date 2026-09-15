@@ -376,3 +376,4 @@ mod test_registry;
 mod scheduler_tests;
 
 pub mod container_actor;
+pub mod vm_actor;

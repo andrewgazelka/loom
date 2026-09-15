@@ -1,3 +1,5 @@
+pub mod vm_images;
+pub use vm_images::StoreVmImages;
 pub mod actors;
 mod commands;
 mod definitions;

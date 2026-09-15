@@ -3,6 +3,7 @@ declare namespace Loom {
     type Bytes = readonly number[];
     type Json = null | boolean | number | string | readonly Json[] | {readonly [key: string]: Json};
     type Message = Json | {toJSON(): Json};
+    interface CasRef {readonly $ref: string}
     interface CapabilityRef {
         readonly cap: Bytes;
         toJSON(): Bytes;
@@ -49,6 +50,18 @@ declare namespace Loom {
         ttlMs?: number;
         subscriber?: CapabilityRef | Bytes;
     }
+    interface VmSpec {
+        /** A DAG-CBOR rootfs manifest in this tenant's CAS. */
+        image: CasRef;
+        command: string;
+        args?: readonly string[];
+        env?: Readonly<Record<string, string>>;
+        cwd?: string;
+        network?: 'none';
+        limits?: {memoryMb?: number; cpus?: number; rootfsMb?: number};
+        ttlMs?: number;
+        subscriber?: CapabilityRef | Bytes;
+    }
     interface WebSocketRef extends CapabilityRef {
         send(text: string): Promise<unknown>;
         sendBytes(bytes: Bytes): Promise<unknown>;
@@ -84,6 +97,10 @@ declare namespace Loom {
             /** Launches through the tenant's host-configured Docker connection. */
             spawn(spec: ContainerSpec): Promise<ProcessRef>;
         };
+        readonly vms: {
+            /** Command and cwd are absolute paths inside the guest rootfs. */
+            spawn(spec: VmSpec): Promise<ProcessRef>;
+        };
         readonly websockets: {
             get(cap: Bytes): WebSocketRef;
             sender(): Promise<WebSocketRef>;
@@ -93,6 +110,14 @@ declare namespace Loom {
             encode(value: unknown): number[];
             decode(bytes: Bytes): Json;
             json<T extends Json>(handler: (message: T) => unknown): (bytes: Bytes) => unknown;
+        };
+        readonly cas: {
+            /** RAW codec; host CAS_GUEST_MAX_BYTES limits guest blobs to 128 KiB. */
+            put(bytes: Bytes): Promise<CasRef>;
+            /** RAW codec; the same 128 KiB host limit applies to reads. */
+            get(reference: CasRef): Promise<Bytes>;
+            putJson(value: unknown): Promise<CasRef>;
+            getJson(reference: CasRef): Promise<Json>;
         };
         readonly sql: Sql;
         now(): Promise<number>;

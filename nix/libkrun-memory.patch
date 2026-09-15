@@ -1,0 +1,97 @@
+--- a/src/arch/src/x86_64/mod.rs
++++ b/src/arch/src/x86_64/mod.rs
+@@ -77,16 +77,23 @@
+ 
+                 let (ram_last_addr, mut regions) = if let Some(kernel_load_addr) = kernel_load_addr
+                 {
+-                    if size < (kernel_load_addr + kernel_size as u64) as usize {
+-                        panic!("Kernel doesn't fit in RAM");
+-                    }
+-
+-                    let ram_last_addr = kernel_load_addr + kernel_size as u64 + size as u64;
++                    let kernel_end = kernel_load_addr
++                        .checked_add(kernel_size as u64)
++                        .expect("Kernel address overflows RAM");
++                    let remaining = size
++                        .checked_sub(usize::try_from(kernel_end).expect("Kernel address exceeds host usize"))
++                        .expect("Kernel doesn't fit in RAM");
++                    assert!(remaining > 0, "Kernel leaves no RAM after its mapping");
++
++                    // The mmap-backed kernel belongs inside configured RAM,
++                    // just like the above-MMIO-gap path. Appending the full
++                    // requested size here silently grants extra guest memory.
++                    let ram_last_addr = size as u64;
+                     (
+                         ram_last_addr,
+                         vec![
+                             (GuestAddress(0), kernel_load_addr as usize),
+-                            (GuestAddress(kernel_load_addr + kernel_size as u64), size),
++                            (GuestAddress(kernel_end), remaining),
+                         ],
+                     )
+                 } else {
+@@ -374,7 +381,21 @@
+             GuestAddress(KERNEL_LOAD_ADDR + KERNEL_SIZE as u64),
+             regions[1].0
+         );
+-        assert_eq!(1usize << 29, regions[1].1);
++        assert_eq!((1usize << 29) - KERNEL_LOAD_ADDR as usize - KERNEL_SIZE, regions[1].1);
++    }
++
++    #[test]
++    fn embedded_kernel_stays_within_configured_ram() {
++        for size in [64usize << 20, 256usize << 20, MMIO_MEM_START as usize] {
++            let (info, regions) =
++                arch_memory_regions(size, Some(KERNEL_LOAD_ADDR), KERNEL_SIZE, 0, None);
++            assert_eq!(info.ram_last_addr, size as u64);
++            let anonymous_bytes: usize = regions.iter().map(|region| region.1).sum();
++            assert_eq!(anonymous_bytes + KERNEL_SIZE, size);
++            for region in regions {
++                assert!(region.0.raw_value() + region.1 as u64 <= size as u64);
++            }
++        }
+     }
+ 
+     #[test]
+--- a/src/vmm/src/builder.rs
++++ b/src/vmm/src/builder.rs
+@@ -1459,6 +1459,14 @@
+                 } else {
+                     return Err(StartMicrovmError::MissingKernelConfig);
+                 };
++            // Reject impossible kernel mappings before architecture layout code
++            // subtracts their prefix. The embedded kernel must fit below MMIO
++            // and within the configured total, including the minimum RAM case.
++            let below_gap = (mem_size as u64).min(arch::x86_64::layout::MMIO_MEM_START);
++            match kernel_guest_addr.checked_add(kernel_size as u64) {
++                Some(end) if end < below_gap => {}
++                _ => return Err(StartMicrovmError::KernelDoesNotFit(kernel_guest_addr, kernel_size)),
++            }
+             arch::arch_memory_regions(mem_size, Some(kernel_guest_addr), kernel_size, 0, None)
+         }
+         Payload::ExternalKernel(external_kernel) => arch::arch_memory_regions(
+@@ -2367,6 +2375,24 @@
+     }
+ 
+     #[test]
++    #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
++    fn embedded_kernel_outside_ram_returns_error() {
++        for guest_addr in [64u64 << 20, u64::MAX] {
++            let mut resources = VmResources::default();
++            resources.kernel_bundle = Some(KernelBundle {
++                host_addr: 0x1000,
++                guest_addr,
++                entry_addr: guest_addr,
++                size: 0x1000,
++            });
++            assert!(matches!(
++                create_guest_memory(64, &resources, &Payload::KernelMmap),
++                Err(StartMicrovmError::KernelDoesNotFit(..))
++            ));
++        }
++    }
++
++    #[test]
+     #[cfg(target_arch = "x86_64")]
+     fn test_create_vcpus_x86_64() {
+         let vcpu_count = 2;

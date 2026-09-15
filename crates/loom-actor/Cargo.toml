@@ -6,6 +6,8 @@ autotests = false
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+loom-proto = { path = "../loom-proto" }
+tempfile = "3"
 loom-process = { path = "../loom-process" }
 turso = "0.7.2"
 turso_core = "0.7.2"
@@ -24,7 +26,6 @@ reqwest = { version = "0.12", default-features = false, features = ["json"] }
 
 [dev-dependencies]
 loom-store = { path = "../loom-store" }
-tempfile = "3"
 axum = "0.8"
 tokio = { version = "1", features = ["net"] }
 
@@ -70,3 +71,7 @@ path = "tests/container_driver.rs"
 [[test]]
 name = "lifecycle_hooks"
 path = "tests/lifecycle_hooks.rs"
+
+[[test]]
+name = "vm_driver"
+path = "tests/vm_driver.rs"

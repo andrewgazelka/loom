@@ -3,6 +3,7 @@ name = "loom-api"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+tempfile = "3"
 loom-imports = { path = "../loom-imports" }
 loom-v8 = { path = "../loom-v8" }
 loom-behavior = { path = "../loom-behavior" }
@@ -28,5 +29,4 @@ loom-maintenance = { path = "../loom-maintenance" }
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
-tempfile = "3"
 tokio-tungstenite = "0.29"

@@ -36,34 +36,21 @@
   driver = import ./hash-rustc.nix {inherit pkgs lib toolchain;};
   v8 = import ./v8.nix {inherit pkgs lib;};
   deno = import ./deno.nix {inherit pkgs lib;};
+  libkrun = import ./libkrun.nix {inherit pkgs;};
   # One rustc invocation per Cargo unit, so a change in one crate rebuilds that
   # crate and its dependents, not the workspace. This is the host build: what it
   # compiles with is invisible to guests, which get ./toolchain.nix's `guest`
   # entry and the driver built from it. The gates (clippy, tests, audit) belong
   # to this repo's own checks, not to packaging: this workspace exists to
   # produce two binaries.
-  workspace = cargoUnit.buildWorkspace {
-    pname = "loom-host";
+  workspaceArgs = {
     src = rustSource;
     workspaceRoot = rustSource;
     cargoLock = ../Cargo.lock;
     rustToolchain = buildToolchain;
     cargoTargetNames = ["host"];
-    cargoTargets = [["-p" "loomd" "-p" "loom-cli" "--target" hostTarget]];
     profile = "release";
     nativeBuildInputs = [pkgs.pkg-config];
-    # V8's build script otherwise downloads its native archive and bindings.
-    # Scope these fixed-output inputs to V8 so updating them does not rebuild
-    # unrelated Cargo units.
-    packageBuildEnv = {
-      v8 = {
-        RUSTY_V8_ARCHIVE = v8.archive;
-        RUSTY_V8_SRC_BINDING_PATH = v8.bindings;
-      };
-      loom-imports.LOOM_DENO = lib.getExe deno;
-    } // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
-      loom-process.LOOM_BWRAP = lib.getExe pkgs.bubblewrap;
-    };
     policy = {
       # This workspace's rustc is the pinned STABLE compiler in ./toolchain.nix.
       # cargoUnit otherwise passes `-Zembed-metadata=no`, which a stable rustc
@@ -77,6 +64,39 @@
       cargoMachete.enable = false;
     };
   };
+  # The daemon embeds the helper path. Building that helper as an independent
+  # target graph avoids a daemon environment -> same workspace output cycle.
+  vmWorkspace = cargoUnit.buildWorkspace (workspaceArgs // {
+    pname = "loom-vm-runner";
+    cargoTargets = [["-p" "loom-vm-runner" "--target" hostTarget]];
+  });
+  vmRunner = withMainProgram "loom-vm-runner" vmWorkspace.targetSets.host.binaries.loom-vm-runner;
+  # The realized ELF/library dependency graph belongs to Nix. Give the daemon
+  # its generated path list instead of exposing the entire store or evaluating
+  # a build result to reconstruct this list during package evaluation.
+  vmRuntimeClosure = pkgs.closureInfo {rootPaths = [vmRunner libkrun];};
+  workspace = cargoUnit.buildWorkspace (workspaceArgs // {
+    pname = "loom-host";
+    cargoTargets = [["-p" "loomd" "-p" "loom-cli" "--target" hostTarget]];
+    # V8's build script otherwise downloads its native archive and bindings.
+    # Scope these fixed-output inputs to V8 so updating them does not rebuild
+    # unrelated Cargo units.
+    packageBuildEnv = {
+      v8 = {
+        RUSTY_V8_ARCHIVE = v8.archive;
+        RUSTY_V8_SRC_BINDING_PATH = v8.bindings;
+      };
+      loom-imports.LOOM_DENO = lib.getExe deno;
+    } // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+      loom-process.LOOM_BWRAP = lib.getExe pkgs.bubblewrap;
+      loomd = {
+        LOOM_VM_RUNNER = lib.getExe vmRunner;
+        LOOM_VM_LIBRARY = "${libkrun}/lib/libkrun.so";
+        LOOM_VM_BWRAP = lib.getExe pkgs.bubblewrap;
+        LOOM_VM_RUNTIME_ROOTS_FILE = "${vmRuntimeClosure}/store-paths";
+      };
+    };
+  });
   # `lib.getExe` needs a mainProgram; a unit derivation is named for its crate.
   withMainProgram = name: derivation:
     derivation.overrideAttrs (old: {
@@ -127,7 +147,8 @@
       shellcheck $out/bin/loomd
       runHook postInstall
     '';
-    passthru = {inherit host daemon cli toolchain buildToolchain driver sources workspace deno;};
+    passthru = {inherit host daemon cli toolchain buildToolchain driver sources workspace deno;}
+      // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {inherit vmRunner;};
     meta = {
       description = "Loom with the Rust guest toolchain";
       license = lib.licenses.mit;
@@ -162,4 +183,4 @@
 in {
   default = package;
   inherit host daemon cli toolchain buildToolchain driver sources repl deno;
-}
+} // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {inherit vmRunner;}

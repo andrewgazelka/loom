@@ -129,6 +129,23 @@ pub async fn open(
             drivers.push(Arc::new(driver));
             behaviors.push(Arc::new(loom_actor::container_actor::ContainerActor));
         }
+        if let Some(runner) = &args.vm_runner {
+            let vm_root = actors_dir.join("vms");
+            std::fs::create_dir_all(&vm_root)?;
+            let driver = loom_actor::drivers::vm::VmDriver::new(
+                service.runtime.process_supervisor(),
+                loom_actor::drivers::vm::VmConfig {
+                    runner: runner.clone(),
+                    library: args.vm_library.clone().context("VM library missing")?,
+                    bwrap: args.vm_bwrap.clone().context("VM bubblewrap missing")?,
+                    root: vm_root.canonicalize()?,
+                    runtime_roots: args.vm_runtime_root.clone(),
+                },
+                Arc::new(loom_api::StoreVmImages::new(service.store.clone())),
+            )?;
+            drivers.push(Arc::new(driver));
+            behaviors.push(Arc::new(loom_actor::vm_actor::VmActor));
+        }
         for preset in presets.iter().filter(|preset| preset.tenant == tenant) {
             let hash = process_hash(preset)?;
             drivers.push(Arc::new(loom_actor::drivers::process::ProcessDriver::new(
@@ -150,7 +167,10 @@ pub async fn open(
         let node = loom_actor::Node::new(
             actors_dir,
             service.actor_registry(),
-            Arc::new(loom_actor::DefaultEffects),
+            Arc::new(loom_behavior::StoreEffects::new(
+                service.store.clone(),
+                Arc::new(loom_actor::DefaultEffects),
+            )),
             tenant_config(&config, &tenant),
         )
         .await?;
@@ -280,7 +300,10 @@ mod tests {
         let node = loom_actor::Node::new(
             &path,
             service.actor_registry(),
-            Arc::new(loom_actor::DefaultEffects),
+            Arc::new(loom_behavior::StoreEffects::new(
+                service.store.clone(),
+                Arc::new(loom_actor::DefaultEffects),
+            )),
             Default::default(),
         )
         .await?;
@@ -306,7 +329,10 @@ mod tests {
         let reopened = loom_actor::Node::new(
             &path,
             service.actor_registry(),
-            Arc::new(loom_actor::DefaultEffects),
+            Arc::new(loom_behavior::StoreEffects::new(
+                service.store.clone(),
+                Arc::new(loom_actor::DefaultEffects),
+            )),
             Default::default(),
         )
         .await?;

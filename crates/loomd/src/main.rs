@@ -1,6 +1,8 @@
 mod cluster_worker;
 mod static_files;
 mod tenants;
+#[cfg(test)]
+mod vm_config_tests;
 use anyhow::{Context, ensure};
 use axum::serve::ListenerExt;
 use clap::Parser;
@@ -34,6 +36,15 @@ struct Args {
     /// Docker daemon endpoint; guests cannot override it.
     #[arg(long, requires = "docker_executable")]
     docker_host: Option<String>,
+    /// Trusted Linux VM runtime. Packaged builds provide an immutable closure.
+    #[arg(long, env = "LOOM_VM_RUNNER")]
+    vm_runner: Option<PathBuf>,
+    #[arg(long, env = "LOOM_VM_LIBRARY")]
+    vm_library: Option<PathBuf>,
+    #[arg(long, env = "LOOM_VM_BWRAP")]
+    vm_bwrap: Option<PathBuf>,
+    #[arg(long, env = "LOOM_VM_RUNTIME_ROOTS", value_delimiter = ':')]
+    vm_runtime_root: Vec<PathBuf>,
     #[arg(long, default_value = "127.0.0.1:8787")]
     bind: std::net::SocketAddr,
     #[arg(
@@ -65,7 +76,8 @@ struct Args {
     cluster_key_file: Option<PathBuf>,
 }
 async fn serve() -> anyhow::Result<()> {
-    let args = Args::parse();
+    let mut args = Args::parse();
+    args.vm_defaults()?;
     let config = args.actor_config().await?;
     let shutdown = Shutdown::new()?;
     let authorizer = if let Some(path) = &args.tokens_file {
@@ -122,6 +134,45 @@ async fn serve() -> anyhow::Result<()> {
 }
 
 impl Args {
+    fn vm_defaults(&mut self) -> anyhow::Result<()> {
+        self.vm_runner = self
+            .vm_runner
+            .take()
+            .or_else(|| option_env!("LOOM_VM_RUNNER").map(PathBuf::from));
+        self.vm_library = self
+            .vm_library
+            .take()
+            .or_else(|| option_env!("LOOM_VM_LIBRARY").map(PathBuf::from));
+        self.vm_bwrap = self
+            .vm_bwrap
+            .take()
+            .or_else(|| option_env!("LOOM_VM_BWRAP").map(PathBuf::from));
+        if self.vm_runtime_root.is_empty() {
+            if let Some(path) = option_env!("LOOM_VM_RUNTIME_ROOTS_FILE") {
+                // Nix supplies its transitive runtime closure after realization;
+                // reading the store-paths file avoids evaluating build outputs.
+                self.vm_runtime_root = std::fs::read_to_string(path)
+                    .context("read packaged VM runtime closure")?
+                    .lines()
+                    .map(PathBuf::from)
+                    .collect();
+            }
+        }
+        let configured = self.vm_runner.is_some()
+            || self.vm_library.is_some()
+            || self.vm_bwrap.is_some()
+            || !self.vm_runtime_root.is_empty();
+        ensure!(
+            !configured
+                || (self.vm_runner.is_some()
+                    && self.vm_library.is_some()
+                    && self.vm_bwrap.is_some()
+                    && !self.vm_runtime_root.is_empty()),
+            "Linux VMs require --vm-runner, --vm-library, --vm-bwrap and --vm-runtime-root"
+        );
+        Ok(())
+    }
+
     async fn actor_config(&self) -> anyhow::Result<loom_actor::Config> {
         let Some(store) = &self.store else {
             return Ok(loom_actor::Config::default());

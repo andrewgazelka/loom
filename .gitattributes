@@ -1,0 +1,2 @@
+# Unified diffs retain a space prefix on empty context lines.
+nix/*.patch whitespace=-blank-at-eol

@@ -40,6 +40,46 @@ Admission uses pinned Deno 2.9.6 and esbuild 0.25.5 to produce a browser-targete
 
 The default approved HTTPS origins are `deno.land`, `jsr.io`, `registry.npmjs.org`, `esm.sh`, `raw.esm.sh`, and `cdn.jsdelivr.net`, on port 443. The host can add origins with `Compiler::allow_import`. Imported code has the same Loom capabilities and runtime restrictions as the importing actor. Packages that require Node, Deno, filesystem, or ambient network APIs cannot use those APIs here; use Loom's actor, process, and WebSocket handles for host operations.
 
+## Backend upgrades
+
+Definition identities include the complete execution ABI. This release uses `loom-v8/3/v8-152.2.0`; TypeScript also records its compiler version. Both source-only definitions and bundled modules are checked against the current ABI before compilation. Older identities are rejected, including during historical replay.
+
+A running actor pinned to an older JS or TypeScript identity can prevent node and daemon startup. Opening that actor resolves its behavior before activation. Re-admitting its source creates a new definition hash; it does not change the actor's pinned hash. Rebinding a definition name also leaves existing actors unchanged.
+
+Before upgrading an existing store, this read-only query lists definitions whose recorded ABI differs from this release. Replace the database path with the tenant's store path:
+
+```sh
+sqlite3 -readonly /path/to/loom.sqlite <<'SQL'
+WITH scripts AS (
+  SELECT d.hash, d.lang,
+    CASE WHEN json_valid(CAST(c.bytes AS TEXT))
+      THEN json_extract(CAST(c.bytes AS TEXT), '$.backend') END AS backend
+  FROM defs AS d LEFT JOIN cas AS c ON c.hash = d.hash
+  WHERE d.lang IN ('javascript', 'typescript')
+)
+SELECT hash, lang, coalesce(backend, 'MISSING_OR_INVALID') AS recorded_backend
+FROM scripts
+WHERE backend IS NULL OR backend != CASE lang
+  WHEN 'javascript' THEN 'loom-v8/3/v8-152.2.0'
+  WHEN 'typescript' THEN 'loom-v8/3/v8-152.2.0;deno_ast=0.53.3;typescript=1'
+END
+ORDER BY hash;
+SQL
+```
+
+The query inventories definition metadata; runtime loading still verifies content hashes, compiler artifacts, and execution policy. Listed historical definitions can remain archived. Running actors that reference them require an explicit upgrade plan.
+
+For a specific actor file, inspect its current status and pinned hash without starting the runtime:
+
+```sh
+sqlite3 -readonly /path/to/actors/ACTOR_ID.db "SELECT (SELECT value FROM meta WHERE key='status') AS status, behavior_hash FROM code_changes ORDER BY seq DESC LIMIT 1;"
+```
+
+A `running` actor whose hash appears in the incompatible-definition list can block startup. Snapshot files are historical copies; inspect the actor's `ACTOR_ID.db` file.
+
+
+There is currently no verified in-place migration command across these ABIs. The disposable POC uses a new store and actor directory, admits the sources again with `loom add`, and spawns new actors with their desired configuration. This creates new actor identities and resources. It does not migrate historical state. For an existing application, retain the original database and its matching binary until a checkpoint export and explicit state import have been implemented and verified. The new runtime never reinterprets old history under a rewritten hash.
+
 ## Actor lifecycle
 
 `loom.actor({onStart, onMessage, onStop})` creates a JSON message handler with optional host lifecycle hooks. `onMessage` is required. The host invokes `onStart` after schema setup and before ordinary initialization or inbox messages, once per activation. Fresh isolates for subsequent messages do not invoke it again. Graceful `Node.close()` invokes `onStop("node_shutdown")`; an abrupt host exit cannot run that hook. Reopening the node activates the actor and invokes `onStart` again.
@@ -101,6 +141,73 @@ await sandbox.closeStdin();
 `network` accepts `"none"` for offline execution or `"bridge"` for external API access, such as Claude. It defaults to `"bridge"`. Guests cannot select host or custom networks, configure the Docker socket, or supply mounts or privileges. The host's Docker connection determines where containers run.
 
 The container receives only its explicit `env` map, without inherited host environment variables. Loom removes containers on exit, cancellation, actor stop, or TTL expiry. The TTL watchdog runs in `loomd`; a container can continue running while the daemon is down. On startup, the daemon reconciles old containers by tenant and a durable random owner ID stored in that tenant's database.
+
+## Content-addressed storage
+
+`loom.cas` uses the current tenant's store. Its frozen references contain exactly `{$ref: CID}` and can pass through actor messages or be saved in SQL as JSON. Reads validate the CID, stored codec, and presence in that tenant.
+
+| Methods | Content |
+| --- | --- |
+| `put(bytes)` / `get(ref)` | Raw bytes; `put` returns a RAW-codec reference. |
+| `putJson(value)` / `getJson(ref)` | JSON values stored as DAG-CBOR; `putJson` returns a DAG-CBOR reference. |
+
+```javascript
+const raw = await loom.cas.put([0, 127, 255]);
+const document = await loom.cas.putJson({name: "sample", data: raw});
+// Save document in SQL or include it in an actor message.
+const saved = await loom.cas.getJson(document);
+const bytes = await loom.cas.get(saved.data);
+```
+
+Guest CAS operations use the host's `CAS_GUEST_MAX_BYTES` limit of 128 KiB. The host checks raw byte lengths and JSON encoding sizes; configured V8 message budgets can impose a smaller limit. Raw and JSON reads require the corresponding codec.
+
+For larger image files, the authenticated `POST /v1/cas` endpoint accepts `application/octet-stream` up to 512 MiB or `application/json` up to 16 MiB and requires `define` scope. Authentication chooses the destination tenant. The [rootfs importer](../../tools/import-vm-image.py) streams regular files, records directories and symlinks, and prints the resulting image reference:
+
+```sh
+# LOOM_TOKEN identifies the destination tenant and must have define scope.
+python3 tools/import-vm-image.py ./rootfs --url http://127.0.0.1:8787 > image.json
+```
+
+The image is a DAG-CBOR manifest with `format: "loom.vm.rootfs.v1"`, `arch: "x86_64"`, and `entries` keyed by relative guest paths. File entries contain RAW CAS references and modes. Imported files remain content-addressed; each VM receives its own writable rootfs.
+
+## Linux VMs
+
+`loom.vms.spawn(spec)` uses a tenant-local CAS image and returns the existing process handle. `image` and `command` are required. `command` and optional `cwd` are absolute paths inside the guest. `args` and `env` configure that guest process. Host runner paths, mounts, kernel devices, and tenant selection remain host configuration.
+
+Inside a handler with an image reference from the importer:
+
+```javascript
+const vm = await loom.vms.spawn({
+    image: message.image,
+    command: "/bin/sh",
+    args: ["-i"],
+    cwd: "/",
+    env: {PATH: "/bin"},
+    network: "none",
+    limits: {memoryMb: 256, cpus: 1, rootfsMb: 64},
+    ttlMs: 60000,
+    subscriber: await loom.actors.self(),
+});
+await vm.write("uname -a\n");
+```
+
+Output arrives through `process.output` messages. The handle also supports `closeStdin`, `subscribe`, and `cancel`; restore a saved capability with `loom.processes.get(cap)` between turns.
+
+| Option | Default | Accepted range |
+| --- | --- | --- |
+| `limits.memoryMb` | 512 MiB | 64–32768 MiB |
+| `limits.cpus` | 1 | 1–8 virtual CPUs |
+| `limits.rootfsMb` | 512 MiB | 16–32768 MiB |
+| `ttlMs` | 3600000 | 1–86400000 milliseconds |
+| `network` | `"none"` | `"none"` only |
+
+The backend uses libkrun on x86_64 Linux and requires read/write access to `/dev/kvm`. The host confines each runner with bubblewrap, including a private network namespace and a bounded writable rootfs. VM network egress is currently unavailable.
+
+The daemon requires `--vm-runner`, `--vm-library`, `--vm-bwrap`, and one or more `--vm-runtime-root` paths. These are trusted absolute host paths for the runner, libkrun library, bubblewrap executable, and runtime closure. The runner resolves ELF libraries only through `lib` and `lib64` directories in the declared runtime roots, in their declared order. Bubblewrap clears the host environment; Loom supplies this derived library search path, and applies the guest `env` separately inside the VM. An ambient host `LD_LIBRARY_PATH` is not used. Packaged x86_64 Linux builds supply their pinned defaults; custom builds must configure all four. Guest code cannot override them.
+
+VM exit, cancellation, actor stop, TTL expiry, or graceful host shutdown tears down the temporary VM. Its writable rootfs and process memory are discarded. Save the desired image and configuration in actor SQL; `onStart` can then create a fresh VM after restart. This resumes the durable workflow without restoring a VM memory snapshot.
+
+The [VM actor example](../../examples/vm-actor/main.ts) persists its image configuration, exchanges CAS references with another actor, records output, and cancels the current VM in `onStop`. The [native daemon smoke](../../tools/smoke-loomd-vm.py) uses that source to exercise Linux boot, console input/output, tenant isolation, resource limits, and fresh VM identity after restart.
 
 ## WebSockets
 

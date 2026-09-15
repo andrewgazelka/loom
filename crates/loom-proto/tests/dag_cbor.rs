@@ -263,3 +263,50 @@ fn encoder_depth_counts_reference_strings_and_enum_containers() {
     linked = Value::Array(vec![linked]);
     assert!(encode(&linked).is_err());
 }
+
+#[test]
+fn typed_tagged_untagged_and_flattened_values_decode_safe_integer_widths() {
+    #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+    #[serde(tag = "type", rename_all = "snake_case")]
+    enum Entry {
+        File {
+            mode: u32,
+            offset: i64,
+            reference: loom_proto::CasReference,
+        },
+    }
+    #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+    #[serde(untagged)]
+    enum Number {
+        Integer { value: i64 },
+        Float { value: f64 },
+    }
+    #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+    struct Flattened {
+        label: String,
+        #[serde(flatten)]
+        entry: Entry,
+    }
+    let entry = Entry::File {
+        mode: 493,
+        offset: -9_007_199_254_740_991,
+        reference: loom_proto::CasReference {
+            reference: cid_for_hash(&"ab".repeat(32), RAW_CODEC).unwrap(),
+        },
+    };
+    let value = Flattened {
+        label: "typed".into(),
+        entry,
+    };
+    let encoded = encode(&value).unwrap();
+    assert_eq!(decode::<Flattened>(&encoded).unwrap(), value);
+    for value in [
+        Number::Integer {
+            value: 9_007_199_254_740_991,
+        },
+        Number::Float { value: 1.5 },
+    ] {
+        assert_eq!(decode::<Number>(&encode(&value).unwrap()).unwrap(), value);
+    }
+    assert!(decode::<Entry>(&encode(&json!({"type":"file","mode":-1,"offset":0,"reference":reference(&"ab".repeat(32), RAW_CODEC).unwrap()})).unwrap()).is_err());
+}

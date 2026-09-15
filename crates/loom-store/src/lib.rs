@@ -1,3 +1,7 @@
+pub use rusqlite::Error as DatabaseError;
+mod files;
+mod guest_cas;
+pub use guest_cas::CAS_GUEST_MAX_BYTES;
 mod cas_browser;
 mod dag_migration;
 mod definitions;

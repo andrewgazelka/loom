@@ -144,6 +144,12 @@ pub async fn dispatch(
         return Err(Trap::new("effect op must not be empty"));
     }
     match op.as_str() {
+        "cas.put" | "cas.get" | "cas.put_bytes" | "cas.get_bytes" => {
+            let request =
+                serde_json::to_vec(&args).map_err(|error| Trap::new(error.to_string()))?;
+            let response = cx.effect(&op, &request).await?;
+            serde_json::from_slice(&response).map_err(|error| cx.runtime(error))
+        }
         "actor.resolve" => {
             let request: Resolve = parse(&op, args)?;
             wire::capability_value(cx.resolve_name(&request.name).await?)

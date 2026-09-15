@@ -177,13 +177,16 @@ impl RootHandler for Memo {
             let runtime = request.runtime;
             let op = effect_name(&request.desc)?;
             let args = request.desc.get("args").cloned().unwrap_or(Value::Null);
-            let hash = if matches!(op, "cas.get" | "cas.put" | "exec") {
+            let hash = if matches!(
+                op,
+                "cas.get" | "cas.put" | "cas.get_bytes" | "cas.put_bytes" | "exec"
+            ) {
                 blake3::hash(&encode(&request.desc)?).to_hex().to_string()
             } else {
                 String::new()
             };
             let class = match op {
-                "cas.get" | "cas.put" => "hermetic",
+                "cas.get" | "cas.put" | "cas.get_bytes" | "cas.put_bytes" => "hermetic",
                 "exec" if args.get("tree").and_then(Value::as_str).is_some() => "hermetic",
                 "exec" if args.get("key").and_then(Value::as_str).is_some() => "keyed",
                 _ => "observational",
@@ -246,18 +249,9 @@ impl RootHandler for Builtins {
                     (uuid::Uuid::new_v4().as_u128() as u64 & ((1u64 << 53) - 1)) as f64
                         / ((1u64 << 53) as f64)
                 ),
-                "cas.put" => {
-                    let hash = runtime.inner.store.put_value("blob", &args)?;
-                    runtime
-                        .inner
-                        .store
-                        .reference(&hash, loom_proto::DAG_CBOR_CODEC)?
+                "cas.put" | "cas.get" | "cas.put_bytes" | "cas.get_bytes" => {
+                    runtime.inner.store.guest_cas_effect(op, args)?
                 }
-                "cas.get" => runtime
-                    .inner
-                    .store
-                    .get_value(required_str(&args, "hash")?)?
-                    .context("CAS value not found")?,
                 "exec" if args.get("tree").is_some() => runtime.hermetic_exec(&args).await?,
                 "exec" => {
                     let program = required_str(&args, "program")?;

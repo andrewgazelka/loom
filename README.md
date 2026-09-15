@@ -61,6 +61,11 @@ The package includes `nightly-2026-08-24` and the prebuilt content-hashing rustc
 
 ## TypeScript and JavaScript actors
 
+This release changes the V8 execution ABI. Existing running JS or TypeScript
+actors admitted under an older ABI can prevent daemon startup; see
+[backend upgrade checks and limits](crates/loom-v8/README.md#backend-upgrades).
+The native POC uses fresh databases.
+
 TypeScript and JavaScript use the same durable actors, SQL transactions,
 capabilities, and message delivery as Rust. TypeScript is the default language
 for `add`. Save this as `counter.ts`:
@@ -161,6 +166,41 @@ Containers return the same process handles and output messages as process
 presets. Persist and restore their capabilities with `loom.processes.get(cap)`.
 See [temporary containers](crates/loom-v8/README.md#temporary-containers) for
 host configuration and lifetime.
+
+### CAS and Linux VMs
+
+`loom.cas.put(bytes)` stores raw bytes and returns a serializable `{$ref: CID}`.
+`loom.cas.get(ref)` reads them from the current tenant's store. Use
+`putJson(value)` and `getJson(ref)` for JSON documents. Guest CAS operations
+have a 128 KiB object limit; [the rootfs importer](tools/import-vm-image.py)
+streams larger files into the tenant's CAS.
+
+`loom.vms.spawn` boots a Linux rootfs manifest from CAS and returns the same
+process handle as containers. Inside an actor handler receiving `message.image`:
+
+```javascript
+const vm = await loom.vms.spawn({
+    image: message.image,
+    command: "/bin/sh",
+    args: ["-i"],
+    env: {PATH: "/bin"},
+    network: "none",
+    limits: {memoryMb: 256, cpus: 1, rootfsMb: 64},
+    ttlMs: 60000,
+    subscriber: await loom.actors.self(),
+});
+await vm.write("uname -a\n");
+```
+
+The backend requires x86_64 Linux with KVM. VM networking currently supports
+only `"none"`. Shutdown destroys the temporary VM and its writable rootfs;
+an actor's next `onStart` can boot a fresh VM from its saved image reference.
+SQL state resumes; VM memory snapshots are not restored. See the
+[VM actor example](examples/vm-actor/main.ts),
+[native smoke](tools/smoke-loomd-vm.py), and
+[CAS and VM setup](crates/loom-v8/README.md#linux-vms).
+
+### WebSockets and effects
 
 `await loom.websockets.listen()` attaches a native WebSocket listener driver
 to an actor. On `websocket.message`, use `await loom.websockets.sender()` to

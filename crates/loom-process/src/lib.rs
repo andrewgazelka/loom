@@ -87,6 +87,16 @@ impl ProcessSession {
         &self.id
     }
 
+    /// Observational host identity for resource lifecycle diagnostics. A PID is
+    /// never an authority to signal a process; cancellation uses the owned group.
+    pub fn host_pid(&self) -> Option<u32> {
+        *self
+            .group
+            .pid
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
+
     /// Split input ownership so writes and output draining can run concurrently.
     pub fn take_input(&mut self) -> Result<ProcessInput> {
         self.input.take().context("process input already taken")
