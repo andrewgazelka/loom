@@ -15,7 +15,7 @@ fn unsupported_store_language_is_rejected_before_migration() -> Result<()> {
         .err()
         .expect("unsupported store accepted");
     assert!(error.to_string().contains("store table defs"));
-    assert!(error.to_string().contains("only rust is supported"));
+    assert!(error.to_string().contains("supported languages are rust and javascript"));
     assert!(
         error.to_string().contains("offending-row"),
         "error should name the offending row: {error}"

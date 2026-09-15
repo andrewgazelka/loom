@@ -18,7 +18,7 @@ pub(super) fn validate(connection: &Connection) -> Result<()> {
     }
     let definition = connection
         .query_row(
-            "SELECT hash,lang FROM defs WHERE lang != 'rust' LIMIT 1",
+            "SELECT hash,lang FROM defs WHERE lang NOT IN ('rust', 'javascript') LIMIT 1",
             [],
             |row| {
                 Ok(UnsupportedDefinition {
@@ -30,7 +30,7 @@ pub(super) fn validate(connection: &Connection) -> Result<()> {
         .optional()?;
     if let Some(definition) = definition {
         bail!(
-            "unsupported guest language {:?} in store table defs row hash={:?}; only rust is supported; open a new Rust-only store",
+            "unsupported guest language {:?} in store table defs row hash={:?}; supported languages are rust and javascript",
             definition.language,
             definition.hash,
         );

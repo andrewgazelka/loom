@@ -1,6 +1,6 @@
 # Loom
 
-Loom is a Rust execution runtime. Ordinary Rust functions perform algebraic effects
+Loom executes Rust on WebAssembly and JavaScript in V8 isolates. Ordinary Rust functions perform algebraic effects
 (`loom::sleep`, filesystem reads, model calls) on WebAssembly fibers: a call suspends
 the fiber, a host handler does the work, the fiber resumes with the result, and
 signatures stay ordinary Rust throughout. Actors (`loom-actor`) add durable,
@@ -58,6 +58,59 @@ The script starts `nix run --builders '' .#repl -- --bind 127.0.0.1:8793` with a
 See [the guide's Try it section](docs/guide.md#try-it) for transport details and response shapes.
 
 The package includes `nightly-2026-08-24` and the prebuilt content-hashing rustc driver. Guest compilation uses those tools through the launcher’s `RUSTC` and `LOOM_HASH_RUSTC` settings.
+
+## JavaScript actors
+
+JavaScript uses the same durable actors, SQL transactions, capabilities, and
+message delivery as Rust. Save this as `counter.js`:
+
+```javascript
+const LOOM_SCHEMA = "CREATE TABLE increments(amount INTEGER)";
+
+const main = loom.messages.json(async message => {
+    await loom.sql("INSERT INTO increments VALUES (?)", [message.amount]);
+});
+```
+
+```sh
+loom add counter.js --lang javascript --name js-counter
+loom spawn js-counter
+ID='paste-actor-id'
+loom send "$ID" '{"amount":1}'
+loom info "$ID"
+```
+
+`loom.messages.json` decodes each message as UTF-8 JSON. A plain `main` receives
+an array of bytes. Each invocation starts with fresh JavaScript state; keep
+durable state in SQL. `LOOM_SCHEMA` runs when an actor is created or promoted.
+Ordinary functions can also use `loom run`; its JSON array supplies positional
+arguments to `main(...args)`.
+
+Pass capabilities in messages to connect actors. Inside a JSON handler:
+
+```javascript
+const peer = await loom.actors.accept(message.peer);
+await peer.send({type: "hello"});
+```
+
+`accept` verifies and saves the capability. Actor references encode messages
+as UTF-8 JSON and expose `send`, `call`, `reply`, timers, and `stop`.
+`loom.actors.spawn(spec)` returns a child reference; serializing a reference
+passes its capability token. Knowing an actor ID alone does not grant access.
+Calls return a request reference; replies arrive as later actor messages.
+
+`loom.sql(query, params)` accepts plain JavaScript values and returns an array
+of row objects. The raw `loom.perform("sql", ...)` contract uses tagged SQL
+cells. `loom.now` and `loom.random` use the recorded effect path.
+`await loom.perform(op, args)` exposes the complete
+[actor effect API](crates/loom-behavior/README.md#effect-wire-contract).
+Actor SQL and messaging require an actor transaction; a standalone `run` uses
+the runtime's host effects.
+
+Use `--allowed_effects '["sql","actor.send"]'` to restrict a definition's
+escaped effects. JavaScript effects are checked at execution because their
+names can be computed dynamically. Imports and definition dependencies are
+currently rejected. Rust remains the default language for `add`.
 
 ## Updating functions and callers
 

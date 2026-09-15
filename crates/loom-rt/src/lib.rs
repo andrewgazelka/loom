@@ -1,4 +1,6 @@
 mod call;
+mod sandbox;
+pub use sandbox::WasmSandbox;
 mod compilation_cache;
 pub use call::{CallEffects, GuestFailure};
 pub use compilation_cache::{CompilationCacheStats, LoomCompilationCache};
@@ -41,6 +43,8 @@ struct Inner {
     resolver: Option<Arc<dyn ComponentResolver>>,
     store: Store,
     core_engine: Engine,
+    v8_engine: Mutex<Option<Arc<loom_v8::V8Engine>>>,
+    javascript_programs: AsyncMutex<HashMap<String, Arc<loom_v8::V8Sandbox>>>,
     compilation_cache: Arc<LoomCompilationCache>,
     core_executor: futures::executor::ThreadPool,
     core_modules: Mutex<HashMap<String, wasmtime::Module>>,
@@ -191,6 +195,8 @@ impl Runtime {
                 resolver,
                 store,
                 core_engine,
+                v8_engine: Mutex::new(None),
+                javascript_programs: AsyncMutex::new(HashMap::new()),
                 compilation_cache,
                 core_executor: futures::executor::ThreadPoolBuilder::new()
                     .pool_size(8)

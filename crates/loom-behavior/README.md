@@ -1,6 +1,6 @@
 # Loom definitions as behaviors
 
-`StoreRegistry::new(store)` resolves stored Rust definitions by name or hash
+`StoreRegistry::new(store)` resolves stored Rust and JavaScript definitions by name or hash
 when an actor is spawned or promoted. Pass it in an `Arc` to
 `loom_actor::Node::new`. Definitions added to the same store become available
 without restarting the node; actors retain their resolved definition hash.
@@ -29,6 +29,37 @@ envelope containing SQL text. Behavior resolution invokes it in a pure execution
 an absent export means empty SQL. The actor runtime runs that SQL during
 creation and promotion. Schema extraction does not create a legacy actor or
 invoke `run`, `fold`, `spawn`, `send`, or `state` on `loom_rt::Runtime`.
+
+## JavaScript actors
+
+JavaScript definitions run in V8 isolates and share the same actor SQL,
+capability checks, transactional outbox, and rollback behavior as Rust guests.
+Use `loom.messages.json` to decode incoming JSON messages, including Unicode:
+
+```javascript
+const LOOM_SCHEMA = 'CREATE TABLE increments(amount INTEGER);';
+const main = loom.messages.json(async message => {
+  if (message.type === 'forward') {
+    const peer = await loom.actors.accept(message.peer);
+    await peer.send({type: 'increment', amount: 2});
+  } else if (message.type === 'increment') {
+    await loom.sql('INSERT INTO increments(amount) VALUES (?)', [message.amount]);
+  }
+});
+```
+
+A peer is a capability-bearing actor reference. `peer.send(value)` encodes JSON;
+`peer.toJSON()` returns frozen capability bytes for handing that reference to
+another actor, which must accept it before use. Throwing from the handler rolls
+back its SQL writes and pending sends together. A plain `main(messageBytes)`
+receives binary inbox messages; `peer.sendBytes(bytes)` sends them unchanged.
+The lower-level `loom.perform` descriptor API
+remains available for all actor operations listed below.
+
+`LoomBehavior::from_sandbox(hash, schema, Arc<dyn Sandbox>)` accepts another
+engine or a wrapper around an existing sandbox. The sandbox receives the same
+borrowed actor effect handler. `StoreRegistry::with_v8(store, engine)` shares a
+V8 engine across registries.
 
 ## View templates
 

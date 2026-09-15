@@ -18,7 +18,9 @@ impl Service {
     }
     pub(super) async fn define_inner(&self, request: DefineRequest) -> Result<Response> {
         let progress = self.build_progress.start(&request.name);
-        self.builder.preflight().await?;
+        if request.lang == Lang::Rust {
+            self.builder.preflight().await?;
+        }
         let mut intake = self.clone();
         intake.store = self.store.stage_intake()?;
         intake.builder = Arc::new(self.builder.for_store(intake.store.clone()));
@@ -29,7 +31,9 @@ impl Service {
     /// Compile one node directly into an already private update store.
     pub(super) async fn define_update_node(&self, request: DefineRequest) -> Result<Response> {
         let progress = self.build_progress.start(&request.name);
-        self.builder.preflight().await?;
+        if request.lang == Lang::Rust {
+            self.builder.preflight().await?;
+        }
         self.define_staged(request, None, &progress).await
     }
 
@@ -46,6 +50,9 @@ impl Service {
             request.lang.as_str()
         );
         ensure!(request.source.len() <= 16 * 1024 * 1024, "source too large");
+        if request.lang == Lang::JavaScript {
+            return self.define_javascript(request, destination, progress).await;
+        }
         if let Some(reference) = source_reference(&request.source) {
             let bundle = self
                 .store

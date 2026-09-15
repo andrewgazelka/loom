@@ -9,8 +9,10 @@ pub use template::LoomTemplate;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use loom_actor::{Behavior, Ctx, Registry, Trap};
-use loom_rt::{CallEffects, GuestFailure, Runtime};
+use loom_rt::{Runtime, WasmSandbox};
+use loom_sandbox::{CallEffects, GuestFailure, Sandbox};
 use loom_store::Store;
+use loom_v8::V8Engine;
 use serde_json::Value;
 use std::{future::Future, pin::Pin, sync::Arc};
 
@@ -18,11 +20,31 @@ use std::{future::Future, pin::Pin, sync::Arc};
 pub struct LoomBehavior {
     hash: String,
     schema: String,
-    runtime: Runtime,
+    sandbox: Arc<dyn Sandbox>,
+    allowed_effects: Option<Vec<String>>,
 }
 
 impl LoomBehavior {
     pub async fn new(store: Store, def_hash: &str) -> Result<Self> {
+        let runtime = Runtime::new(store.clone())?;
+        Self::load(store, def_hash, runtime, None).await
+    }
+
+    pub fn from_sandbox(hash: String, schema: String, sandbox: Arc<dyn Sandbox>) -> Self {
+        Self {
+            hash,
+            schema,
+            sandbox,
+            allowed_effects: None,
+        }
+    }
+
+    async fn load(
+        store: Store,
+        def_hash: &str,
+        runtime: Runtime,
+        v8: Option<Arc<V8Engine>>,
+    ) -> Result<Self> {
         let definition = store
             .executable_definition(def_hash)?
             .with_context(|| format!("definition {def_hash} not found"))?;
@@ -40,23 +62,40 @@ impl LoomBehavior {
         };
         anyhow::ensure!(
             entry.params.len() == 1
-                && matches!(
-                    &entry.params[0].shape,
-                    loom_proto::ValueShape::Array { items } if matches!(items.as_ref(), loom_proto::ValueShape::Number)
-                ),
+                && (definition.lang == loom_proto::Lang::JavaScript
+                    || matches!(
+                        &entry.params[0].shape,
+                        loom_proto::ValueShape::Array { items } if matches!(items.as_ref(), loom_proto::ValueShape::Number)
+                    )),
             "actor definition {def_hash}: entry {} must accept one byte-array message",
             entry.name
         );
-        let runtime = Runtime::new(store)?;
-        // The build exports the evaluated root LOOM_SCHEMA through loom_schema.
-        let schema = runtime
-            .definition_schema(def_hash)
-            .await
-            .with_context(|| format!("definition {def_hash}: LOOM_SCHEMA export"))?;
+        let sandbox: Arc<dyn Sandbox>;
+        let schema;
+        match definition.lang {
+            loom_proto::Lang::Rust => {
+                schema = runtime
+                    .definition_schema(def_hash)
+                    .await
+                    .with_context(|| format!("definition {def_hash}: LOOM_SCHEMA export"))?;
+                sandbox = Arc::new(WasmSandbox::new(runtime, def_hash.to_owned()));
+            }
+            loom_proto::Lang::JavaScript => {
+                let engine = match v8 {
+                    Some(engine) => engine,
+                    None => runtime.v8_engine()?,
+                };
+                let source = store.javascript_source(def_hash, loom_v8::ABI_VERSION)?;
+                let compiled = engine.compile(&source).await?;
+                schema = compiled.schema().to_owned();
+                sandbox = Arc::new(compiled);
+            }
+        }
         Ok(Self {
             hash: definition.hash,
             schema,
-            runtime,
+            sandbox,
+            allowed_effects: definition.allowed_effects,
         })
     }
 }
@@ -64,12 +103,21 @@ impl LoomBehavior {
 /// Resolves the current name binding on every lookup; actors pin the returned hash.
 pub struct StoreRegistry {
     store: Store,
+    v8: tokio::sync::OnceCell<Arc<V8Engine>>,
     resolved: tokio::sync::Mutex<std::collections::HashMap<String, Arc<dyn Behavior>>>,
 }
 impl StoreRegistry {
     pub fn new(store: Store) -> Self {
         Self {
             store,
+            v8: Default::default(),
+            resolved: Default::default(),
+        }
+    }
+    pub fn with_v8(store: Store, engine: Arc<V8Engine>) -> Self {
+        Self {
+            store,
+            v8: tokio::sync::OnceCell::new_with(Some(engine)),
             resolved: Default::default(),
         }
     }
@@ -89,8 +137,19 @@ impl Registry for StoreRegistry {
         if let Some(behavior) = resolved.get(&definition.hash) {
             return Ok(behavior.clone());
         }
+        let runtime = Runtime::new(self.store.clone())?;
+        let v8 = if definition.lang == loom_proto::Lang::JavaScript {
+            Some(
+                self.v8
+                    .get_or_try_init(|| async { runtime.v8_engine() })
+                    .await?
+                    .clone(),
+            )
+        } else {
+            None
+        };
         let behavior: Arc<dyn Behavior> = Arc::new(
-            LoomBehavior::new(self.store.clone(), &definition.hash)
+            LoomBehavior::load(self.store.clone(), &definition.hash, runtime, v8)
                 .await
                 .with_context(|| format!("actor definition {reference:?}"))?,
         );
@@ -126,12 +185,9 @@ impl Behavior for LoomBehavior {
         let mut effects = ActorEffects {
             cx,
             definition: &self.hash,
+            allowed_effects: self.allowed_effects.as_deref(),
         };
-        match self
-            .runtime
-            .call_with_effects(&self.hash, args, &mut effects)
-            .await
-        {
+        match self.sandbox.call(args, &mut effects).await {
             Ok(_) => Ok(()),
             Err(error) => match error.downcast::<Trap>() {
                 Ok(trap) => Err(trap),
@@ -149,6 +205,7 @@ impl Behavior for LoomBehavior {
 struct ActorEffects<'cx, 'db> {
     cx: &'cx mut Ctx<'db>,
     definition: &'cx str,
+    allowed_effects: Option<&'cx [String]>,
 }
 impl CallEffects for ActorEffects<'_, '_> {
     fn perform(
@@ -156,6 +213,19 @@ impl CallEffects for ActorEffects<'_, '_> {
         descriptor: Value,
     ) -> Pin<Box<dyn Future<Output = Result<Value>> + Send + '_>> {
         Box::pin(async move {
+            if let Some(allowed) = self.allowed_effects {
+                let op = descriptor
+                    .get("op")
+                    .and_then(Value::as_str)
+                    .unwrap_or("<missing op>");
+                anyhow::ensure!(
+                    allowed.iter().any(|effect| effect == op),
+                    Trap::new(format!(
+                        "effect {op} is not allowed for definition {}",
+                        self.definition
+                    ))
+                );
+            }
             effects::dispatch(self.cx, self.definition, descriptor)
                 .await
                 .map_err(anyhow::Error::new)

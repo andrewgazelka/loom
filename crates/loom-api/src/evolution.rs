@@ -57,7 +57,7 @@ struct Publication {
     names: Vec<String>,
     source: String,
     deps: BTreeMap<String, String>,
-    identity: loom_proto::BuildIdentity,
+    identity: Option<loom_proto::BuildIdentity>,
     event: Value,
 }
 
@@ -89,7 +89,7 @@ impl Service {
                     "update conflict: expected_hash does not match current name"
                 );
             }
-            let edit = self.resolve_edit(serde_json::from_value(json!({
+            let edit = self.resolve_edit(hash, serde_json::from_value(json!({
                 "source":field(args, "source")?, "deps":args.get("deps"),
                 "allowed_effects":args.get("allowed_effects")
             }))?)?;
@@ -233,7 +233,7 @@ impl Service {
                         .map(|failure| failure.hash.clone())
                 })
                 .with_context(|| format!("repair target {name:?} not in update snapshot"))?;
-            let mut edit = self.resolve_edit(edit)?;
+            let mut edit = self.resolve_edit(&hash, edit)?;
             if let Some(previous) = state.edits.get(&hash) {
                 if edit.deps.is_none() {
                     edit.deps = previous.deps.clone();
@@ -272,7 +272,12 @@ impl Service {
         self.update_result(session)
     }
 
-    fn resolve_edit(&self, mut edit: Edit) -> Result<Edit> {
+    fn resolve_edit(&self, hash: &str, mut edit: Edit) -> Result<Edit> {
+        let definition = self.store.resolve(hash)?.context("edited definition missing")?;
+        if definition.lang == Lang::JavaScript {
+            ensure!(edit.deps.as_ref().is_none_or(BTreeMap::is_empty), "JavaScript definitions do not support imports or dependencies");
+            ensure!(source_reference(&edit.source).is_none(), "JavaScript source must be inline; Rust source bundles are unsupported");
+        }
         if let Some(deps) = &mut edit.deps {
             for target in deps.values_mut() {
                 *target = self
@@ -448,7 +453,10 @@ impl Service {
                 definition: staged.store.resolve(&new_hash)?.context("built definition missing")?, names,
                 source: staged.store.source(&new_hash)?.context("built source missing")?,
                 deps: staged.store.definition_deps(&new_hash)?,
-                identity: staged.store.build_identity(&new_hash)?.context("built identity missing")?,
+                identity: match definition.lang {
+                    Lang::Rust => Some(staged.store.build_identity(&new_hash)?.context("built identity missing")?),
+                    Lang::JavaScript => None,
+                },
                 event: json!({"type":"component_built", "component_hash":response.result["build"]["component_hash"], "logs_ref":response.result["build"]["logs_ref"], "ms":response.result["build"]["ms"], "size":response.result["build"]["size"], "rustc_invocations":response.result["build"]["rustc_invocations"]}),
             });
         }
@@ -479,7 +487,7 @@ impl Service {
                     name,
                     source: &publication.source,
                     deps: &publication.deps,
-                    identity: Some(&publication.identity),
+                    identity: publication.identity.as_ref(),
                     build_event: &publication.event,
                 });
             }

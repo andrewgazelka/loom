@@ -8,6 +8,8 @@ autotests = false
 [dependencies]
 tokio = { version = "1", features = ["sync"] }
 loom-actor = { path = "../loom-actor" }
+loom-sandbox = { path = "../loom-sandbox" }
+loom-v8 = { path = "../loom-v8" }
 loom-rt = { path = "../loom-rt" }
 loom-store = { path = "../loom-store" }
 loom-proto = { path = "../loom-proto" }
@@ -30,3 +32,7 @@ path = "tests/fixture_builder.rs"
 [[test]]
 name = "behavior"
 path = "tests/behavior.rs"
+
+[[test]]
+name = "sandbox"
+path = "tests/sandbox.rs"

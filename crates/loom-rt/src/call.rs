@@ -1,28 +1,8 @@
 //! Call-local root effects. The caller owns effect lifetime and persistence.
 use super::{EffectContext, EffectOutput, Runtime, Value};
-use std::{future::Future, pin::Pin};
 use tokio::sync::{mpsc, oneshot};
 
-/// A guest failure is deterministic; all other runtime errors remain retryable.
-#[derive(Debug)]
-pub struct GuestFailure {
-    pub message: String,
-}
-
-impl GuestFailure {
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
-    }
-}
-
-impl std::fmt::Display for GuestFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-impl std::error::Error for GuestFailure {}
+pub use loom_sandbox::{CallEffects, GuestFailure};
 
 pub(super) fn wasm_error(error: wasmtime::Error) -> anyhow::Error {
     if error.is::<wasmtime::Trap>() {
@@ -30,15 +10,6 @@ pub(super) fn wasm_error(error: wasmtime::Error) -> anyhow::Error {
     } else {
         error.into()
     }
-}
-
-/// Root effects are serialized on the caller's borrowed context, including
-/// effects from guest scoped tasks. Returning an error aborts the entire call.
-pub trait CallEffects: Send {
-    fn perform(
-        &mut self,
-        descriptor: Value,
-    ) -> Pin<Box<dyn Future<Output = anyhow::Result<Value>> + Send + '_>>;
 }
 
 pub(super) struct Request {
@@ -50,6 +21,14 @@ impl Runtime {
     /// Read the optional pure `loom_schema` export without creating an actor.
     /// Registration validates the executable before publishing its hash.
     pub async fn definition_schema(&self, hash: &str) -> anyhow::Result<String> {
+        let definition = self
+            .inner
+            .store
+            .executable_definition(hash)?
+            .ok_or_else(|| anyhow::anyhow!("definition {hash} not found"))?;
+        if definition.lang == loom_proto::Lang::JavaScript {
+            return Ok(self.javascript_program(hash).await?.schema().to_owned());
+        }
         let call = self
             .core_execute(
                 hash,

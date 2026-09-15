@@ -69,6 +69,19 @@ Two things this workspace has to tell it:
 evaluation wherever `abort-on-warn` is set. Drop the `follows` once `index`
 pins a rust-overlay that reads `stdenv.hostPlatform.isLinux`.
 
+### V8 native inputs
+
+`v8.nix` supplies V8's native archive and matching generated Rust bindings as
+fixed-output inputs to the V8 Cargo unit. To update, change the exact dependency
+in `crates/loom-v8/Cargo.toml`, then run `python3 nix/update-v8.py` and review
+`v8-manifest.json`. The updater downloads and hashes both supported platforms;
+upstream publishes no signed release manifest.
+
+These are the official pointer-compressed release archives. V8 152.2.0 does
+not publish the additional memory-corruption sandbox variant. JavaScript's host
+API isolation remains Loom's responsibility; these archives do not enable V8's
+memory-corruption cage.
+
 ## Two toolchains, one in the runtime closure
 
 `toolchain.nix` reads `rust-toolchain-manifest.json` and assembles both pinned

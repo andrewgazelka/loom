@@ -92,6 +92,48 @@ impl Store {
             .map(|h| definition(&c, h)?.context("definition disappeared"))
             .collect()
     }
+    /// Load the immutable executable payload, independent of display-source
+    /// revisions. A changed engine ABI requires explicit re-admission; old
+    /// actors must never silently execute a new host contract under an old hash.
+    pub fn javascript_source(&self, hash: &str, backend_abi: &str) -> Result<String> {
+        let definition = self
+            .executable_definition(hash)?
+            .context("JavaScript definition missing")?;
+        ensure!(
+            definition.lang == loom_proto::Lang::JavaScript,
+            "definition {hash} is not JavaScript"
+        );
+        let artifact = definition
+            .component_hash
+            .as_ref()
+            .context("JavaScript definition has no executable source")?;
+        let bytes = self
+            .get(artifact)?
+            .context("JavaScript executable source missing")?;
+        ensure!(
+            blake3::hash(&bytes).to_hex().as_str() == artifact.as_str(),
+            "JavaScript executable source hash mismatch for {hash}"
+        );
+        let source =
+            String::from_utf8(bytes).context("JavaScript executable source is not UTF-8")?;
+        let deps = self.definition_deps(hash)?;
+        ensure!(
+            deps.is_empty(),
+            "JavaScript definitions do not support imports or dependencies"
+        );
+        let identity = loom_proto::javascript_definition_identity(
+            &source,
+            &deps,
+            definition.allowed_effects.as_deref(),
+            backend_abi,
+        )?;
+        ensure!(
+            blake3::hash(&identity).to_hex().as_str() == hash,
+            "JavaScript definition identity mismatch for {hash}: source, policy, dependencies, or engine ABI changed"
+        );
+        Ok(source)
+    }
+
     pub fn source(&self, hash: &str) -> Result<Option<String>> {
         Ok(self.lock()?.query_row("SELECT CAST(c.bytes AS TEXT) FROM defs d JOIN cas c ON c.hash=d.source_hash WHERE d.hash=?",[hash],|r|r.get(0)).optional()?)
     }

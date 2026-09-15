@@ -34,6 +34,7 @@
   # The daemon runs this prebuilt driver for every guest build; it is built
   # from, and pinned to, the same nightly it compiles guests with.
   driver = import ./hash-rustc.nix {inherit pkgs lib toolchain;};
+  v8 = import ./v8.nix {inherit pkgs lib;};
   # One rustc invocation per Cargo unit, so a change in one crate rebuilds that
   # crate and its dependents, not the workspace. This is the host build: what it
   # compiles with is invisible to guests, which get ./toolchain.nix's `guest`
@@ -50,6 +51,13 @@
     cargoTargets = [["-p" "loomd" "-p" "loom-cli" "--target" hostTarget]];
     profile = "release";
     nativeBuildInputs = [pkgs.pkg-config];
+    # V8's build script otherwise downloads its native archive and bindings.
+    # Scope these fixed-output inputs to V8 so updating them does not rebuild
+    # unrelated Cargo units.
+    packageBuildEnv.v8 = {
+      RUSTY_V8_ARCHIVE = v8.archive;
+      RUSTY_V8_SRC_BINDING_PATH = v8.bindings;
+    };
     policy = {
       # This workspace's rustc is the pinned STABLE compiler in ./toolchain.nix.
       # cargoUnit otherwise passes `-Zembed-metadata=no`, which a stable rustc

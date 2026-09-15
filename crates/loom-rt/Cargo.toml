@@ -3,6 +3,8 @@ name = "loom-rt"
 version.workspace = true
 edition.workspace = true
 [dependencies]
+loom-sandbox = { path = "../loom-sandbox" }
+loom-v8 = { path = "../loom-v8" }
 loom-proto = { path = "../loom-proto" }
 loom-store = { path = "../loom-store" }
 loom-process = { path = "../loom-process" }

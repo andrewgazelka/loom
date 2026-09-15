@@ -1,6 +1,7 @@
 pub mod actors;
 mod commands;
 mod definitions;
+mod javascript;
 mod http;
 mod message_failure;
 mod source;
@@ -48,6 +49,7 @@ pub struct Service {
     pub runtime: loom_rt::Runtime,
     checker: Arc<loom_check::Checker>,
     builder: Arc<loom_build::Builder>,
+    v8_engine: Option<Arc<loom_v8::V8Engine>>,
     languages: Vec<Lang>,
     backup_directory: PathBuf,
     definitions_gate: Arc<tokio::sync::Mutex<()>>,
@@ -63,13 +65,20 @@ impl Service {
             store: store.clone(),
             gate: tokio::sync::Mutex::new(()),
         });
+        let runtime = loom_rt::Runtime::with_resolver(store.clone(), resolver)?;
+        let v8_engine = if languages.contains(&Lang::JavaScript) {
+            Some(runtime.v8_engine()?)
+        } else {
+            None
+        };
         Ok(Self {
             access: Access::owner(),
             actors: None,
-            runtime: loom_rt::Runtime::with_resolver(store.clone(), resolver)?,
+            runtime,
             store,
             checker,
             builder,
+            v8_engine,
             languages,
             backup_directory,
             definitions_gate: Arc::new(tokio::sync::Mutex::new(())),
@@ -88,7 +97,10 @@ impl Service {
     }
 
     pub fn actor_registry(&self) -> Arc<dyn loom_actor::Registry> {
-        Arc::new(loom_behavior::StoreRegistry::new(self.store.clone()))
+        match &self.v8_engine {
+            Some(engine) => Arc::new(loom_behavior::StoreRegistry::with_v8(self.store.clone(), engine.clone())),
+            None => Arc::new(loom_behavior::StoreRegistry::new(self.store.clone())),
+        }
     }
 
     pub fn with_actors(mut self, node: loom_actor::Node) -> Self {

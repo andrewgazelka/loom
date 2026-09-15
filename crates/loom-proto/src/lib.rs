@@ -16,11 +16,13 @@ use ts_rs::TS;
 pub enum Lang {
     #[default]
     Rust,
+    JavaScript,
 }
 impl Lang {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Rust => "rust",
+            Self::JavaScript => "javascript",
         }
     }
 }
@@ -271,6 +273,21 @@ pub fn definition_identity(
         identity["allowed_effects"] = serde_json::to_value(labels)?;
     }
     serde_json::to_vec(&identity)
+}
+
+/// A JavaScript identity binds source and execution policy to the engine ABI.
+/// Loaders recompute this preimage before executing persisted source.
+pub fn javascript_definition_identity(
+    source: &str,
+    deps: &BTreeMap<String, String>,
+    allowed_effects: Option<&[String]>,
+    backend_abi: &str,
+) -> Result<Vec<u8>, serde_json::Error> {
+    let definition = definition_identity(Lang::JavaScript, source, deps, allowed_effects)?;
+    serde_json::to_vec(&serde_json::json!({
+        "backend": backend_abi,
+        "definition": serde_json::from_slice::<Value>(&definition)?,
+    }))
 }
 
 /// Content identities emitted by the mandatory item-hashing compiler.

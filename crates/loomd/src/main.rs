@@ -79,7 +79,7 @@ async fn serve() -> anyhow::Result<()> {
     let service = loom_api::Service::new(
         loom_store::Store::open(args.db)?,
         args.root.canonicalize()?,
-        vec![loom_proto::Lang::Rust],
+        vec![loom_proto::Lang::Rust, loom_proto::Lang::JavaScript],
     )?
     .with_backup_directory(backup_directory);
     let node = loom_actor::Node::new(

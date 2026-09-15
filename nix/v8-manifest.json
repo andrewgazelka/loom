@@ -1,0 +1,25 @@
+{
+  "version": "152.2.0",
+  "platforms": {
+    "aarch64-darwin": {
+      "archive": {
+        "url": "https://github.com/denoland/rusty_v8/releases/download/v152.2.0/librusty_v8_ptrcomp_release_aarch64-apple-darwin.a.gz",
+        "hash": "sha256-ylAd5emcMnwoNaU8wvFrhWBjG8gXvzj7ptuYtlzZdX8="
+      },
+      "bindings": {
+        "url": "https://github.com/denoland/rusty_v8/releases/download/v152.2.0/src_binding_ptrcomp_release_aarch64-apple-darwin.rs",
+        "hash": "sha256-udVlLrylFesr9MLuSmVRslZxF7Wqcg9DDSAyYW3X47U="
+      }
+    },
+    "x86_64-linux": {
+      "archive": {
+        "url": "https://github.com/denoland/rusty_v8/releases/download/v152.2.0/librusty_v8_ptrcomp_release_x86_64-unknown-linux-gnu.a.gz",
+        "hash": "sha256-quunkyrN+p/0RZLZKSv03WNlHiq6/euKWVIZm1kB6lA="
+      },
+      "bindings": {
+        "url": "https://github.com/denoland/rusty_v8/releases/download/v152.2.0/src_binding_ptrcomp_release_x86_64-unknown-linux-gnu.rs",
+        "hash": "sha256-Pk1f7Nvg+YpgF+adfKglGad/sDLF615M2+zdPi7FGdU="
+      }
+    }
+  }
+}

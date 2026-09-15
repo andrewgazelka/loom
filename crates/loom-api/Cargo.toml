@@ -3,6 +3,7 @@ name = "loom-api"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+loom-v8 = { path = "../loom-v8" }
 loom-behavior = { path = "../loom-behavior" }
 loom-actor = { path = "../loom-actor" }
 toml = "0.8"
