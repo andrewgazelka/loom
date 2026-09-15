@@ -15,7 +15,10 @@ fn service() -> Service {
     )
     .unwrap()
 }
-async fn command(service: &Service, name: &str, args: Value) -> Value {
+async fn command(service: &Service, name: &str, mut args: Value) -> Value {
+    if name == "add" {
+        args["lang"] = json!("rust");
+    }
     let response = service
         .command(CommandRequest {
             session: None,

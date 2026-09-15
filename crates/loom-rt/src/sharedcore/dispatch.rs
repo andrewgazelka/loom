@@ -44,9 +44,11 @@ impl Runtime {
                     .join(", ")
             )
         })?;
-        if definition.lang == loom_proto::Lang::JavaScript {
+        if definition.lang.is_v8() {
             anyhow::ensure!(entry.name == "main", "JavaScript entry must be main");
-            return self.javascript_call(&definition, args.clone(), scope, effects).await;
+            return self
+                .javascript_call(&definition, args.clone(), scope, effects)
+                .await;
         }
         let export = format!("loom_call_{}", entry.name);
         let effects = effects.clone().with_inferred(&entry.effects.labels);

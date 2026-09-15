@@ -12,6 +12,7 @@ impl Runtime {
         command: tokio::process::Command,
         capture_paths: Vec<std::path::PathBuf>,
     ) -> Result<Value> {
+        self.require_host("exec")?;
         let native = command.as_std();
         let cwd = native
             .get_current_dir()

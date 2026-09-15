@@ -19,7 +19,7 @@ The launcher prints `Token file: <path>` and opens `http://127.0.0.1:8793/#token
 export LOOM_TOKEN="$(cat /path/printed/by/launcher)"
 export LOOM_URL=http://127.0.0.1:8793
 export PATH="/store/path/printed/by/launcher/bin:$PATH"
-loom --url "$LOOM_URL" add examples/unison/greet.rs --name greet
+loom --url "$LOOM_URL" add examples/unison/greet.rs --lang rust --name greet
 # Copy the returned definition hash into OLD.
 OLD='paste-definition-hash'
 loom --url "$LOOM_URL" view "$OLD"                       # stored source and two items
@@ -28,15 +28,15 @@ loom --url "$LOOM_URL" update greet examples/unison/greet-v2.rs  # same hash: lo
 loom --url "$LOOM_URL" update greet examples/unison/greet-v3.rs  # new hash: constant changed
 loom --url "$LOOM_URL" run "$OLD" '"loom"'                # still "hello, loom"
 loom --url "$LOOM_URL" history greet                     # both hashes
-loom --url "$LOOM_URL" add examples/unison/sleeper.rs --name sleeper     # inferred effects ["sleep"]
-loom --url "$LOOM_URL" add examples/unison/counter.rs --name counter
+loom --url "$LOOM_URL" add examples/unison/sleeper.rs --lang rust --name sleeper     # inferred effects ["sleep"]
+loom --url "$LOOM_URL" add examples/unison/counter.rs --lang rust --name counter
 loom --url "$LOOM_URL" spawn counter
 ID='paste-actor-id'
 loom --url "$LOOM_URL" send "$ID" 1
 loom --url "$LOOM_URL" send "$ID" 1
 loom --url "$LOOM_URL" send "$ID" 1
 loom --url "$LOOM_URL" info "$ID"                        # cursor 3
-loom --url "$LOOM_URL" add examples/unison/counter-v2.rs --name counter-v2
+loom --url "$LOOM_URL" add examples/unison/counter-v2.rs --lang rust --name counter-v2
 V2='paste-counter-v2-definition-hash'
 loom --url "$LOOM_URL" validate "$ID" "$V2" 3            # Differs, with table hashes
 loom --url "$LOOM_URL" promote "$ID" "$V2" --rationale e2e --author e2e
@@ -59,22 +59,24 @@ See [the guide's Try it section](docs/guide.md#try-it) for transport details and
 
 The package includes `nightly-2026-08-24` and the prebuilt content-hashing rustc driver. Guest compilation uses those tools through the launcher’s `RUSTC` and `LOOM_HASH_RUSTC` settings.
 
-## JavaScript actors
+## TypeScript and JavaScript actors
 
-JavaScript uses the same durable actors, SQL transactions, capabilities, and
-message delivery as Rust. Save this as `counter.js`:
+TypeScript and JavaScript use the same durable actors, SQL transactions,
+capabilities, and message delivery as Rust. TypeScript is the default language
+for `add`. Save this as `counter.ts`:
 
-```javascript
+```typescript
 const LOOM_SCHEMA = "CREATE TABLE increments(amount INTEGER)";
 
-const main = loom.messages.json(async message => {
+const main = loom.messages.json(async (message: {amount: number} | null) => {
+    if (message === null) return;
     await loom.sql("INSERT INTO increments VALUES (?)", [message.amount]);
 });
 ```
 
 ```sh
-loom add counter.js --lang javascript --name js-counter
-loom spawn js-counter
+loom add counter.ts --name counter
+loom spawn counter
 ID='paste-actor-id'
 loom send "$ID" '{"amount":1}'
 loom info "$ID"
@@ -85,6 +87,27 @@ an array of bytes. Each invocation starts with fresh JavaScript state; keep
 durable state in SQL. `LOOM_SCHEMA` runs when an actor is created or promoted.
 Ordinary functions can also use `loom run`; its JSON array supplies positional
 arguments to `main(...args)`.
+
+Use `const main = loom.actor({onStart, onMessage, onStop})` when an actor needs
+lifecycle hooks. `onMessage` receives decoded JSON and is required; the other
+hooks are optional. The host calls `onStart` after schema setup on activation,
+before ordinary messages, and `onStop("node_shutdown")` during graceful node
+shutdown. An abrupt host exit cannot run `onStop`. To resume a container-backed
+workflow, persist its desired configuration in SQL and create a fresh container
+in `onStart`; container process memory is not restored. See
+[actor lifecycle](crates/loom-v8/README.md#actor-lifecycle).
+
+Loom transpiles source-only TypeScript with `deno_ast` and bundles modules
+with pinned Deno tooling at admission; neither path performs semantic type
+checking. The runtime provides the Loom APIs below. It does not install
+Deno globals or operating-system access. Use `--lang javascript` for JavaScript
+source and `--lang rust` for Rust.
+
+Static imports support `npm:`, `jsr:`, and approved HTTPS origins. Admission
+stores the bundle, dependency lock, and dependency sources; runtime reopen
+uses that stored artifact offline. Define `main` locally or export it by name.
+Dynamic imports and default-only exports are unsupported. See
+[module admission](crates/loom-v8/README.md#module-admission) for the host policy.
 
 Pass capabilities in messages to connect actors. Inside a JSON handler:
 
@@ -99,6 +122,54 @@ as UTF-8 JSON and expose `send`, `call`, `reply`, timers, and `stop`.
 passes its capability token. Knowing an actor ID alone does not grant access.
 Calls return a request reference; replies arrive as later actor messages.
 
+Use `await loom.actors.named("worker")` for a host-published actor in the
+current tenant and `await loom.actors.sender()` for the current message's
+sender. Names resolve within the tenant selected by the authenticated host;
+guest code cannot select another tenant. `loom.actors.spawn` takes a behavior
+hash and ordinary JSON initialization:
+
+```javascript
+const child = await loom.actors.spawn({behavior: message.behaviorHash, init: {count: 0}});
+await child.send({type: "increment", amount: 1});
+```
+
+Host-configured processes use the same capability and message system.
+`await loom.processes.named("claude")` accesses the registered process actor;
+`await loom.processes.spawn("claude", {subscriber: await loom.actors.self()})`
+starts a new instance of that preset and subscribes before it starts.
+Process handles provide `write(text)`, `closeStdin()`, `cancel()`, and
+`subscribe(actor)`. Output arrives in later messages. Processes do not
+automatically restart after exit or host restart.
+
+For a temporary container, select an image through the tenant's
+host-configured Docker connection:
+
+```javascript
+const sandbox = await loom.containers.spawn({
+    image: "alpine:3.22",
+    command: "cat",
+    network: "none",
+    limits: {memoryMb: 128, cpus: 1, pids: 32},
+    ttlMs: 60000,
+    subscriber: await loom.actors.self(),
+});
+await sandbox.write("hello\n");
+await sandbox.closeStdin();
+```
+
+Containers return the same process handles and output messages as process
+presets. Persist and restore their capabilities with `loom.processes.get(cap)`.
+See [temporary containers](crates/loom-v8/README.md#temporary-containers) for
+host configuration and lifetime.
+
+`await loom.websockets.listen()` attaches a native WebSocket listener driver
+to an actor. On `websocket.message`, use `await loom.websockets.sender()` to
+get the connection handle, then `send(text)`, `sendBytes(bytes)`, or `close()`.
+The native connection survives fresh V8 isolates between messages. Host
+restart closes it; the actor must listen again and the client must reconnect.
+See the [JavaScript API guide](crates/loom-v8/README.md#websockets) for an
+authenticated browser example and [editor declarations](crates/loom-v8/api.d.ts).
+
 `loom.sql(query, params)` accepts plain JavaScript values and returns an array
 of row objects. The raw `loom.perform("sql", ...)` contract uses tagged SQL
 cells. `loom.now` and `loom.random` use the recorded effect path.
@@ -109,8 +180,46 @@ the runtime's host effects.
 
 Use `--allowed_effects '["sql","actor.send"]'` to restrict a definition's
 escaped effects. JavaScript effects are checked at execution because their
-names can be computed dynamically. Imports and definition dependencies are
-currently rejected. Rust remains the default language for `add`.
+names can be computed dynamically. Loom definition dependencies are currently
+rejected for TypeScript and JavaScript.
+
+### Native container and lifecycle smoke
+
+The standalone [container actor](examples/container-actor/main.ts) persists its
+image configuration and recreates its container after daemon restart. The
+[native smoke script](tools/smoke-loomd-v8.py) loads this same source, checks
+stdin/stdout before and after restart, and requires different container IDs.
+
+On Linux, use a prebuilt `loomd`, a static BusyBox executable, and a running
+Docker daemon. The packaged daemon embeds the pinned import compiler wrapper
+and bubblewrap paths. For an ad-hoc Cargo binary, set `LOOM_DENO` to the
+[confined Deno compiler wrapper](nix/README.md#javascript-import-compiler) and
+`LOOM_BWRAP` to an absolute bubblewrap executable, or put `bwrap` on the
+supervisor's absolute `PATH`. The compiler needs network access during package
+admission; the smoke then disables it to verify offline reopen.
+
+Build the real Claude Code image with the
+[pinned image builder](examples/claude-container/build.sh):
+
+```sh
+./examples/claude-container/build.sh
+LOOM_STATIC_BUSYBOX=/absolute/path/to/busybox python3 tools/smoke-loomd-v8.py \
+  /absolute/path/to/loomd \
+  --npm \
+  --docker-executable /absolute/path/to/docker \
+  --docker-image busybox@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0 \
+  --claude-image loom-claude:2.1.272
+```
+
+Preload the BusyBox image into that Docker daemon. Set `DOCKER` and
+`DOCKER_HOST` for the builder and add `--docker-host ENDPOINT` to the smoke
+command when using a custom Docker connection. This native POC passed `9/9`;
+the script reports `"passed": 9, "total": 9`. It covers durable SQL,
+tenant-scoped actor messaging, process I/O, WebSockets, external package
+admission and offline reopen, container stdin/cancellation/removal, actual
+Claude Code startup, and graceful lifecycle restart with a fresh container
+and no replayed stdin. The Claude check runs the actual binary's `--version`
+without credentials or an inference request.
 
 ## Updating functions and callers
 

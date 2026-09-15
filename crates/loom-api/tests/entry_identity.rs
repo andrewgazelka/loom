@@ -4,7 +4,10 @@ use loom_store::Store;
 use serde_json::json;
 use std::path::PathBuf;
 
-async fn command(service: &Service, verb: &str, args: Value) -> Value {
+async fn command(service: &Service, verb: &str, mut args: Value) -> Value {
+    if verb == "add" {
+        args["lang"] = json!("rust");
+    }
     let response = service
         .command(CommandRequest {
             session: None,

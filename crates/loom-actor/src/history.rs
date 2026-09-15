@@ -98,8 +98,7 @@ impl Node {
             if matches!(mode, ReplayMode::Remote) {
                 crate::supervisor_store::replay_host_spawns(source, conn, epoch - 1).await?;
             }
-            if matches!(mode, ReplayMode::Remote)
-                && let Some(verdict) = self.replay_terminations(source, conn, epoch - 1, effects).await?
+            if let Some(verdict) = self.replay_terminations(source, conn, epoch - 1, effects, matches!(mode, ReplayMode::Candidate)).await?
             {
                 return Ok(Some(verdict));
             }
@@ -177,9 +176,11 @@ impl Node {
         }
         if matches!(mode, ReplayMode::Remote) {
             crate::supervisor_store::replay_host_spawns(source, conn, target_epoch).await?;
-            if let Some(verdict) = self.replay_terminations(source, conn, target_epoch, effects).await? {
-                return Ok(Some(verdict));
-            }
+        }
+        if let Some(verdict) = self.replay_terminations(source, conn, target_epoch, effects, matches!(mode, ReplayMode::Candidate)).await? {
+            return Ok(Some(verdict));
+        }
+        if matches!(mode, ReplayMode::Remote) {
             let revision = actor::code(source).await?.revision;
             let changes = actor::query(
                 source,
@@ -208,6 +209,25 @@ impl Node {
         self.memory_ids.lock().map_err(|_| anyhow::anyhow!("memory actor registry poisoned"))?.push(fork.id.clone());
         self.connections.lock().await.insert(fork.id.clone(), fork.conn);
         Ok(fork.id)
+    }
+}
+
+pub(crate) async fn promote_candidate(
+    conn: &mut Connection,
+    behavior: &dyn crate::Behavior,
+    effects: &ReplayEffects,
+) -> Result<Option<Verdict>> {
+    effects.begin(i64::MIN).await;
+    let result = actor::promote_candidate(conn, behavior, effects).await;
+    if let Some(verdict) = effects.finish(i64::MIN, result.is_ok()).await? {
+        return Ok(Some(verdict));
+    }
+    match result {
+        Ok(()) => Ok(None),
+        Err(error) if error.downcast_ref::<crate::Trap>().is_some_and(|trap| !trap.runtime) => {
+            Ok(Some(Verdict::Trapped { seq: i64::MIN, error: format!("candidate upgrade: {error:#}") }))
+        }
+        Err(error) => Err(error),
     }
 }
 

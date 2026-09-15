@@ -1,3 +1,10 @@
+/// Original source and optional closed module compilation. A source script
+/// compiles in the runtime; a module graph always executes its pinned output.
+pub struct ExecutableScript {
+    pub source: String,
+    pub javascript: Option<String>,
+}
+
 /// An entry hash may occur in several revisions; the earliest publication owns
 /// its stable address, so later unrelated entries cannot change its execution.
 pub struct EntryReference {
@@ -96,42 +103,85 @@ impl Store {
     /// revisions. A changed engine ABI requires explicit re-admission; old
     /// actors must never silently execute a new host contract under an old hash.
     pub fn javascript_source(&self, hash: &str, backend_abi: &str) -> Result<String> {
+        Ok(self.executable_script(hash, backend_abi)?.source)
+    }
+
+    pub fn executable_script(&self, hash: &str, backend_abi: &str) -> Result<ExecutableScript> {
         let definition = self
             .executable_definition(hash)?
-            .context("JavaScript definition missing")?;
+            .context("script definition missing")?;
         ensure!(
-            definition.lang == loom_proto::Lang::JavaScript,
-            "definition {hash} is not JavaScript"
+            definition.lang.is_v8(),
+            "definition {hash} is not a V8 script"
         );
-        let artifact = definition
+        let artifact_hash = definition
             .component_hash
             .as_ref()
-            .context("JavaScript definition has no executable source")?;
+            .context("script executable missing")?;
         let bytes = self
-            .get(artifact)?
-            .context("JavaScript executable source missing")?;
+            .get(artifact_hash)?
+            .context("script executable source missing")?;
         ensure!(
-            blake3::hash(&bytes).to_hex().as_str() == artifact.as_str(),
-            "JavaScript executable source hash mismatch for {hash}"
+            blake3::hash(&bytes).to_hex().as_str() == artifact_hash,
+            "script executable source hash mismatch for {hash}"
         );
-        let source =
-            String::from_utf8(bytes).context("JavaScript executable source is not UTF-8")?;
         let deps = self.definition_deps(hash)?;
-        ensure!(
-            deps.is_empty(),
-            "JavaScript definitions do not support imports or dependencies"
-        );
-        let identity = loom_proto::javascript_definition_identity(
-            &source,
+        ensure!(deps.is_empty(), "script deps must be empty");
+        let source = std::str::from_utf8(&bytes).context("script payload is not UTF-8")?;
+        let raw_identity = loom_proto::script_definition_identity(
+            definition.lang,
+            source,
             &deps,
             definition.allowed_effects.as_deref(),
             backend_abi,
         )?;
+        // Source-only definitions are fully identified by this preimage; they
+        // need no separately retained identity blob. This also works when the
+        // source is JSON-looking text: only the content identity chooses format.
+        if blake3::hash(&raw_identity).to_hex().as_str() == hash {
+            return Ok(ExecutableScript {
+                source: source.to_owned(),
+                javascript: None,
+            });
+        }
+        let definition_bytes = self
+            .get(hash)?
+            .context("script definition identity mismatch: compiled module identity missing")?;
+        ensure!(
+            blake3::hash(&definition_bytes).to_hex().as_str() == hash,
+            "script definition identity hash mismatch"
+        );
+        let recorded: Value = serde_json::from_slice(&definition_bytes)
+            .context("script definition identity invalid")?;
+        ensure!(
+            recorded.get("module").is_some(),
+            "script definition identity mismatch for {hash}: source, policy, dependencies, or engine ABI changed"
+        );
+        // Only the verified module identity permits parsing the payload as a
+        // closed compilation artifact. Failed source validation cannot select it.
+        let artifact: loom_proto::ScriptArtifact = serde_json::from_slice(&bytes)?;
+        artifact.validate()?;
+        ensure!(
+            artifact.language == definition.lang.as_str(),
+            "module language mismatch"
+        );
+        let identity = loom_proto::module_definition_identity(
+            definition.lang,
+            &artifact.source,
+            &deps,
+            definition.allowed_effects.as_deref(),
+            backend_abi,
+            artifact_hash,
+            &artifact.compiler,
+        )?;
         ensure!(
             blake3::hash(&identity).to_hex().as_str() == hash,
-            "JavaScript definition identity mismatch for {hash}: source, policy, dependencies, or engine ABI changed"
+            "script definition identity mismatch for {hash}: source, policy, dependencies, or engine ABI changed"
         );
-        Ok(source)
+        Ok(ExecutableScript {
+            source: artifact.source,
+            javascript: Some(artifact.javascript),
+        })
     }
 
     pub fn source(&self, hash: &str) -> Result<Option<String>> {

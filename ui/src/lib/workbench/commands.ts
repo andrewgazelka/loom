@@ -75,7 +75,7 @@ const hash = field("hash", "Definition hash");
 const behavior = field("hash", "Behavior hash");
 const author = field("author", "Author");
 const rationale = field("rationale", "Rationale");
-const source = field("source", "Rust source", { kind: "source" });
+const source = field("source", "Source", { kind: "source" });
 const definitionCommands: Command[] = [
   {
     id: V.find,
@@ -106,10 +106,11 @@ const definitionCommands: Command[] = [
     name: V.add,
     group: "Definitions",
     operation: V.add,
-    description: "Add a Rust definition",
+    description: "Add a TypeScript, JavaScript or Rust definition",
     read: false,
     fields: [
       field("name", "Name", { optional: true }),
+      field("lang", "Language", { options: ["typescript", "javascript", "rust"], initial: "typescript", default: "typescript" }),
       source,
       field("deps", "Dependency names → hashes", {
         kind: "json",
@@ -501,7 +502,7 @@ export function parseFields(
         throw new Error("changes: definition name must not be empty");
       const repair = object(change, `changes.${name}`);
       if (typeof repair.source !== "string")
-        throw new Error(`changes.${name}.source: expected Rust source`);
+        throw new Error(`changes.${name}.source: expected source text`);
       if (
         repair.deps !== undefined && repair.deps !== null &&
         Object.values(object(repair.deps, `changes.${name}.deps`)).some(

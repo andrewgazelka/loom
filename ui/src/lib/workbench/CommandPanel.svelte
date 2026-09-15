@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { sourceLanguage } from "../sourceLanguage";
   import { V, type Command } from "./commands";
   import { onMount, onDestroy } from "svelte";
   import { Play, RefreshCw } from "lucide-svelte";
@@ -138,7 +139,7 @@
                 language={field.key === "query"
                   ? V.sql
                   : field.kind === "source"
-                    ? "rust"
+                    ? sourceLanguage($session.values.lang ?? "typescript")
                     : "json"}
                 label={field.label}
                 disabled={$session.busy}

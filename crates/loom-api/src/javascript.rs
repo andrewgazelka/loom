@@ -10,31 +10,65 @@ impl Service {
     ) -> Result<Response> {
         ensure!(
             request.deps.is_empty(),
-            "JavaScript definitions do not support imports or dependencies"
+            "script deps must be empty; use source import declarations"
         );
         ensure!(
             source_reference(&request.source).is_none(),
-            "JavaScript source must be inline; Rust source bundles are unsupported"
+            "script source must be inline; Rust source bundles are unsupported"
         );
         progress.stage("compile");
-        let engine = self.v8_engine.as_ref().context("JavaScript is disabled")?;
-        let sandbox = engine.compile(&request.source).await?;
-        let _schema = sandbox.schema();
-        let identity = loom_proto::javascript_definition_identity(
-            &request.source,
-            &request.deps,
-            request.allowed_effects.as_deref(),
-            loom_v8::ABI_VERSION,
-        )?;
+        let engine = self.v8_engine.as_ref().context("V8 scripts are disabled")?;
+        let bundled = loom_imports::requires_bundle(&request.source, request.lang.as_str())
+            .with_context(|| format!("{} source rejected", request.lang.as_str()))?;
+        let abi = if request.lang == Lang::TypeScript {
+            loom_v8::typescript_abi()
+        } else {
+            loom_v8::ABI_VERSION.to_owned()
+        };
+        let component_hash;
+        let identity;
+        if bundled {
+            let artifact = loom_imports::compile(
+                &request.source,
+                request.lang.as_str(),
+                &self.script_compiler,
+            )
+            .await?;
+            artifact.validate()?;
+            let _sandbox = engine.compile(&artifact.javascript).await?;
+            component_hash = self
+                .store
+                .put("javascript_module", &serde_json::to_vec(&artifact)?)?;
+            identity = loom_proto::module_definition_identity(
+                request.lang,
+                &request.source,
+                &request.deps,
+                request.allowed_effects.as_deref(),
+                &abi,
+                &component_hash,
+                &artifact.compiler,
+            )?;
+        } else {
+            let _sandbox = if request.lang == Lang::TypeScript {
+                engine.compile_typescript(&request.source).await?
+            } else {
+                engine.compile(&request.source).await?
+            };
+            component_hash = self
+                .store
+                .put("javascript_source", request.source.as_bytes())?;
+            identity = loom_proto::script_definition_identity(
+                request.lang,
+                &request.source,
+                &request.deps,
+                request.allowed_effects.as_deref(),
+                &abi,
+            )?;
+        }
         let hash = self.store.put("javascript_definition", &identity)?;
-        // component_hash is the executable payload address. Rust stores Wasm;
-        // JavaScript stores source and selects V8 through the persisted language.
-        let component_hash = self
-            .store
-            .put("javascript_source", request.source.as_bytes())?;
         let def = Def {
             hash,
-            lang: Lang::JavaScript,
+            lang: request.lang,
             component_hash: Some(component_hash.clone()),
             sig: loom_proto::TypeSig {
                 exports: vec![loom_proto::ExportSig {

@@ -16,7 +16,7 @@ const gates:Gate[] = [];
 let client:LoomMcpClient|undefined;
 function assert(value:unknown, message:string):asserts value {if(!value)throw new Error(message);}
 async function define(name:string, source:string) {
-  const reply=await client!.callTool('add',{name:`shared-gate-${name}`,source});
+  const reply=await client!.callTool('add',{lang:'rust',name:`shared-gate-${name}`,source});
   assert(reply.ok,JSON.stringify(reply));
   const def=object(object(reply.result).def);
   assert(typeof def.hash==='string','missing definition hash');
@@ -95,7 +95,7 @@ try {
     {name:names[5]!,source:'pub fn main()->String { loom::scope(|s| { let job=s.spawn(|| { let value=String::from("local"); value.as_str() }).expect("spawn child"); job.join().expect("child result").to_owned() }) }',reason:/E0515|cannot return.*(?:local|owned)|borrowed|does not live long enough/},
   ];
   for(const control of refusals) await gate(control.name,async()=>{
-    const reply=await client!.callTool('add',{name:'shared-gate-refusal',source:control.source});
+    const reply=await client!.callTool('add',{lang:'rust',name:'shared-gate-refusal',source:control.source});
     assert(!reply.ok&&control.reason.test(JSON.stringify(reply)),'expected specific compiler refusal');
   });
   await gate(names[6]!,async()=>{

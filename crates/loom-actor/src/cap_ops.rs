@@ -9,6 +9,8 @@ pub(crate) enum Operation {
     PrepareSpawn { spec: crate::ChildSpec },
     Check { cap: Cap, right: Rights, name: String },
     SelfCap,
+    ResolveName { name: String },
+    ResolveProcess { name: String },
     SenderCap { sender: String },
     DriverSpawn { target: String, hash: String },
     Spawn { target: String },
@@ -32,7 +34,13 @@ impl Operation {
             Self::Revoke { cap } => Presented { cap, name: "revoke" },
             Self::Inspect { cap } => Presented { cap, name: "inspect" },
             Self::InspectSql { cap, .. } => Presented { cap, name: "inspect_sql" },
-            Self::SelfCap | Self::SenderCap { .. } | Self::Spawn { .. } | Self::PrepareSpawn { .. } | Self::DriverSpawn { .. } => {
+            Self::SelfCap
+            | Self::ResolveName { .. }
+            | Self::ResolveProcess { .. }
+            | Self::SenderCap { .. }
+            | Self::Spawn { .. }
+            | Self::PrepareSpawn { .. }
+            | Self::DriverSpawn { .. } => {
                 return None;
             }
         })
@@ -85,6 +93,13 @@ impl Ctx<'_> {
     /// Authority over this actor only; never resolves another actor's identity.
     pub async fn self_cap(&mut self) -> Result<Cap, Trap> {
         self.minted(Operation::SelfCap).await
+    }
+
+    /// Resolve a host-published name inside this Node's tenant directory.
+    /// Publication grants SEND only; knowing an arbitrary actor ID grants nothing.
+    /// The capability result is recorded and retained in this actor's held caps.
+    pub async fn resolve_name(&mut self, name: &str) -> Result<Cap, Trap> {
+        self.minted(Operation::ResolveName { name: name.into() }).await
     }
 
     pub async fn cap(&mut self, cap_id: u64) -> Result<Cap, Trap> {
@@ -206,6 +221,11 @@ pub(crate) async fn execute(node: &Node, conn: &turso::Connection, key: &EffectK
             let id: i64 = row.get(0).map_err(|e| EffectError::Environmental(e.into()))?;
             capability::load_cap(conn, id as u64).await.map_err(EffectError::Environmental)?
         }
+        Operation::ResolveProcess { name } => {
+            let hash = node.registry.resolve_process(&name).await.map_err(EffectError::Deterministic)?;
+            return serde_json::to_vec(&hash).map_err(|error| EffectError::Environmental(error.into()));
+        }
+        Operation::ResolveName { name } => node.resolve_name_cap(conn, &key.actor_id, &name, identity.as_bytes()).await?,
         Operation::SelfCap => {
             let epoch = actor::meta(conn, "capability_epoch")
                 .await

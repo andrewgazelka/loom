@@ -19,8 +19,8 @@ export interface DefinitionView extends Definition {
   source: string;
   def: Row;
   behavior_hash: string;
-  wasm_hash: string;
-  toolchain_hash: string;
+  wasm_hash?: string;
+  toolchain_hash?: string;
   entries: Record<string, { effects: EffectRow }>;
 }
 export interface Change {
@@ -178,8 +178,8 @@ export function definitionView(value: unknown): DefinitionView {
     source: string(data.source, "source"),
     def: json(object(data.def, "def"), "def") as Row,
     behavior_hash: string(data.behavior_hash, "behavior_hash"),
-    wasm_hash: string(data.wasm_hash, "wasm_hash"),
-    toolchain_hash: string(data.toolchain_hash, "toolchain_hash"),
+    ...(data.wasm_hash === undefined ? {} : { wasm_hash: string(data.wasm_hash, "wasm_hash") }),
+    ...(data.toolchain_hash === undefined ? {} : { toolchain_hash: string(data.toolchain_hash, "toolchain_hash") }),
     entries: parsed,
   };
 }

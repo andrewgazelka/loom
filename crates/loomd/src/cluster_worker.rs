@@ -7,18 +7,17 @@ pub struct ClusterWorker {
 }
 
 impl ClusterWorker {
-    pub fn start(node: &Node) -> Option<Self> {
-        node.identity()?;
+    pub fn start(node: &Node) -> Self {
         let channel = tokio::sync::watch::channel(false);
         let stop = channel.0;
         let receiver = channel.1;
         let node = node.clone();
-        Some(Self {
+        Self {
             stop,
             task: Some(tokio::spawn(
                 async move { node.run_service(receiver).await },
             )),
-        })
+        }
     }
 
     pub async fn finish(mut self, node: &Node) -> anyhow::Result<()> {

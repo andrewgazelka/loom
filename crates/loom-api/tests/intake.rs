@@ -36,7 +36,7 @@ async fn assert_unchanged(service: Service, source: &str, expected: &str) -> any
         .command(CommandRequest {
             session: None,
             command: "add".into(),
-            args: json!({"name":"failed-intake","source":source}),
+            args: json!({"lang":"rust","name":"failed-intake","source":source}),
         })
         .await;
     assert!(!response.ok, "{response:?}");

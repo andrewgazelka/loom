@@ -106,6 +106,21 @@ impl Builder {
             driver_path: std::env::var_os("LOOM_HASH_RUSTC").map(PathBuf::from),
         }
     }
+    /// Mutable build workspaces have one owner. Tenant services select their
+    /// cache directory explicitly; process-wide environment overrides cannot
+    /// make tenant eviction or materialization touch a sibling's workspace.
+    pub fn for_cache_directory(&self, cache: PathBuf) -> Self {
+        Self {
+            store: self.store.clone(),
+            root: self.root.clone(),
+            cache,
+            gate: std::sync::Arc::new(Mutex::new(())),
+            driver_path: self.driver_path.clone(),
+        }
+    }
+    pub fn cache_directory(&self) -> &Path {
+        &self.cache
+    }
     pub fn with_driver_path(mut self, path: PathBuf) -> Self {
         self.driver_path = Some(path);
         self

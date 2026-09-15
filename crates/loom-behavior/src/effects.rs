@@ -10,6 +10,17 @@ struct Target {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct Resolve {
+    name: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpawnDriver {
+    hash: String,
+    init: Vec<u8>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Subscribe {
     cap: wire::Capability,
     table: String,
@@ -133,6 +144,18 @@ pub async fn dispatch(
         return Err(Trap::new("effect op must not be empty"));
     }
     match op.as_str() {
+        "actor.resolve" => {
+            let request: Resolve = parse(&op, args)?;
+            wire::capability_value(cx.resolve_name(&request.name).await?)
+        }
+        "actor.spawn_driver" => {
+            let request: SpawnDriver = parse(&op, args)?;
+            wire::capability_value(cx.spawn_driver(&request.hash, &request.init).await?)
+        }
+        "actor.sender_cap" => {
+            parse::<()>(&op, args)?;
+            wire::capability_value(cx.sender_cap().await?)
+        }
         "actor.subscribe" => {
             let request: Subscribe = parse(&op, args)?;
             value(cx.subscribe(&request.cap.token, &request.table).await?)
@@ -307,5 +330,48 @@ pub async fn dispatch(
                 value(cx.effect(&op, &request.request).await?)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_requires_a_name_and_rejects_actor_ids() {
+        let request: Resolve =
+            parse("actor.resolve", serde_json::json!({"name":"service"})).unwrap();
+        assert_eq!(request.name, "service");
+        for args in [
+            serde_json::json!({"target":"actor-id"}),
+            serde_json::json!({"name":"service", "target":"actor-id"}),
+            serde_json::json!({"name":42}),
+        ] {
+            assert!(parse::<Resolve>("actor.resolve", args).is_err());
+        }
+    }
+
+    #[test]
+    fn spawn_driver_requires_hash_and_byte_init() {
+        let request: SpawnDriver = parse(
+            "actor.spawn_driver",
+            serde_json::json!({"hash":"driver-hash", "init":[0,255]}),
+        )
+        .unwrap();
+        assert_eq!(request.hash, "driver-hash");
+        assert_eq!(request.init, vec![0, 255]);
+        for args in [
+            serde_json::json!({"hash":"driver-hash"}),
+            serde_json::json!({"hash":"driver-hash", "init":[256]}),
+            serde_json::json!({"hash":"driver-hash", "init":[], "rights":255}),
+        ] {
+            assert!(parse::<SpawnDriver>("actor.spawn_driver", args).is_err());
+        }
+    }
+
+    #[test]
+    fn sender_cap_accepts_only_unit_arguments() {
+        assert!(parse::<()>("actor.sender_cap", Value::Null).is_ok());
+        assert!(parse::<()>("actor.sender_cap", serde_json::json!({"target":"other"})).is_err());
     }
 }

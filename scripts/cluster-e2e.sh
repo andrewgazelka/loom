@@ -92,7 +92,7 @@ passed=$((passed + 1))
 # Admit the maintained counter example identically to both definition stores;
 # takeover must resolve the pinned behavior hash on either node.
 for port in $port_one $port_two; do
-    cli "$port" add "$root/examples/unison/counter.rs" --name cluster-counter | jq -e '.ok == true' >/dev/null
+    cli "$port" add "$root/examples/unison/counter.rs" --lang rust --name cluster-counter | jq -e '.ok == true' >/dev/null
 done
 actor=$(cli $port_two spawn cluster-counter '{}' | jq -er 'select(.ok == true) | .result.id')
 cli $port_two drain | jq -e '.ok == true' >/dev/null

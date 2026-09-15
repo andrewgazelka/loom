@@ -3,7 +3,7 @@ use super::{DriverAck, DriverContext, DriverDelivery, DriverSpawn, Injection, ta
 use crate::{Node, Rights, Status, actor};
 use anyhow::{Context, Result, ensure};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -28,6 +28,7 @@ struct Running {
 #[derive(Default)]
 pub(crate) struct Drivers {
     running: Mutex<HashMap<String, Running>>,
+    fenced_owners: Mutex<HashSet<String>>,
 }
 /// Brokers hold no lifetime owner, so dropping the last public Node aborts workers.
 pub(crate) struct DriverLifetime(pub Arc<Drivers>);
@@ -49,6 +50,52 @@ impl Drop for Completion {
 }
 
 impl Node {
+    /// Native resources cannot survive a node restart. Keep their spawn receipts
+    /// (replaying a spawn must not repeat external work), but wake the owner with
+    /// a durable DOWN so it can explicitly choose whether to open a replacement.
+    pub(crate) async fn recover_drivers(&self, owner: &str) -> Result<()> {
+        let source = self.open_actor(owner).await?;
+        let mut conn = source.conn.lock().await;
+        self.recover_drivers_on(owner, &mut conn).await
+    }
+
+    /// Called before a restored connection is published. This also covers lease
+    /// takeover by a node that was already running when the old resource died.
+    pub(crate) async fn recover_drivers_on(&self, owner: &str, conn: &mut turso::Connection) -> Result<()> {
+        if matches!(actor::status(&conn).await?, Status::Stopped | Status::Fork)
+            || !actor::query(&conn, "SELECT value FROM meta WHERE key='replay_source'", ()).await?.rows.is_empty()
+        {
+            // Fork databases retain source receipts for replay, but never own
+            // the source's native resource or receive fresh lifecycle events.
+            return Ok(());
+        }
+        let generation: i64 = actor::meta(&conn, "generation").await?.parse()?;
+        let rows = actor::query(
+            &conn,
+            "SELECT substr(key, 14) FROM meta AS spawn WHERE key LIKE 'driver_spawn:%' AND value != 'owner_stopped' AND NOT EXISTS (SELECT 1 FROM meta AS done WHERE done.key = 'driver_down:' || substr(spawn.key, 14) OR done.key = 'driver_closed:' || substr(spawn.key, 14))",
+            (),
+        ).await?;
+        let ids = rows.rows.iter().map(|row| row.get::<String>(0)).collect::<Result<Vec<_>, _>>()?;
+        for id in ids {
+            self.driver_down_on(owner, conn, &id, generation, "node restarted; native resource interrupted").await?;
+        }
+        Ok(())
+    }
+
+    /// An explicit stop is durable before resource cancellation. Whole-node
+    /// close intentionally omits this receipt so restart can report interruption.
+    pub(crate) async fn stop_driver(&self, destination: &str) -> Result<()> {
+        let target = target(destination)?;
+        let _lifecycle = self.guard(&format!("lifecycle:{}", target.owner)).await;
+        let source = self.open_actor(target.owner).await?;
+        let mut conn = source.conn.lock().await;
+        let tx = conn.transaction().await?;
+        actor::set_meta(&tx, &format!("driver_closed:{}", target.id), "explicit stop").await?;
+        self.commit_control(target.owner, tx).await?;
+        drop(conn);
+        self.close_drivers(None, Some(target.id)).await
+    }
+
     /// Closed-handle drops are terminal metadata, not a second delivery path.
     /// The ordinary pump marks the row delivered after this marker commits.
     async fn driver_drop(&self, sender: &str, destination: &str, key: &str) -> Result<()> {
@@ -98,7 +145,10 @@ impl Node {
         let source = self.open_actor(owner).await?;
         let mut conn = source.conn.lock().await;
         let receipt = format!("driver_spawn:{}", spawn.id);
-        if !actor::query(&conn, "SELECT value FROM meta WHERE key=?", [receipt.as_str()]).await?.rows.is_empty() {
+        let closed = format!("driver_closed:{}", spawn.id);
+        // A host can stop a committed driver before its spawn outbox row is
+        // pumped. The terminal marker also prevents that delayed open.
+        if !actor::query(&conn, "SELECT value FROM meta WHERE key IN (?,?)", [receipt.as_str(), closed.as_str()]).await?.rows.is_empty() {
             return Ok(());
         }
         if actor::status(&conn).await? == Status::Stopped {
@@ -117,6 +167,11 @@ impl Node {
         self.commit_control(owner, tx).await?;
         drop(conn);
 
+        // Archive can race the gap after the spawn receipt commits and before
+        // this worker enters the roster. Hold the owner fence through insertion
+        // so lease loss either refuses this worker or sees and cancels it.
+        let fenced = self.drivers.fenced_owners.lock().map_err(|_| anyhow::anyhow!("driver fence poisoned"))?;
+        ensure!(!fenced.contains(owner), "actor {owner}: native driver owner lost its lease");
         let (deliveries, incoming) = mpsc::channel(64);
         let (inject, mut injections) = mpsc::channel(64);
         let (finished, closed) = watch::channel(false);
@@ -132,6 +187,7 @@ impl Node {
             spawn.id.clone(),
             Running { owner: owner.into(), deliveries, abort: worker.abort_handle(), closed, intentional: intentional.clone() },
         );
+        drop(fenced);
         let mut node = self.clone();
         node.driver_lifetime = None;
         node.background = None;
@@ -223,7 +279,20 @@ impl Node {
         let _admission = self.admission.clone().try_read_owned().context("node is closing; driver DOWN deferred")?;
         let actor = self.open_actor(owner).await?;
         let mut conn = actor.conn.lock().await;
+        self.driver_down_on(owner, &mut conn, id, generation, reason).await?;
+        drop(conn);
+        self.wake_actor(owner)?;
+        Ok(())
+    }
+
+    async fn driver_down_on(&self, owner: &str, conn: &mut turso::Connection, id: &str, generation: i64, reason: &str) -> Result<()> {
         let tx = conn.transaction().await?;
+        // The resource may finish naturally while an explicit stop commits.
+        // Whichever transaction wins determines whether a DOWN was warranted;
+        // cancellation must never turn a durable stop into a restart signal.
+        if !actor::query(&tx, "SELECT value FROM meta WHERE key=?", [format!("driver_closed:{id}")]).await?.rows.is_empty() {
+            return Ok(());
+        }
         let from = format!("drv:{id}:root");
         let reference = format!("spawn:{from}");
         let msg = serde_json::to_vec(&serde_json::json!({
@@ -232,8 +301,17 @@ impl Node {
         }))?;
         actor::inject(&tx, &format!("down:{reference}"), &from, &msg).await?;
         actor::set_meta(&tx, &format!("driver_down:{id}"), reason).await?;
-        self.commit_control(owner, tx).await?;
-        self.wake_actor(owner)?;
+        self.commit_control(owner, tx).await
+    }
+
+    pub(crate) async fn fence_drivers(&self, owner: &str) -> Result<()> {
+        self.drivers.fenced_owners.lock().map_err(|_| anyhow::anyhow!("driver fence poisoned"))?.insert(owner.into());
+        self.close_drivers(Some(owner), None).await
+    }
+
+    pub(crate) fn admit_driver_owner(&self, owner: &str) -> Result<()> {
+        self.check_lease(owner)?;
+        self.drivers.fenced_owners.lock().map_err(|_| anyhow::anyhow!("driver fence poisoned"))?.remove(owner);
         Ok(())
     }
 

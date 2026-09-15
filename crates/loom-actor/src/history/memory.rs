@@ -156,7 +156,10 @@ impl Node {
             let snapshot = snapshots.get(path).context("ephemeral snapshot no longer exists")?;
             return snapshot.image.restore().await;
         }
-        let source = actor::connect(Path::new(path), self.config.io).await?;
+        // Replay images are immutable. The live-actor opener performs migration
+        // writes; even ignored writes can append CDC transaction markers and
+        // advance this image's MAX(change_id), hiding source rows on later replay.
+        let source = actor::connect_reader(Path::new(path), self.config.io).await?;
         Image::capture(&source).await?.restore().await
     }
 }

@@ -98,3 +98,30 @@ fn javascript_rejects_corrupt_or_replaced_executable() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn source_only_definitions_do_not_require_redundant_identity_object() -> Result<()> {
+    let store = Store::memory()?;
+    let identity = loom_proto::javascript_definition_identity(SOURCE, &BTreeMap::new(), None, ABI)?;
+    let hash = blake3::hash(&identity).to_hex().to_string();
+    let artifact = store.put("javascript_source", SOURCE.as_bytes())?;
+    store.define(
+        &Def {
+            hash: hash.clone(),
+            lang: Lang::JavaScript,
+            component_hash: Some(artifact),
+            sig: Default::default(),
+            allowed_effects: None,
+            observed_effects: Vec::new(),
+        },
+        Some("source-only"),
+        SOURCE,
+        &BTreeMap::new(),
+    )?;
+    assert!(store.get(&hash)?.is_none());
+    let executable = store.executable_script(&hash, ABI)?;
+    assert_eq!(executable.source, SOURCE);
+    assert!(executable.javascript.is_none());
+    assert!(store.executable_script(&hash, "changed-abi").is_err());
+    Ok(())
+}

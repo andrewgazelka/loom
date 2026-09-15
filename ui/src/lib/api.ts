@@ -1,5 +1,6 @@
+export type SourceLanguage = "typescript" | "javascript" | "rust";
 export interface Diagnostic {
-  lang: "rust";
+  lang: SourceLanguage;
   file: string;
   line: number;
   col: number;
@@ -20,7 +21,7 @@ export interface Definition {
   allowed_effects?: string[] | null;
   observed_effects?: string[];
   hash: string;
-  lang: "rust";
+  lang: SourceLanguage;
   name_hint?: string;
   name?: string;
   component_hash?: string | null;

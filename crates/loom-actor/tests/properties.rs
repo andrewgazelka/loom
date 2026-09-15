@@ -1,5 +1,4 @@
 use crate::common;
-use crate::registry::Registry;
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;

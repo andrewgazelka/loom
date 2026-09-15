@@ -84,7 +84,7 @@ async fn runtime_workflow(root: &Path) -> anyhow::Result<()> {
         .command(CommandRequest {
             session: None,
             command: "add".into(),
-            args: json!({"name":"values", "source":"pub fn values() -> i32 { 42 }"}),
+            args: json!({"lang":"rust","name":"values", "source":"pub fn values() -> i32 { 42 }"}),
         })
         .await;
     assert!(added.ok, "{added:?}");

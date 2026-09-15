@@ -1,5 +1,6 @@
 import { createHighlighterCore } from "shiki/core";
 import { createOnigurumaEngine } from "shiki/engine/oniguruma";
+import javascript from "@shikijs/langs/javascript";
 import typescript from "@shikijs/langs/typescript";
 import sql from "@shikijs/langs/sql";
 import rust from "@shikijs/langs/rust";
@@ -10,11 +11,12 @@ import light from "@shikijs/themes/github-light";
 import dark from "@shikijs/themes/github-dark";
 export const highlighter = createHighlighterCore({
   themes: [light, dark],
-  langs: [sql, typescript, rust, json, toml, shellscript],
+  langs: [sql, typescript, javascript, rust, json, toml, shellscript],
   engine: createOnigurumaEngine(import("shiki/wasm")),
 });
 export type CodeLanguage =
   | "typescript"
+  | "javascript"
   | "sql"
   | "rust"
   | "json"

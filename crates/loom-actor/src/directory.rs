@@ -1,4 +1,4 @@
-use crate::{ActorId, Node, Status, actor};
+use crate::{ActorId, Cap, EffectError, Node, Rights, Status, actor};
 use anyhow::{Context, Result, ensure};
 use std::path::Path;
 use turso::Connection;
@@ -30,7 +30,10 @@ pub(crate) struct IndexedState {
 }
 
 impl Node {
+    /// Publish a SEND-only discovery grant to actors in this Node's tenant.
+    /// This is a trusted host/admin operation. Guests cannot publish names.
     /// Names are unique: registering an occupied name fails rather than replacing it.
+    /// Unregistering prevents future lookup; revoke capabilities to withdraw old grants.
     pub async fn register(&self, name: &str, id: &str) -> Result<()> {
         async {
             ensure!(!name.is_empty(), "empty registered name");
@@ -66,6 +69,39 @@ impl Node {
         }
         .await
         .with_context(|| format!("actor <node> seq -1: whereis {name}"))
+    }
+
+    /// Mint only from a directory entry, never from a caller-supplied actor ID.
+    /// The capability operation supplies its stable journal identity so retries
+    /// and replay do not mint random grants through the host `cap_for` API.
+    pub(crate) async fn resolve_name_cap(
+        &self,
+        caller: &Connection,
+        caller_id: &str,
+        name: &str,
+        identity: &[u8],
+    ) -> Result<Cap, EffectError> {
+        if name.is_empty() {
+            return Err(EffectError::Deterministic(anyhow::anyhow!("actor.resolve: empty registered name")));
+        }
+        // Release the directory lock before reading target authority. Host
+        // registration acquires actor then directory; reversing that order
+        // would deadlock a concurrent registration with this lookup.
+        let target = self
+            .whereis(name)
+            .await
+            .map_err(EffectError::Environmental)?
+            .ok_or_else(|| EffectError::Deterministic(anyhow::anyhow!("actor.resolve: unknown registered name {name:?}")))?;
+        let epoch = if target == caller_id {
+            // The caller already owns its transaction connection. Asking the
+            // node for another lock would deadlock a named actor resolving itself.
+            named_epoch(caller, name, &target).await?
+        } else {
+            let reader = self.capability_reader(&target).await?;
+            named_epoch(&reader, name, &target).await?
+        };
+        let cap = self.mint_cap_at(&target, epoch, identity);
+        self.attenuate_verified(&cap, Rights::SEND)
     }
 
     pub async fn join(&self, group: &str, id: &str) -> Result<()> {
@@ -238,6 +274,27 @@ impl Node {
         .await
         .with_context(|| format!("actor {id} seq -1: sync node index"))
     }
+}
+
+async fn named_epoch(conn: &Connection, name: &str, target: &str) -> Result<u64, EffectError> {
+    let actual = actor::meta(conn, "id").await.map_err(EffectError::Environmental)?;
+    if actual != target {
+        return Err(EffectError::Environmental(anyhow::anyhow!("actor.resolve: registered name {name:?} has mismatched target identity")));
+    }
+    let status = actor::status(conn).await.map_err(EffectError::Environmental)?;
+    let fork = !actor::query(conn, "SELECT value FROM meta WHERE key='replay_source'", ())
+        .await
+        .map_err(EffectError::Environmental)?
+        .rows
+        .is_empty();
+    if matches!(status, Status::Stopped | Status::Fork) || fork {
+        return Err(EffectError::Deterministic(anyhow::anyhow!("actor.resolve: registered name {name:?} is not live")));
+    }
+    actor::meta(conn, "capability_epoch")
+        .await
+        .map_err(EffectError::Environmental)?
+        .parse()
+        .map_err(|error| EffectError::Environmental(anyhow::anyhow!("actor.resolve: invalid capability epoch: {error}")))
 }
 
 async fn ensure_live(conn: &Connection) -> Result<()> {

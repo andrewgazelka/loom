@@ -15,6 +15,10 @@ pub struct LoomTemplate {
 
 impl LoomTemplate {
     pub fn new(store: Store, reference: &str) -> Result<Self> {
+        let runtime = Runtime::new(store.clone())?;
+        Self::with_runtime(store, reference, runtime)
+    }
+    pub fn with_runtime(store: Store, reference: &str, runtime: Runtime) -> Result<Self> {
         let definition = store
             .resolve(reference)?
             .with_context(|| format!("view-v1 template {reference:?} not found"))?;
@@ -50,7 +54,7 @@ impl LoomTemplate {
         }
         Ok(Self {
             hash: definition.hash,
-            runtime: Runtime::new(store)?,
+            runtime,
         })
     }
 }

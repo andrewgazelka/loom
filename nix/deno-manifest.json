@@ -1,0 +1,33 @@
+{
+  "version": "2.9.6",
+  "esbuild_version": "0.25.5",
+  "helper_cache": "esbuild-0.25.5-1",
+  "helper_source": {
+    "url": "https://raw.githubusercontent.com/denoland/deno/v2.9.6/cli/tools/bundle/esbuild.rs",
+    "hash": "sha256-dLuKiJNOD/BRu/waV7OtG0N7oZIoG0Jk7kfV17a/sTI="
+  },
+  "platforms": {
+    "aarch64-darwin": {
+      "helper": "esbuild-darwin-arm64",
+      "deno": {
+        "url": "https://github.com/denoland/deno/releases/download/v2.9.6/deno-aarch64-apple-darwin.zip",
+        "hash": "sha256-ITovME8E08nLUiBmmvrROPYKWqsf6Aliq96481gHpHI="
+      },
+      "esbuild": {
+        "url": "https://registry.npmjs.org/@esbuild/darwin-arm64/-/darwin-arm64-0.25.5.tgz",
+        "hash": "sha256-YaMSvLgknQWGOcQFz2N43TEH3lU1qZdJc8SKbdDS0GI="
+      }
+    },
+    "x86_64-linux": {
+      "helper": "esbuild-linux-x64",
+      "deno": {
+        "url": "https://github.com/denoland/deno/releases/download/v2.9.6/deno-x86_64-unknown-linux-gnu.zip",
+        "hash": "sha256-OU8H9Nor6+bObx584PoWQpspsIw14/rD/iWXJnbf9LI="
+      },
+      "esbuild": {
+        "url": "https://registry.npmjs.org/@esbuild/linux-x64/-/linux-x64-0.25.5.tgz",
+        "hash": "sha256-lako2Bh8b3rWMqPzu/AfZt/Vta23JLi/7sX/9z/y2Ro="
+      }
+    }
+  }
+}

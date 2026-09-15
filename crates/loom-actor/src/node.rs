@@ -33,6 +33,8 @@ pub struct Node {
     pub(crate) shutdown_deadlines: Arc<Mutex<HashMap<String, crate::messaging::ShutdownTimer>>>,
     pub(crate) connections: Arc<Mutex<HashMap<ActorId, Arc<Mutex<Connection>>>>>,
     gates: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    pub(crate) activations: Arc<Mutex<HashMap<ActorId, i64>>>,
+    pub(crate) shutdown_hooks: Arc<Mutex<std::collections::HashSet<ActorId>>>,
     pub(crate) admission: Arc<tokio::sync::RwLock<()>>,
     pub(crate) run_gate: Arc<Mutex<()>>,
     pub(crate) send_outcomes: crate::send_outcome::Outcomes,
@@ -42,6 +44,10 @@ pub struct Node {
 }
 
 impl Node {
+    pub fn shares_storage(&self, other: &Self) -> Result<bool> {
+        Ok(Arc::ptr_eq(&self.connections, &other.connections) || self.dir.canonicalize()? == other.dir.canonicalize()?)
+    }
+
     pub async fn open(&self, id: &str) -> Result<Actor> {
         let _admission = self.admit().await?;
         self.open_actor(id).await
@@ -136,6 +142,8 @@ impl Node {
             gates: Arc::new(Mutex::new(HashMap::new())),
             run_gate: Arc::new(Mutex::new(())),
             send_outcomes: Default::default(),
+            activations: Default::default(),
+            shutdown_hooks: Default::default(),
             admission: Arc::new(tokio::sync::RwLock::new(())),
             indexed: Default::default(),
             names: Arc::new(Mutex::new(names)),
@@ -183,6 +191,7 @@ impl Node {
         for id in node.actor_ids()? {
             node.scheduling()?.index_dirty.insert(id.clone());
             node.wake_actor(&id)?;
+            node.recover_drivers(&id).await?;
             let owner = node.open_actor(&id).await?;
             let conn = owner.conn.lock().await;
             for row in actor::query(&conn, "SELECT child FROM shutdowns", ()).await?.rows {
@@ -262,11 +271,15 @@ impl Node {
         }
         self.restore_on_open(id).await?;
         ensure!(self.path(id).is_file(), "actor {id} seq -1: actor file does not exist");
-        let conn = actor::connect(&self.path(id), self.config.io).await.with_context(|| format!("actor {id} seq -1: open"))?;
+        let mut conn = actor::connect(&self.path(id), self.config.io).await.with_context(|| format!("actor {id} seq -1: open"))?;
         ensure!(actor::meta(&conn, "id").await? == id, "actor {id} seq -1: file identity mismatch");
         crate::capability::migrate(&conn).await?;
         self.migrate_authority(&conn).await?;
         self.initialize_durability(id, &conn).await?;
+        self.recover_drivers_on(id, &mut conn).await?;
+        self.admit_driver_owner(id)?;
+        self.activations.lock().await.remove(id);
+        self.activate_on(id, &mut conn).await?;
         let conn = Arc::new(Mutex::new(conn));
         self.connections.lock().await.insert(id.into(), conn.clone());
         self.wake_actor(id)?;
@@ -276,6 +289,10 @@ impl Node {
     pub(crate) async fn create(&self, id: &str, parent: &str, hash: &str, msg: &[u8], durability: crate::Durability) -> Result<Actor> {
         let durability = if hash == crate::view::HASH { crate::Durability::Ephemeral } else { durability };
         let _creation = self.guard(&format!("create:{id}")).await;
+        // Initialization publishes the file before reopening it and installing
+        // its shared connection. Directory scans can discover that file in the
+        // gap, so serialize their open/migrations with the entire publication.
+        let opening = self.guard(&format!("open:{id}")).await;
         if durability != crate::Durability::Ephemeral && !self.connections.lock().await.contains_key(id) {
             self.restore_on_open(id).await?;
         }
@@ -291,14 +308,16 @@ impl Node {
                 self.memory_ids.lock().map_err(|_| anyhow!("memory actor registry poisoned"))?.push(id.into());
             }
         }
+        drop(opening);
         let actor = self.open_actor(id).await?;
-        let conn = actor.conn.lock().await;
+        let mut conn = actor.conn.lock().await;
         ensure!(actor::meta(&conn, "parent").await? == parent, "actor {id} seq 0: parent mismatch");
         // A retry after publication but before snapshot registration finishes creation.
         if actor::cursor(&conn).await? == 0 {
             self.snapshot_actor(&conn, id, 0).await?;
         }
         self.initialize_durability(id, &conn).await?;
+        self.activate_on(id, &mut conn).await?;
         drop(conn);
         self.scheduling()?.index_dirty.insert(id.into());
         self.wake_actor(id)?;

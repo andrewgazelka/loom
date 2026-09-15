@@ -18,7 +18,6 @@ mod recording;
 mod tests;
 mod trace;
 mod update;
-pub use update::UpdateSession;
 use anyhow::{Context, Result, anyhow, ensure};
 pub use intake::IntakePublication;
 use loom_proto::{Def, Event, Value};
@@ -31,6 +30,7 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 pub use trace::{TraceEffect, TraceEffectsPage};
+pub use update::UpdateSession;
 
 #[derive(Clone)]
 pub struct Store {
@@ -38,6 +38,28 @@ pub struct Store {
     connection: Arc<Mutex<Connection>>,
 }
 impl Store {
+    /// Tenant directories must reject both cloned owners and separate handles
+    /// opened on the same SQLite file.
+    pub fn shares_storage(&self, other: &Self) -> Result<bool> {
+        if Arc::ptr_eq(&self.connection, &other.connection) {
+            return Ok(true);
+        }
+        let path = self
+            .lock()?
+            .path()
+            .filter(|path| !path.is_empty())
+            .map(std::path::PathBuf::from);
+        let other_path = other
+            .lock()?
+            .path()
+            .filter(|path| !path.is_empty())
+            .map(std::path::PathBuf::from);
+        match (path, other_path) {
+            (Some(path), Some(other)) => Ok(path.canonicalize()? == other.canonicalize()?),
+            _ => Ok(false),
+        }
+    }
+
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         Self::initialize(Connection::open(path)?, recording::Durability::Wal)
     }
@@ -188,4 +210,4 @@ fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     loom_proto::decode(bytes).map_err(anyhow::Error::msg)
 }
 
-pub use definitions::EntryReference;
+pub use definitions::{EntryReference, ExecutableScript};

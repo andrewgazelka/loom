@@ -1,5 +1,9 @@
 //! Ephemeral resource owners. The pump is their only outbound delivery path.
+mod receipts;
 mod runtime;
+pub use receipts::{DriverReceipt, DriverReceipts};
+pub mod container;
+pub mod process;
 pub mod tcp;
 
 use crate::{Cap, Ctx, Rights, Trap, cap_ops::Operation};

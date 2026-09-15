@@ -39,6 +39,41 @@ pub trait CallEffects: Send {
 /// Arguments are positional JSON values. Dropping the future cancels execution
 /// and releases access to the borrowed handler.
 pub trait Sandbox: Send + Sync {
+    fn has_startup(&self) -> bool {
+        false
+    }
+    fn has_shutdown(&self) -> bool {
+        false
+    }
+
+    /// Host-scheduled activation, separate from the actor's ordinary inbox.
+    fn call_startup<'a>(
+        &'a self,
+        _effects: &'a mut dyn CallEffects,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<Value>> + Send + 'a>> {
+        Box::pin(async { Ok(Value::Null) })
+    }
+
+    /// Graceful shutdown or permanent termination. Abrupt process loss cannot
+    /// run this callback; durable recovery belongs in the next startup.
+    fn call_shutdown<'a>(
+        &'a self,
+        _reason: &'a str,
+        _effects: &'a mut dyn CallEffects,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<Value>> + Send + 'a>> {
+        Box::pin(async { Ok(Value::Null) })
+    }
+
+    /// Invoke an actor with its original inbox bytes. Engines can avoid
+    /// expanding each byte into a decimal JSON argument before admission.
+    fn call_message<'a>(
+        &'a self,
+        message: &'a [u8],
+        effects: &'a mut dyn CallEffects,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<Value>> + Send + 'a>> {
+        self.call(serde_json::json!([message]), effects)
+    }
+
     fn call<'a>(
         &'a self,
         args: Value,

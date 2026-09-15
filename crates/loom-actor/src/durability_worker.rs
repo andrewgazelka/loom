@@ -152,14 +152,58 @@ impl Node {
         let _admission = self.admission.write().await;
         let _run = self.run_gate.lock().await;
         let actors = self.connections.lock().await.keys().cloned().collect::<Vec<_>>();
+        let mut failure = None;
         if !self.shipping.closed.load(Ordering::Acquire) {
             for id in &actors {
-                self.ship_inner(id).await?;
+                if !self.shutdown_hooks.lock().await.contains(id) {
+                    match self.shutdown_hook(id).await {
+                        Ok(()) => {
+                            self.shutdown_hooks.lock().await.insert(id.clone());
+                        }
+                        Err(error) => {
+                            failure.get_or_insert(error);
+                        }
+                    }
+                }
             }
-            self.shipping.closed.store(true, Ordering::Release);
-            self.wake.notify_waiters();
+            // Cleanup is an ordinary committed outbox operation. Deliver it
+            // while native drivers are still alive; admission already excludes
+            // new host turns, so callbacks cannot race a mailbox handler.
+            for id in &actors {
+                let drained: Result<()> = async {
+                    self.pump_inner(id).await?;
+                    let owner = self.open_actor(id).await?;
+                    let conn = owner.conn.lock().await;
+                    if crate::actor::status(&conn).await? == crate::Status::Fork {
+                        return Ok(());
+                    }
+                    let pending = crate::actor::query(&conn, "SELECT 1 FROM outbox WHERE seq<0 AND delivered=0 LIMIT 1", ()).await?;
+                    anyhow::ensure!(pending.rows.is_empty(), "actor {id}: lifecycle cleanup remains pending");
+                    Ok(())
+                }
+                .await;
+                if let Err(error) = drained {
+                    failure.get_or_insert(error);
+                }
+            }
+            for id in &actors {
+                if let Err(error) = self.ship_inner(id).await {
+                    failure.get_or_insert(error);
+                }
+            }
+            if failure.is_none() {
+                self.shipping.closed.store(true, Ordering::Release);
+                self.wake.notify_waiters();
+            }
         }
-        self.close_drivers(None, None).await?;
+        // A guest callback cannot keep a native resource alive by trapping.
+        // Failed callbacks remain retryable, but resource teardown is mandatory.
+        if let Err(error) = self.close_drivers(None, None).await {
+            failure.get_or_insert(error);
+        }
+        if let Some(error) = failure {
+            return Err(error);
+        }
         if let Some(background) = &self.background {
             background.stop.notify_one();
             let task = background.task.lock().map_err(|_| anyhow::anyhow!("shipper task mutex poisoned"))?.take();

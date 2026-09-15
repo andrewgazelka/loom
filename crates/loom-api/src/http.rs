@@ -1,19 +1,16 @@
 use super::*;
+pub(crate) use crate::tenant::TenantService;
 
 #[derive(Clone)]
 struct ApiState {
-    service: Arc<Service>,
+    directory: ServiceDirectory,
     authorizer: Authorizer,
 }
-pub fn router(service: Arc<Service>, authorizer: Authorizer) -> Router {
-    let authorizer = authorizer.with_ingress_bearer(
-        service
-            .actors
-            .as_ref()
-            .and_then(|actors| actors.node.ingress_bearer()),
-    );
+pub fn router(directory: impl Into<ServiceDirectory>, authorizer: Authorizer) -> Router {
+    let directory = directory.into();
+    let authorizer = directory.authorizer(authorizer);
     let state = ApiState {
-        service,
+        directory,
         authorizer,
     };
     Router::new()
@@ -26,8 +23,16 @@ pub fn router(service: Arc<Service>, authorizer: Authorizer) -> Router {
         .route("/v1/builds/{hash}", get(build))
         .route("/v1/builds/active", get(active_build))
         .route("/v1/stream", get(stream))
+        .route(
+            "/v1/actors/{name}/websocket",
+            get(crate::actor_websocket::upgrade),
+        )
         .route("/health", get(|| async { Json(json!({"ok":true})) }))
         .layer(DefaultBodyLimit::max(16 * 1024 * 1024))
+        .route_layer(middleware::from_fn_with_state(
+            state.directory.clone(),
+            select_tenant,
+        ))
         .route_layer(middleware::from_fn_with_state(
             state.authorizer.clone(),
             authorize_token,
@@ -47,14 +52,37 @@ async fn authorize_token(
     mut request: Request<axum::body::Body>,
     next: Next,
 ) -> HttpResponse {
-    let token = request
+    let header_token = request
         .headers()
         .get("authorization")
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "));
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::to_owned);
+    let actor_websocket = request.method() == axum::http::Method::GET
+        && request.uri().path().starts_with("/v1/actors/")
+        && request.uri().path().ends_with("/websocket");
+    let browser_token = if actor_websocket {
+        match crate::actor_websocket::browser_bearer(request.headers()) {
+            Ok(token) => token,
+            Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+        }
+    } else {
+        None
+    };
+    if browser_token.is_some() && request.headers().contains_key("authorization") {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let credential = header_token.or(browser_token);
+    let token = credential.as_deref();
     let ingress_route = request.uri().path() == "/v1/ingress";
     if token.is_some_and(|token| authorizer.is_ingress(token)) {
         return if ingress_route {
+            let Some(tenant) = token.and_then(|token| authorizer.ingress_tenant(token)) else {
+                return StatusCode::FORBIDDEN.into_response();
+            };
+            request
+                .extensions_mut()
+                .insert(Access::owner().for_tenant(tenant));
             next.run(request).await
         } else {
             StatusCode::FORBIDDEN.into_response()
@@ -75,17 +103,49 @@ async fn authorize_token(
     let Some(access) = access else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    if request.method() == axum::http::Method::GET && !access.allows(Scope::Read) {
-        return StatusCode::FORBIDDEN.into_response();
+    if request.method() == axum::http::Method::GET {
+        let scope = if request.uri().path().starts_with("/v1/actors/")
+            && request.uri().path().ends_with("/websocket")
+        {
+            Scope::Execute
+        } else {
+            Scope::Read
+        };
+        if !access.allows(scope) {
+            return StatusCode::FORBIDDEN.into_response();
+        }
     }
     request.extensions_mut().insert(access);
     next.run(request).await
 }
+async fn select_tenant(
+    State(directory): State<ServiceDirectory>,
+    mut request: Request<axum::body::Body>,
+    next: Next,
+) -> HttpResponse {
+    if matches!(request.uri().path(), "/health" | "/v1/stream") {
+        return next.run(request).await;
+    }
+    let Some(access) = request.extensions().get::<Access>().cloned() else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let Ok(service) = directory.scoped(access) else {
+        return StatusCode::FORBIDDEN.into_response();
+    };
+    request.extensions_mut().insert(TenantService {
+        service: Arc::new(service),
+    });
+    next.run(request).await
+}
+
 #[derive(Deserialize)]
 struct IngressRequest {
     ops: Vec<loom_actor::DeliveryOp>,
 }
-async fn ingress(State(s): State<ApiState>, Json(request): Json<IngressRequest>) -> HttpResponse {
+async fn ingress(
+    axum::Extension(s): axum::Extension<TenantService>,
+    Json(request): Json<IngressRequest>,
+) -> HttpResponse {
     let Some(actors) = &s.service.actors else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
@@ -129,11 +189,10 @@ fn protocol_response(response: Response) -> HttpResponse {
     response
 }
 async fn command(
-    State(s): State<ApiState>,
-    axum::Extension(access): axum::Extension<Access>,
+    axum::Extension(s): axum::Extension<TenantService>,
     request: Result<Json<CommandRequest>, axum::extract::rejection::JsonRejection>,
 ) -> HttpResponse {
-    let service = s.service.scoped(access);
+    let service = s.service;
     match request {
         Ok(Json(request)) => protocol_response(service.command(request).await),
         Err(error) => json_rejection(&service, error),
@@ -150,7 +209,7 @@ fn json_rejection(
     response
 }
 async fn cas(
-    State(s): State<ApiState>,
+    axum::Extension(s): axum::Extension<TenantService>,
     Path(hash): Path<String>,
     headers: HeaderMap,
 ) -> HttpResponse {
@@ -211,11 +270,11 @@ async fn cas(
             };
             response.headers_mut().insert(
                 axum::http::header::CACHE_CONTROL,
-                axum::http::HeaderValue::from_static("public, max-age=31536000, immutable"),
+                axum::http::HeaderValue::from_static("private, max-age=31536000, immutable"),
             );
             response.headers_mut().insert(
                 axum::http::header::VARY,
-                axum::http::HeaderValue::from_static("Accept"),
+                axum::http::HeaderValue::from_static("Accept, Authorization"),
             );
             response
         }
@@ -238,7 +297,10 @@ struct EventQuery {
     after: i64,
     limit: Option<usize>,
 }
-async fn events(State(s): State<ApiState>, Query(q): Query<EventQuery>) -> Json<Response> {
+async fn events(
+    axum::Extension(s): axum::Extension<TenantService>,
+    Query(q): Query<EventQuery>,
+) -> Json<Response> {
     Json(
         s.service.response(
             s.service
@@ -248,7 +310,10 @@ async fn events(State(s): State<ApiState>, Query(q): Query<EventQuery>) -> Json<
         ),
     )
 }
-async fn definition(State(s): State<ApiState>, Path(name): Path<String>) -> Json<Response> {
+async fn definition(
+    axum::Extension(s): axum::Extension<TenantService>,
+    Path(name): Path<String>,
+) -> Json<Response> {
     Json(
         s.service.response(
             s.service
@@ -258,7 +323,10 @@ async fn definition(State(s): State<ApiState>, Path(name): Path<String>) -> Json
         ),
     )
 }
-async fn deps(State(s): State<ApiState>, Path(hash): Path<String>) -> Json<Response> {
+async fn deps(
+    axum::Extension(s): axum::Extension<TenantService>,
+    Path(hash): Path<String>,
+) -> Json<Response> {
     Json(
         s.service.response(
             s.service
@@ -268,10 +336,13 @@ async fn deps(State(s): State<ApiState>, Path(hash): Path<String>) -> Json<Respo
         ),
     )
 }
-async fn build(State(s): State<ApiState>, Path(hash): Path<String>) -> Json<Response> {
+async fn build(
+    axum::Extension(s): axum::Extension<TenantService>,
+    Path(hash): Path<String>,
+) -> Json<Response> {
     Json(s.service.response(s.service.build_record(&hash)))
 }
-async fn active_build(State(s): State<ApiState>) -> Json<Response> {
+async fn active_build(axum::Extension(s): axum::Extension<TenantService>) -> Json<Response> {
     Json(s.service.response(Ok(s.service.build_progress.snapshot())))
 }
 async fn stream(State(s): State<ApiState>, ws: WebSocketUpgrade) -> HttpResponse {
@@ -292,13 +363,21 @@ async fn stream_events(s: ApiState, mut socket: WebSocket) {
     let Ok(mut subscription) = serde_json::from_str::<Subscription>(&text) else {
         return;
     };
-    if s.authorizer.is_ingress(&subscription.token)
-        || s.authorizer
-            .authenticate(&subscription.token)
-            .is_none_or(|access| !access.allows(Scope::Read))
-    {
+    if s.authorizer.is_ingress(&subscription.token) {
         return;
     }
+    let Some(access) = s.authorizer.authenticate(&subscription.token) else {
+        return;
+    };
+    if !access.allows(Scope::Read) {
+        return;
+    }
+    let Ok(service) = s.directory.scoped(access) else {
+        return;
+    };
+    let s = TenantService {
+        service: Arc::new(service),
+    };
     if socket
         .send(Message::Text("{\"ok\":true}".into()))
         .await
@@ -339,7 +418,7 @@ async fn stream_events(s: ApiState, mut socket: WebSocket) {
 }
 
 async fn definition_tick(
-    s: &ApiState,
+    s: &TenantService,
     socket: &mut WebSocket,
     subscription: &mut Subscription,
 ) -> Result<()> {
@@ -358,7 +437,7 @@ async fn definition_tick(
 }
 
 async fn definition_stream(
-    s: &ApiState,
+    s: &TenantService,
     socket: &mut WebSocket,
     subscription: &mut Subscription,
 ) -> Result<()> {
@@ -391,7 +470,7 @@ struct SubscribeTarget {
 }
 
 async fn actor_stream(
-    s: &ApiState,
+    s: &TenantService,
     socket: &mut WebSocket,
     subscription: &mut Subscription,
     host: &mut loom_actor::HostStream,

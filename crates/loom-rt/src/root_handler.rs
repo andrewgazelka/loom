@@ -54,6 +54,14 @@ pub(super) fn dispatch<'a>(
     occurrence: i64,
     effects: EffectContext,
 ) -> HandlerFuture<'a> {
+    // Check before replay and memo lookup, which can otherwise return data from
+    // a prior host-authorized execution without reaching the native handler.
+    if effects.root.is_none()
+        && let Ok(op) = effect_name(&desc)
+        && let Err(error) = runtime.require_host_effect(op)
+    {
+        return Box::pin(async move { Err(error) });
+    }
     if let Some(sender) = effects.root.clone() {
         return Box::pin(async move {
             let descriptor = match effect_name(&desc) {
@@ -209,6 +217,7 @@ impl RootHandler for Builtins {
             let runtime = request.runtime;
             let op = effect_name(&request.desc)?;
             let args = request.desc.get("args").cloned().unwrap_or(Value::Null);
+            runtime.require_host_effect(op)?;
             let result = match op {
                 "llm" => serde_json::to_value(
                     runtime

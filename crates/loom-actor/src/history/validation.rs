@@ -60,7 +60,11 @@ impl Node {
         let fork = self.fork_from(&source, id, cursor - k).await?;
         let mut conn = fork.conn.lock().await;
         let effects = ReplayEffects::load(&source).await?;
-        if let Some(verdict) = promote_replay(&mut conn, behavior.as_ref(), "validation", "candidate", &effects).await? {
+        // Revalidating the installed code must not invent an upgrade hook:
+        // it would consume the next recorded startup/shutdown effect sequence.
+        if actor::code(&conn).await?.hash != behavior.hash()
+            && let Some(verdict) = promote_candidate(&mut conn, behavior.as_ref(), &effects).await?
+        {
             let record = memo::Record {
                 key: key.clone(),
                 result: crate::ValidationResult { verdict, assertions: Vec::new() },

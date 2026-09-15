@@ -322,7 +322,7 @@ impl Node {
                 ))),
             };
         }
-        let conn = actor::connect(&self.path(target), self.config.io).await.map_err(EffectError::Environmental)?;
+        let conn = actor::connect_reader(&self.path(target), self.config.io).await.map_err(EffectError::Environmental)?;
         Ok(CapabilityReader::Independent { conn })
     }
     pub(crate) fn attenuate_verified(&self, cap: &Cap, rights: Rights) -> Result<Cap, EffectError> {

@@ -66,15 +66,15 @@ const gates = [
     token = tokenFile ? (await readFile(tokenFile, 'utf8')).trim() : process.env.LOOM_TOKEN ?? '';
     timeout = Number(process.env.LOOM_E2E_OPERATION_TIMEOUT_MS ?? 180000);
     assert(Number.isSafeInteger(timeout) && timeout > 0, 'Invalid timeout');
-    original[names.base] = await call('add', { name: names.base, source: baseSource });
+    original[names.base] = await call('add', { lang: 'rust', name: names.base, source: baseSource });
     hash(original[names.base]!); entryHash(original[names.base]!);
     await run(names.base, 41);
   } },
   { name: 'compatible transitive propagation', check: async () => {
-    original[names.caller] = await call('add', { name: names.caller, source: 'pub fn main() -> i32 { base::main() + 1 }', deps: { base: hash(original[names.base]!) } });
-    original[names.outer] = await call('add', { name: names.outer, source: 'pub fn main() -> i32 { caller::main() * 2 }', deps: { caller: hash(original[names.caller]!) } });
-    original[names.config] = await call('add', { name: names.config, source: 'pub fn main() -> i32 { 123 }' });
-    original[names.unrelated] = await call('add', { name: names.unrelated, source: 'pub fn main() -> i32 { 777 }' });
+    original[names.caller] = await call('add', { lang: 'rust', name: names.caller, source: 'pub fn main() -> i32 { base::main() + 1 }', deps: { base: hash(original[names.base]!) } });
+    original[names.outer] = await call('add', { lang: 'rust', name: names.outer, source: 'pub fn main() -> i32 { caller::main() * 2 }', deps: { caller: hash(original[names.caller]!) } });
+    original[names.config] = await call('add', { lang: 'rust', name: names.config, source: 'pub fn main() -> i32 { 123 }' });
+    original[names.unrelated] = await call('add', { lang: 'rust', name: names.unrelated, source: 'pub fn main() -> i32 { 777 }' });
     await run(names.outer, 84);
     const request = { name: names.base, source: changedSource, expected_hash: hash(original[names.base]!), request_id: `${prefix}_request` };
     const updated = await call('update', request);

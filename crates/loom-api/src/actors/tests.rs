@@ -55,7 +55,7 @@ pub fn handle(_message: Vec<u8>) {
         .command(loom_proto::CommandRequest {
             session: None,
             command: "add".into(),
-            args: json!({"name":"new-actor","source":source}),
+            args: json!({"lang":"rust","name":"new-actor","source":source}),
         })
         .await;
     assert!(added.ok, "{added:?}");

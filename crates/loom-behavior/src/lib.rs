@@ -12,7 +12,6 @@ use loom_actor::{Behavior, Ctx, Registry, Trap};
 use loom_rt::{Runtime, WasmSandbox};
 use loom_sandbox::{CallEffects, GuestFailure, Sandbox};
 use loom_store::Store;
-use loom_v8::V8Engine;
 use serde_json::Value;
 use std::{future::Future, pin::Pin, sync::Arc};
 
@@ -27,7 +26,7 @@ pub struct LoomBehavior {
 impl LoomBehavior {
     pub async fn new(store: Store, def_hash: &str) -> Result<Self> {
         let runtime = Runtime::new(store.clone())?;
-        Self::load(store, def_hash, runtime, None).await
+        Self::load(store, def_hash, runtime).await
     }
 
     pub fn from_sandbox(hash: String, schema: String, sandbox: Arc<dyn Sandbox>) -> Self {
@@ -39,12 +38,7 @@ impl LoomBehavior {
         }
     }
 
-    async fn load(
-        store: Store,
-        def_hash: &str,
-        runtime: Runtime,
-        v8: Option<Arc<V8Engine>>,
-    ) -> Result<Self> {
+    async fn load(store: Store, def_hash: &str, runtime: Runtime) -> Result<Self> {
         let definition = store
             .executable_definition(def_hash)?
             .with_context(|| format!("definition {def_hash} not found"))?;
@@ -62,7 +56,7 @@ impl LoomBehavior {
         };
         anyhow::ensure!(
             entry.params.len() == 1
-                && (definition.lang == loom_proto::Lang::JavaScript
+                && (definition.lang.is_v8()
                     || matches!(
                         &entry.params[0].shape,
                         loom_proto::ValueShape::Array { items } if matches!(items.as_ref(), loom_proto::ValueShape::Number)
@@ -80,15 +74,10 @@ impl LoomBehavior {
                     .with_context(|| format!("definition {def_hash}: LOOM_SCHEMA export"))?;
                 sandbox = Arc::new(WasmSandbox::new(runtime, def_hash.to_owned()));
             }
-            loom_proto::Lang::JavaScript => {
-                let engine = match v8 {
-                    Some(engine) => engine,
-                    None => runtime.v8_engine()?,
-                };
-                let source = store.javascript_source(def_hash, loom_v8::ABI_VERSION)?;
-                let compiled = engine.compile(&source).await?;
+            loom_proto::Lang::JavaScript | loom_proto::Lang::TypeScript => {
+                let compiled = runtime.javascript_program(def_hash).await?;
                 schema = compiled.schema().to_owned();
-                sandbox = Arc::new(compiled);
+                sandbox = compiled;
             }
         }
         Ok(Self {
@@ -103,29 +92,43 @@ impl LoomBehavior {
 /// Resolves the current name binding on every lookup; actors pin the returned hash.
 pub struct StoreRegistry {
     store: Store,
-    v8: tokio::sync::OnceCell<Arc<V8Engine>>,
+    runtime: tokio::sync::OnceCell<Runtime>,
     resolved: tokio::sync::Mutex<std::collections::HashMap<String, Arc<dyn Behavior>>>,
 }
 impl StoreRegistry {
     pub fn new(store: Store) -> Self {
         Self {
             store,
-            v8: Default::default(),
+            runtime: Default::default(),
             resolved: Default::default(),
         }
     }
-    pub fn with_v8(store: Store, engine: Arc<V8Engine>) -> Self {
+    /// The daemon already owns process recovery and engine pools. Resolutions
+    /// must share that owner: constructing a new Runtime would mark live process
+    /// sessions interrupted and create another set of execution workers.
+    pub fn with_runtime(store: Store, runtime: Runtime) -> Self {
         Self {
             store,
-            v8: tokio::sync::OnceCell::new_with(Some(engine)),
+            runtime: tokio::sync::OnceCell::new_with(Some(runtime)),
             resolved: Default::default(),
         }
+    }
+    async fn runtime(&self) -> Result<Runtime> {
+        Ok(self
+            .runtime
+            .get_or_try_init(|| async { Runtime::new(self.store.clone()) })
+            .await?
+            .clone())
     }
 }
 #[async_trait]
 impl Registry for StoreRegistry {
     async fn template(&self, reference: &str) -> Result<Arc<dyn loom_actor::Template>> {
-        Ok(Arc::new(LoomTemplate::new(self.store.clone(), reference)?))
+        Ok(Arc::new(LoomTemplate::with_runtime(
+            self.store.clone(),
+            reference,
+            self.runtime().await?,
+        )?))
     }
 
     async fn resolve(&self, reference: &str) -> Result<Arc<dyn Behavior>> {
@@ -137,19 +140,9 @@ impl Registry for StoreRegistry {
         if let Some(behavior) = resolved.get(&definition.hash) {
             return Ok(behavior.clone());
         }
-        let runtime = Runtime::new(self.store.clone())?;
-        let v8 = if definition.lang == loom_proto::Lang::JavaScript {
-            Some(
-                self.v8
-                    .get_or_try_init(|| async { runtime.v8_engine() })
-                    .await?
-                    .clone(),
-            )
-        } else {
-            None
-        };
+        let runtime = self.runtime().await?;
         let behavior: Arc<dyn Behavior> = Arc::new(
-            LoomBehavior::load(self.store.clone(), &definition.hash, runtime, v8)
+            LoomBehavior::load(self.store.clone(), &definition.hash, runtime)
                 .await
                 .with_context(|| format!("actor definition {reference:?}"))?,
         );
@@ -179,26 +172,41 @@ impl Behavior for LoomBehavior {
         &self.schema
     }
 
-    async fn handle(&self, cx: &mut Ctx<'_>, msg: &[u8]) -> Result<(), Trap> {
-        // One positional Vec<u8> argument preserves arbitrary inbox bytes.
-        let args = serde_json::json!([msg]);
+    fn has_startup(&self) -> bool {
+        self.sandbox.has_startup()
+    }
+    fn has_shutdown(&self) -> bool {
+        self.sandbox.has_shutdown()
+    }
+
+    async fn startup(&self, cx: &mut Ctx<'_>) -> Result<(), Trap> {
         let mut effects = ActorEffects {
             cx,
             definition: &self.hash,
             allowed_effects: self.allowed_effects.as_deref(),
         };
-        match self.sandbox.call(args, &mut effects).await {
-            Ok(_) => Ok(()),
-            Err(error) => match error.downcast::<Trap>() {
-                Ok(trap) => Err(trap),
-                Err(error) if error.is::<GuestFailure>() => {
-                    Err(Trap::new(format!("definition {}: {error:#}", self.hash)))
-                }
-                Err(error) => Err(effects
-                    .cx
-                    .runtime(format!("definition {}: {error:#}", self.hash))),
-            },
-        }
+        let result = self.sandbox.call_startup(&mut effects).await;
+        effects.finish(result)
+    }
+
+    async fn terminate(&self, cx: &mut Ctx<'_>, reason: &str) -> Result<(), Trap> {
+        let mut effects = ActorEffects {
+            cx,
+            definition: &self.hash,
+            allowed_effects: self.allowed_effects.as_deref(),
+        };
+        let result = self.sandbox.call_shutdown(reason, &mut effects).await;
+        effects.finish(result)
+    }
+
+    async fn handle(&self, cx: &mut Ctx<'_>, msg: &[u8]) -> Result<(), Trap> {
+        let mut effects = ActorEffects {
+            cx,
+            definition: &self.hash,
+            allowed_effects: self.allowed_effects.as_deref(),
+        };
+        let result = self.sandbox.call_message(msg, &mut effects).await;
+        effects.finish(result)
     }
 }
 
@@ -206,6 +214,23 @@ struct ActorEffects<'cx, 'db> {
     cx: &'cx mut Ctx<'db>,
     definition: &'cx str,
     allowed_effects: Option<&'cx [String]>,
+}
+impl ActorEffects<'_, '_> {
+    fn finish(&mut self, result: Result<Value>) -> Result<(), Trap> {
+        match result {
+            Ok(_) => Ok(()),
+            Err(error) => match error.downcast::<Trap>() {
+                Ok(trap) => Err(trap),
+                Err(error) if error.is::<GuestFailure>() => Err(Trap::new(format!(
+                    "definition {}: {error:#}",
+                    self.definition
+                ))),
+                Err(error) => Err(self
+                    .cx
+                    .runtime(format!("definition {}: {error:#}", self.definition))),
+            },
+        }
+    }
 }
 impl CallEffects for ActorEffects<'_, '_> {
     fn perform(

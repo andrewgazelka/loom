@@ -93,7 +93,7 @@ async function add(file: string, name: string): Promise<Record<string, unknown>>
   const path = join(directory, file);
   const source = await readFile(path, 'utf8');
   assert(!source.includes('#[') && !/\w+!\s*\(/.test(source), `${file}: guest must have no macros`);
-  return object(await call(['add', path, '--name', name], 'add', { source, name }));
+  return object(await call(['add', path, '--name', name, '--lang', 'rust'], 'add', { lang: 'rust', source, name }));
 }
 async function runGreeting(reference: string, expected: string) {
   const result = object(await call(['run', reference, '"loom"'], 'run', { target: reference, args: 'loom' }));

@@ -6,6 +6,7 @@ autotests = false
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+loom-process = { path = "../loom-process" }
 turso = "0.7.2"
 turso_core = "0.7.2"
 turso_parser = "0.7.2"
@@ -22,6 +23,7 @@ futures-core = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 
 [dev-dependencies]
+loom-store = { path = "../loom-store" }
 tempfile = "3"
 axum = "0.8"
 tokio = { version = "1", features = ["net"] }
@@ -52,3 +54,19 @@ path = "tests/view.rs"
 [[test]]
 name = "drivers"
 path = "tests/drivers.rs"
+
+[[test]]
+name = "process_driver"
+path = "tests/process_driver.rs"
+
+[[test]]
+name = "named"
+path = "tests/named.rs"
+
+[[test]]
+name = "container_driver"
+path = "tests/container_driver.rs"
+
+[[test]]
+name = "lifecycle_hooks"
+path = "tests/lifecycle_hooks.rs"

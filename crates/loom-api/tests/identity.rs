@@ -4,7 +4,10 @@ use loom_store::Store;
 use serde_json::json;
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
-async fn command(service: &Service, command: &str, args: Value) -> Value {
+async fn command(service: &Service, command: &str, mut args: Value) -> Value {
+    if command == "add" {
+        args["lang"] = json!("rust");
+    }
     let response = service
         .command(CommandRequest {
             session: None,

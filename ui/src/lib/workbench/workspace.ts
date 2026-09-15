@@ -1,3 +1,4 @@
+import { sourceLanguage } from "../sourceLanguage";
 import { get, writable } from "svelte/store";
 import { commandById, parseFields, V, type Command } from "./commands";
 import { definitionView, object, string, type Json, type Row } from "./schema";
@@ -62,8 +63,10 @@ export class PanelSession {
         defaults[field.key] ?? field.initial ?? "",
       ]),
     );
+    if (command.id === V.update && defaults.lang) this.baseline.lang = defaults.lang;
+    // Drafts saved before language selection existed contain Rust source.
     this.state = writable<PanelSnapshot>({
-      values: { ...(draft ?? this.baseline) },
+      values: { ...(draft ?? this.baseline), ...(draft && [V.add, V.update].some(id => id === this.command.id) && !draft.lang ? { lang: "rust" } : {}) },
       busy: false,
       loadingSource: false,
       dirty: draft !== undefined,
@@ -87,8 +90,7 @@ export class PanelSession {
     const snapshot = get(this.state);
     if (
       this.command.id !== V.update ||
-      snapshot.dirty ||
-      snapshot.values.source ||
+      ((snapshot.dirty || snapshot.values.source) && snapshot.values.lang) ||
       !snapshot.values.name ||
       snapshot.busy
     )
@@ -98,10 +100,14 @@ export class PanelSession {
       const result = await client.call(commandById(V.view), {
         target: snapshot.values.name,
       });
-      if (get(this.state).dirty) return;
+      if (get(this.state).dirty || snapshot.values.source) {
+        this.state.update((value) => ({ ...value, values: { ...value.values, lang: sourceLanguage(definitionView(result).def.lang) } }));
+        return;
+      }
       this.baseline = {
         ...snapshot.values,
         source: definitionView(result).source,
+        lang: sourceLanguage(definitionView(result).def.lang),
         expected_hash: definitionView(result).hash,
       };
       this.state.update((value) => ({

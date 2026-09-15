@@ -89,10 +89,13 @@ impl Service {
                     "update conflict: expected_hash does not match current name"
                 );
             }
-            let edit = self.resolve_edit(hash, serde_json::from_value(json!({
-                "source":field(args, "source")?, "deps":args.get("deps"),
-                "allowed_effects":args.get("allowed_effects")
-            }))?)?;
+            let edit = self.resolve_edit(
+                hash,
+                serde_json::from_value(json!({
+                    "source":field(args, "source")?, "deps":args.get("deps"),
+                    "allowed_effects":args.get("allowed_effects")
+                }))?,
+            )?;
             let state = Evolution {
                 original_request: Some(original_request),
                 target,
@@ -273,10 +276,19 @@ impl Service {
     }
 
     fn resolve_edit(&self, hash: &str, mut edit: Edit) -> Result<Edit> {
-        let definition = self.store.resolve(hash)?.context("edited definition missing")?;
-        if definition.lang == Lang::JavaScript {
-            ensure!(edit.deps.as_ref().is_none_or(BTreeMap::is_empty), "JavaScript definitions do not support imports or dependencies");
-            ensure!(source_reference(&edit.source).is_none(), "JavaScript source must be inline; Rust source bundles are unsupported");
+        let definition = self
+            .store
+            .resolve(hash)?
+            .context("edited definition missing")?;
+        if definition.lang.is_v8() {
+            ensure!(
+                edit.deps.as_ref().is_none_or(BTreeMap::is_empty),
+                "script deps must be empty; use source import declarations"
+            );
+            ensure!(
+                source_reference(&edit.source).is_none(),
+                "script source must be inline; Rust source bundles are unsupported"
+            );
         }
         if let Some(deps) = &mut edit.deps {
             for target in deps.values_mut() {
@@ -455,7 +467,7 @@ impl Service {
                 deps: staged.store.definition_deps(&new_hash)?,
                 identity: match definition.lang {
                     Lang::Rust => Some(staged.store.build_identity(&new_hash)?.context("built identity missing")?),
-                    Lang::JavaScript => None,
+                    Lang::JavaScript | Lang::TypeScript => None,
                 },
                 event: json!({"type":"component_built", "component_hash":response.result["build"]["component_hash"], "logs_ref":response.result["build"]["logs_ref"], "ms":response.result["build"]["ms"], "size":response.result["build"]["size"], "rustc_invocations":response.result["build"]["rustc_invocations"]}),
             });

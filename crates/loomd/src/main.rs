@@ -1,9 +1,10 @@
 mod cluster_worker;
 mod static_files;
+mod tenants;
 use anyhow::{Context, ensure};
 use axum::serve::ListenerExt;
 use clap::Parser;
-use std::{path::PathBuf, process::ExitCode, sync::Arc};
+use std::{path::PathBuf, process::ExitCode};
 
 fn main() -> anyhow::Result<ExitCode> {
     if let Some(status) = loom_build::compiler_cache_entry()? {
@@ -21,6 +22,18 @@ struct Args {
     db: PathBuf,
     #[arg(long)]
     actors_dir: Option<PathBuf>,
+    /// Non-default tenants store definitions and actors beneath this directory.
+    #[arg(long)]
+    tenant_root: Option<PathBuf>,
+    /// Fixed native process presets: [{tenant,name,spec}].
+    #[arg(long)]
+    processes_file: Option<PathBuf>,
+    /// Enable tenant container actors using this trusted absolute Docker executable path.
+    #[arg(long)]
+    docker_executable: Option<PathBuf>,
+    /// Docker daemon endpoint; guests cannot override it.
+    #[arg(long, requires = "docker_executable")]
+    docker_host: Option<String>,
     #[arg(long, default_value = "127.0.0.1:8787")]
     bind: std::net::SocketAddr,
     #[arg(
@@ -55,58 +68,36 @@ async fn serve() -> anyhow::Result<()> {
     let args = Args::parse();
     let config = args.actor_config().await?;
     let shutdown = Shutdown::new()?;
-    let authorizer = if let Some(path) = args.tokens_file {
+    let authorizer = if let Some(path) = &args.tokens_file {
         loom_api::Authorizer::new(serde_json::from_slice(&tokio::fs::read(path).await?)?)?
     } else {
         loom_api::Authorizer::single(
             args.token
+                .clone()
                 .ok_or_else(|| anyhow::anyhow!("token required"))?,
         )?
     };
     let ui = args.root.join("ui/build");
-    let backup_directory = args.backup_dir.unwrap_or_else(|| {
-        args.db
-            .parent()
-            .unwrap_or(std::path::Path::new("."))
-            .join("backups")
-    });
-    let actors_dir = args.actors_dir.unwrap_or_else(|| {
-        args.db
-            .parent()
-            .unwrap_or(std::path::Path::new("."))
-            .join("actors")
-    });
-    let service = loom_api::Service::new(
-        loom_store::Store::open(args.db)?,
-        args.root.canonicalize()?,
-        vec![loom_proto::Lang::Rust, loom_proto::Lang::JavaScript],
-    )?
-    .with_backup_directory(backup_directory);
-    let node = loom_actor::Node::new(
-        actors_dir,
-        service.actor_registry(),
-        Arc::new(loom_actor::DefaultEffects),
-        config,
-    )
-    .await?;
-    let authorizer = authorizer.with_ingress_bearer(node.ingress_bearer());
-    let service = Arc::new(service.with_actors(node.clone()));
+    let services = tenants::open(&args, &authorizer, config).await?;
+    let authorizer = services.authorizer(authorizer);
     if args.stdio {
-        let worker = cluster_worker::ClusterWorker::start(&node);
+        let tenant = authorizer.tenants();
+        ensure!(
+            tenant.len() == 1,
+            "stdio requires exactly one authenticated tenant"
+        );
+        let service = services.get(tenant.iter().next().context("tenant missing")?)?;
+        let node = service.actor_node().context("actor node missing")?.clone();
+        let workers = tenants::start_workers(&services);
         let result = tokio::select! {
-            result = loom_mcp::stdio(service, node.clone()) => result,
+            result = loom_mcp::stdio(service, node) => result,
             _ = shutdown.wait() => Ok(()),
         };
-        if let Some(worker) = worker {
-            worker.finish(&node).await?;
-        }
+        tenants::finish_workers(workers).await?;
         return result;
     }
-    let mcp = loom_api::protect(
-        loom_mcp::router(service.clone(), node.clone()),
-        authorizer.clone(),
-    );
-    let app = loom_api::router(service, authorizer.clone())
+    let mcp = loom_api::protect(loom_mcp::router(services.clone()), authorizer.clone());
+    let app = loom_api::router(services.clone(), authorizer.clone())
         .merge(mcp)
         .fallback_service(loom_api::protect_public(
             static_files::router(ui),
@@ -121,13 +112,11 @@ async fn serve() -> anyhow::Result<()> {
             eprintln!("failed to disable TCP buffering for an accepted connection: {error}");
         }
     });
-    let worker = cluster_worker::ClusterWorker::start(&node);
+    let workers = tenants::start_workers(&services);
     let result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown.wait())
         .await;
-    if let Some(worker) = worker {
-        worker.finish(&node).await?;
-    }
+    tenants::finish_workers(workers).await?;
     result?;
     Ok(())
 }

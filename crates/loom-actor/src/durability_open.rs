@@ -96,6 +96,10 @@ impl Node {
 
     /// Stale files are preserved by design; never listed; removed only by an operator.
     pub(crate) async fn archive_stale(&self, id: &str, conn: &mut Connection) -> Result<()> {
+        // Losing ownership fences native I/O too, even if an idle process or
+        // socket never attempts another inbox injection. Driver cancellation
+        // is intentional: the losing node cannot publish a lifecycle event.
+        self.fence_drivers(id).await?;
         let epoch: u64 = actor::meta(conn, "lease_epoch").await?.parse()?;
         let archive = self.dir.join(format!("{id}.stale.{epoch}.db"));
         if archive.exists() && actor::status(conn).await? == crate::Status::Stopped && actor::meta(conn, "reason").await? == "lease_lost" {

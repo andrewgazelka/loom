@@ -16,9 +16,47 @@ use std::{
 
 #[derive(Clone, Debug)]
 pub enum StoreConfig {
-    Local { path: PathBuf },
-    S3 { endpoint: String, bucket: String, region: String },
+    Local {
+        path: PathBuf,
+    },
+    S3 {
+        endpoint: String,
+        bucket: String,
+        region: String,
+    },
+    /// Apply one object-key namespace to every operation, including listing and
+    /// conditional writes. This wraps local and S3 stores at the same boundary.
+    Namespace {
+        store: Box<StoreConfig>,
+        prefix: String,
+    },
 }
+fn open_store(config: &StoreConfig) -> Result<Arc<dyn ObjectStore>> {
+    let store: Arc<dyn ObjectStore> = match config {
+        StoreConfig::Local { path } => Arc::new(ConditionalLocalStore::new(path)?),
+        StoreConfig::S3 { endpoint, bucket, region } => Arc::new(
+            AmazonS3Builder::from_env()
+                .with_endpoint(endpoint)
+                .with_bucket_name(bucket)
+                .with_region(region)
+                .with_allow_http(endpoint.starts_with("http://"))
+                .with_conditional_put(S3ConditionalPut::ETagMatch)
+                .build()?,
+        ),
+        StoreConfig::Namespace { store, prefix } => {
+            ensure!(
+                !prefix.is_empty()
+                    && !prefix.starts_with('/')
+                    && !prefix.ends_with('/')
+                    && !prefix.split('/').any(|part| part.is_empty() || part == "." || part == ".."),
+                "invalid object-store namespace"
+            );
+            Arc::new(object_store::prefix::PrefixStore::new(open_store(store)?, Path::parse(prefix)?))
+        }
+    };
+    Ok(store)
+}
+
 pub trait Clock: Debug + Send + Sync {
     fn now_ms(&self) -> Result<u64>;
 }
@@ -77,18 +115,7 @@ impl RemoteStore {
     pub fn new(config: &StoreConfig, ttl: Duration, clock: Arc<dyn Clock>, owner: String) -> Result<Self> {
         let ttl: u64 = ttl.as_millis().try_into()?;
         ensure!(ttl >= 3, "lease TTL must be at least 3 ms");
-        let store: Arc<dyn ObjectStore> = match config {
-            StoreConfig::Local { path } => Arc::new(ConditionalLocalStore::new(path)?),
-            StoreConfig::S3 { endpoint, bucket, region } => Arc::new(
-                AmazonS3Builder::from_env()
-                    .with_endpoint(endpoint)
-                    .with_bucket_name(bucket)
-                    .with_region(region)
-                    .with_allow_http(endpoint.starts_with("http://"))
-                    .with_conditional_put(S3ConditionalPut::ETagMatch)
-                    .build()?,
-            ),
-        };
+        let store = open_store(config)?;
         Ok(Self { store, owner, clock, ttl, owned: Mutex::new(HashMap::new()), guards: Mutex::new(HashMap::new()) })
     }
     fn guards(&self, id: &str) -> Result<Arc<ActorGuards>> {
@@ -293,4 +320,28 @@ fn conflict(error: &anyhow::Error) -> bool {
         error.downcast_ref::<object_store::Error>(),
         Some(object_store::Error::Precondition { .. } | object_store::Error::AlreadyExists { .. })
     )
+}
+
+#[cfg(test)]
+mod namespace_tests {
+    use super::*;
+    #[tokio::test]
+    async fn object_namespaces_separate_conditional_writes_and_listings() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let base = StoreConfig::Local { path: directory.path().to_owned() };
+        let alice = open_store(&StoreConfig::Namespace { store: Box::new(base.clone()), prefix: "tenants/alice".into() })?;
+        let bob = open_store(&StoreConfig::Namespace { store: Box::new(base.clone()), prefix: "tenants/bob".into() })?;
+        let key = Path::from("actors/same/head");
+        alice.put_opts(&key, b"alice".to_vec().into(), PutOptions { mode: PutMode::Create, ..Default::default() }).await?;
+        assert!(matches!(bob.get(&key).await, Err(object_store::Error::NotFound { .. })));
+        bob.put_opts(&key, b"bob".to_vec().into(), PutOptions { mode: PutMode::Create, ..Default::default() }).await?;
+        assert_eq!(alice.get(&key).await?.bytes().await?.as_ref(), b"alice");
+        assert_eq!(bob.get(&key).await?.bytes().await?.as_ref(), b"bob");
+        let listing = alice.list_with_delimiter(Some(&Path::from("actors/same"))).await?;
+        assert_eq!(listing.objects.len(), 1);
+        assert_eq!(listing.objects[0].location, key);
+        assert!(open_store(&base)?.get(&Path::from("tenants/alice/actors/same/head")).await.is_ok());
+        assert!(open_store(&StoreConfig::Namespace { store: Box::new(base), prefix: "../bob".into() }).is_err());
+        Ok(())
+    }
 }

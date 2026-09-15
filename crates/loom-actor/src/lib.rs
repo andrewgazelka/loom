@@ -3,6 +3,8 @@
 #![forbid(unsafe_code)]
 
 mod actor;
+mod registry;
+pub use registry::CompositeRegistry;
 pub mod cdc;
 mod subscribe;
 pub use subscribe::{HostStream, Subscription};
@@ -30,6 +32,7 @@ pub use relation_delivery::RelationshipWrite;
 pub mod builtin;
 mod directory;
 pub mod drivers;
+pub mod process_actor;
 pub use drivers::{Driver, DriverAck, DriverContext, DriverDelivery};
 mod durability;
 mod durability_open;
@@ -86,6 +89,10 @@ pub trait Registry: Send + Sync {
     async fn template(&self, reference: &str) -> Result<Arc<dyn Template>> {
         anyhow::bail!("template {reference}: registry does not resolve templates")
     }
+    /// Host-authorized public process preset names resolve to fixed driver identities.
+    async fn resolve_process(&self, name: &str) -> Result<String> {
+        anyhow::bail!("unknown process preset {name}")
+    }
     /// Native resource code is a separate namespace from actor behaviors.
     async fn resolve_driver(&self, hash: &str) -> Result<Arc<dyn Driver>> {
         anyhow::bail!("unknown driver hash {hash}")
@@ -103,6 +110,19 @@ pub trait Behavior: Send + Sync {
     }
     fn schema(&self) -> &str;
     async fn handle(&self, cx: &mut Ctx<'_>, msg: &[u8]) -> Result<(), Trap>;
+    /// Opt into a transactional callback after schema installation and on each
+    /// live activation. Ordinary opens, forks and replay do not activate resources.
+    fn has_startup(&self) -> bool {
+        false
+    }
+    /// Opt into `terminate(cx, "node_shutdown")` on graceful host shutdown.
+    /// Explicit actor stops invoke `terminate` regardless of this flag.
+    fn has_shutdown(&self) -> bool {
+        false
+    }
+    async fn startup(&self, _cx: &mut Ctx<'_>) -> Result<(), Trap> {
+        Ok(())
+    }
     async fn terminate(&self, _cx: &mut Ctx<'_>, _reason: &str) -> Result<(), Trap> {
         Ok(())
     }
@@ -354,3 +374,5 @@ mod test_registry;
 #[cfg(test)]
 #[path = "../tests/scheduler.rs"]
 mod scheduler_tests;
+
+pub mod container_actor;

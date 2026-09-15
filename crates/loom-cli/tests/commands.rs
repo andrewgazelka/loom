@@ -235,7 +235,9 @@ async fn definition_commands_reach_shared_service() {
     let path = file.path().to_str().unwrap();
     let first = "fn value() -> i32 { 41 }\r\n\r\npub fn main() -> i32 { value() }\r\n// Submitted trailing comment.\r\n";
     std::fs::write(file.path(), first).unwrap();
-    let added = server.invoke(&["add", path, "--name", "answer"]).await;
+    let added = server
+        .invoke(&["add", path, "--name", "answer", "--lang", "rust"])
+        .await;
     assert!(added.ok, "{added:?}");
     let old = added.result["hash"].as_str().unwrap();
     for key in ["behavior_hash", "wasm_hash"] {
@@ -249,7 +251,9 @@ async fn definition_commands_reach_shared_service() {
     std::fs::write(file.path(), "pub fn main() -> i32 { answer::main() }").unwrap();
     let pins = serde_json::json!({"answer":old}).to_string();
     let caller = server
-        .invoke(&["add", path, "--name", "caller", "--deps", &pins])
+        .invoke(&[
+            "add", path, "--name", "caller", "--deps", &pins, "--lang", "rust",
+        ])
         .await;
     assert!(caller.ok, "{caller:?}");
     std::fs::write(file.path(), first.replace("41", "42")).unwrap();

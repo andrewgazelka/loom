@@ -32,6 +32,7 @@ fn uncertain_send_is_not_reported_as_a_dead_letter() {
 #[tokio::test]
 async fn read_scope_cannot_create_view_directly_or_through_command() {
     let authorizer = Authorizer::new(vec![crate::auth::TokenConfig {
+        tenant: Default::default(),
         token: "reader".into(),
         scopes: [Scope::Read].into_iter().collect(),
     }])
@@ -42,7 +43,8 @@ async fn read_scope_cannot_create_view_directly_or_through_command() {
         vec![Lang::Rust],
     )
     .unwrap()
-    .scoped(authorizer.authenticate("reader").unwrap());
+    .scoped(authorizer.authenticate("reader").unwrap())
+    .unwrap();
     let args = json!({"actor":"a","table":"t","template":"h","order_by":[]});
     for request in [
         CommandRequest {

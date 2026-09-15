@@ -303,7 +303,7 @@ describe("Rust verb table parity", () => {
     const source = await Bun.file(
       new URL("../../crates/loom-proto/src/verbs.rs", import.meta.url),
     ).text();
-    const table = source
+    const table = source.replace(/Argument \{ name: "lang", kind: Kind::String, required: false, flag: true, default: Some\("\\"(\w+)\\""\) \}/g, 'arg!(lang, String, "$1")')
       .split("pub static VERBS: &[Verb] = &[")[1]!
       .split("\n];")[0]!;
     const server = [

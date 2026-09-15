@@ -30,10 +30,12 @@ impl Fixture {
         );
         let authorizer = Authorizer::new(vec![
             TokenConfig {
+                tenant: Default::default(),
                 token: "reader".into(),
                 scopes: [Scope::Read].into_iter().collect(),
             },
             TokenConfig {
+                tenant: Default::default(),
                 token: "runner".into(),
                 scopes: [Scope::Execute].into_iter().collect(),
             },

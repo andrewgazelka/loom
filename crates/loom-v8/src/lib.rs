@@ -3,9 +3,11 @@ mod codec;
 mod control;
 mod execution;
 mod pool;
+mod transpile;
+pub use transpile::{transpile_typescript, typescript_abi};
 
 /// Immutable guest contract and engine version used by definition identities.
-pub const ABI_VERSION: &str = "loom-v8/1/v8-152.2.0";
+pub const ABI_VERSION: &str = "loom-v8/2/v8-152.2.0";
 
 use anyhow::{Result, ensure};
 use loom_sandbox::{CallEffects, GuestFailure, Sandbox};
@@ -96,10 +98,19 @@ pub struct V8Sandbox {
     program: Arc<Program>,
 }
 
+pub(crate) enum Input {
+    Arguments { json: String },
+    Message { bytes: Vec<u8> },
+    Startup,
+    Shutdown { reason: String },
+}
+
 struct Program {
     source: String,
     code_cache: Vec<u8>,
     schema: String,
+    has_startup: bool,
+    has_shutdown: bool,
 }
 
 /// Counts completed compilations and V8-accepted code-cache consumptions.
@@ -122,8 +133,21 @@ impl V8Engine {
         })
     }
 
+    pub fn max_message_bytes(&self) -> usize {
+        self.pool.limits.max_message_bytes
+    }
+
     pub fn cache_stats(&self) -> CacheStats {
         self.pool.cache_stats()
+    }
+
+    pub async fn compile_typescript(&self, source: &str) -> Result<V8Sandbox> {
+        guest_ensure(
+            source.len() <= self.pool.limits.max_source_bytes,
+            "TypeScript source exceeds byte limit",
+        )?;
+        let javascript = transpile_typescript(source)?;
+        self.compile(&javascript).await
     }
 
     /// Validate main and optional LOOM_SCHEMA without granting host effects.
@@ -162,6 +186,48 @@ impl V8Sandbox {
 }
 
 impl Sandbox for V8Sandbox {
+    fn has_startup(&self) -> bool {
+        self.program.has_startup
+    }
+    fn has_shutdown(&self) -> bool {
+        self.program.has_shutdown
+    }
+
+    fn call_startup<'a>(
+        &'a self,
+        effects: &'a mut dyn CallEffects,
+    ) -> Pin<Box<dyn Future<Output = Result<Value>> + Send + 'a>> {
+        Box::pin(async move {
+            if !self.has_startup() {
+                return Ok(Value::Null);
+            }
+            self.invoke(Input::Startup, effects).await
+        })
+    }
+
+    fn call_shutdown<'a>(
+        &'a self,
+        reason: &'a str,
+        effects: &'a mut dyn CallEffects,
+    ) -> Pin<Box<dyn Future<Output = Result<Value>> + Send + 'a>> {
+        Box::pin(async move {
+            if !self.has_shutdown() {
+                return Ok(Value::Null);
+            }
+            guest_ensure(
+                reason.len() <= self.engine.max_message_bytes(),
+                "Loom shutdown reason exceeds byte limit",
+            )?;
+            self.invoke(
+                Input::Shutdown {
+                    reason: reason.to_owned(),
+                },
+                effects,
+            )
+            .await
+        })
+    }
+
     fn call<'a>(
         &'a self,
         args: Value,
@@ -173,40 +239,66 @@ impl Sandbox for V8Sandbox {
                 "JavaScript call arguments must be an array",
             )?;
             let args = encode_message(&args, self.engine.pool.limits.max_message_bytes)?;
-            let control = control::Control::new(self.engine.pool.limits.timeout);
-            let _cancel = control::CancelOnDrop(control.clone());
-            let (reply, mut receiver) = oneshot::channel();
-            let (sender, mut requests) = mpsc::channel(self.engine.pool.limits.max_pending_effects);
-            self.engine.pool.submit(pool::Job {
-                control,
-                task: pool::Task::Call {
-                    program: self.program.clone(),
-                    args,
-                    effects: sender,
-                    reply,
+            self.invoke(Input::Arguments { json: args }, effects).await
+        })
+    }
+
+    fn call_message<'a>(
+        &'a self,
+        message: &'a [u8],
+        effects: &'a mut dyn CallEffects,
+    ) -> Pin<Box<dyn Future<Output = Result<Value>> + Send + 'a>> {
+        Box::pin(async move {
+            guest_ensure(
+                message.len() <= self.engine.max_message_bytes(),
+                "Loom message exceeds byte limit",
+            )?;
+            self.invoke(
+                Input::Message {
+                    bytes: message.to_vec(),
                 },
-            })?;
-            let execution = async {
-                loop {
-                    tokio::select! {
-                        biased;
-                        // Effects already issued by the guest belong to this
-                        // transaction even when its returned promise is settled.
-                        Some(request) = requests.recv() => {
-                            let output = effects.perform(request.descriptor).await?;
-                            encode_message(&output, self.engine.pool.limits.max_message_bytes)?;
-                            let _ = request.reply.send(output);
-                        }
-                        result = &mut receiver => {
-                            return result.map_err(|_| anyhow::anyhow!("V8 execution worker stopped"))?;
-                        }
+                effects,
+            )
+            .await
+        })
+    }
+}
+
+impl V8Sandbox {
+    async fn invoke(&self, input: Input, effects: &mut dyn CallEffects) -> Result<Value> {
+        let control = control::Control::new(self.engine.pool.limits.timeout);
+        let _cancel = control::CancelOnDrop(control.clone());
+        let (reply, mut receiver) = oneshot::channel();
+        let (sender, mut requests) = mpsc::channel(self.engine.pool.limits.max_pending_effects);
+        self.engine.pool.submit(pool::Job {
+            control,
+            task: pool::Task::Call {
+                program: self.program.clone(),
+                input,
+                effects: sender,
+                reply,
+            },
+        })?;
+        let execution = async {
+            loop {
+                tokio::select! {
+                    biased;
+                    // Effects already issued by the guest belong to this
+                    // transaction even when its returned promise is settled.
+                    Some(request) = requests.recv() => {
+                        let output = effects.perform(request.descriptor).await?;
+                        encode_message(&output, self.engine.pool.limits.max_message_bytes)?;
+                        let _ = request.reply.send(output);
+                    }
+                    result = &mut receiver => {
+                        return result.map_err(|_| anyhow::anyhow!("V8 execution worker stopped"))?;
                     }
                 }
-            };
-            tokio::time::timeout(self.engine.pool.limits.timeout, execution)
-                .await
-                .map_err(|_| guest("JavaScript execution timed out"))?
-        })
+            }
+        };
+        tokio::time::timeout(self.engine.pool.limits.timeout, execution)
+            .await
+            .map_err(|_| guest("JavaScript execution timed out"))?
     }
 }
 

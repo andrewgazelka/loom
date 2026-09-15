@@ -353,12 +353,20 @@ async fn node_restart_does_not_restore_attempted_driver_spawn() {
     node.close().await.unwrap();
     drop(actor);
     drop(node);
-    let reopened = Node::new(dir.path(), registry, Arc::new(DefaultEffects), config).await.unwrap();
+    let reopened = Node::new(dir.path(), registry.clone(), Arc::new(DefaultEffects), config.clone()).await.unwrap();
     reopened.pump(&owner).await.unwrap();
     let actor = reopened.open(&owner).await.unwrap();
     assert_eq!(integer(&actor, "SELECT COUNT(*) FROM inbox WHERE key LIKE 'driver:%:listening'").await, 1);
     assert_eq!(integer(&actor, "SELECT COUNT(*) FROM outbox WHERE delivered=0 AND target LIKE 'drv:spawn:%'").await, 0);
     assert!(TcpStream::connect(&addr).await.is_err());
+    assert_eq!(integer(&actor, "SELECT COUNT(*) FROM inbox WHERE key LIKE 'down:spawn:drv:%'").await, 1);
+    assert_eq!(integer(&actor, "SELECT COUNT(*) FROM meta WHERE key LIKE 'driver_down:%'").await, 1);
+    reopened.close().await.unwrap();
+    drop(actor);
+    drop(reopened);
+    let reopened = Node::new(dir.path(), registry, Arc::new(DefaultEffects), config).await.unwrap();
+    let actor = reopened.open(&owner).await.unwrap();
+    assert_eq!(integer(&actor, "SELECT COUNT(*) FROM inbox WHERE key LIKE 'down:spawn:drv:%'").await, 1);
     reopened.close().await.unwrap();
 }
 
@@ -442,7 +450,26 @@ async fn lost_acknowledgement_is_an_error() {
     assert_eq!(rows.rows.len(), 1);
     assert_eq!(rows.rows[0].get::<i64>(0).unwrap(), 0);
     assert_eq!(integer(&f.actor, "SELECT COUNT(*) FROM meta WHERE key LIKE 'driver_drop:%'").await, 0);
-    f.node.close().await.unwrap();
+    // Shutdown drains committed output before cancelling resources. A lost ack
+    // remains an error, but cannot keep the native worker alive or erase the row.
+    let error = tokio::time::timeout(Duration::from_secs(15), f.node.close())
+        .await
+        .expect("shutdown hung after a lost acknowledgement")
+        .unwrap_err();
+    let text = format!("{error:#}");
+    assert!(text.contains("driver dropped acknowledgement; retry destination"), "{text}");
+    assert_eq!(integer(&f.actor, "SELECT COUNT(*) FROM outbox WHERE delivered=0").await, 1);
+    assert_eq!(integer(&f.actor, "SELECT COUNT(*) FROM meta WHERE key LIKE 'driver_drop:%'").await, 0);
+
+    // Retry now reaches a closed handle and records the ordinary terminal drop.
+    // If shutdown left the receiver alive, this would lose its ack again.
+    tokio::time::timeout(Duration::from_secs(5), f.node.pump(&f.owner))
+        .await
+        .expect("retry hung after native worker cancellation")
+        .unwrap();
+    assert_eq!(integer(&f.actor, "SELECT COUNT(*) FROM outbox WHERE delivered=0").await, 0);
+    assert_eq!(integer(&f.actor, "SELECT COUNT(*) FROM meta WHERE key LIKE 'driver_drop:%'").await, 1);
+    tokio::time::timeout(Duration::from_secs(15), f.node.close()).await.expect("shutdown retry hung").unwrap();
 }
 
 struct ControlledInjection {
@@ -488,4 +515,90 @@ async fn injection_after_owner_reset_is_refused() {
     assert!(text.contains("driver kernel closed") || text.contains("driver owner incarnation changed"), "{text}");
     assert_eq!(integer(&f.actor, "SELECT COUNT(*) FROM inbox WHERE key='after-owner-reset'").await, 0);
     f.node.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn explicit_driver_stop_survives_node_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut registry = registry::Registry::new();
+    registry.insert(OWNER.into(), Arc::new(Owner { trap: false, hash: OWNER }));
+    registry.insert_driver(Arc::new(loom_actor::drivers::tcp::TcpListenerDriver));
+    let registry = Arc::new(registry);
+    let config = Config { io: Io::Syscall, ..Config::default() };
+    let node = Node::new(dir.path(), registry.clone(), Arc::new(DefaultEffects), config.clone()).await.unwrap();
+    let owner = node.spawn_root(OWNER, b"start").await.unwrap();
+    node.run_until_idle().await.unwrap();
+    let actor = node.open(&owner).await.unwrap();
+    wait_rows(&actor, "SELECT msg FROM inbox WHERE key LIKE 'driver:%:listening'").await;
+    let rows = actor.sql("SELECT cap FROM driver_state", ()).await.unwrap();
+    let cap: Cap = serde_json::from_str(&rows.rows[0].get::<String>(0).unwrap()).unwrap();
+    let rows = actor.sql("SELECT msg FROM inbox WHERE key LIKE 'driver:%:listening'", ()).await.unwrap();
+    let listening: serde_json::Value = serde_json::from_slice(&rows.rows[0].get::<Vec<u8>>(0).unwrap()).unwrap();
+    let addr = listening["addr"].as_str().unwrap();
+    let control = TcpStream::connect(addr).await.unwrap();
+    node.stop(&cap.target, "normal").await.unwrap();
+    assert!(TcpStream::connect(addr).await.is_err());
+    drop(control);
+    assert_eq!(integer(&actor, "SELECT COUNT(*) FROM meta WHERE key LIKE 'driver_closed:%'").await, 1);
+    assert_eq!(integer(&actor, "SELECT COUNT(*) FROM inbox WHERE key LIKE 'down:spawn:drv:%'").await, 0);
+    node.close().await.unwrap();
+    drop(actor);
+    drop(node);
+
+    let reopened = Node::new(dir.path(), registry, Arc::new(DefaultEffects), config).await.unwrap();
+    let actor = reopened.open(&owner).await.unwrap();
+    reopened.run_until_idle().await.unwrap();
+    assert_eq!(integer(&actor, "SELECT COUNT(*) FROM meta WHERE key LIKE 'driver_closed:%'").await, 1);
+    assert_eq!(integer(&actor, "SELECT COUNT(*) FROM meta WHERE key LIKE 'driver_down:%'").await, 0);
+    assert_eq!(integer(&actor, "SELECT COUNT(*) FROM inbox WHERE key LIKE 'down:spawn:drv:%'").await, 0);
+    reopened.close().await.unwrap();
+}
+
+async fn restart_preserves_replay_driver_history(replay_source: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut registry = registry::Registry::new();
+    registry.insert(OWNER.into(), Arc::new(Owner { trap: false, hash: OWNER }));
+    registry.insert_driver(Arc::new(loom_actor::drivers::tcp::TcpListenerDriver));
+    let registry = Arc::new(registry);
+    let config = Config { io: Io::Syscall, ..Config::default() };
+    let node = Node::new(dir.path(), registry.clone(), Arc::new(DefaultEffects), config.clone()).await.unwrap();
+    let owner = node.spawn_root(OWNER, b"start").await.unwrap();
+    node.run_until_idle().await.unwrap();
+    let actor = node.open(&owner).await.unwrap();
+    wait_rows(&actor, "SELECT msg FROM inbox WHERE key LIKE 'driver:%:listening'").await;
+    node.run_until_idle().await.unwrap();
+    assert_eq!(integer(&actor, "SELECT COUNT(*) FROM meta WHERE key LIKE 'driver_spawn:%'").await, 1);
+    // Public forks are ephemeral. Seed the two persisted replay identities
+    // independently to exercise startup admission without inventing fork durability.
+    if replay_source {
+        actor.sql("INSERT INTO meta(key,value) VALUES ('replay_source',?)", [owner.as_str()]).await.unwrap();
+    } else {
+        actor.sql("UPDATE meta SET value='fork' WHERE key='status'", ()).await.unwrap();
+    }
+    let meta_sql = "SELECT group_concat(entry, char(10)) FROM (SELECT quote(key)||'='||quote(value) AS entry FROM meta ORDER BY key)";
+    let inbox_sql = "SELECT group_concat(entry, char(10)) FROM (SELECT seq||':'||quote(key)||':'||quote(sender)||':'||hex(msg)||':'||state AS entry FROM inbox ORDER BY seq)";
+    let before_meta: String = actor.sql(meta_sql, ()).await.unwrap().rows[0].get(0).unwrap();
+    let before_inbox: String = actor.sql(inbox_sql, ()).await.unwrap().rows[0].get(0).unwrap();
+    node.close().await.unwrap();
+    drop(actor);
+    drop(node);
+
+    let reopened = Node::new(dir.path(), registry, Arc::new(DefaultEffects), config).await.unwrap();
+    let actor = reopened.open(&owner).await.unwrap();
+    let after_meta: String = actor.sql(meta_sql, ()).await.unwrap().rows[0].get(0).unwrap();
+    let after_inbox: String = actor.sql(inbox_sql, ()).await.unwrap().rows[0].get(0).unwrap();
+    assert_eq!(after_meta, before_meta);
+    assert_eq!(after_inbox, before_inbox);
+    assert_eq!(integer(&actor, "SELECT COUNT(*) FROM inbox WHERE key LIKE 'down:spawn:drv:%'").await, 0);
+    reopened.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn node_restart_preserves_fork_driver_history() {
+    restart_preserves_replay_driver_history(false).await;
+}
+
+#[tokio::test]
+async fn node_restart_preserves_replay_source_driver_history() {
+    restart_preserves_replay_driver_history(true).await;
 }

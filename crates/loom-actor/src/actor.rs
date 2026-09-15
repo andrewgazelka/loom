@@ -51,6 +51,22 @@ pub(crate) async fn connect(path: &Path, io: crate::Io) -> Result<Connection> {
     Ok(conn)
 }
 
+/// Read an existing actor while its owning connection executes a message.
+/// `connect` performs CDC/schema migrations and writes metadata, so using it
+/// here races the actor's writer even for an otherwise read-only authority
+/// check (observed through the background daemon's actor_sql endpoint).
+pub(crate) async fn connect_reader(path: &Path, io: crate::Io) -> Result<Connection> {
+    let path = path.to_str().context("database path is not UTF-8")?;
+    let db = turso::Builder::new_local(path).with_io(io.name()?.to_owned()).experimental_vacuum(true).build().await?;
+    let conn = db.connect()?;
+    // Turso 0.7.2 accepts the numeric form but rejects bare ON as a keyword.
+    conn.execute("PRAGMA query_only=1", ()).await?;
+    // Epoch, revocation and inspected rows must come from one committed WAL
+    // snapshot. Dropping this independent connection ends its read transaction.
+    conn.execute("BEGIN DEFERRED", ()).await?;
+    Ok(conn)
+}
+
 pub(crate) async fn query(conn: &Connection, sql: &str, params: impl IntoParams) -> Result<Rows> {
     let mut result = conn.query(sql, params).await?;
     let columns = result.column_names();
@@ -210,6 +226,22 @@ pub(crate) async fn promote(
     effects: &dyn EffectHandler,
     node: Option<&crate::Node>,
 ) -> Result<()> {
+    promote_with_mode(conn, behavior, author, rationale, effects, node, false).await
+}
+
+pub(crate) async fn promote_candidate(conn: &mut Connection, behavior: &dyn Behavior, effects: &dyn EffectHandler) -> Result<()> {
+    promote_with_mode(conn, behavior, "validation", "candidate", effects, None, true).await
+}
+
+async fn promote_with_mode(
+    conn: &mut Connection,
+    behavior: &dyn Behavior,
+    author: &str,
+    rationale: &str,
+    effects: &dyn EffectHandler,
+    node: Option<&crate::Node>,
+    synthetic: bool,
+) -> Result<()> {
     let schema = crate::Node::schema_fingerprint(conn).await?;
     let tx = conn.transaction().await?;
     let status = status(&tx).await?;
@@ -219,7 +251,7 @@ pub(crate) async fn promote(
     if seen.rows.is_empty() {
         tx.execute_batch(behavior.schema()).await?;
     }
-    crate::hooks::upgrade(&tx, &meta(&tx, "id").await?, behavior, &previous.hash, effects).await?;
+    crate::hooks::upgrade(&tx, &meta(&tx, "id").await?, behavior, &previous.hash, effects, synthetic).await?;
     tx.execute(
         "INSERT INTO code_changes(seq,behavior_hash,parent_hash,author,rationale,schema_sql) VALUES (?,?,?,?,?,?)",
         turso::params![

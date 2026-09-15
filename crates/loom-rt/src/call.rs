@@ -26,7 +26,7 @@ impl Runtime {
             .store
             .executable_definition(hash)?
             .ok_or_else(|| anyhow::anyhow!("definition {hash} not found"))?;
-        if definition.lang == loom_proto::Lang::JavaScript {
+        if definition.lang.is_v8() {
             return Ok(self.javascript_program(hash).await?.schema().to_owned());
         }
         let call = self

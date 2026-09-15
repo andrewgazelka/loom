@@ -1,19 +1,24 @@
 //! Durable process lifecycle. Callers supply a trusted, sandboxed command after
 //! machine authorization; cwd containment alone is not a filesystem sandbox.
 mod capture;
+mod sandbox;
 use anyhow::{Context, Result, ensure};
 pub use capture::{FileChange, FilesystemCapture, UnavailablePath};
 use loom_store::Store;
+pub use sandbox::ProcessSandbox;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     path::PathBuf,
     process::Stdio,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use tokio::{
-    io::{AsyncRead, AsyncReadExt},
-    process::Command,
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
+    process::{ChildStdin, Command},
     sync::{mpsc, watch},
 };
 
@@ -53,6 +58,116 @@ pub struct ProcessState {
     #[serde(default)]
     pub filesystem_capture: FilesystemCapture,
 }
+/// Ordered, durably recorded events from an owned interactive process.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ProcessEvent {
+    Output {
+        sequence: u64,
+        stderr: bool,
+        bytes: Vec<u8>,
+    },
+    Exit {
+        state: ProcessState,
+    },
+}
+
+/// Dropping the session synchronously signals its process group with SIGKILL
+/// on Unix; the supervisor then reaps it and durably records cancellation.
+/// Consume events regularly: delivery applies bounded backpressure.
+pub struct ProcessSession {
+    id: String,
+    input: Option<ProcessInput>,
+    events: mpsc::Receiver<ProcessEvent>,
+    cancel: mpsc::Sender<()>,
+    group: Arc<ProcessGroup>,
+}
+impl ProcessSession {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Split input ownership so writes and output draining can run concurrently.
+    pub fn take_input(&mut self) -> Result<ProcessInput> {
+        self.input.take().context("process input already taken")
+    }
+    pub async fn write(&mut self, bytes: &[u8]) -> Result<()> {
+        self.input
+            .as_mut()
+            .context("process input already taken")?
+            .write(bytes)
+            .await
+    }
+    pub async fn close_stdin(&mut self) -> Result<()> {
+        self.input
+            .as_mut()
+            .context("process input already taken")?
+            .close_stdin()
+            .await
+    }
+    pub async fn next_event(&mut self) -> Option<ProcessEvent> {
+        self.events.recv().await
+    }
+}
+/// Independently owned stdin. Drop closes the pipe without cancelling the
+/// session; cancelling an in-flight write terminates the process instead.
+pub struct ProcessInput {
+    stdin: Option<ChildStdin>,
+    cancel: mpsc::Sender<()>,
+    group: Arc<ProcessGroup>,
+}
+impl ProcessInput {
+    /// Writes at most 64 KiB, with a five-second deadline. An incomplete or
+    /// cancelled write terminates the session: retrying could duplicate input.
+    pub async fn write(&mut self, bytes: &[u8]) -> Result<()> {
+        ensure!(
+            bytes.len() <= 64 * 1024,
+            "session writes are limited to 64 KiB"
+        );
+        let mut stdin = self.stdin.take().context("process stdin is closed")?;
+        let mut attempt = InputAttempt {
+            cancel: Some(self.cancel.clone()),
+            group: self.group.clone(),
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), stdin.write_all(bytes))
+            .await
+            .context("process stdin write timed out")?
+            .context("write process stdin")?;
+        self.stdin = Some(stdin);
+        attempt.cancel = None;
+        Ok(())
+    }
+    pub async fn close_stdin(&mut self) -> Result<()> {
+        // ChildStdin has no userspace buffer; closing the pipe delivers EOF.
+        self.stdin.take();
+        Ok(())
+    }
+}
+impl Drop for ProcessSession {
+    fn drop(&mut self) {
+        self.group.cancelled.store(true, Ordering::SeqCst);
+        self.group.kill();
+        let _ = self.cancel.try_send(());
+    }
+}
+struct InputAttempt {
+    cancel: Option<mpsc::Sender<()>>,
+    group: Arc<ProcessGroup>,
+}
+impl Drop for InputAttempt {
+    fn drop(&mut self) {
+        if let Some(cancel) = &self.cancel {
+            self.group.cancelled.store(true, Ordering::SeqCst);
+            self.group.kill();
+            let _ = cancel.try_send(());
+        }
+    }
+}
+struct StartedProcess {
+    state: ProcessState,
+    session: Option<ProcessSession>,
+}
+
 struct Running {
     state: watch::Receiver<ProcessState>,
     cancel: mpsc::Sender<()>,
@@ -104,6 +219,22 @@ impl Supervisor {
             .context("unknown process")
     }
     pub async fn start(&self, spec: ProcessSpec) -> Result<ProcessState> {
+        Ok(self.start_owned(spec, false).await?.state)
+    }
+    pub async fn start_sandboxed_session(
+        &self,
+        spec: ProcessSpec,
+        policy: &ProcessSandbox,
+    ) -> Result<ProcessSession> {
+        self.start_session(policy.wrapped_spec(&spec)?).await
+    }
+    pub async fn start_session(&self, spec: ProcessSpec) -> Result<ProcessSession> {
+        self.start_owned(spec, true)
+            .await?
+            .session
+            .context("interactive session missing")
+    }
+    async fn start_owned(&self, spec: ProcessSpec, interactive: bool) -> Result<StartedProcess> {
         self.inner
             .running
             .lock()
@@ -127,14 +258,22 @@ impl Supervisor {
             .current_dir(cwd)
             .env_clear()
             .envs(&spec.env)
-            .stdin(Stdio::null())
+            .stdin(if interactive {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         #[cfg(unix)]
         command.process_group(0);
         let mut child = command.spawn().context("start process")?;
-        let guard = ProcessGroup { pid: child.id() };
+        let guard = Arc::new(ProcessGroup {
+            pid: Mutex::new(child.id()),
+            cancelled: AtomicBool::new(false),
+        });
+        let stdin = child.stdin.take();
         let stdout = child.stdout.take().context("stdout pipe")?;
         let stderr = child.stderr.take().context("stderr pipe")?;
         let initial = ProcessState {
@@ -151,14 +290,28 @@ impl Supervisor {
         record(&self.inner.store, &initial)?;
         let (state_tx, state_rx) = watch::channel(initial.clone());
         let (cancel_tx, mut cancel_rx) = mpsc::channel(1);
+        let (event_tx, event_rx) = mpsc::channel(16);
+        let mut event_tx = interactive.then_some(event_tx);
+        let session = interactive.then(|| ProcessSession {
+            id: initial.id.clone(),
+            input: Some(ProcessInput {
+                stdin,
+                cancel: cancel_tx.clone(),
+                group: guard.clone(),
+            }),
+            events: event_rx,
+            cancel: cancel_tx.clone(),
+            group: guard.clone(),
+        });
         let store = self.inner.store.clone();
         let mut state = initial.clone();
         let task = tokio::spawn(async move {
-            let _guard = guard;
+            let _guard = ProcessGroupOwner { group: guard };
             let (output_tx, mut output_rx) = mpsc::channel::<Chunk>(16);
             let out_task = tokio::spawn(read_output(stdout, false, output_tx.clone()));
             let err_task = tokio::spawn(read_output(stderr, true, output_tx));
             let readers = Readers { out_task, err_task };
+            let mut sequence = 0;
             let mut exited = false;
             let mut streams_done = false;
             let mut stdout_bytes = Vec::new();
@@ -169,11 +322,12 @@ impl Supervisor {
                         _guard.kill();
                         let _ = child.kill().await;
                         state.phase = Phase::Cancelled;
+                        event_tx = None;
                     }
                     result = child.wait(), if !exited => {
                         exited = true;
                         match result {
-                            Ok(status) => { state.code = status.code(); if state.phase == Phase::Running { state.phase = Phase::Completed; } }
+                            Ok(status) => { state.code = status.code(); if state.phase == Phase::Running { state.phase = if _guard.group.cancelled.load(Ordering::SeqCst) { Phase::Cancelled } else { Phase::Completed }; } }
                             Err(error) => { state.phase = Phase::Failed; state.error = Some(error.to_string()); }
                         }
                         // Descendants must not outlive their supervised leader or retain its pipes.
@@ -195,11 +349,31 @@ impl Supervisor {
                                 } else {
                                     if chunk.stderr { stderr_bytes.extend_from_slice(&chunk.bytes); state.stderr = String::from_utf8_lossy(&stderr_bytes).into_owned(); }
                                     else { stdout_bytes.extend_from_slice(&chunk.bytes); state.stdout = String::from_utf8_lossy(&stdout_bytes).into_owned(); }
-                                    if let Err(error) = store.record_definition_event(&serde_json::json!({"type":"process_output","process":state.id,"stderr":chunk.stderr,"bytes":chunk.bytes})) {
-                                        state.phase = Phase::Failed;
-                                        state.error = Some(error.to_string());
-                                        _guard.kill();
-                                        let _ = child.kill().await;
+                                    sequence += 1;
+                                    match store.record_definition_event(&serde_json::json!({"type":"process_output","process":state.id,"sequence":sequence,"stderr":chunk.stderr,"bytes":chunk.bytes})) {
+                                        Err(error) => {
+                                            state.phase = Phase::Failed;
+                                            state.error = Some(error.to_string());
+                                            _guard.kill();
+                                            let _ = child.kill().await;
+                                        }
+                                        Ok(_) => {
+                                            if let Some(sender) = &event_tx {
+                                                // Cancellation must interrupt a full event queue;
+                                                // otherwise dropping an unread session leaks its child.
+                                                let event = ProcessEvent::Output { sequence, stderr: chunk.stderr, bytes: chunk.bytes };
+                                                let delivered = tokio::select! {
+                                                    result = sender.send(event) => result.is_ok(),
+                                                    _ = cancel_rx.recv() => false,
+                                                };
+                                                if !delivered {
+                                                    event_tx = None;
+                                                    state.phase = Phase::Cancelled;
+                                                    _guard.kill();
+                                                    let _ = child.kill().await;
+                                                }
+                                            }
+                                        }
                                     }
                                     state_tx.send_replace(state.clone());
                                 }
@@ -225,7 +399,14 @@ impl Supervisor {
                 state.phase = Phase::Failed;
                 state.error = Some(format!("persist process outcome: {error}"));
             }
-            state_tx.send_replace(state);
+            state_tx.send_replace(state.clone());
+            drop(state_tx);
+            if let Some(sender) = event_tx {
+                tokio::select! {
+                    _ = sender.send(ProcessEvent::Exit { state }) => {},
+                    _ = cancel_rx.recv() => {},
+                }
+            }
         });
         self.inner
             .running
@@ -239,7 +420,10 @@ impl Supervisor {
                     task,
                 },
             );
-        Ok(initial)
+        Ok(StartedProcess {
+            state: initial,
+            session,
+        })
     }
     pub async fn wait(&self, id: &str) -> Result<ProcessState> {
         let receiver = self
@@ -320,13 +504,37 @@ impl Drop for Readers {
         self.err_task.abort();
     }
 }
+// The supervisor task retains cancellation-on-drop even when a session keeps
+// the shared signal handle alive after the supervisor itself is dropped.
+struct ProcessGroupOwner {
+    group: Arc<ProcessGroup>,
+}
+impl ProcessGroupOwner {
+    fn kill(&self) {
+        self.group.kill();
+    }
+}
+impl Drop for ProcessGroupOwner {
+    fn drop(&mut self) {
+        self.group.kill();
+    }
+}
 struct ProcessGroup {
-    pid: Option<u32>,
+    // Taking the PID under this lock makes cancellation one-shot. The waiter
+    // clears it while killing remaining descendants, so a session retained
+    // after completion cannot signal an unrelated process that reuses the PID.
+    pid: Mutex<Option<u32>>,
+    cancelled: AtomicBool,
 }
 impl ProcessGroup {
     fn kill(&self) {
+        let pid = self
+            .pid
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
         #[cfg(unix)]
-        if let Some(pid) = self.pid {
+        if let Some(pid) = pid {
             let _ = nix::sys::signal::killpg(
                 nix::unistd::Pid::from_raw(pid as i32),
                 nix::sys::signal::Signal::SIGKILL,
@@ -441,6 +649,152 @@ mod tests {
             capture_paths: Vec::new(),
         }
     }
+    #[tokio::test]
+    async fn interactive_unicode_input_eof_and_events_are_durable() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = Store::memory()?;
+        let supervisor = Supervisor::new(store.clone())?;
+        let mut input = spec(temp.path(), "\"$LOOM_TEST_CAT\"; printf warning >&2");
+        input.env.insert("LOOM_TEST_CAT".into(), executable("cat"));
+        let mut session = supervisor.start_session(input).await?;
+        let id = session.id().to_owned();
+        let expected = "hello λ 🌍\n".repeat(1000);
+        session.write(expected.as_bytes()).await?;
+        session.close_stdin().await?;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut previous = 0;
+        let terminal = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(event) = session.next_event().await {
+                match event {
+                    ProcessEvent::Output {
+                        sequence,
+                        stderr: is_stderr,
+                        bytes,
+                    } => {
+                        assert_eq!(sequence, previous + 1);
+                        previous = sequence;
+                        assert!(store.definition_events(0, 1000)?.iter().any(|event| {
+                            event.event["type"] == "process_output"
+                                && event.event["process"] == id
+                                && event.event["sequence"] == sequence
+                        }));
+                        if is_stderr {
+                            stderr.extend(bytes);
+                        } else {
+                            stdout.extend(bytes);
+                        }
+                    }
+                    ProcessEvent::Exit { state } => return Ok::<_, anyhow::Error>(state),
+                }
+            }
+            anyhow::bail!("session closed without exit")
+        })
+        .await??;
+        assert_eq!(stdout, expected.as_bytes());
+        assert_eq!(stderr, b"warning");
+        assert_eq!(terminal.phase, Phase::Completed);
+        assert_eq!(terminal.code, Some(0));
+        assert_eq!(supervisor.status(&id)?.stdout, expected);
+        assert!(session.next_event().await.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn split_input_drains_output_while_child_stdin_is_backpressured() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let supervisor = Supervisor::new(Store::memory()?)?;
+        // The child fills stdout before reading stdin; both directions exceed
+        // native pipe capacity and the bounded event queue together.
+        let mut input_spec = spec(
+            temp.path(),
+            "\"$LOOM_TEST_DD\" if=/dev/zero bs=4096 count=128 2>/dev/null; \"$LOOM_TEST_CAT\"",
+        );
+        input_spec
+            .env
+            .insert("LOOM_TEST_DD".into(), executable("dd"));
+        input_spec
+            .env
+            .insert("LOOM_TEST_CAT".into(), executable("cat"));
+        let mut session = supervisor.start_session(input_spec).await?;
+        let mut input = session.take_input()?;
+        assert!(session.take_input().is_err());
+        let writer = async {
+            for _ in 0..8 {
+                input.write(&vec![b'x'; 64 * 1024]).await?;
+            }
+            input.close_stdin().await
+        };
+        tokio::pin!(writer);
+        let mut write_done = false;
+        let mut output = Vec::new();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                tokio::select! {
+                    result = &mut writer, if !write_done => {
+                        result?;
+                        write_done = true;
+                    }
+                    event = session.next_event() => {
+                        match event.context("missing process exit")? {
+                            ProcessEvent::Output { stderr, bytes, .. } => {
+                                assert!(!stderr);
+                                output.extend(bytes);
+                            }
+                            ProcessEvent::Exit { state } => {
+                                assert_eq!(state.phase, Phase::Completed);
+                                assert_eq!(state.code, Some(0));
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if !write_done {
+                writer.await?;
+            }
+            Ok::<(), anyhow::Error>(())
+        })
+        .await??;
+        assert_eq!(output.len(), 1024 * 1024);
+        assert!(output[..512 * 1024].iter().all(|byte| *byte == 0));
+        assert!(output[512 * 1024..].iter().all(|byte| *byte == b'x'));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dropping_unread_interactive_session_cancels_process() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let supervisor = Supervisor::new(Store::memory()?)?;
+        let session = supervisor
+            .start_session(spec(temp.path(), "while :; do printf 'output'; done"))
+            .await?;
+        let id = session.id().to_owned();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        drop(session);
+        let state =
+            tokio::time::timeout(std::time::Duration::from_secs(5), supervisor.wait(&id)).await??;
+        assert_eq!(state.phase, Phase::Cancelled);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dropping_idle_session_records_cancellation_after_child_reaping() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let supervisor = Supervisor::new(Store::memory()?)?;
+        let session = supervisor
+            .start_session(spec(temp.path(), "exec \"$LOOM_TEST_SLEEP\" 30"))
+            .await?;
+        let id = session.id().to_owned();
+        drop(session);
+        let state =
+            tokio::time::timeout(std::time::Duration::from_secs(5), supervisor.wait(&id)).await??;
+        assert_eq!(state.phase, Phase::Cancelled);
+        assert_eq!(state.code, None);
+        assert_eq!(supervisor.status(&id)?.phase, Phase::Cancelled);
+        Ok(())
+    }
+
     #[tokio::test]
     async fn delayed_output_completion_and_restart_are_durable() -> Result<()> {
         let temp = tempfile::tempdir()?;

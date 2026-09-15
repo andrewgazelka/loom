@@ -92,6 +92,7 @@ describe("workspace ownership", () => {
     const session = workspace.open(commandById(V.update), {
       name: "first",
       source: "stored source",
+      lang: "rust",
     });
     session.set({
       ...get(session),

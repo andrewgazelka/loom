@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { sourceLanguage } from "./sourceLanguage";
   import EffectBadges from "./EffectBadges.svelte";
   import SignatureView from "./SignatureView.svelte";
   import RowPreview from "./RowPreview.svelte";
@@ -101,7 +102,7 @@
 <div class="section-heading">
   <div>
     <h1>Definitions</h1>
-    <p>Named code. Immutable identities. Rust.</p>
+    <p>Named code. Immutable identities.</p>
   </div>
   <AlignLeft size={18} strokeWidth={1.4} />
 </div>
@@ -124,7 +125,7 @@
     >{#if source}<details class="source-card"><summary class="source-summary">Source</summary>
         <CodeBlock
           code={source}
-          language="rust"
+          language={sourceLanguage(selected.lang)}
         />
       </details>{:else if loading}<p class="empty">Reading definition…</p>{/if}
     <details class="plain-details">
@@ -184,7 +185,7 @@
               >{short(def.hash, 25)}</code
             >
           </div>
-          <span class="badge">Rust</span><span
+          <span class="badge">{def.lang}</span><span
             class="quiet"
             >{typeof def.component_size === "number"
               ? bytes(def.component_size)
@@ -192,7 +193,7 @@
                 ? "Built"
                 : "On first use"}</span
           ><ChevronRight size={12} /></button
-        ><details class="source-peek"><summary>Source</summary><RowPreview code load={() => preview(def)} /></details></div>{:else}<p class="empty">
+        ><details class="source-peek"><summary>Source</summary><RowPreview code language={sourceLanguage(def.lang)} load={() => preview(def)} /></details></div>{:else}<p class="empty">
           No definitions yet. Save one from the session prompt.
         </p>{/each}
     </div>{/if}{/if}

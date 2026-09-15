@@ -102,7 +102,7 @@ async fn javascript_rejects_dependencies_and_unknown_language() -> Result<()> {
     let app = service(Store::memory()?)?;
     for args in [
         json!({"name":"dependency", "lang":"javascript", "source":"async function main() {}", "deps":{"x":"missing"}}),
-        json!({"name":"unknown", "lang":"typescript", "source":"async function main() {}"}),
+        json!({"name":"unknown", "lang":"ruby", "source":"async function main() {}"}),
     ] {
         let before = counts(&app.store)?;
         let response = command(&app, "add", args).await;

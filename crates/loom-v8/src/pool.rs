@@ -14,7 +14,7 @@ pub(crate) enum Task {
     },
     Call {
         program: Arc<Program>,
-        args: String,
+        input: crate::Input,
         effects: async_mpsc::Sender<EffectRequest>,
         reply: oneshot::Sender<Result<serde_json::Value>>,
     },
@@ -165,14 +165,14 @@ impl Worker {
             }
             Task::Call {
                 program,
-                args,
+                input,
                 effects,
                 reply,
             } => {
                 let result = if admitted {
                     execution::call(
                         &program,
-                        &args,
+                        &input,
                         effects,
                         &self.limits,
                         &job.control,

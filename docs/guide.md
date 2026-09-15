@@ -18,7 +18,7 @@ The launcher prints `Token file: <path>` and opens `http://127.0.0.1:8793/#token
 
 The proof checks these results in order:
 
-1. `loom add examples/unison/greet.rs --name greet` returns a definition hash and an empty inferred effect row.
+1. `loom add examples/unison/greet.rs --lang rust --name greet` returns a definition hash and an empty inferred effect row.
 2. `loom view <hash>` returns the original submitted source byte-for-byte and two items after the input file has been moved away. The proof reads the fixture before moving it and compares `view.source` against those original bytes.
 3. `loom run greet '"loom"'` returns `"hello, loom"` with an empty effects list.
 4. Updating with `greet-v2.rs` only renames a local and keeps the hash. Updating with `greet-v3.rs` changes the greeting constant and moves the hash. The old hash still runs; `history greet` contains both hashes.
@@ -98,13 +98,13 @@ The second command starts the MCP stdio transport. Configure an MCP client to ru
 
 ## Command reference
 
-The CLI, HTTP commands, and MCP tools use the same definition operations. The CLI reads files for `add` and `update`; the service stores their source in CAS. `view` reads that stored source, including when the original file has changed or disappeared.
+The CLI, HTTP commands, and MCP tools use the same definition operations. `add` defaults to TypeScript; use `--lang javascript` or `--lang rust` explicitly. File extensions do not select a language, and `update` retains the existing definition language. The CLI reads files for `add` and `update`; the service stores their source in CAS. `view` reads that stored source, including when the original file has changed or disappeared.
 
 | CLI | MCP tool | Result |
 | --- | --- | --- |
-| `add <file.rs> [--name n]` | `add` | Name, definition hash, entry item hashes, Wasm hash, and item table |
+| `add <file> [--lang language] [--name n]` | `add` | Name, definition hash, entries, and backend metadata |
 | `view <name-or-hash>` | `view` | Stored source and item table |
-| `update <name> <file.rs> [--expected_hash hash]` | `update` | Atomic caller propagation or a durable repair session; old hashes remain runnable |
+| `update <name> <file> [--expected_hash hash]` | `update` | Atomic caller propagation or a durable repair session; old hashes remain runnable |
 | `history <name>` | `history` | Hash chain, timestamps, and changed items between entries |
 | `diff <old-hash> <new-hash>` | `diff` | Added, removed, and changed items, with their hashes |
 | `run <name-or-hash> [args-json]` | `run` | Output and recorded effects |
@@ -112,7 +112,7 @@ The CLI, HTTP commands, and MCP tools use the same definition operations. The CL
 | `dependents <hash>` | `dependents` | Definitions with a dependency pinned to the hash |
 
 ```sh
-loom --token "$LOOM_TOKEN" add sum.rs --name sum
+loom --token "$LOOM_TOKEN" add sum.rs --lang rust --name sum
 loom --token "$LOOM_TOKEN" run sum '[20,22]'
 loom --token "$LOOM_TOKEN" view sum
 loom --token "$LOOM_TOKEN" update sum sum.rs

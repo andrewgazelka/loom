@@ -41,11 +41,26 @@ impl Runtime {
         if let Some(program) = programs.get(hash) {
             return Ok(program.clone());
         }
-        let source = self
+        let definition = self
             .inner
             .store
-            .javascript_source(hash, loom_v8::ABI_VERSION)?;
-        let program = Arc::new(self.v8_engine()?.compile(&source).await?);
+            .executable_definition(hash)?
+            .context("script definition missing")?;
+        let typescript = definition.lang == loom_proto::Lang::TypeScript;
+        let abi = if typescript {
+            loom_v8::typescript_abi()
+        } else {
+            loom_v8::ABI_VERSION.to_owned()
+        };
+        let executable = self.inner.store.executable_script(hash, &abi)?;
+        let engine = self.v8_engine()?;
+        let program = Arc::new(if let Some(javascript) = executable.javascript {
+            engine.compile(&javascript).await?
+        } else if typescript {
+            engine.compile_typescript(&executable.source).await?
+        } else {
+            engine.compile(&executable.source).await?
+        });
         // Definitions remain in CAS; eviction only drops compiled code. Bound
         // this cache independently from the number of definitions in the store.
         if programs.len() >= 128 {

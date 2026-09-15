@@ -96,7 +96,13 @@ pub static VERBS: &[Verb] = &[
         [
             arg!(source, Source),
             arg!(name, String, optional),
-            Argument { name: "lang", kind: Kind::String, required: false, flag: true, default: Some("\"rust\"") },
+            Argument {
+                name: "lang",
+                kind: Kind::String,
+                required: false,
+                flag: true,
+                default: Some("\"typescript\"")
+            },
             arg!(deps, Json, optional),
             arg!(allowed_effects, Json, optional)
         ]

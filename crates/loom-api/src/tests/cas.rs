@@ -62,8 +62,9 @@ async fn inline_dag_reference_resolves_as_json_and_serves_canonical_bytes() {
     );
     assert_eq!(
         raw.headers()["cache-control"],
-        "public, max-age=31536000, immutable"
+        "private, max-age=31536000, immutable"
     );
+    assert_eq!(raw.headers()["vary"], "Accept, Authorization");
     assert_eq!(
         loom_proto::decode::<Value>(&raw.into_body().collect().await.unwrap().to_bytes()).unwrap(),
         value
@@ -82,8 +83,9 @@ async fn inline_dag_reference_resolves_as_json_and_serves_canonical_bytes() {
     assert_eq!(json.headers()["content-type"], "application/json");
     assert_eq!(
         json.headers()["cache-control"],
-        "public, max-age=31536000, immutable"
+        "private, max-age=31536000, immutable"
     );
+    assert_eq!(json.headers()["vary"], "Accept, Authorization");
     assert_eq!(
         serde_json::from_slice::<Value>(&json.into_body().collect().await.unwrap().to_bytes())
             .unwrap(),

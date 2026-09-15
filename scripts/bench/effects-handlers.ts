@@ -28,7 +28,7 @@ async function raw(command:string,args:unknown):Promise<LoomResponse> {
 }
 async function command(command:string,args:unknown) {const reply=await raw(command,args);assert(reply.ok,JSON.stringify(reply));return reply;}
 async function define(name:string,source:string) {
-  const reply=await bounded(client!.callTool('add',{name:`effects-gate-${name}`,source}),600_000,`define ${name}`);
+  const reply=await bounded(client!.callTool('add',{lang:'rust',name:`effects-gate-${name}`,source}),600_000,`define ${name}`);
   assert(reply.ok,JSON.stringify(reply));const hash=object(object(reply.result).def).hash;assert(typeof hash==='string','missing definition hash');return hash;
 }
 async function call(mode:string) {return command('run',{hash:controls,args:[mode]});}
@@ -55,7 +55,7 @@ async function nativeControl(mode:'timing'|'cancellation'):Promise<Record<string
   const executable=process.env.LOOM_HANDLER_BENCH,dbPath=process.env.LOOM_BENCH_DB;
   assert(executable&&dbPath,'LOOM_HANDLER_BENCH and LOOM_BENCH_DB required for actual native full-roundtrip timing');
   const source=await readFile(new URL(`./effects-fixtures/${mode}.rs`,import.meta.url),'utf8');
-  const built=await bounded(client!.callTool('add',{name:`effects-gate-native-${mode}`,source}),600_000,`define native ${mode}`);
+  const built=await bounded(client!.callTool('add',{lang:'rust',name:`effects-gate-native-${mode}`,source}),600_000,`define native ${mode}`);
   assert(built.ok,JSON.stringify(built));const definition=object(object(built.result).def);
   assert(typeof definition.hash==='string'&&typeof definition.component_hash==='string','native compiled definition artifact identity missing');
   const database=new Database(dbPath,{readonly:true});
@@ -137,7 +137,7 @@ try {
     try {const result=await Promise.all([new Response(child.stdout).text(),new Response(child.stderr).text(),child.exited]);const output=result[0];const diagnostics=result[1];const code=result[2];assert(code===0&&/^6\/6 shared limit controls pass$/m.test(output),`shared limits exit ${code}\n${output}\n${diagnostics}`);}finally{clearTimeout(timer);}
   });
   await gate(11,async()=>{
-    const reply=await bounded(client!.callTool('add',{name:'effects-gate-inferred-row',source:'pub fn main() { loom::sleep(0).expect("sleep"); }'}),600_000,'add inferred row');
+    const reply=await bounded(client!.callTool('add',{lang:'rust',name:'effects-gate-inferred-row',source:'pub fn main() { loom::sleep(0).expect("sleep"); }'}),600_000,'add inferred row');
     assert(reply.ok,JSON.stringify(reply));
     const row=object(object(object(reply.result).entries).main).effects;
     assert(Array.isArray(object(row).labels)&&object(row).unknown===false&&JSON.stringify(object(row).labels)==='["sleep"]',JSON.stringify(row));

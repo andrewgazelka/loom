@@ -165,3 +165,20 @@ _LLVMInitializeLanaiAsmParser` while linking a dependency's build script
 (the fifth run of `scripts/e2e-unison.sh`). Apple's `cc` links against no LLVM
 dylib. The launcher refuses to start without `/usr/bin/cc`. The wasm32 guest
 itself links with rust-lld and is unaffected; Linux keeps the nixpkgs linker.
+
+## JavaScript import compiler
+
+`deno.nix` pins the official Deno CLI and its exact native esbuild helper for
+Darwin ARM64 and Linux x86_64. Update both with
+`python3 nix/update-deno.py 2.9.6`; the updater checks Deno's upstream helper
+version and cache layout, downloads each archive, and generates real hashes.
+Deno's native bundler does not honor `ESBUILD_BINARY_PATH`, so the wrapper seeds
+its versioned helper cache atomically before invocation.
+
+The `loom-imports` Cargo unit embeds this wrapper as `LOOM_DENO`. Each admission
+provides an isolated `LOOM_IMPORT_ROOT` and child `DENO_DIR`. Linux uses bubblewrap
+to expose only that directory, the exact compiler runtime closure and DNS files.
+Darwin uses a deny-by-default Seatbelt profile. Bundling retains network access
+for admission-time imports; guest isolates execute the stored bundle without
+module fetching. Tool installation and package scripts are separate from module
+resolution: the native helper is pinned and lifecycle scripts are disabled.

@@ -157,7 +157,14 @@ pub(crate) fn compile(
         let main = exports
             .get(scope, main_key.into())
             .ok_or_else(|| guest("missing JavaScript main"))?;
-        guest_ensure(main.is_function(), "JavaScript main must be a function")?;
+        let main = v8::Local::<v8::Function>::try_from(main)
+            .map_err(|_| guest("JavaScript main must be a function"))?;
+        let has_startup =
+            crate::codec::lifecycle_handler(scope, main, crate::codec::Lifecycle::Startup)?
+                .is_some();
+        let has_shutdown =
+            crate::codec::lifecycle_handler(scope, main, crate::codec::Lifecycle::Shutdown)?
+                .is_some();
         let schema_key = string(scope, "schema")?;
         let schema = exports
             .get(scope, schema_key.into())
@@ -178,13 +185,15 @@ pub(crate) fn compile(
             source: source.clone(),
             code_cache,
             schema,
+            has_startup,
+            has_shutdown,
         })
     })
 }
 
 pub(crate) fn call(
     program: &Program,
-    args: &str,
+    input: &crate::Input,
     effects: async_mpsc::Sender<EffectRequest>,
     limits: &Limits,
     control: &Arc<Control>,
@@ -226,22 +235,52 @@ pub(crate) fn call(
             .ok_or_else(|| guest("missing JavaScript main"))?;
         let main = v8::Local::<v8::Function>::try_from(main)
             .map_err(|_| guest("JavaScript main must be a function"))?;
-        let args_json = string(scope, args)?;
-        let args =
-            v8::json::parse(scope, args_json).ok_or_else(|| guest("invalid argument JSON"))?;
-        let args = v8::Local::<v8::Array>::try_from(args)
-            .map_err(|_| guest("arguments must be an array"))?;
-        guest_ensure(
-            args.length() <= 65_535,
-            "too many JavaScript positional arguments",
-        )?;
-        let mut positional = Vec::with_capacity(args.length() as usize);
-        for index in 0..args.length() {
-            positional.push(
-                args.get_index(scope, index)
-                    .ok_or_else(|| guest("cannot read argument"))?,
-            );
-        }
+        let mut positional = Vec::new();
+        let main = match input {
+            crate::Input::Arguments { json: args } => {
+                let args_json = string(scope, args)?;
+                let args = v8::json::parse(scope, args_json)
+                    .ok_or_else(|| guest("invalid argument JSON"))?;
+                let args = v8::Local::<v8::Array>::try_from(args)
+                    .map_err(|_| guest("arguments must be an array"))?;
+                guest_ensure(
+                    args.length() <= 65_535,
+                    "too many JavaScript positional arguments",
+                )?;
+                for index in 0..args.length() {
+                    positional.push(
+                        args.get_index(scope, index)
+                            .ok_or_else(|| guest("cannot read argument"))?,
+                    );
+                }
+                main
+            }
+            crate::Input::Startup => {
+                crate::codec::lifecycle_handler(scope, main, crate::codec::Lifecycle::Startup)?
+                    .ok_or_else(|| guest("startup callback changed after compilation"))?
+            }
+            crate::Input::Shutdown { reason } => {
+                positional.push(string(scope, reason)?.into());
+                crate::codec::lifecycle_handler(scope, main, crate::codec::Lifecycle::Shutdown)?
+                    .ok_or_else(|| guest("shutdown callback changed after compilation"))?
+            }
+            crate::Input::Message { bytes } => {
+                guest_ensure(
+                    bytes.len() <= limits.max_message_bytes,
+                    "Loom message exceeds byte limit",
+                )?;
+                if let Some(handler) = crate::codec::json_handler(scope, main)? {
+                    // The registered wrapper retains normal positional-call
+                    // semantics. Actor calls can parse the original payload
+                    // directly, avoiding decimal byte arrays entirely.
+                    positional.push(crate::codec::decode_message(scope, bytes)?);
+                    handler
+                } else {
+                    positional.push(crate::codec::byte_array(scope, bytes)?.into());
+                    main
+                }
+            }
+        };
         let receiver = v8::undefined(scope).into();
         let output = main
             .call(scope, receiver, &positional)
@@ -359,7 +398,7 @@ fn enqueue_effect(
         bridge.pending.len() < bridge.max_pending_effects,
         "JavaScript pending effect limit exceeded",
     )?;
-    let descriptor = decode(scope, descriptor, bridge.max_message_bytes)?;
+    let descriptor = effect_descriptor(scope, descriptor, bridge.max_message_bytes)?;
     guest_ensure(
         descriptor.is_object()
             && descriptor.get("op").is_some_and(Value::is_string)
@@ -433,4 +472,56 @@ pub(crate) fn fail(scope: &mut v8::PinScope, error: anyhow::Error) {
         .unwrap()
         .control
         .fail(format!("{error:#}"));
+}
+
+fn effect_descriptor(
+    scope: &v8::PinScope,
+    descriptor: v8::Local<v8::Value>,
+    limit: usize,
+) -> Result<Value> {
+    let object = v8::Local::<v8::Object>::try_from(descriptor)
+        .map_err(|_| guest("Loom effect requires an object"))?;
+    let key = string(scope, "op")?;
+    let operation = object
+        .get(scope, key.into())
+        .ok_or_else(|| guest("missing effect operation"))?;
+    let operation = v8::Local::<v8::String>::try_from(operation)
+        .map_err(|_| guest("Loom effect requires op string"))?;
+    let operation = bounded_string(scope, operation, limit)?;
+    let has_message = matches!(
+        operation.as_str(),
+        "actor.send" | "actor.call" | "actor.reply" | "actor.send_after"
+    );
+    if !has_message {
+        return decode(scope, descriptor, limit);
+    }
+    // Each u8 occupies at most four JSON bytes including its comma. Account
+    // for that transport expansion separately from the logical payload and
+    // metadata budgets; no other effect receives this larger admission bound.
+    let mut descriptor = decode(scope, descriptor, limit.saturating_mul(5))?;
+    guest_ensure(
+        descriptor.get("op").and_then(Value::as_str) == Some(operation.as_str()),
+        "effect operation changed during serialization",
+    )?;
+    let message = descriptor
+        .get_mut("args")
+        .and_then(Value::as_object_mut)
+        .and_then(|args| args.get_mut("msg"))
+        .map(std::mem::take)
+        .ok_or_else(|| guest("actor message effect requires msg bytes"))?;
+    let bytes = message
+        .as_array()
+        .ok_or_else(|| guest("actor message must be an array of bytes"))?;
+    guest_ensure(bytes.len() <= limit, "Loom message exceeds byte limit")?;
+    guest_ensure(
+        bytes
+            .iter()
+            .all(|byte| byte.as_u64().is_some_and(|byte| byte <= 255)),
+        "actor message must contain integer bytes from 0 to 255",
+    )?;
+    // Temporarily replacing msg with null measures the remaining descriptor
+    // without allocating or serializing its byte array for a second time.
+    crate::encode_message(&descriptor, limit)?;
+    descriptor["args"]["msg"] = message;
+    Ok(descriptor)
 }

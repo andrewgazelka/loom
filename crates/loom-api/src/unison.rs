@@ -11,7 +11,7 @@ struct Item {
 impl Service {
     fn items(&self, hash: &str) -> Result<BTreeMap<String, String>> {
         let definition = self.store.resolve(hash)?.context("definition missing")?;
-        if definition.lang == Lang::JavaScript {
+        if definition.lang.is_v8() {
             return Ok(BTreeMap::from([("main".into(), definition.hash)]));
         }
         let identity = self
@@ -34,7 +34,7 @@ impl Service {
             .store
             .resolve(target)?
             .with_context(|| format!("definition {target:?} not found"))?;
-        if def.lang == Lang::JavaScript {
+        if def.lang.is_v8() {
             return Ok(json!({
                 "name": self.store.definition_name(&def.hash)?,
                 "hash": def.hash,
@@ -177,7 +177,11 @@ impl Service {
                     .flatten();
                 let response = self
                     .define_inner(DefineRequest {
-                        lang: serde_json::from_value(args.get("lang").cloned().unwrap_or_else(|| json!("rust")))?,
+                        lang: serde_json::from_value(
+                            args.get("lang")
+                                .cloned()
+                                .unwrap_or_else(|| json!("typescript")),
+                        )?,
                         name: name.into(),
                         source: field(args, "source")?.into(),
                         deps,

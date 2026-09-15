@@ -175,7 +175,8 @@ async fn missing_source_archive_reports_missing_reference() {
         response.result["error"]
             .as_str()
             .unwrap()
-            .contains(&format!("Rust source bundle {} not found", "a".repeat(64)))
+            .contains(&format!("Rust source bundle {} not found", "a".repeat(64))),
+        "{response:?}"
     );
     let source = "pub fn main() { std::fs::read(\"secret\").unwrap(); }";
     let checked = service
@@ -201,11 +202,14 @@ async fn read_scope_cannot_execute_or_define_through_service_or_http() {
         .unwrap(),
     );
     let authorizer = Authorizer::new(vec![TokenConfig {
+        tenant: Default::default(),
         token: "reader".into(),
         scopes: [Scope::Read].into_iter().collect(),
     }])
     .unwrap();
-    let reader = service.scoped(authorizer.authenticate("reader").unwrap());
+    let reader = service
+        .scoped(authorizer.authenticate("reader").unwrap())
+        .unwrap();
     let response = reader
         .command(CommandRequest {
             session: None,

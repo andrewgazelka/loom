@@ -11,15 +11,17 @@ async fn active_build_route_shares_scoped_progress_and_requires_read_access() {
         )
         .unwrap(),
     );
-    let scoped = service.scoped(Access::owner());
+    let scoped = service.scoped(Access::owner()).unwrap();
     let progress = scoped.build_progress.start("example");
     progress.stage("compile");
     let authorizer = Authorizer::new(vec![
         TokenConfig {
+            tenant: Default::default(),
             token: "read".into(),
             scopes: [Scope::Read].into_iter().collect(),
         },
         TokenConfig {
+            tenant: Default::default(),
             token: "define".into(),
             scopes: [Scope::Define].into_iter().collect(),
         },

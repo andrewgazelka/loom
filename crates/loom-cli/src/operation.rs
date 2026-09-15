@@ -9,7 +9,7 @@ pub struct Command {
 
 pub fn parser() -> clap::Command {
     let mut parser = clap::Command::new("loom")
-        .about("Content-addressed Rust definitions and actors")
+        .about("Content-addressed TypeScript, JavaScript and Rust definitions and actors")
         .arg(
             clap::Arg::new("url")
                 .long("url")
@@ -29,6 +29,9 @@ pub fn parser() -> clap::Command {
             let mut arg = clap::Arg::new(argument.name).required(argument.required);
             if argument.flag && !(verb.name == "view" && argument.name == "target") {
                 arg = arg.long(argument.name);
+            }
+            if verb.name == "add" && argument.name == "lang" {
+                arg = arg.help("Source language: typescript (default), javascript, or rust");
             }
             if argument.kind == Kind::Boolean {
                 arg = arg.action(clap::ArgAction::SetTrue);
@@ -79,6 +82,29 @@ pub fn from_matches(matches: &clap::ArgMatches) -> anyhow::Result<Option<Command
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn add_defaults_to_typescript_and_explicit_language_controls_any_filename() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("source.rs");
+        let source = "function main(value: number): number { return value; }\n";
+        std::fs::write(&path, source).unwrap();
+        let path = path.to_str().unwrap();
+        let matches = parser()
+            .try_get_matches_from(["loom", "add", path])
+            .unwrap();
+        let command = from_matches(&matches).unwrap().unwrap();
+        assert_eq!(command.args["lang"], "typescript");
+        assert_eq!(command.args["source"], source);
+        for lang in ["rust", "javascript"] {
+            let matches = parser()
+                .try_get_matches_from(["loom", "add", path, "--lang", lang])
+                .unwrap();
+            let command = from_matches(&matches).unwrap().unwrap();
+            assert_eq!(command.args["lang"], lang);
+            assert_eq!(command.args["source"], source);
+        }
+    }
 
     #[test]
     fn cluster_commands_share_the_wire_vocabulary() {

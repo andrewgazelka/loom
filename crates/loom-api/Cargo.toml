@@ -3,11 +3,15 @@ name = "loom-api"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+loom-imports = { path = "../loom-imports" }
 loom-v8 = { path = "../loom-v8" }
 loom-behavior = { path = "../loom-behavior" }
 loom-actor = { path = "../loom-actor" }
 toml = "0.8"
 anyhow = "1"
+async-trait = "0.1"
+base64 = "0.22"
+futures-util = { version = "0.3", features = ["sink"] }
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
@@ -25,3 +29,4 @@ loom-maintenance = { path = "../loom-maintenance" }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 tempfile = "3"
+tokio-tungstenite = "0.29"

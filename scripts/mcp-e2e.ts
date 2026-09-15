@@ -20,10 +20,10 @@ try {
     assert(JSON.stringify(names) === JSON.stringify(await commandNames()), `unexpected shared protocol tools: ${names.join(', ')}`);
   });
   await check('MCP Rust reject retry accept execute', async () => {
-    const rejected = await tool('add', { name: 'mcp-rust', source: 'pub fn main() { std::fs::read("secret").unwrap(); }' });
+    const rejected = await tool('add', { lang: 'rust', name: 'mcp-rust', source: 'pub fn main() { std::fs::read("secret").unwrap(); }' });
     assert(!rejected.ok && typeof object(rejected.result).error === 'string', 'Rust rejection lacks an error');
     const source = 'pub fn sum(a: i64, b: i64) -> i64 { a + b }';
-    const accepted = await tool('add', { name: 'mcp-rust', source });
+    const accepted = await tool('add', { lang: 'rust', name: 'mcp-rust', source });
     assert(accepted.ok, JSON.stringify(accepted));
     const call = await tool('run', { target: definitionHash(accepted.result), args: [22, 20] });
     assert(call.ok && object(call.result).output === 42, JSON.stringify(call));

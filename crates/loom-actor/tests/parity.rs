@@ -175,7 +175,20 @@ async fn pair_fifo_and_down_after_messages() {
     // Destinations pump independently (per-pair FIFO, docs/multi-node.md): the blocked effect holds only
     // its own pair, so every number reaches B in order while the barrier is still open. DOWN can only
     // follow the exit, which follows the handler, so it is absent or last.
-    let midpoint: Vec<Value> = inbox(&receiver).await.into_iter().filter(|msg| msg["type"] == "number" || msg["type"] == "down").collect();
+    // Entering the effect barrier does not synchronize the independent receiver
+    // pair. Wait for its committed deliveries while the effect stays blocked.
+    let midpoint = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let messages: Vec<Value> =
+                inbox(&receiver).await.into_iter().filter(|msg| msg["type"] == "number" || msg["type"] == "down").collect();
+            if messages.iter().filter(|msg| msg["type"] == "number").count() >= 10 {
+                break messages;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("receiver pair did not finish while the unrelated effect was blocked");
     let numbers: Vec<&Value> = midpoint.iter().filter(|msg| msg["type"] == "number").collect();
     assert_eq!(numbers.len(), 10);
     for (number, message) in numbers.iter().enumerate() {

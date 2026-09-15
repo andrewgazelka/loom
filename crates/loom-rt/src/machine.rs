@@ -12,6 +12,7 @@ use std::{
 
 impl Runtime {
     pub fn create_machine(&self, path: &Path) -> Result<loom_store::MachineRoot> {
+        self.require_host("machine.create")?;
         let root = Arc::new(PinnedRoot::open(path)?);
         let machine = loom_store::MachineRoot {
             id: uuid::Uuid::new_v4().to_string(),
@@ -31,6 +32,7 @@ impl Runtime {
         Ok(machine)
     }
     fn machine_handle(&self, id: &str) -> Result<Arc<PinnedRoot>> {
+        self.require_host("filesystem access")?;
         let mut roots = self
             .inner
             .machine_roots
@@ -57,6 +59,7 @@ impl Runtime {
         Ok(self.machine_handle(id)?.path.clone())
     }
     pub async fn start_process(&self, mut args: Value) -> Result<loom_process::ProcessState> {
+        self.require_host("process.start")?;
         let machine = required_str(&args, "machine")?.to_owned();
         let root = self.machine_root(&machine)?;
         ensure!(

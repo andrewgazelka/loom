@@ -22,11 +22,12 @@
     HighlightStyle,
   } from "@codemirror/language";
   import { sql } from "@codemirror/lang-sql";
+  import { javascript } from "@codemirror/lang-javascript";
   import { rust } from "@codemirror/lang-rust";
   import { json } from "@codemirror/lang-json";
   import { tags } from "@lezer/highlight";
   export let value = "";
-  export let language: "rust" | "json" | "sql" = "rust";
+  export let language: "typescript" | "javascript" | "rust" | "json" | "sql" = "typescript";
   export let label = "Source code";
   export let disabled = false;
   export let submit: () => Promise<void>;
@@ -35,7 +36,7 @@
   const editable = new Compartment();
   const grammar = new Compartment();
   const extension = (lang: string) =>
-    lang === "rust" ? rust() : lang === "sql" ? sql() : json();
+    lang === "rust" ? rust() : lang === "sql" ? sql() : lang === "json" ? json() : javascript({ typescript: lang === "typescript" });
   const colors = HighlightStyle.define([
     { tag: [tags.keyword, tags.operator], color: "var(--syntax-keyword)" },
     { tag: [tags.string, tags.regexp], color: "var(--syntax-string)" },
@@ -108,7 +109,7 @@
             ".cm-content": {
               fontFamily: "var(--mono)",
               padding: "14px 0",
-              minHeight: language === "rust" ? "160px" : "52px",
+              minHeight: language === "json" || language === "sql" ? "52px" : "160px",
               caretColor: "var(--ink)",
             },
             ".cm-line": { padding: "0 16px" },

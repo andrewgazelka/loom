@@ -12,14 +12,26 @@ pub fn run<F: Future<Output = ()>>(test: &str, workflow: impl FnOnce() -> F) {
     }
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let owner = cache_owner(&root);
-    let output = Command::new(std::env::current_exe().unwrap())
+    let mut child = Command::new(std::env::current_exe().unwrap());
+    child
         .args(["--exact", test, "--nocapture"])
         .env(CHILD, test)
         .env_remove("RUSTUP_TOOLCHAIN")
-        .env_remove("RUSTC")
-        .env("LOOM_COMPILER_CACHE_OWNER", owner)
-        .output()
-        .expect("run pinned guest test subprocess");
+        .env("LOOM_COMPILER_CACHE_OWNER", owner);
+    if let Some(driver) = std::env::var_os("LOOM_HASH_RUSTC") {
+        // Packaged guests use this exact compiler/driver pair. Clearing RUSTC
+        // would turn the production contract into an unrelated rustup lookup.
+        assert!(
+            Path::new(&driver).is_absolute(),
+            "LOOM_HASH_RUSTC must be absolute"
+        );
+        let rustc = std::env::var_os("RUSTC")
+            .expect("prebuilt LOOM_HASH_RUSTC requires an absolute RUSTC path");
+        assert!(Path::new(&rustc).is_absolute(), "RUSTC must be absolute");
+    } else {
+        child.env_remove("RUSTC");
+    }
+    let output = child.output().expect("run pinned guest test subprocess");
     assert!(
         output.status.success(),
         "guest workflow {test} failed:\n{}\n{}",

@@ -59,8 +59,8 @@ async fn concurrent_guest_effects_reach_the_borrowed_host() {
             r#"
         async function main() {
             return await Promise.all([
-                loom.perform('actor.send', {target: 'first', message: 1}),
-                loom.perform('actor.send', {target: 'second', message: 2})
+                loom.perform('example.send', {target: 'first', message: 1}),
+                loom.perform('example.send', {target: 'second', message: 2})
             ]);
         }
     "#,
@@ -70,8 +70,8 @@ async fn concurrent_guest_effects_reach_the_borrowed_host() {
     let mut effects = EchoEffects::default();
     let output = sandbox.call(json!([]), &mut effects).await.unwrap();
     let expected = json!([
-        {"op":"actor.send", "args":{"target":"first", "message":1}},
-        {"op":"actor.send", "args":{"target":"second", "message":2}}
+        {"op":"example.send", "args":{"target":"first", "message":1}},
+        {"op":"example.send", "args":{"target":"second", "message":2}}
     ]);
     assert_eq!(output, expected);
     assert_eq!(Value::Array(effects.descriptors), expected);

@@ -2,6 +2,8 @@
   import CodeEditor from "./CodeEditor.svelte";
   import Select from "./Select.svelte";
   import { ArrowUp, ChevronRight, Terminal } from "lucide-svelte";
+  import type { SourceLanguage } from "./api";
+  export let language: SourceLanguage = "typescript";
   export let mode = "eval",
     source = "",
     name = "",
@@ -11,7 +13,7 @@
   function changeMode() {
     if (mode === "command") source = '{"command":"defs","args":{}}';
     else if (mode === "define")
-      source = "pub fn main(value: i64) -> i64 {\n    value * 2\n}";
+      source = language === "rust" ? "pub fn main(value: i64) -> i64 {\n    value * 2\n}" : language === "typescript" ? "function main(value: number): number {\n  return value * 2;\n}" : "function main(value) {\n  return value * 2;\n}";
     else source = "";
   }
 </script>
@@ -23,10 +25,10 @@
         bind:value={name}
         placeholder="Definition name"
       />{:else}<span class="quiet right"
-        >{mode === "eval" ? "Rust" : "JSON command"}</span
+        >{mode === "eval" ? language : "JSON command"}</span
       >{/if}
   </div>
-  <CodeEditor bind:value={source} language={mode === "command" ? "json" : "rust"} {submit} />{#if mode === "define"}<details class="dependency-options">
+  <CodeEditor bind:value={source} language={mode === "command" ? "json" : language} {submit} />{#if mode === "define"}<details class="dependency-options">
       <summary><ChevronRight size={11} /> Dependencies</summary><label
         >Import names → definition hashes<input
           aria-label="Dependency names and hashes"

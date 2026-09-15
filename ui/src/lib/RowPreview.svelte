@@ -1,4 +1,6 @@
 <script lang="ts">
+  import type { CodeLanguage } from "./highlight";
+  export let language: CodeLanguage = "typescript";
   import { onMount } from "svelte";
   import { boundedPreview } from "./preview";
   import { record } from "./api";
@@ -20,7 +22,7 @@
   });
 </script>
 <div class="row-preview" bind:this={node}>
-  {#if ready}{#if code}<CodeBlock code={String(value || "Source unavailable").slice(0,320)} language="rust" />
+  {#if ready}{#if code}<CodeBlock code={String(value || "Source unavailable").slice(0,320)} {language} />
     {:else}<ValueView value={record(value).type === "evaluated" ? record(value).result : value} {inspect} />{/if}
   {:else}<span class="quiet" title={error || undefined}>{error ? "Preview unavailable" : "Loading preview…"}</span>{/if}
 </div>

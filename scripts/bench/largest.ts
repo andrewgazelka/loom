@@ -59,7 +59,7 @@ try {
     if(hash===undefined) {
     const source=await readFile(new URL(`largest-${name}.rs`,import.meta.url),'utf8');
     const start=performance.now();
-    const reply=await client.callTool('add',{name:`benchmark-largest-${name}`,source});
+    const reply=await client.callTool('add',{lang:'rust',name:`benchmark-largest-${name}`,source});
     assert(reply.ok,JSON.stringify(reply));
     const result=object(reply.result),def=object(result.def);
     assert(typeof def.hash==='string','Missing definition hash');

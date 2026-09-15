@@ -316,3 +316,94 @@ async fn fork_cannot_use_caps() {
         assert_eq!(actor.sql("SELECT * FROM inbox ORDER BY seq", ()).await.unwrap().rows, before[index]);
     }
 }
+
+struct HeldWriter {
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+#[async_trait]
+impl Behavior for HeldWriter {
+    fn hash(&self) -> &str {
+        "caps-held-writer"
+    }
+    fn schema(&self) -> &str {
+        "CREATE TABLE counter(value INTEGER); INSERT INTO counter VALUES (1)"
+    }
+    async fn handle(&self, cx: &mut Ctx<'_>, msg: &[u8]) -> Result<(), Trap> {
+        if msg == b"hold" {
+            cx.sql("UPDATE counter SET value=2", ()).await?;
+            // Notification follows the write, so the test cannot mistake an
+            // idle connection for an independently readable WAL snapshot.
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        Ok(())
+    }
+}
+struct ConcurrentInspector {
+    observed: tokio::sync::mpsc::UnboundedSender<i64>,
+}
+#[async_trait]
+impl Behavior for ConcurrentInspector {
+    fn hash(&self) -> &str {
+        "caps-concurrent-inspector"
+    }
+    fn schema(&self) -> &str {
+        ""
+    }
+    async fn handle(&self, cx: &mut Ctx<'_>, msg: &[u8]) -> Result<(), Trap> {
+        if msg.is_empty() {
+            return Ok(());
+        }
+        let cap: Cap = serde_json::from_slice(msg).map_err(|error| Trap::new(error.to_string()))?;
+        cx.accept(cap.clone()).await?;
+        let result = cx.inspect_sql(&cap, "SELECT value FROM counter", vec![]).await?;
+        let loom_actor::SqlValue::Integer(value) = &result.rows[0].values[0] else {
+            return Err(Trap::new("expected integer counter"));
+        };
+        self.observed.send(*value).map_err(|error| Trap::new(error.to_string()))?;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn capability_inspection_reads_committed_authority_during_writer_transaction() {
+    let directory = tempfile::tempdir().unwrap();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (observed, mut observations) = tokio::sync::mpsc::unbounded_channel();
+    let mut registry = Registry::new();
+    registry.insert("caps-held-writer".into(), Arc::new(HeldWriter { entered: entered.clone(), release: release.clone() }));
+    registry.insert("caps-concurrent-inspector".into(), Arc::new(ConcurrentInspector { observed }));
+    let node = Node::new(
+        directory.path(),
+        Arc::new(registry),
+        Arc::new(DefaultEffects),
+        Config { io: loom_actor::Io::Syscall, ..Config::default() },
+    )
+    .await
+    .unwrap();
+    let writer = node.spawn_root("caps-held-writer", b"").await.unwrap();
+    let inspector = node.spawn_root("caps-concurrent-inspector", b"").await.unwrap();
+    drain(&node).await;
+    let cap = node.cap_for(&writer, Rights::INSPECT).await.unwrap();
+    node.check_cap(&cap, Rights::INSPECT, "before-writer").await.unwrap();
+    node.send(&writer, "held-write", b"hold").await.unwrap();
+    let running_node = node.clone();
+    let running = tokio::spawn(async move { running_node.run_until_idle().await });
+    tokio::time::timeout(Duration::from_secs(5), entered.notified()).await.expect("writer did not acquire transaction");
+
+    let authority = tokio::time::timeout(Duration::from_secs(2), node.check_cap(&cap, Rights::INSPECT, "concurrent-check")).await;
+    node.send(&inspector, "read-before-commit", &serde_json::to_vec(&cap).unwrap()).await.unwrap();
+    let before = tokio::time::timeout(Duration::from_secs(2), observations.recv()).await;
+    // Always release the writer before asserting, including the old connector's
+    // database-locked error path, so a failed regression cannot strand the task.
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), running).await.unwrap().unwrap().unwrap();
+    authority.expect("authority read waited for writer commit").expect("authority read tried to mutate the locked actor database");
+    assert_eq!(before.expect("cross-actor inspection waited for writer commit"), Some(1));
+    node.send(&inspector, "read-after-commit", &serde_json::to_vec(&cap).unwrap()).await.unwrap();
+    drain(&node).await;
+    assert_eq!(tokio::time::timeout(Duration::from_secs(2), observations.recv()).await.unwrap(), Some(2));
+    node.close().await.unwrap();
+}

@@ -91,12 +91,15 @@ trap with the operation's name.
 | `actor.attenuate` | `{cap, rights:{bits}}` | attenuated capability bytes |
 | `actor.revoke` | `{cap_id:decimal_string}` | null |
 | `actor.self_cap` | null | capability bytes for the executing actor |
+| `actor.resolve` | `{name:string}` | SEND-only capability bytes for a published name |
+| `actor.sender_cap` | null | capability bytes supplied with the incoming driver message |
 | `actor.promote` | `{cap, behavior_hash, author, rationale}` | null |
 | `actor.inspect_sql` | `{cap, sql, params}` | `{columns, rows}` |
 | `actor.send` | `{cap, msg}` | null |
 | `actor.subscribe` | `{cap, table}` | subscription ID (requires INSPECT) |
 | `actor.unsubscribe` | `{subscription_id}` | null |
 | `actor.spawn` | serialized `loom_actor::ChildSpec` | capability bytes |
+| `actor.spawn_driver` | `{hash:string, init:bytes}` | capability bytes for the driver |
 | `actor.stop` | `{cap, reason}` | null |
 | `actor.monitor` | `{cap}` | monitor reference |
 | `actor.demonitor` | `{reference, flush}` | null |
@@ -133,6 +136,18 @@ retrieve that held token with `actor.cap`; knowing another actor's ID or
 `actor.sender` does not permit sending. An operator provisions a message with
 `serde_json::to_vec(&node.cap_for(id, rights).await?)?` as its `cap` field.
 Spawn and attenuation results use the same token-byte representation.
+
+An administrator publishes actor names with `Node::register`. `actor.resolve`
+resolves only those names and issues a SEND-only grant within the tenant.
+An arbitrary actor ID does not confer authority. Guests cannot publish names
+through this effect API.
+
+`actor.spawn_driver` selects a registered native driver by hash and queues its
+creation in the transaction's outbox. The driver opens resources after commit.
+`actor.sender_cap` retrieves the authority supplied with an incoming driver
+message and persists the token for later turns. It traps when the message has
+no supplied sender authority; ordinary actor messages carry explicit reply
+capabilities in their payloads.
 
 The SDK's `loom::actor::Cap { token: Vec<u8> }` serializes transparently to these
 bytes. Its helpers construct the same descriptors:

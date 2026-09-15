@@ -1,3 +1,5 @@
+pub mod script_artifact;
+pub use script_artifact::ScriptArtifact;
 mod entry_identity;
 pub use entry_identity::entry_identity_preimage;
 mod cas;
@@ -14,15 +16,21 @@ use ts_rs::TS;
 #[cfg_attr(feature = "codegen", derive(TS))]
 #[serde(rename_all = "lowercase")]
 pub enum Lang {
-    #[default]
     Rust,
     JavaScript,
+    #[default]
+    TypeScript,
 }
 impl Lang {
+    pub fn is_v8(self) -> bool {
+        matches!(self, Self::JavaScript | Self::TypeScript)
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Rust => "rust",
             Self::JavaScript => "javascript",
+            Self::TypeScript => "typescript",
         }
     }
 }
@@ -283,11 +291,39 @@ pub fn javascript_definition_identity(
     allowed_effects: Option<&[String]>,
     backend_abi: &str,
 ) -> Result<Vec<u8>, serde_json::Error> {
-    let definition = definition_identity(Lang::JavaScript, source, deps, allowed_effects)?;
+    script_definition_identity(Lang::JavaScript, source, deps, allowed_effects, backend_abi)
+}
+
+/// Binds the original language/source and policy to its complete compiler ABI.
+pub fn script_definition_identity(
+    lang: Lang,
+    source: &str,
+    deps: &BTreeMap<String, String>,
+    allowed_effects: Option<&[String]>,
+    backend_abi: &str,
+) -> Result<Vec<u8>, serde_json::Error> {
+    let definition = definition_identity(lang, source, deps, allowed_effects)?;
     serde_json::to_vec(&serde_json::json!({
         "backend": backend_abi,
         "definition": serde_json::from_slice::<Value>(&definition)?,
     }))
+}
+
+/// A closed module graph binds compiler output and fetched source bytes to the
+/// original definition. Reopening must load this artifact without network work.
+pub fn module_definition_identity(
+    lang: Lang,
+    source: &str,
+    deps: &BTreeMap<String, String>,
+    allowed_effects: Option<&[String]>,
+    backend_abi: &str,
+    artifact_hash: &str,
+    compiler: &str,
+) -> Result<Vec<u8>, serde_json::Error> {
+    let script = script_definition_identity(lang, source, deps, allowed_effects, backend_abi)?;
+    let mut identity: Value = serde_json::from_slice(&script)?;
+    identity["module"] = serde_json::json!({"artifact":artifact_hash,"compiler":compiler});
+    serde_json::to_vec(&identity)
 }
 
 /// Content identities emitted by the mandatory item-hashing compiler.

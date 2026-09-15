@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { sourceLanguage } from "../sourceLanguage";
   import { V } from "./commands";
   import CodeBlock from "../CodeBlock.svelte";
   import {
@@ -30,7 +31,7 @@
   {@const def = definitionView(value)}
   <div class="section-bar">
     <h2>{def.name ?? def.hash}</h2>
-    <span class="muted">Rust</span><button
+    <span class="muted">{sourceLanguage(def.def.lang)}</span><button
       class="push text-control"
       on:click={() => navigate(V.run, { target: def.name ?? def.hash })}
       >Run</button
@@ -39,9 +40,9 @@
   <div class="identity-strip">
     <span>Definition <Hash value={def.hash} /></span><span
       >Behavior <Hash value={def.behavior_hash} /></span
-    ><span>Wasm <Hash value={def.wasm_hash} /></span><span
+    >{#if def.wasm_hash}<span>Wasm <Hash value={def.wasm_hash} /></span>{/if}{#if def.toolchain_hash}<span
       >Toolchain <Hash value={def.toolchain_hash} /></span
-    >
+    >{/if}
   </div>
   <div class="section-bar"><h3>Inferred effects per entry</h3></div>
   <DataTable
@@ -58,7 +59,7 @@
         <h3>Source</h3>
         <span class="muted">{def.source.split("\n").length} lines</span>
       </div>
-      <CodeBlock code={def.source} language="rust" />
+      <CodeBlock code={def.source} language={sourceLanguage(def.def.lang)} />
     </section>
     <section class="items">
       <div class="section-bar">

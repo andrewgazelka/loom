@@ -1,6 +1,6 @@
 mod actors;
 pub use actors::ActorMcp;
-use loom_api::{Access, Service};
+use loom_api::{Access, Service, ServiceDirectory};
 use loom_proto::CommandRequest;
 use rmcp::service::RequestContext;
 use rmcp::{ServerHandler, ServiceExt, model::*};
@@ -8,30 +8,40 @@ use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct LoomMcp {
-    service: Arc<Service>,
-    actors: ActorMcp,
+    directory: ServiceDirectory,
     session: String,
     default_access: Access,
 }
 impl LoomMcp {
     pub fn new(service: Arc<Service>, default_access: Access, node: loom_actor::Node) -> Self {
+        Self::for_directory(
+            Arc::new(service.as_ref().clone().with_actors(node)).into(),
+            default_access,
+        )
+    }
+    pub fn for_directory(directory: ServiceDirectory, default_access: Access) -> Self {
         Self {
-            service: Arc::new(service.as_ref().clone().with_actors(node.clone())),
-            actors: ActorMcp::new(node),
+            directory,
             default_access,
             session: uuid::Uuid::new_v4().to_string(),
         }
     }
-    fn service_for(&self, context: &RequestContext<rmcp::RoleServer>) -> Service {
+    fn service_for(
+        &self,
+        context: &RequestContext<rmcp::RoleServer>,
+    ) -> Result<Service, rmcp::ErrorData> {
         let access = context
             .extensions
             .get::<axum::http::request::Parts>()
             .and_then(|parts| parts.extensions.get::<Access>())
             .cloned()
             .unwrap_or_else(|| self.default_access.clone());
-        self.service.scoped(access)
+        self.directory
+            .scoped(access)
+            .map_err(|error| rmcp::ErrorData::invalid_params(error.to_string(), None))
     }
 }
+
 impl ServerHandler for LoomMcp {
     async fn list_tools(
         &self,
@@ -61,7 +71,7 @@ impl ServerHandler for LoomMcp {
         context: RequestContext<rmcp::RoleServer>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let response = self
-            .service_for(&context)
+            .service_for(&context)?
             .command(CommandRequest {
                 session: Some(self.session.clone()),
                 command: request.name.into_owned(),
@@ -147,10 +157,14 @@ impl ServerHandler for LoomMcp {
         let uri = &request.uri;
         if uri.starts_with("actor://") {
             self.actor_access(&context, loom_api::Scope::Read)?;
-            return self.actors.resource(uri).await;
+            let service = self.service_for(&context)?;
+            let node = service
+                .actor_node()
+                .ok_or_else(|| rmcp::ErrorData::invalid_params("actor node unavailable", None))?;
+            return ActorMcp::new(node.clone()).resource(uri).await;
         }
         let response = if let Some(name) = uri.strip_prefix("loom://def/") {
-            self.service_for(&context)
+            self.service_for(&context)?
                 .command(CommandRequest {
                     session: None,
                     command: "view".into(),
@@ -158,7 +172,7 @@ impl ServerHandler for LoomMcp {
                 })
                 .await
         } else if let Some(hash) = uri.strip_prefix("loom://build/") {
-            self.service_for(&context)
+            self.service_for(&context)?
                 .command(CommandRequest {
                     session: None,
                     command: "build".into(),
@@ -193,24 +207,20 @@ fn json_resource(value: serde_json::Value, uri: &str) -> ResourceContents {
 }
 
 pub async fn stdio(service: Arc<Service>, node: loom_actor::Node) -> anyhow::Result<()> {
-    let running = LoomMcp::new(service, Access::owner(), node)
+    let access = Access::owner().for_tenant(service.tenant().clone());
+    let running = LoomMcp::new(service, access, node)
         .serve(rmcp::transport::stdio())
         .await?;
     running.waiting().await?;
     Ok(())
 }
-pub fn router(service: Arc<Service>, node: loom_actor::Node) -> axum::Router {
+pub fn router(directory: impl Into<ServiceDirectory>) -> axum::Router {
     use rmcp::transport::streamable_http_server::{
         StreamableHttpService, session::local::LocalSessionManager,
     };
+    let directory = directory.into();
     let transport = StreamableHttpService::new(
-        move || {
-            Ok(LoomMcp::new(
-                service.clone(),
-                Access::default(),
-                node.clone(),
-            ))
-        },
+        move || Ok(LoomMcp::for_directory(directory.clone(), Access::default())),
         Arc::new(LocalSessionManager::default()),
         Default::default(),
     );

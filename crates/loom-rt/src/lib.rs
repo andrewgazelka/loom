@@ -30,6 +30,7 @@ use wasmtime::Engine;
 #[derive(Clone)]
 pub struct Runtime {
     inner: Arc<Inner>,
+    host_authority: bool,
 }
 pub trait ComponentResolver: Send + Sync {
     fn ensure_built<'a>(
@@ -140,6 +141,10 @@ struct EncodedCall {
     timing: RuntimeTiming,
 }
 impl Runtime {
+    pub fn shares_resources(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
     fn effect_lock(&self, key: String) -> Arc<AsyncMutex<()>> {
         let mut locks = self.inner.effect_locks.lock().unwrap();
         locks.retain(|_, lock| lock.strong_count() != 0);
@@ -176,26 +181,62 @@ impl Runtime {
     pub fn effect_wire_bytes(&self) -> u64 {
         self.inner.effect_wire_bytes.load(Ordering::Relaxed)
     }
+    /// Narrow this caller without mutating shared engine or process ownership.
+    pub fn without_host_authority(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            host_authority: false,
+        }
+    }
+    pub(crate) fn require_host_effect(&self, operation: &str) -> Result<()> {
+        if matches!(operation, "llm" | "exec") || operation.starts_with("fs.") {
+            self.require_host(operation)?;
+        }
+        Ok(())
+    }
+    pub(crate) fn require_host(&self, operation: &str) -> Result<()> {
+        anyhow::ensure!(
+            self.host_authority,
+            "host authority required for {operation}"
+        );
+        Ok(())
+    }
     pub fn new(store: Store) -> Result<Self> {
-        Self::create(store, None)
+        Self::create(store, None, None)
+    }
+    /// Share the daemon's existing process owner with native actor drivers.
+    pub fn process_supervisor(&self) -> loom_process::Supervisor {
+        self.inner.processes.clone()
     }
     /// Candidate function-cache hits and native compiler storage diagnostics.
     pub fn compilation_cache_stats(&self) -> CompilationCacheStats {
         self.inner.compilation_cache.stats()
     }
     pub fn with_resolver(store: Store, resolver: Arc<dyn ComponentResolver>) -> Result<Self> {
-        Self::create(store, Some(resolver))
+        Self::create(store, Some(resolver), None)
     }
-    fn create(store: Store, resolver: Option<Arc<dyn ComponentResolver>>) -> Result<Self> {
+    pub fn with_resolver_and_v8(
+        store: Store,
+        resolver: Arc<dyn ComponentResolver>,
+        engine: Option<Arc<loom_v8::V8Engine>>,
+    ) -> Result<Self> {
+        Self::create(store, Some(resolver), engine)
+    }
+    fn create(
+        store: Store,
+        resolver: Option<Arc<dyn ComponentResolver>>,
+        engine: Option<Arc<loom_v8::V8Engine>>,
+    ) -> Result<Self> {
         let (core_engine, compilation_cache) = sharedcore::engine(store.clone())?;
         let runtime = Self {
+            host_authority: true,
             inner: Arc::new(Inner {
                 model: loom_model::Model::from_env(store.clone())?,
                 processes: loom_process::Supervisor::new(store.clone())?,
                 resolver,
                 store,
                 core_engine,
-                v8_engine: Mutex::new(None),
+                v8_engine: Mutex::new(engine),
                 javascript_programs: AsyncMutex::new(HashMap::new()),
                 compilation_cache,
                 core_executor: futures::executor::ThreadPoolBuilder::new()
@@ -228,6 +269,9 @@ impl Runtime {
         occurrence: i64,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send + 'a>> {
         Box::pin(async move {
+            if let Some(op) = desc.get("op").and_then(Value::as_str) {
+                self.require_host_effect(op)?;
+            }
             let lock = self.trace_lock(scope);
             let _guard = lock.lock().await;
 

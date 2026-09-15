@@ -1,17 +1,21 @@
 pub mod actors;
 mod commands;
 mod definitions;
-mod javascript;
+mod evolution;
 mod http;
+mod javascript;
 mod message_failure;
 mod source;
 #[cfg(test)]
 mod tests;
 mod unison;
-mod evolution;
 pub use http::{protect, protect_public, router};
 use source::*;
 mod auth;
+mod tenant;
+pub use tenant::{ServiceDirectory, TenantId};
+mod actor_websocket;
+pub use actor_websocket::WebSocketHub;
 mod build_progress;
 mod cas_browser;
 use anyhow::{Context, Result, bail, ensure};
@@ -44,12 +48,17 @@ use std::{
 #[derive(Clone)]
 pub struct Service {
     access: Access,
+    tenant: TenantId,
+    websockets: Option<WebSocketHub>,
     actors: Option<actors::ActorService>,
     pub store: Store,
     pub runtime: loom_rt::Runtime,
     checker: Arc<loom_check::Checker>,
     builder: Arc<loom_build::Builder>,
     v8_engine: Option<Arc<loom_v8::V8Engine>>,
+    script_compiler: Arc<loom_imports::Compiler>,
+    native_registry: Option<Arc<dyn loom_actor::Registry>>,
+    process_presets: BTreeMap<String, String>,
     languages: Vec<Lang>,
     backup_directory: PathBuf,
     definitions_gate: Arc<tokio::sync::Mutex<()>>,
@@ -58,6 +67,14 @@ pub struct Service {
 }
 impl Service {
     pub fn new(store: Store, root: PathBuf, languages: Vec<Lang>) -> Result<Self> {
+        Self::new_with_engine(store, root, languages, None)
+    }
+    pub fn new_with_engine(
+        store: Store,
+        root: PathBuf,
+        languages: Vec<Lang>,
+        engine: Option<Arc<loom_v8::V8Engine>>,
+    ) -> Result<Self> {
         let backup_directory = root.join("backups");
         let checker = Arc::new(loom_check::Checker::new());
         let builder = Arc::new(loom_build::Builder::new(root, store.clone()));
@@ -65,20 +82,26 @@ impl Service {
             store: store.clone(),
             gate: tokio::sync::Mutex::new(()),
         });
-        let runtime = loom_rt::Runtime::with_resolver(store.clone(), resolver)?;
-        let v8_engine = if languages.contains(&Lang::JavaScript) {
-            Some(runtime.v8_engine()?)
-        } else {
-            None
-        };
+        let runtime = loom_rt::Runtime::with_resolver_and_v8(store.clone(), resolver, engine)?;
+        let v8_engine =
+            if languages.contains(&Lang::JavaScript) || languages.contains(&Lang::TypeScript) {
+                Some(runtime.v8_engine()?)
+            } else {
+                None
+            };
         Ok(Self {
             access: Access::owner(),
+            tenant: TenantId::default(),
+            websockets: None,
             actors: None,
             runtime,
             store,
             checker,
             builder,
             v8_engine,
+            script_compiler: Arc::new(loom_imports::Compiler::default()),
+            native_registry: None,
+            process_presets: BTreeMap::new(),
             languages,
             backup_directory,
             definitions_gate: Arc::new(tokio::sync::Mutex::new(())),
@@ -96,21 +119,90 @@ impl Service {
         self
     }
 
+    pub fn with_process_presets(mut self, presets: BTreeMap<String, String>) -> Result<Self> {
+        ensure!(
+            self.native_registry.is_none(),
+            "configure process presets before native drivers"
+        );
+        self.process_presets = presets;
+        Ok(self)
+    }
+    pub fn with_native_drivers(
+        mut self,
+        behaviors: Vec<Arc<dyn loom_actor::Behavior>>,
+        drivers: Vec<Arc<dyn loom_actor::Driver>>,
+    ) -> Result<Self> {
+        ensure!(
+            self.native_registry.is_none(),
+            "native drivers already configured"
+        );
+        self.native_registry = Some(Arc::new(
+            loom_actor::CompositeRegistry::new(self.actor_registry(), behaviors, drivers)?
+                .with_processes(self.process_presets.clone())?,
+        ));
+        Ok(self)
+    }
     pub fn actor_registry(&self) -> Arc<dyn loom_actor::Registry> {
-        match &self.v8_engine {
-            Some(engine) => Arc::new(loom_behavior::StoreRegistry::with_v8(self.store.clone(), engine.clone())),
-            None => Arc::new(loom_behavior::StoreRegistry::new(self.store.clone())),
+        if let Some(registry) = &self.native_registry {
+            return registry.clone();
         }
+        Arc::new(loom_behavior::StoreRegistry::with_runtime(
+            self.store.clone(),
+            self.runtime.clone(),
+        ))
     }
 
     pub fn with_actors(mut self, node: loom_actor::Node) -> Self {
         self.actors = Some(actors::ActorService::new(node));
         self
     }
-    pub fn scoped(&self, access: Access) -> Self {
+    pub fn tenant(&self) -> &TenantId {
+        &self.tenant
+    }
+    pub fn with_tenant(mut self, tenant: TenantId) -> Self {
+        if tenant != TenantId::default() {
+            let cache = self
+                .builder
+                .cache_directory()
+                .join("tenants")
+                .join(tenant.as_str());
+            self.builder = Arc::new(self.builder.for_cache_directory(cache));
+            self.runtime = self.runtime.without_host_authority();
+        }
+        self.access = self.access.for_tenant(tenant.clone());
+        self.tenant = tenant;
+        self
+    }
+    /// Import policy is host configuration, never guest-controlled authority.
+    pub fn with_script_compiler(mut self, compiler: loom_imports::Compiler) -> Self {
+        self.script_compiler = Arc::new(compiler);
+        self
+    }
+    pub fn with_build_directory(mut self, directory: PathBuf) -> Self {
+        self.builder = Arc::new(self.builder.for_cache_directory(directory));
+        self
+    }
+    pub fn build_directory(&self) -> &std::path::Path {
+        self.builder.cache_directory()
+    }
+    pub fn with_websockets(mut self, hub: WebSocketHub) -> Self {
+        if let Some(engine) = &self.v8_engine {
+            hub.limit_actor_messages(engine.max_message_bytes());
+        }
+        self.websockets = Some(hub);
+        self
+    }
+    pub fn actor_node(&self) -> Option<&loom_actor::Node> {
+        self.actors.as_ref().map(|actors| &actors.node)
+    }
+    pub fn scoped(&self, access: Access) -> Result<Self> {
+        ensure!(access.tenant() == &self.tenant, "tenant access mismatch");
         let mut service = self.clone();
+        if !access.allows(Scope::Host) {
+            service.runtime = service.runtime.without_host_authority();
+        }
         service.access = access;
-        service
+        Ok(service)
     }
     pub fn with_backup_directory(mut self, directory: PathBuf) -> Self {
         self.backup_directory = directory;

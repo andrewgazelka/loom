@@ -133,7 +133,12 @@ impl Node {
         }
         let mut operations = Vec::new();
         for source in self.actor_ids()? {
-            for sub in self.subscriptions(&source).await? {
+            // This also runs during Node::close under exclusive admission.
+            // Use the admitted connection path; public subscriptions/open would
+            // request shared admission and deadlock shutdown on itself.
+            let source_actor = self.open_actor(&source).await?;
+            let existing = subscriptions(&*source_actor.conn.lock().await).await?;
+            for sub in existing {
                 if sub.subscriber == id {
                     operations.push(Closing { source: source.clone(), id: sub.id });
                 }
