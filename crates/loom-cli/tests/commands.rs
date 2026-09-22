@@ -284,7 +284,8 @@ async fn definition_commands_reach_shared_service() {
     std::fs::write(file.path(), "pub fn main() -> i32 { answer::main() + 1 }").unwrap();
     let revised_caller = server.invoke(&["update", "caller", path]).await;
     assert!(revised_caller.ok, "{revised_caller:?}");
-    assert_eq!(server.invoke(&["run", "caller"]).await.result["output"], 42);
+    // 42 from the propagated dependency plus the caller's own `+ 1`.
+    assert_eq!(server.invoke(&["run", "caller"]).await.result["output"], 43);
     let dependents = server.invoke(&["dependents", old]).await;
     assert!(dependents.ok, "{dependents:?}");
     let dependent_hashes = dependents.result.as_array().unwrap();

@@ -147,3 +147,129 @@ async fn macros_expand_inside_rustc_so_builtin_forms_pass_and_procedural_forms_f
         .unwrap();
     assert!(named.diagnostics.is_empty(), "{:?}", named.diagnostics);
 }
+/// A `macro_rules!` transcriber may assemble a macro invocation, an attribute
+/// or a renamed import out of fragments that neither side spells in full. Each
+/// route is refused and the diagnostic names the fragment or alias; a body
+/// that spells `vec!` and `format!` itself, and an alias outside the tables,
+/// are accepted.
+#[tokio::test]
+async fn macro_fragments_and_table_aliases_cannot_smuggle_refused_items() {
+    let checker = Checker::new();
+    let request = |source: &str| DefineRequest {
+        lang: Lang::Rust,
+        name: "test".into(),
+        source: source.into(),
+        deps: BTreeMap::new(),
+        allowed_effects: None,
+    };
+    // B1: the macro name arrives through a fragment; refused by LOOM_MACRO and
+    // by LOOM_IO, both naming the fragment.
+    let fragment = checker
+        .check(&request(
+            "macro_rules! call { ($m:ident) => { $m!(\"/etc/passwd\") } } pub fn main() -> &'static str { call!(include_str) }",
+        ))
+        .await
+        .unwrap();
+    assert!(
+        fragment
+            .diagnostics
+            .iter()
+            .any(|error| error.code == "LOOM_MACRO" && error.message.contains("Fragment `$m`")),
+        "{:?}",
+        fragment.diagnostics
+    );
+    assert!(
+        fragment
+            .diagnostics
+            .iter()
+            .any(|error| error.code == "LOOM_IO" && error.message.contains("fragment `$m`")),
+        "{:?}",
+        fragment.diagnostics
+    );
+    let repetition = checker
+        .check(&request(
+            "macro_rules! call { ($($m:ident)*) => { $($m)*!(\"LOOM_TOKEN\") } } pub fn main() -> &'static str { call!(env) }",
+        ))
+        .await
+        .unwrap();
+    assert!(
+        repetition
+            .diagnostics
+            .iter()
+            .any(|error| error.code == "LOOM_MACRO" && error.message.contains("Fragment `$(...)*`")),
+        "{:?}",
+        repetition.diagnostics
+    );
+    assert!(
+        repetition
+            .diagnostics
+            .iter()
+            .any(|error| error.code == "LOOM_IO" && error.message.contains("fragment `$(...)`")),
+        "{:?}",
+        repetition.diagnostics
+    );
+    // B2: the attribute arrives through a `meta` fragment.
+    for source in [
+        "macro_rules! tag { ($a:meta, $i:item) => { #[$a] $i } } tag!(cfg(not(test)), pub fn hidden() {}); pub fn main() {}",
+        "macro_rules! tag { ($a:meta, $i:item) => { #[$a] $i } } tag!(derive(loom::serde::Serialize), struct S;); pub fn main() {}",
+    ] {
+        let tagged = checker.check(&request(source)).await.unwrap();
+        assert!(
+            tagged
+                .diagnostics
+                .iter()
+                .any(|error| error.code == "LOOM_MACRO" && error.message.contains("Fragment `$a`")),
+            "{source}: {:?}",
+            tagged.diagnostics
+        );
+    }
+    // A `tt` fragment can carry a bare `#`, `!` or `[...]`; refused by
+    // specifier.
+    let token_tree = checker
+        .check(&request(
+            "macro_rules! call { ($bang:tt) => { include_str $bang (\"/etc/passwd\") } } pub fn main() { call!(!); }",
+        ))
+        .await
+        .unwrap();
+    assert!(
+        token_tree.diagnostics.iter().any(
+            |error| error.code == "LOOM_MACRO" && error.message.contains("Fragment `$bang:tt`")
+        ),
+        "{:?}",
+        token_tree.diagnostics
+    );
+    // B3: a renamed import would pass the tables by spelling.
+    for (source, alias) in [
+        (
+            "use loom::serde::Serialize as Clone; #[derive(Clone)] struct S; pub fn main() {}",
+            "`loom::serde::Serialize as Clone`",
+        ),
+        (
+            "use std::println as format; pub fn main() { format!(\"x\"); }",
+            "`std::println as format`",
+        ),
+    ] {
+        let renamed = checker.check(&request(source)).await.unwrap();
+        assert!(
+            renamed
+                .diagnostics
+                .iter()
+                .any(|error| error.code == "LOOM_MACRO" && error.message.contains(alias)),
+            "{source}: {:?}",
+            renamed.diagnostics
+        );
+    }
+    // Positive controls: a body that spells its macros, and an alias outside
+    // every table.
+    for source in [
+        "macro_rules! pair { ($a:expr) => { vec![format!(\"{}\", $a), format!(\"{}\", $a)] } } pub fn main() -> Vec<String> { pair!(1) }",
+        "use std::fmt::Write as FmtWrite; pub fn main() -> String { let mut out = String::new(); write!(out, \"{}\", 1).unwrap(); out }",
+    ] {
+        let accepted = checker.check(&request(source)).await.unwrap();
+        assert!(
+            accepted.diagnostics.is_empty(),
+            "{source}: {:?}",
+            accepted.diagnostics
+        );
+    }
+}

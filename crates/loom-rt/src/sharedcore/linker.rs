@@ -114,6 +114,8 @@ pub(super) fn linker(
                             }
                             Err(error) => Err(error),
                         };
+                        caller.data_mut().last_effect_error =
+                            outcome.as_ref().err().map(|error| error.to_string());
                         let frame = loom_proto::isolated::response_frame(match &outcome {
                             Ok(result) => Ok(result.as_slice()),
                             Err(error) => Err(error),

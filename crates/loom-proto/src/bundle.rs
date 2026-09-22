@@ -130,7 +130,7 @@ fn read_varint(bytes: &[u8], position: &mut usize) -> Result<u64, String> {
         *position += 1;
         let group = u64::from(byte & 0x7f);
         if index == MAX_VARINT_BYTES - 1 && group > 1 {
-            return Err("bundle varint exceeds 63 bits".into());
+            return Err("bundle varint exceeds 57 bits".into());
         }
         value |= group << (7 * index);
         if byte & 0x80 == 0 {

@@ -122,6 +122,10 @@ impl Store {
 
     /// Seed the Rust resolver cache with an imported overlay. A key this node
     /// already resolved keeps its own overlay; the overlay object must exist.
+    /// The key is the caller's claim, not this store's derivation: only a
+    /// staged store takes it, and `Service::seed_preparation` refuses the
+    /// import unless the builder derives the same key for the record, so the
+    /// row reaches a live store only under a key this node computes itself.
     pub fn set_preparation(&self, key: &str, overlay_hash: &str) -> Result<()> {
         ensure!(
             key.len() == 64 && key.bytes().all(|byte| byte.is_ascii_hexdigit()),

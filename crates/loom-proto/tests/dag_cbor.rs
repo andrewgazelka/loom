@@ -1,5 +1,6 @@
 use loom_proto::{
-    DAG_CBOR_CODEC, RAW_CODEC, Value, cid_for_hash, decode, encode, parse_reference, reference,
+    Bytes, DAG_CBOR_CODEC, RAW_CODEC, Value, cid_for_hash, decode, encode, encode_arguments,
+    parse_reference, reference,
 };
 use serde_json::json;
 
@@ -309,4 +310,35 @@ fn typed_tagged_untagged_and_flattened_values_decode_safe_integer_widths() {
         assert_eq!(decode::<Number>(&encode(&value).unwrap()).unwrap(), value);
     }
     assert!(decode::<Entry>(&encode(&json!({"type":"file","mode":-1,"offset":0,"reference":reference(&"ab".repeat(32), RAW_CODEC).unwrap()})).unwrap()).is_err());
+}
+
+#[test]
+fn argument_encoding_keeps_floats_and_still_links_references() {
+    // The canonical value codec collapses a whole-valued float to an integer;
+    // the argument codec must not, or a typed `f64` parameter cannot decode it.
+    assert_eq!(encode(&json!([3.0])).unwrap(), vec![0x81, 0x03]);
+    let arguments = encode_arguments(&json!([3.0])).unwrap();
+    assert_eq!(arguments[..2], [0x81, 0xfb], "float major type 7, 64-bit");
+    assert_eq!(arguments.len(), 10);
+    let typed: (f64,) = loom_proto::isolated::decode_payload(&arguments).unwrap();
+    assert_eq!(typed.0, 3.0);
+    // Links are still tag 42 under both encodings.
+    let hash = format!("77c1{}", "00".repeat(30));
+    let linked = json!([reference(&hash, RAW_CODEC).unwrap()]);
+    let canonical = encode(&linked).unwrap();
+    let preserved = encode_arguments(&linked).unwrap();
+    assert_eq!(canonical, preserved);
+    assert_eq!(canonical[1], 0xd8, "tag prefix");
+    assert_eq!(canonical[2], 42);
+}
+
+#[test]
+fn bytes_decode_from_a_cbor_byte_string_and_from_a_json_array() {
+    let byte_string = loom_proto::isolated::encode_payload(&(Bytes(vec![1, 2, 255]),)).unwrap();
+    let (from_bytes,): (Bytes,) = loom_proto::isolated::decode_payload(&byte_string).unwrap();
+    assert_eq!(from_bytes.0, vec![1, 2, 255]);
+    let array = encode_arguments(&json!([[1, 2, 255]])).unwrap();
+    assert_eq!(array[1], 0x83, "an array, not a byte string");
+    let (from_array,): (Bytes,) = loom_proto::isolated::decode_payload(&array).unwrap();
+    assert_eq!(from_array.0, vec![1, 2, 255]);
 }

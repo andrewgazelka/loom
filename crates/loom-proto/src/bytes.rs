@@ -78,8 +78,10 @@ impl<'de> Deserialize<'de> for Bytes {
                 Ok(Bytes(bytes))
             }
             // The host `Value` API (JSON) has no byte string; it hands a
-            // `Vec<u8>` as an array of numbers and serde_json routes that
-            // through `visit_seq`. DAG-CBOR decoders never reach this arm.
+            // `Vec<u8>` as an array of numbers. `deserialize_any` below lets
+            // the DAG-CBOR decoder dispatch a byte string to `visit_byte_buf`
+            // and an array to this arm; `deserialize_byte_buf` would refuse
+            // the array outright.
             fn visit_seq<A: serde::de::SeqAccess<'de>>(
                 self,
                 mut seq: A,
@@ -91,7 +93,7 @@ impl<'de> Deserialize<'de> for Bytes {
                 Ok(Bytes(bytes))
             }
         }
-        deserializer.deserialize_byte_buf(BytesVisitor)
+        deserializer.deserialize_any(BytesVisitor)
     }
 }
 

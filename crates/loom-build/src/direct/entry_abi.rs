@@ -39,6 +39,7 @@ pub(super) async fn compile(request: Request<'_>) -> Result<(), BuildError> {
     // compiled by the same driver but are not guest items in its document.
     recipe.environment.remove("LOOM_ITEM_HASHES");
     recipe.environment.remove("LOOM_ITEM_PREIMAGES");
+    recipe.environment.remove("LOOM_DEP_ITEMS");
     let mut command = if isolated {
         fs::write(target.join("direct.sh"), recipe.shell()).await?;
         let mut command = Command::new(root.join("rustc/sandbox.sh"));

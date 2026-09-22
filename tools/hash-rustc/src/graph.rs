@@ -238,10 +238,11 @@ pub fn collect(tcx: TyCtxt<'_>) -> Document {
     for path in entry.keys() {
         // A root `pub fn` is directly public; the effective-visibility table
         // cannot mark it unreachable.
-        assert!(
-            exports.contains_key(path),
-            "entry {path} is not among the exported definitions"
-        );
+        if !exports.contains_key(path) {
+            tcx.dcx().fatal(format!(
+                "hash-rustc: entry {path} is not among the exported definitions"
+            ));
+        }
     }
     Document {
         toolchain: String::new(),
@@ -269,6 +270,13 @@ pub(crate) fn external(tcx: TyCtxt<'_>, id: DefId, dependencies: &Dependencies) 
     let path = definition_path(tcx, id);
     match dependencies.hash(name.as_str(), &path) {
         Ok(Some(hash)) => hash,
+        // A materialized Loom definition is always named `loom_definition_*`
+        // (loom-build's contract). One without a staged document must never
+        // degrade to the whole-crate rule: that would be a caller identity
+        // that silently ignores its callee's content.
+        Ok(None) if name.as_str().starts_with("loom_definition_") => tcx.dcx().fatal(format!(
+            "hash-rustc: Loom definition crate `{name}` referenced at `{path}` has no staged item document in LOOM_DEP_ITEMS"
+        )),
         Ok(None) => crate_reference(tcx, id),
         Err(error) => tcx.dcx().fatal(format!("hash-rustc: {error}")),
     }

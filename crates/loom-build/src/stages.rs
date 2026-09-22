@@ -30,9 +30,13 @@ impl Stages {
     /// A name recorded twice is summed, so a loop can checkpoint per iteration.
     pub(crate) fn checkpoint(&mut self, name: &'static str) {
         let now = Instant::now();
-        let elapsed = now.duration_since(self.last).as_millis();
+        // Attribute whole milliseconds of the cumulative clock, so the stage
+        // sum equals the total by construction instead of trailing it by up
+        // to one millisecond per checkpoint.
+        let previous = self.last.duration_since(self.started).as_millis();
+        let current = now.duration_since(self.started).as_millis();
         self.last = now;
-        self.add(name, elapsed);
+        self.add(name, current - previous);
     }
 
     /// Fold a nested chain in: its stages already sum to its own span, which sat

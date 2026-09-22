@@ -175,7 +175,9 @@ pub static VERBS: &[Verb] = &[
     ),
     verb!(find, Definition, Read, [arg!(text, String)]),
     verb!(dependents, Definition, Read, [arg!(hash, String)]),
-    verb!(export, Definition, Read, [arg!(targets, List)]),
+    // Define, not Read: an export persists up to 512 MiB into the live CAS,
+    // the same write `POST /v1/cas` gates behind the define scope.
+    verb!(export, Definition, Define, [arg!(targets, List)]),
     verb!(
         import,
         Definition,
@@ -517,6 +519,10 @@ mod tests {
     fn export_takes_target_words_and_import_takes_an_uploaded_reference() {
         let export = lookup("export").unwrap();
         assert!(export.family == Family::Definition);
+        assert!(
+            matches!(export.permission, Permission::Define),
+            "export writes the bundle into the CAS"
+        );
         assert_eq!(
             export.schema()["properties"]["targets"],
             json!({"type":"array","items":{"type":"string"},"minItems":1})

@@ -100,7 +100,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
     let identity_directory = staged_identity_directory.as_path();
     // Cross-crate references into definition dependencies hash the stored
     // item, so the driver needs each dependency's document at hand.
-    crate::identity::stage_dependency_items(store, definition, identity_directory)?;
+    crate::identity::stage_dependency_items(store, dependencies, identity_directory)?;
     let lineage = blake3::hash(definition.name.as_bytes())
         .to_hex()
         .to_string();

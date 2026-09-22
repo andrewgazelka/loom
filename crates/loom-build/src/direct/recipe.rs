@@ -126,6 +126,7 @@ impl Recipe {
                 if name == "incremental"
                     || name == ".fingerprint"
                     || name == "root-rustc.recipe.units"
+                    || name == "item-identity"
                 {
                     continue;
                 }

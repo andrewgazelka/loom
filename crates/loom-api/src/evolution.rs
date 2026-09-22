@@ -292,13 +292,9 @@ impl Service {
             );
         }
         if let Some(deps) = &mut edit.deps {
-            for target in deps.values_mut() {
-                *target = self
-                    .store
-                    .resolve(target)?
-                    .with_context(|| format!("dependency {target:?} not found"))?
-                    .hash;
-            }
+            // One rule on every transport: a 64-hex value must be a definition
+            // hash, anything else is a name resolved to its current hash.
+            *deps = crate::definitions::resolve_dependency_pins(&self.store, deps)?;
         }
         if let Some(reference) = source_reference(&edit.source) {
             edit.source = decode_source_bundle(

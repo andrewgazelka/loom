@@ -166,6 +166,11 @@ impl RootHandler for Scheduling {
                         None | Some(Value::Null) => "",
                         Some(entry) => entry.as_str().context("call entry must be a string")?,
                     };
+                    anyhow::ensure!(
+                        entry.len() <= loom_proto::isolated::MAX_ENTRY_BYTES,
+                        "call entry name exceeds {} bytes",
+                        loom_proto::isolated::MAX_ENTRY_BYTES
+                    );
                     let positional = args.get("args").cloned().unwrap_or(json!([]));
                     let (argc, payload) = positional_payload(&positional)?;
                     let bytes = runtime

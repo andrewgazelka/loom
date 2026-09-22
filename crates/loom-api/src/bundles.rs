@@ -402,12 +402,16 @@ struct Plan {
     root_cid: String,
     roots: BTreeMap<String, String>,
     records: BTreeMap<String, Record>,
-    /// Object CID -> (block, kind); the `objects` list of the root.
+    /// Object CID -> (block, kind): the `objects` list of the root, every one
+    /// of them reached from a record (directly or through a tree).
     objects: BTreeMap<String, (Block, String)>,
     /// Definition hashes, dependencies first.
     order: Vec<String>,
 }
 
+/// Decode and cross-check a bundle without touching any store. Every check a
+/// bundle can fail on its own bytes lives here; the store-dependent checks
+/// (name conflicts, the preparation key, the rebuilt hash) come later.
 fn plan(bytes: &[u8]) -> Result<Plan> {
     let verified = verify_bundle(bytes)?;
     let mut blocks = verified.blocks.into_iter();
@@ -419,6 +423,18 @@ fn plan(bytes: &[u8]) -> Result<Plan> {
         root.loom_bundle == BUNDLE_VERSION,
         "bundle format {} is not supported; this node reads loom_bundle {BUNDLE_VERSION}",
         root.loom_bundle
+    );
+    // The caps come before any per-entry work so a root listing a hundred
+    // thousand definitions costs one comparison, not a hundred thousand decodes.
+    ensure!(
+        root.definitions.len() <= MAX_DEFINITIONS,
+        "bundle lists {} definitions; this node imports at most {MAX_DEFINITIONS}",
+        root.definitions.len()
+    );
+    ensure!(
+        root.objects.len() <= MAX_OBJECTS,
+        "bundle lists {} objects; this node imports at most {MAX_OBJECTS}",
+        root.objects.len()
     );
     let mut by_cid: BTreeMap<String, Block> =
         blocks.map(|block| (block.cid.clone(), block)).collect();
@@ -449,14 +465,16 @@ fn plan(bytes: &[u8]) -> Result<Plan> {
             record.loom_definition == BUNDLE_VERSION && record.hash == *hash,
             "bundle definition record {cid} does not describe {hash}"
         );
-        let mut referenced = Vec::new();
-        links(&serde_json::to_value(&record)?, &mut referenced);
-        for reference in referenced {
-            ensure!(
-                objects.contains_key(&reference),
-                "bundle definition {hash} links object {reference} which the root does not list"
-            );
-        }
+        ensure!(
+            record.identity.is_some() != record.lang.is_v8(),
+            "bundle definition {hash} is {} but {} a compiler identity",
+            record.lang.as_str(),
+            if record.identity.is_some() {
+                "carries"
+            } else {
+                "lacks"
+            }
+        );
         for dependency in record.deps.values() {
             ensure!(
                 root.definitions.contains_key(dependency),
@@ -468,19 +486,21 @@ fn plan(bytes: &[u8]) -> Result<Plan> {
     if let Some(stray) = by_cid.keys().next() {
         bail!("bundle block {stray} is not referenced by the root");
     }
+    let referenced = referenced_objects(&records, &objects)?;
+    if let Some(stray) = objects.keys().find(|cid| !referenced.contains(*cid)) {
+        bail!("bundle root lists object {stray} which no definition record or tree references");
+    }
+    for (hash, record) in &records {
+        check_preparation(hash, record, &objects)?;
+    }
     for (name, hash) in &root.roots {
-        ensure!(!name.is_empty(), "bundle root binds an empty name");
+        validate_name(name).with_context(|| format!("bundle root name {name:?}"))?;
         ensure!(
             records.contains_key(hash),
             "bundle root {name:?} names definition {hash} which the bundle lacks"
         );
     }
-    let mut order = Vec::new();
-    let mut visited = BTreeSet::new();
-    let mut visiting = BTreeSet::new();
-    for hash in records.keys() {
-        visit(&records, hash, &mut visited, &mut visiting, &mut order)?;
-    }
+    let order = dependency_order(&records)?;
     Ok(Plan {
         root_cid: verified.root,
         roots: root.roots,
@@ -490,55 +510,251 @@ fn plan(bytes: &[u8]) -> Result<Plan> {
     })
 }
 
-fn visit(
+/// Every object some record reaches: its direct links (source, item document,
+/// preimages, trees, overlay), then every link inside a reached DAG-CBOR object
+/// (subtrees, blobs), to closure. A link to an unlisted object is an error
+/// naming the record or object that carries it. Iterative: a deep tree cannot
+/// exhaust the stack.
+fn referenced_objects(
     records: &BTreeMap<String, Record>,
+    objects: &BTreeMap<String, (Block, String)>,
+) -> Result<BTreeSet<String>> {
+    let mut referenced = BTreeSet::new();
+    let mut pending: Vec<(String, String)> = Vec::new();
+    for (hash, record) in records {
+        let mut direct = Vec::new();
+        links(&serde_json::to_value(record)?, &mut direct);
+        pending.extend(
+            direct
+                .into_iter()
+                .map(|cid| (cid, format!("definition {hash}"))),
+        );
+    }
+    while let Some((cid, owner)) = pending.pop() {
+        let (block, _) = objects.get(&cid).with_context(|| {
+            format!("bundle {owner} links object {cid} which the root does not list")
+        })?;
+        if !referenced.insert(cid.clone()) {
+            continue;
+        }
+        if block.codec == DAG_CBOR_CODEC {
+            let value: Value = loom_proto::decode(&block.bytes).map_err(anyhow::Error::msg)?;
+            let mut children = Vec::new();
+            links(&value, &mut children);
+            pending.extend(
+                children
+                    .into_iter()
+                    .map(|child| (child, format!("object {cid}"))),
+            );
+        }
+    }
+    Ok(referenced)
+}
+
+/// A record's resolver overlay must be what `preparation::save` writes: a
+/// DAG-CBOR map holding only `Cargo.lock` and `loom.vendor-tree`, and the
+/// vendor tree it names must travel in the record's `trees`, so the receiver
+/// materializes the crates the overlay points at from hashed bundle bytes,
+/// never from anywhere else. The key itself is checked against this node's
+/// derivation at import time, once the record's dependencies are staged.
+fn check_preparation(
     hash: &str,
-    visited: &mut BTreeSet<String>,
-    visiting: &mut BTreeSet<String>,
-    order: &mut Vec<String>,
+    record: &Record,
+    objects: &BTreeMap<String, (Block, String)>,
 ) -> Result<()> {
-    if visited.contains(hash) {
+    let Some(preparation) = &record.preparation else {
         return Ok(());
-    }
+    };
     ensure!(
-        visiting.insert(hash.to_owned()),
-        "bundle dependency cycle at {hash}"
+        record.identity.is_some(),
+        "bundle definition {hash} carries a resolver preparation but no compiler identity"
     );
-    for dependency in records[hash].deps.values() {
-        visit(records, dependency, visited, visiting, order)?;
+    ensure!(
+        is_hash(&preparation.key),
+        "bundle definition {hash} preparation key {:?} is not a hash",
+        preparation.key
+    );
+    let cid = link_cid(&preparation.overlay)?;
+    let (block, _) = objects.get(cid).with_context(|| {
+        format!("bundle definition {hash} preparation overlay {cid} is not listed")
+    })?;
+    ensure!(
+        block.codec == DAG_CBOR_CODEC,
+        "bundle definition {hash} preparation overlay {cid} is not DAG-CBOR"
+    );
+    let overlay: BTreeMap<String, SourceFile> = loom_proto::decode(&block.bytes)
+        .map_err(anyhow::Error::msg)
+        .with_context(|| {
+            format!("bundle definition {hash} preparation overlay {cid} is malformed")
+        })?;
+    if let Some(unexpected) = overlay
+        .keys()
+        .find(|key| !["Cargo.lock", loom_build::VENDOR_TREE].contains(&key.as_str()))
+    {
+        bail!(
+            "bundle definition {hash} preparation overlay {cid} carries {unexpected:?}; an overlay holds only Cargo.lock and {}",
+            loom_build::VENDOR_TREE
+        );
     }
-    visiting.remove(hash);
-    visited.insert(hash.to_owned());
-    order.push(hash.to_owned());
+    if let Some(tree) = overlay.get(loom_build::VENDOR_TREE) {
+        let tree = tree.as_text().with_context(|| {
+            format!("bundle definition {hash} preparation overlay names a non-text vendor tree")
+        })?;
+        ensure!(
+            is_hash(tree),
+            "bundle definition {hash} preparation overlay vendor tree {tree:?} is not a hash"
+        );
+        let tree_cid = cid_for_hash(tree, DAG_CBOR_CODEC).map_err(anyhow::Error::msg)?;
+        let trees = record
+            .trees
+            .iter()
+            .map(link_cid)
+            .collect::<Result<Vec<_>>>()?;
+        ensure!(
+            trees.contains(&tree_cid.as_str()),
+            "bundle definition {hash} preparation overlay points at vendor tree {tree_cid} which the record's trees do not include"
+        );
+    }
     Ok(())
 }
 
-/// `into` becomes a `prefix/` applied to every bound name.
+/// Definition hashes with every dependency before its dependents. Kahn's
+/// algorithm over the `deps` edges: no recursion, so a chain of any length
+/// costs stack for one frame; anything left unordered lies on a cycle.
+/// Every `deps` value is a key of `records` (checked by `plan`).
+fn dependency_order(records: &BTreeMap<String, Record>) -> Result<Vec<String>> {
+    let mut blocked: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut dependents: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (hash, record) in records {
+        let deps: BTreeSet<&str> = record.deps.values().map(String::as_str).collect();
+        blocked.insert(hash, deps.len());
+        for dep in deps {
+            dependents.entry(dep).or_default().push(hash);
+        }
+    }
+    let mut ready: BTreeSet<&str> = blocked
+        .iter()
+        .filter(|entry| *entry.1 == 0)
+        .map(|entry| *entry.0)
+        .collect();
+    let mut order = Vec::with_capacity(records.len());
+    while let Some(hash) = ready.pop_first() {
+        order.push(hash.to_owned());
+        for dependent in dependents.get(hash).into_iter().flatten().copied() {
+            let remaining = blocked.get_mut(dependent).with_context(|| {
+                format!("bundle definition {dependent} vanished while ordering")
+            })?;
+            *remaining -= 1;
+            if *remaining == 0 {
+                ready.insert(dependent);
+            }
+        }
+    }
+    if order.len() != records.len() {
+        let stuck = blocked
+            .iter()
+            .find(|entry| *entry.1 > 0)
+            .map(|entry| *entry.0)
+            .context("bundle dependency cycle without a member")?;
+        bail!("bundle dependency cycle through {stuck}");
+    }
+    Ok(order)
+}
+
+/// The one rule for a name a bundle may bind: every root name and the `into`
+/// prefix pass through here. A name is resolved by `Store::resolve`, which
+/// strips a leading `#` and looks a 64-hex string up as a definition hash
+/// first, so either shape would bind a name nothing can resolve.
+pub(super) fn validate_name(name: &str) -> Result<()> {
+    ensure!(!name.is_empty(), "definition name is empty");
+    ensure!(
+        !name.chars().any(|ch| ch.is_whitespace() || ch.is_control()),
+        "definition name {name:?} contains whitespace or control characters"
+    );
+    ensure!(
+        !name.starts_with('#'),
+        "definition name {name:?} starts with '#', which resolves as a hash reference"
+    );
+    ensure!(
+        !is_hash(name),
+        "definition name {name:?} is shaped like a definition hash"
+    );
+    ensure!(
+        !name.starts_with('/') && !name.ends_with('/') && !name.contains("//"),
+        "definition name {name:?} has an empty path segment"
+    );
+    Ok(())
+}
+
+/// `into` becomes a `prefix/` applied to every bound name. A valid prefix
+/// joined to a valid root name is itself valid: the prefix ends in one `/`,
+/// the name starts with neither `/` nor `#`, and the join is never 64 hex.
 fn import_prefix(into: Option<&str>) -> Result<String> {
     let Some(into) = into else {
         return Ok(String::new());
     };
-    ensure!(!into.is_empty(), "import prefix is empty");
-    ensure!(
-        !into.chars().any(|ch| ch.is_whitespace() || ch.is_control()),
-        "import prefix {into:?} contains whitespace"
-    );
-    ensure!(
-        !into.starts_with('/') && !into.contains("//"),
-        "import prefix {into:?} has an empty path segment"
-    );
-    Ok(if into.ends_with('/') {
-        into.to_owned()
-    } else {
-        format!("{into}/")
-    })
+    let bare = into.strip_suffix('/').unwrap_or(into);
+    validate_name(bare).with_context(|| format!("import prefix {into:?}"))?;
+    Ok(format!("{bare}/"))
 }
 
 impl Service {
-    /// Import a bundle previously stored with `POST /v1/cas`. Every definition
-    /// is rebuilt through the `add` admission path into a private staged store
-    /// and published in one transaction; nothing reaches the live store unless
-    /// every rebuilt hash equals its recorded hash.
+    /// Seed the staged resolver cache with a record's overlay, on the staged
+    /// service (`self.store` is the private snapshot). The bundle's
+    /// `preparation.key` is a claim about this node's own derivation, and the
+    /// row lands under it only once the claim holds: the overlay is staged
+    /// under the claimed key, then the builder is asked which row it reads for
+    /// the rebuilt record. Any other answer refuses the import, so a bundle
+    /// cannot plant an overlay under a key this node computes for unrelated
+    /// definitions; the staged store, poisoned row included, is discarded with
+    /// the refusal. A key this node already resolved keeps its own overlay.
+    /// Runs after the record's dependencies are staged: the derivation reads
+    /// their stored sources.
+    fn seed_preparation(&self, record: &Record, source: &str, label: &str) -> Result<()> {
+        let Some(preparation) = &record.preparation else {
+            return Ok(());
+        };
+        let overlay = parse_reference(link_cid(&preparation.overlay)?)
+            .map_err(anyhow::Error::msg)?
+            .hash;
+        let checked = loom_check::CheckedDef {
+            hash: record.hash.clone(),
+            lang: record.lang,
+            name: label.to_owned(),
+            source: source.to_owned(),
+            deps: record.deps.clone(),
+            sig: record.sig.clone(),
+            diagnostics: Vec::new(),
+        };
+        let closure = dependency_closure(&self.store, &record.deps)?;
+        // Derive the key locally BEFORE anything is seeded: the bundle's key is
+        // a claim, and only a row under the key this node computes for this
+        // exact source may exist afterwards.
+        match self.builder.preparation_key(&checked, &closure)? {
+            Some(derived) if derived == preparation.key => {
+                self.store.set_preparation(&derived, &overlay)?;
+                Ok(())
+            }
+            Some(derived) => bail!(
+                "import refused: definition {} bundles preparation key {} but this node derives {} for it; the bundle would seed a resolver row this node never computes for that source",
+                record.hash,
+                preparation.key,
+                derived
+            ),
+            None => bail!(
+                "import refused: definition {} bundles preparation key {}, but this node derives no resolver key for it (it carries its own vendor tree)",
+                record.hash,
+                preparation.key
+            ),
+        }
+    }
+
+    /// Import a bundle previously stored with `POST /v1/cas`. `plan` checks
+    /// the bytes; under the definitions gate every definition is rebuilt
+    /// through the `add` admission path into a private staged store, its
+    /// resolver row seeded only under the key this node derives, and the whole
+    /// graph is published in one transaction; nothing reaches the live store
+    /// unless every rebuilt hash equals its recorded hash.
     pub(super) async fn import_bundle(&self, args: &Value) -> Result<Value> {
         let reference = field(args, "bundle")?;
         let hash = if is_hash(reference) {
@@ -579,6 +795,8 @@ impl Service {
         let mut staged = self.clone();
         staged.store = self.store.stage_intake()?;
         staged.builder = Arc::new(self.builder.for_store(staged.store.clone()));
+        // `plan` refused any listed object no record reaches, so this is the
+        // referenced set, nothing more.
         let blocks: Vec<ImportBlock<'_>> = planned
             .objects
             .values()
@@ -588,14 +806,6 @@ impl Service {
             })
             .collect();
         staged.store.import_blocks(&blocks)?;
-        for record in planned.records.values() {
-            if let Some(preparation) = &record.preparation {
-                let overlay = parse_reference(link_cid(&preparation.overlay)?)
-                    .map_err(anyhow::Error::msg)?
-                    .hash;
-                staged.store.set_preparation(&preparation.key, &overlay)?;
-            }
-        }
         let mut publications = Vec::new();
         for hash in &planned.order {
             let record = &planned.records[hash];
@@ -604,6 +814,7 @@ impl Service {
             let source_cid = link_cid(&record.source)?;
             let source = String::from_utf8(planned.objects[source_cid].0.bytes.clone())
                 .with_context(|| format!("import of {label}: source is not UTF-8"))?;
+            staged.seed_preparation(record, &source, &label)?;
             let response = staged
                 .admit(
                     DefineRequest {
@@ -722,9 +933,139 @@ mod tests {
         assert_eq!(import_prefix(Some("friend")).unwrap(), "friend/");
         assert_eq!(import_prefix(Some("friend/")).unwrap(), "friend/");
         assert_eq!(import_prefix(Some("a/b")).unwrap(), "a/b/");
-        for invalid in ["", "/friend", "a//b", "a b", "a\tb"] {
+        for invalid in ["", "/", "/friend", "a//b", "a//", "a b", "a\tb", "#friend"] {
             assert!(import_prefix(Some(invalid)).is_err(), "{invalid:?}");
         }
+        let hash = "ab".repeat(32);
+        assert!(import_prefix(Some(hash.as_str())).is_err());
+    }
+
+    #[test]
+    fn names_that_resolve_as_something_else_are_refused() {
+        for valid in ["sum", "friend/sum", "a.b-c_d", "#inside#ok", "abc123"] {
+            validate_name(valid).unwrap_or_else(|error| panic!("{valid:?}: {error}"));
+        }
+        let hash = "0f".repeat(32);
+        for invalid in [
+            "",
+            "#sum",
+            hash.as_str(),
+            "/sum",
+            "sum/",
+            "a//b",
+            "a b",
+            "a\nb",
+            "a\u{7}b",
+        ] {
+            let error = validate_name(invalid).unwrap_err().to_string();
+            assert!(error.contains("definition name"), "{invalid:?}: {error}");
+        }
+        // The `#` refusal names the reason, since `#sum` looks like a plain name.
+        assert!(
+            validate_name("#sum")
+                .unwrap_err()
+                .to_string()
+                .contains("'#'")
+        );
+    }
+
+    fn record(hash: &str, deps: &[(&str, &str)]) -> Record {
+        Record {
+            loom_definition: BUNDLE_VERSION,
+            hash: hash.to_owned(),
+            lang: Lang::JavaScript,
+            names: Vec::new(),
+            source: json!({"$ref": "bafy"}),
+            deps: deps
+                .iter()
+                .map(|entry| (entry.0.to_owned(), entry.1.to_owned()))
+                .collect(),
+            allowed_effects: None,
+            sig: Default::default(),
+            identity: None,
+            preimages: Vec::new(),
+            trees: Vec::new(),
+            preparation: None,
+        }
+    }
+    fn fake_hash(index: usize) -> String {
+        format!("{index:064x}")
+    }
+
+    #[test]
+    fn dependency_order_puts_dependencies_first_without_recursion() {
+        // A 100,000-long chain: the recursive walk this replaced overflowed the
+        // worker stack on chains far shorter than this.
+        let length = 100_000;
+        let mut records = BTreeMap::new();
+        for index in 0..length {
+            let deps: Vec<(String, String)> = if index == 0 {
+                Vec::new()
+            } else {
+                vec![("prev".to_owned(), fake_hash(index - 1))]
+            };
+            let deps: Vec<(&str, &str)> = deps
+                .iter()
+                .map(|entry| (entry.0.as_str(), entry.1.as_str()))
+                .collect();
+            records.insert(fake_hash(index), record(&fake_hash(index), &deps));
+        }
+        let order = dependency_order(&records).unwrap();
+        assert_eq!(order.len(), length);
+        let position: BTreeMap<&str, usize> = order
+            .iter()
+            .enumerate()
+            .map(|entry| (entry.1.as_str(), entry.0))
+            .collect();
+        for (hash, record) in &records {
+            for dep in record.deps.values() {
+                assert!(
+                    position[dep.as_str()] < position[hash.as_str()],
+                    "{dep} after {hash}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dependency_order_counts_a_dependency_once_per_hash_and_refuses_cycles() {
+        // Two aliases of one dependency are one edge.
+        let util = fake_hash(1);
+        let caller = fake_hash(2);
+        let records = BTreeMap::from([
+            (util.clone(), record(&util, &[])),
+            (
+                caller.clone(),
+                record(&caller, &[("a", util.as_str()), ("b", util.as_str())]),
+            ),
+        ]);
+        assert_eq!(
+            dependency_order(&records).unwrap(),
+            vec![util.clone(), caller.clone()]
+        );
+        // Deterministic: independent roots come out in hash order.
+        let lone = fake_hash(0);
+        let mut records = records;
+        records.insert(lone.clone(), record(&lone, &[]));
+        assert_eq!(
+            dependency_order(&records).unwrap(),
+            vec![lone, util.clone(), caller.clone()]
+        );
+        // A two-cycle and a self-dependency are both refused, naming a member.
+        let a = fake_hash(3);
+        let b = fake_hash(4);
+        let cyclic = BTreeMap::from([
+            (a.clone(), record(&a, &[("b", b.as_str())])),
+            (b.clone(), record(&b, &[("a", a.as_str())])),
+        ]);
+        let error = dependency_order(&cyclic).unwrap_err().to_string();
+        assert!(
+            error.contains("cycle") && (error.contains(&a) || error.contains(&b)),
+            "{error}"
+        );
+        let selfish = BTreeMap::from([(a.clone(), record(&a, &[("me", a.as_str())]))]);
+        let error = dependency_order(&selfish).unwrap_err().to_string();
+        assert!(error.contains("cycle") && error.contains(&a), "{error}");
     }
 
     #[test]

@@ -159,7 +159,7 @@ impl Service {
                     Some(value) => value.as_str().context("name must be a string")?,
                     None => "main",
                 };
-                ensure!(!name.is_empty(), "definition name is empty");
+                crate::bundles::validate_name(name)?;
                 let _guard = self.definitions_gate.lock().await;
                 ensure!(
                     !self.store.current_names()?.contains_key(name),

@@ -207,6 +207,14 @@ pub(super) async fn materialize_rust(request: Materialization<'_>) -> Result<(),
         ));
     }
     library.insert("path".into(), toml::Value::String("src/lib.rs".into()));
+    if dependency {
+        // The driver finds a dependency's staged item document by rustc crate
+        // name; a caller-supplied `[lib] name` would break that link silently.
+        library.insert(
+            "name".into(),
+            toml::Value::String(crate::identity::dependency_crate_name(&definition.hash)),
+        );
+    }
     library.insert(
         "crate-type".into(),
         toml::Value::Array(vec![toml::Value::String(

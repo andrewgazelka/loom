@@ -74,12 +74,68 @@ pub(super) fn check_rust_file(
             /// Macro bodies and inputs are tokens, not paths. An ambient-input
             /// macro is an identifier followed by `!`; an ambient module is the
             /// `std :: <module>` sequence. A local merely named `env` is neither.
+            /// A fragment followed by `!` (`$m!`, `$($m)*!`) is refused outright:
+            /// the call site supplies the macro name without a `!`, so neither
+            /// side spells `include_str!` where this scan reads it.
             fn ambient_tokens(tokens: proc_macro2::TokenStream, violations: &mut Vec<String>) {
-                use proc_macro2::TokenTree;
+                use proc_macro2::{Delimiter, Spacing, TokenTree};
                 let tokens: Vec<TokenTree> = tokens.into_iter().collect();
+                // A `!` that is not the `!=` operator (a joint `!` before `=`).
+                let bang = |position: usize| {
+                    matches!(
+                        tokens.get(position),
+                        Some(TokenTree::Punct(punct))
+                            if punct.as_char() == '!'
+                                && !(punct.spacing() == Spacing::Joint
+                                    && matches!(
+                                        tokens.get(position + 1),
+                                        Some(TokenTree::Punct(next)) if next.as_char() == '='
+                                    ))
+                    )
+                };
+                let repetition_operator = |position: usize| {
+                    matches!(
+                        tokens.get(position),
+                        Some(TokenTree::Punct(punct)) if matches!(punct.as_char(), '*' | '+' | '?')
+                    )
+                };
                 for (index, token) in tokens.iter().enumerate() {
                     match token {
                         TokenTree::Group(group) => ambient_tokens(group.stream(), violations),
+                        TokenTree::Punct(dollar) if dollar.as_char() == '$' => {
+                            match tokens.get(index + 1) {
+                                // `$m!`
+                                Some(TokenTree::Ident(name)) if bang(index + 2) => {
+                                    violations.push(format!(
+                                        "macro invocation through fragment `${name}`"
+                                    ));
+                                }
+                                // `$( ... ) sep? op !`
+                                Some(TokenTree::Group(group))
+                                    if group.delimiter() == Delimiter::Parenthesis =>
+                                {
+                                    let operator = if repetition_operator(index + 2) {
+                                        Some(index + 2)
+                                    } else if !matches!(
+                                        tokens.get(index + 2),
+                                        Some(TokenTree::Group(_))
+                                    ) && repetition_operator(index + 3)
+                                    {
+                                        Some(index + 3)
+                                    } else {
+                                        None
+                                    };
+                                    if let Some(operator) = operator
+                                        && bang(operator + 1)
+                                    {
+                                        violations.push(
+                                            "macro invocation through fragment `$(...)`".into(),
+                                        );
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
                         TokenTree::Ident(name) => {
                             let name = name.to_string();
                             let invoked = matches!(

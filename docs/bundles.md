@@ -27,8 +27,10 @@ BLAKE3-256 CIDs. Byte layout, in order:
 | | `B_i` | the block bytes |
 | | ... | repeated for every block, no trailing bytes |
 
-The unsigned varint is at most nine bytes; a non-minimal encoding (a
-terminating zero group) or a zero-length frame is rejected. `C_i` must
+The unsigned varint is at most nine bytes and carries at most 57 bits: eight
+full seven-bit groups plus a ninth byte whose value may only be 0 or 1. A
+longer value, a non-minimal encoding (a terminating zero group) or a
+zero-length frame is rejected. `C_i` must
 re-encode to exactly the bytes read. Only two codecs occur: `0x55` (raw) and
 `0x71` (DAG-CBOR); every DAG-CBOR block must decode as canonical DAG-CBOR.
 Every block's BLAKE3-256 must equal the digest in its CID; every CID appears
@@ -117,12 +119,17 @@ recursively (subtrees and file blobs), so a receiver materializes them
 without any network access.
 
 `preparation.key` is the exporter's `rust_preparations` row key, a BLAKE3 over
-the manifest, lock, dependency pins, SDK fingerprint and isolation flag. The
-importer seeds the same row in its resolver cache before building, without
-overriding a key it already resolved. A receiver whose SDK fingerprint
-differs computes a different key, ignores the seeded row, and resolves the
-lock itself; that resolution may need network access, and it changes nothing
-about the hash check.
+the manifest, lock, dependency pins, SDK fingerprint and isolation flag. It is
+a claim, not an instruction: the importer derives the key for the record
+itself, from the bundled source and the staged dependencies, and refuses the
+bundle when the two differ (the error names both keys and the definition
+hash). Only that locally derived key is ever seeded, without overriding a key
+the receiver already resolved. The overlay may hold only `Cargo.lock` and
+`loom.vendor-tree`, and the vendor tree it names must be one of the record's
+`trees`, so every crate the overlay points at arrives as hashed bundle bytes.
+A receiver whose SDK fingerprint differs therefore refuses the bundle at this
+step rather than resolving the lock itself: a resolver row is trusted only
+when this node would have computed it.
 
 ## Objects excluded, on purpose
 
@@ -137,27 +144,42 @@ about the hash check.
 ## Import semantics
 
 1. Resolve `bundle` to a raw CAS object; read the bytes.
-2. Verify the container as described above. Decode the root; every
-   `definitions` link and `objects` entry must be a block of the bundle, every
-   link inside a record must be a listed object, and no block may be
-   unreferenced. Every `deps` value must be a bundled definition; cycles are
-   rejected.
+2. Verify the container as described above. Decode the root; it may list at
+   most 1024 definitions and 1,000,000 objects (the same caps `export`
+   applies), checked before any record is decoded. Every `definitions` link
+   and `objects` entry must be a block of the bundle, every link inside a
+   record must be a listed object, and no block may be unreferenced. Every
+   listed object must be reached from some record, directly or through the
+   link closure of a DAG-CBOR tree; an object nothing reaches refuses the
+   bundle, naming it. A Rust record carries `identity`, a script record does
+   not. A record's `preparation` overlay must be DAG-CBOR holding only
+   `Cargo.lock` and `loom.vendor-tree`, and that vendor tree must be among
+   the record's `trees`. Every `deps` value must be a bundled definition;
+   the dependency order is computed without recursion and a cycle is
+   rejected. Every root name passes the one name rule (non-empty, no
+   whitespace or control characters, no leading `#`, not 64 hex, no empty
+   path segment); `--into` passes the same rule.
 3. Under the definitions gate, read the live names. For each root name
    (prefixed by `--into`), an existing binding to a different hash is an
    error; a binding to the same hash is a no-op.
 4. Snapshot the live store into a private staged store. Store every object
-   under its kind; seed each record's `preparation` row.
-5. Rebuild each definition in dependency order through the same admission
-   path as `add` (check, prepare, build, publish) into the staged store. A
-   rebuilt hash different from the record's `hash` fails the import; the
-   error names both hashes and both toolchain hashes.
+   under its kind.
+5. For each definition in dependency order: when the record carries a
+   `preparation`, stage its overlay and derive the preparation key locally
+   for the record; a key different from the bundle's refuses the import,
+   naming both keys and the definition hash. Then rebuild the definition
+   through the same admission path as `add` (check, prepare, build, publish)
+   into the staged store. A rebuilt hash different from the record's `hash`
+   fails the import; the error names both hashes and both toolchain hashes.
 6. Commit every publication and its build event into the live store in one
    SQLite transaction, after checking that the live names still equal the
    snapshot from step 3. A concurrent binding aborts the transaction; nothing
    partial is ever visible.
 
 The failure window is therefore empty: until step 6 commits, the live store
-has not changed. Objects written to the staged store are discarded with it.
+has not changed. Objects and resolver rows written to the staged store,
+including an overlay staged under a key that then failed the check in step
+5, are discarded with it.
 
 ## Export semantics
 
@@ -167,4 +189,8 @@ root) or a definition hash that is the current value of at least one name
 rejected, because an import binds names. The closure follows `deps`
 transitively, up to 1024 definitions and 1,000,000 objects or 512 MiB, the raw
 upload limit. The bundle bytes are stored as a raw CAS object of kind
-`bundle`; the CLI downloads them to `--out`, which must not already exist.
+`bundle`, which is why `export` needs the define scope, like `POST /v1/cas`:
+a read token cannot write up to 512 MiB into the live CAS. The CLI claims
+`--out` before sending the request (an existing file refuses the export),
+downloads into `<out>.tmp`, and renames it into place, so `--out` is either
+absent or the complete bundle.

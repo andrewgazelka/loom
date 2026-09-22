@@ -168,6 +168,21 @@ impl Builder {
         )
     }
 
+    /// The `rust_preparations` row key this node derives for `definition`:
+    /// BLAKE3 over the manifest, lock, dependency pins, SDK fingerprint and
+    /// isolation flag. `None` when the definition carries its own vendor tree.
+    /// Import compares a bundle's claimed key against this before seeding.
+    pub fn preparation_key(
+        &self,
+        definition: &CheckedDef,
+        dependencies: &BTreeMap<String, CheckedDef>,
+    ) -> Result<Option<String>, BuildError> {
+        if is_vendored(definition) {
+            return Ok(None);
+        }
+        Ok(Some(self.preparation_inputs(definition, dependencies)?.key))
+    }
+
     fn preparation_inputs(
         &self,
         definition: &CheckedDef,

@@ -210,7 +210,12 @@ async fn every_export_contributes_to_definition_identity() {
 /// same definition hash even though the entry table lost a name.
 #[tokio::test]
 async fn identity_is_rooted_in_exports_not_entries() {
-    let fixture = Fixture::new().await;
+    let mut fixture = Fixture::new().await;
+    // The checker saw both root functions; the compiler's entry table must
+    // agree in both directions, so `second` is declared on the checked side.
+    let mut second = fixture.definition.sig.exports[0].clone();
+    second.name = "second".into();
+    fixture.definition.sig.exports.push(second);
     let mut document = fixture.document();
     let other = fixture.preimage(b"second root function");
     document["items"]["second"] = serde_json::json!({"hash": other, "refs": [], "cycle": null});
@@ -303,6 +308,18 @@ fn publish_dependency(store: &loom_store::Store, document: &serde_json::Value) -
     root
 }
 
+/// The checked dependency closure the builder hands to staging, keyed by hash.
+fn closure_of(
+    template: &loom_check::CheckedDef,
+    hash: &str,
+    name: &str,
+) -> BTreeMap<String, loom_check::CheckedDef> {
+    let mut member = template.clone();
+    member.hash = hash.to_owned();
+    member.name = name.to_owned();
+    BTreeMap::from([(hash.to_owned(), member)])
+}
+
 /// The staged file is named by the dependency's rustc crate name and holds the
 /// dependency's stored document byte for byte; `configure` points the driver
 /// at that directory.
@@ -319,15 +336,12 @@ async fn stages_dependency_item_documents_for_the_driver() {
     });
     let dependency = publish_dependency(&fixture.store, &document);
     fixture.definition.deps = BTreeMap::from([("shapes".to_owned(), dependency.clone())]);
-    stage_dependency_items(&fixture.store, &fixture.definition, &fixture.directory).unwrap();
+    let closure = closure_of(&fixture.definition, &dependency, "shapes");
+    stage_dependency_items(&fixture.store, &closure, &fixture.directory).unwrap();
     let staged = fixture
         .directory
         .join("dependency-items")
         .join(format!("{}.json", dependency_crate_name(&dependency)));
-    assert_eq!(
-        dependency_crate_name(&dependency),
-        format!("loom_definition_{}", &dependency[..16])
-    );
     assert_eq!(
         std::fs::read(&staged).unwrap(),
         serde_json::to_vec(&document).unwrap()
@@ -367,7 +381,7 @@ async fn restaging_removes_documents_of_dropped_dependencies() {
     let staged = fixture.directory.join("dependency-items");
     std::fs::create_dir_all(&staged).unwrap();
     std::fs::write(staged.join("loom_definition_0000000000000000.json"), b"{}").unwrap();
-    stage_dependency_items(&fixture.store, &fixture.definition, &fixture.directory).unwrap();
+    stage_dependency_items(&fixture.store, &BTreeMap::new(), &fixture.directory).unwrap();
     assert_eq!(std::fs::read_dir(&staged).unwrap().count(), 0);
 }
 
@@ -376,11 +390,28 @@ async fn dependency_without_stored_identity_is_named() {
     let mut fixture = Fixture::new().await;
     let missing = "f".repeat(64);
     fixture.definition.deps = BTreeMap::from([("shapes".to_owned(), missing.clone())]);
-    let error = stage_dependency_items(&fixture.store, &fixture.definition, &fixture.directory)
+    let closure = closure_of(&fixture.definition, &missing, "shapes");
+    let error = stage_dependency_items(&fixture.store, &closure, &fixture.directory)
         .unwrap_err()
         .to_string();
     assert!(error.contains("shapes"), "{error}");
     assert!(error.contains(&missing), "{error}");
     assert!(error.contains("no stored build identity"), "{error}");
     assert!(!fixture.directory.join("dependency-items").exists());
+}
+
+/// A crate-root `pub fn` the compiler saw but the checker did not (macro
+/// expansion) is refused by name, not silently accepted as an entry.
+#[tokio::test]
+async fn rejects_compiler_entry_the_checker_never_saw() {
+    let fixture = Fixture::new().await;
+    let mut document = fixture.document();
+    let other = fixture.preimage(b"expanded root function");
+    document["items"]["expanded"] = serde_json::json!({"hash": other, "refs": [], "cycle": null});
+    document["exports"]["expanded"] = serde_json::json!(other);
+    document["entry"]["expanded"] = serde_json::json!(other);
+    fixture.write_document(&document);
+    let error = fixture.ingest().unwrap_err().to_string();
+    assert!(error.contains("expanded"), "{error}");
+    assert!(error.contains("not an export the checker saw"), "{error}");
 }

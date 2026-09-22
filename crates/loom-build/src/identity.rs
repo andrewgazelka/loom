@@ -10,7 +10,8 @@ use tokio::process::Command;
 struct Document {
     toolchain: String,
     items: BTreeMap<String, Item>,
-    /// Root `pub fn` items: the wasm ABI surface.
+    /// Root `pub fn` items: the wasm ABI surface. Must equal, name for name,
+    /// the export set the source checker read (`CheckedDef::sig.exports`).
     entry: BTreeMap<String, String>,
     /// Every definition reachable through `pub` visibility from the crate
     /// root: the identity surface. Entries are a subset.
@@ -41,17 +42,20 @@ pub(crate) fn dependency_crate_name(hash: &str) -> String {
     format!("loom_definition_{}", &hash[..16])
 }
 
-/// Write each direct dependency's stored item document to
-/// `<directory>/dependency-items/<crate_name>.json` for the driver's
-/// `LOOM_DEP_ITEMS`. A dependency without a stored build identity or
-/// document is an error naming it; nothing is written for a partial set.
+/// Write the stored item document of EVERY definition in the dependency
+/// closure to `<directory>/dependency-items/<crate_name>.json` for the
+/// driver's `LOOM_DEP_ITEMS`. The closure matters: a direct dependency's
+/// public signature can name a transitive one, and the caller's HIR then
+/// references that crate directly. A member without a stored build identity
+/// or document is an error naming it; nothing is written for a partial set.
 pub(crate) fn stage_dependency_items(
     store: &loom_store::Store,
-    definition: &loom_check::CheckedDef,
+    closure: &std::collections::BTreeMap<String, loom_check::CheckedDef>,
     directory: &Path,
 ) -> Result<(), BuildError> {
     let mut documents = Vec::new();
-    for (alias, hash) in &definition.deps {
+    for hash in closure.keys() {
+        let alias = closure[hash].name.as_str();
         let identity = store
             .build_identity(hash)
             .map_err(rejected)?
@@ -238,11 +242,28 @@ impl Driver {
         if document.entry.is_empty() {
             return Err(rejected("definition has no entry export"));
         }
+        // The compiler's entry set and the checker's export set must be equal.
+        // A checker export the compiler lacks is a `pub fn` that expansion or
+        // `cfg` removed; a compiler entry the checker lacks is a crate-root
+        // `pub fn` that macro expansion produced, which the source pass never
+        // read as an export.
         for entry in &definition.sig.exports {
             if !document.entry.contains_key(&entry.name) {
                 return Err(rejected(format!(
                     "hash-rustc document missing entry {}",
                     entry.name
+                )));
+            }
+        }
+        for name in document.entry.keys() {
+            if !definition
+                .sig
+                .exports
+                .iter()
+                .any(|entry| &entry.name == name)
+            {
+                return Err(rejected(format!(
+                    "hash-rustc entry {name} is not an export the checker saw; a crate-root pub fn produced by macro expansion is not an entry"
                 )));
             }
         }
