@@ -45,12 +45,32 @@ pub fn parse_reference(cid: &str) -> Result<ContentAddress, String> {
 }
 
 pub fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, String> {
+    encode_with(value, Floats::Canonical)
+}
+
+/// Encode positional call arguments: the same `$ref` links and validation as
+/// [`encode`], but a JSON `3.0` stays a CBOR float. A typed Rust callee decodes
+/// `f64` parameters strictly, so the canonical integer collapse would make every
+/// whole-valued float argument undecodable.
+pub fn encode_arguments<T: Serialize>(value: &T) -> Result<Vec<u8>, String> {
+    encode_with(value, Floats::Preserved)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Floats {
+    /// Whole-valued floats in the safe range become integers (content identity).
+    Canonical,
+    /// Floats stay floats (typed argument payloads).
+    Preserved,
+}
+
+fn encode_with<T: Serialize>(value: &T, floats: Floats) -> Result<Vec<u8>, String> {
     // Build the canonical value tree once. Validation stays after collection so
     // Serde maps retain the established last-value-wins behavior before admission.
     let mut value = value
         .serialize(ValueSerializer)
         .map_err(|error| error.to_string())?;
-    to_wire(&mut value, 0)?;
+    to_wire(&mut value, 0, floats)?;
     serde_ipld_dagcbor::to_vec(&value).map_err(|error| error.to_string())
 }
 
@@ -90,13 +110,17 @@ fn validate_number(value: &Ipld) -> Result<(), String> {
     }
 }
 
-fn to_wire(value: &mut Ipld, depth: usize) -> Result<(), String> {
+fn to_wire(value: &mut Ipld, depth: usize, floats: Floats) -> Result<(), String> {
     if depth > 256 {
         return Err("Value exceeds maximum depth 256".into());
     }
     validate_number(value)?;
     match value {
-        Ipld::Float(number) if number.fract() == 0.0 && number.abs() <= MAX_SAFE_INTEGER as f64 => {
+        Ipld::Float(number)
+            if floats == Floats::Canonical
+                && number.fract() == 0.0
+                && number.abs() <= MAX_SAFE_INTEGER as f64 =>
+        {
             *value = Ipld::Integer(*number as i128);
         }
         Ipld::Bytes(_) => {
@@ -120,13 +144,13 @@ fn to_wire(value: &mut Ipld, depth: usize) -> Result<(), String> {
                 *value = Ipld::Link(cid);
             } else {
                 for child in fields.values_mut() {
-                    to_wire(child, depth + 1)?;
+                    to_wire(child, depth + 1, floats)?;
                 }
             }
         }
         Ipld::List(values) => {
             for child in values {
-                to_wire(child, depth + 1)?;
+                to_wire(child, depth + 1, floats)?;
             }
         }
         _ => {}

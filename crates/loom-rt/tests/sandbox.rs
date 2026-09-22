@@ -246,12 +246,18 @@ async fn javascript_calls_wasm_calls_javascript() -> Result<()> {
     Ok(())
 }
 
-/// The core guest's frame declares one argument; the JavaScript leaf's stored
-/// signature takes two. The host refuses from the header, before V8 runs.
+/// JavaScript entries are variadic (`main(...args)`): a core guest frame that
+/// declares fewer arguments than the leaf's stored signature is still delivered,
+/// and the missing parameter is `undefined`. Only core wasm callees, whose
+/// generated wrapper decodes a fixed tuple, are refused from the header.
 #[tokio::test]
-async fn isolated_call_arity_is_checked_against_the_stored_signature() -> Result<()> {
+async fn javascript_callees_accept_any_arity() -> Result<()> {
     let store = Store::memory()?;
-    let leaf = javascript(&store, "function main(a, b) { return a + b; }", 2)?;
+    let leaf = javascript(
+        &store,
+        "function main(a, b) { return b === undefined ? a : a + b; }",
+        2,
+    )?;
     let payload = loom_proto::isolated::encode_payload(&(21u8,)).map_err(anyhow::Error::msg)?;
     let wasm = wasm_call(
         &store,
@@ -262,20 +268,8 @@ async fn isolated_call_arity_is_checked_against_the_stored_signature() -> Result
             payload: &payload,
         },
     )?;
-    let error = Runtime::new(store)?
-        .call_def(&wasm, json!([]))
-        .await
-        .unwrap_err();
-    assert_eq!(
-        error.downcast_ref::<loom_proto::isolated::CallError>(),
-        Some(&loom_proto::isolated::CallError::Arity {
-            hash: leaf,
-            entry: "main".into(),
-            expected: 2,
-            actual: 1,
-        }),
-        "{error:#}"
-    );
+    let value = Runtime::new(store)?.call_def(&wasm, json!([])).await?.value;
+    assert_eq!(value, json!(21));
     Ok(())
 }
 

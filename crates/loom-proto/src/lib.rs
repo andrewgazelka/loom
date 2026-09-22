@@ -202,8 +202,8 @@ mod trace;
 pub use bytes::Bytes;
 pub use codec::host::{HostValue, decode_host, encode_host, encode_host_array};
 pub use codec::{
-    ContentAddress, DAG_CBOR_CODEC, RAW_CODEC, cid_for_hash, decode, encode, parse_reference,
-    reference,
+    ContentAddress, DAG_CBOR_CODEC, RAW_CODEC, cid_for_hash, decode, encode, encode_arguments,
+    parse_reference, reference,
 };
 pub use fs::{DirEntry, EntryKind};
 pub use trace::{

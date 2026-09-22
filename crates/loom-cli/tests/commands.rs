@@ -252,10 +252,10 @@ async fn definition_commands_reach_shared_service() {
     source_roundtrip::assert_verbatim(&server, old, first, &viewed).await;
     assert!(!viewed.result["items"].as_object().unwrap().is_empty());
     std::fs::write(file.path(), "pub fn main() -> i32 { answer::main() }").unwrap();
-    let pins = serde_json::json!({"answer":old}).to_string();
+    let pin = format!("answer={old}");
     let caller = server
         .invoke(&[
-            "add", path, "--name", "caller", "--deps", &pins, "--lang", "rust",
+            "add", path, "--name", "caller", "--dep", &pin, "--lang", "rust",
         ])
         .await;
     assert!(caller.ok, "{caller:?}");

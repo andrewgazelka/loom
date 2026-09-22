@@ -78,14 +78,20 @@ pub(crate) fn isolated(frame: &[u8], hash: &str) -> Result<Vec<u8>, CallError> {
 /// Pack a callee's response frame for the host: `[0][result]` or
 /// `[1][CallError]`. Used by the generated `loom_call_<entry>` wrappers.
 pub fn isolated_response(result: Result<Vec<u8>, CallError>) -> u64 {
-    let frame = loom_proto::isolated::response_frame(match &result {
+    let frame = isolated_response_frame(result).into_boxed_slice();
+    let length = frame.len() as u64;
+    // The packed word holds a wasm32 pointer; on any other target it is
+    // truncated and must never be dereferenced.
+    let pointer = Box::into_raw(frame) as *mut u8 as u32;
+    (length << 32) | pointer as u64
+}
+
+/// The response frame bytes: `[0][result]` or `[1][CallError]`.
+pub fn isolated_response_frame(result: Result<Vec<u8>, CallError>) -> Vec<u8> {
+    loom_proto::isolated::response_frame(match &result {
         Ok(payload) => Ok(payload.as_slice()),
         Err(error) => Err(error),
     })
-    .into_boxed_slice();
-    let length = frame.len() as u64;
-    let pointer = Box::into_raw(frame) as *mut u8 as u32;
-    (length << 32) | pointer as u64
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -307,19 +313,14 @@ mod tests {
     }
 
     #[test]
-    fn isolated_response_frames_are_tagged_and_owned() {
+    fn isolated_response_frames_are_tagged() {
         let payload = loom_proto::isolated::encode_payload(&7u8).unwrap();
-        let packed = isolated_response(Ok(payload.clone()));
-        let (pointer, length) = (packed as u32 as *mut u8, (packed >> 32) as usize);
-        // SAFETY: the test owns the leaked frame and frees it once.
-        let frame = unsafe { Vec::from_raw_parts(pointer, length, length) };
+        let frame = isolated_response_frame(Ok(payload.clone()));
         assert_eq!(frame[0], 0);
         assert_eq!(&frame[1..], payload);
-        let packed = isolated_response(Err(CallError::Decode {
+        let frame = isolated_response_frame(Err(CallError::Decode {
             message: "bad".into(),
         }));
-        let (pointer, length) = (packed as u32 as *mut u8, (packed >> 32) as usize);
-        let frame = unsafe { Vec::from_raw_parts(pointer, length, length) };
         assert_eq!(frame[0], 1);
         assert_eq!(
             loom_proto::isolated::Response::parse(&frame)
