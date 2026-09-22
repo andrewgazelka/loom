@@ -3,6 +3,7 @@ use loom_proto::verbs::{Kind, VERBS};
 use serde_json::Value;
 use std::path::PathBuf;
 
+#[derive(Debug)]
 pub struct Command {
     pub name: &'static str,
     pub args: Value,
@@ -12,6 +13,7 @@ pub struct Command {
     /// `export --out`: where the CLI writes the bundle named by `result.bundle`.
     pub download: Option<PathBuf>,
 }
+#[derive(Debug)]
 pub struct Upload {
     pub argument: &'static str,
     pub path: PathBuf,
@@ -112,7 +114,8 @@ pub fn from_matches(matches: &clap::ArgMatches) -> anyhow::Result<Option<Command
                         argument.name
                     );
                     anyhow::ensure!(
-                        map.insert(key.into(), Value::String(value.into())).is_none(),
+                        map.insert(key.into(), Value::String(value.into()))
+                            .is_none(),
                         "--{} names {key:?} twice",
                         argument.name
                     );
@@ -130,7 +133,12 @@ pub fn from_matches(matches: &clap::ArgMatches) -> anyhow::Result<Option<Command
                 );
                 continue;
             }
-            Kind::String | Kind::Source | Kind::Json | Kind::Integer | Kind::Count | Kind::Upload => {}
+            Kind::String
+            | Kind::Source
+            | Kind::Json
+            | Kind::Integer
+            | Kind::Count
+            | Kind::Upload => {}
         }
         let Some(input) = matches.get_one::<String>(argument.name) else {
             continue;
@@ -257,7 +265,14 @@ mod tests {
         let matches = parser()
             .try_get_matches_from(["loom", "add", path, "--lang", "rust"])
             .unwrap();
-        assert!(from_matches(&matches).unwrap().unwrap().args.get("deps").is_none());
+        assert!(
+            from_matches(&matches)
+                .unwrap()
+                .unwrap()
+                .args
+                .get("deps")
+                .is_none()
+        );
     }
 
     #[test]
@@ -276,9 +291,16 @@ mod tests {
             .unwrap();
         let command = from_matches(&matches).unwrap().unwrap();
         assert_eq!(command.name, "export");
-        assert_eq!(command.args, serde_json::json!({"targets": ["greet", "util"]}));
+        assert_eq!(
+            command.args,
+            serde_json::json!({"targets": ["greet", "util"]})
+        );
         assert_eq!(command.download.as_deref(), Some(out.as_path()));
-        assert!(parser().try_get_matches_from(["loom", "export", "greet"]).is_err());
+        assert!(
+            parser()
+                .try_get_matches_from(["loom", "export", "greet"])
+                .is_err()
+        );
         assert!(
             parser()
                 .try_get_matches_from(["loom", "export", "--out", "x"])

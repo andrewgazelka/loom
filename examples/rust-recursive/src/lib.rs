@@ -7,6 +7,11 @@ pub fn descend(depth: u32) -> u32 {
     if depth == 0 {
         0
     } else {
-        loom::isolated::call(DESCEND, depth - 1).expect("child call failed") + 1
+        match loom::isolated::call(DESCEND, depth - 1) {
+            Ok(below) => below + 1,
+            // The host refused to nest further: report how deep we got.
+            Err(loom::CallError::DepthExceeded { depth }) => depth,
+            Err(other) => panic!("child call failed: {other:?}"),
+        }
     }
 }

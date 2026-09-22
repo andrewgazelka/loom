@@ -247,7 +247,10 @@ impl Service {
                     && let Some(data) = store.get(&item.hash)?
                     && data.len() == 40
                 {
-                    let cycle: String = data[..32].iter().map(|byte| format!("{byte:02x}")).collect();
+                    let cycle: String = data[..32]
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect();
                     if store.cas_entry(&cycle)?.is_some() {
                         preimages.insert(link_cid(&exporter.include(&cycle)?)?.to_owned());
                     }
@@ -290,7 +293,9 @@ impl Service {
                 let files: BTreeMap<String, SourceFile> = store
                     .get_value(&found.overlay_hash)?
                     .context("preparation overlay missing from CAS")?;
-                if let Some(tree) = files.get(loom_build::VENDOR_TREE).and_then(SourceFile::as_text)
+                if let Some(tree) = files
+                    .get(loom_build::VENDOR_TREE)
+                    .and_then(SourceFile::as_text)
                 {
                     trees.insert(link_cid(&exporter.include_closure(tree)?)?.to_owned());
                 }
@@ -310,7 +315,10 @@ impl Service {
             allowed_effects: def.allowed_effects,
             sig: def.sig,
             identity,
-            preimages: preimages.into_iter().map(|cid| json!({"$ref": cid})).collect(),
+            preimages: preimages
+                .into_iter()
+                .map(|cid| json!({"$ref": cid}))
+                .collect(),
             trees: trees.into_iter().map(|cid| json!({"$ref": cid})).collect(),
             preparation,
         })
@@ -417,14 +425,19 @@ fn plan(bytes: &[u8]) -> Result<Plan> {
     let mut objects = BTreeMap::new();
     for object in root.objects {
         let cid = link_cid(&object.cid)?;
-        let block = by_cid
-            .remove(cid)
-            .with_context(|| format!("bundle root lists object {cid} but the bundle has no such block, or lists it twice"))?;
+        let block = by_cid.remove(cid).with_context(|| {
+            format!(
+                "bundle root lists object {cid} but the bundle has no such block, or lists it twice"
+            )
+        })?;
         objects.insert(cid.to_owned(), (block, object.kind));
     }
     let mut records = BTreeMap::new();
     for (hash, link) in &root.definitions {
-        ensure!(is_hash(hash), "bundle definition key {hash:?} is not a hash");
+        ensure!(
+            is_hash(hash),
+            "bundle definition key {hash:?} is not a hash"
+        );
         let cid = link_cid(link)?;
         let block = by_cid
             .remove(cid)
@@ -566,7 +579,7 @@ impl Service {
         let mut staged = self.clone();
         staged.store = self.store.stage_intake()?;
         staged.builder = Arc::new(self.builder.for_store(staged.store.clone()));
-        let blocks: Vec<ImportBlock<'_>> = plan
+        let blocks: Vec<ImportBlock<'_>> = planned
             .objects
             .values()
             .map(|entry| ImportBlock {
@@ -682,7 +695,7 @@ impl Service {
         let seq = self
             .store
             .commit_import(&staged.store, &intake, &expected_names)?;
-        let imported: Vec<Value> = plan
+        let imported: Vec<Value> = planned
             .roots
             .iter()
             .map(|entry| json!({"name": format!("{prefix}{}", entry.0), "hash": entry.1}))

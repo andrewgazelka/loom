@@ -351,7 +351,12 @@ fn positional_payload(args: &Value) -> Result<(u32, Vec<u8>)> {
     let arguments = args
         .as_array()
         .context("call arguments must be a positional array")?;
-    Ok((arguments.len() as u32, encode(args)?))
+    // Serialize the JSON values directly: a JSON `3.0` must reach a `f64`
+    // parameter as a CBOR float. The canonical value codec collapses integral
+    // floats to integers for content identity, which a typed decoder refuses.
+    let payload = loom_proto::isolated::encode_payload(args)
+        .map_err(|error| anyhow::anyhow!("positional payload: {error}"))?;
+    Ok((arguments.len() as u32, payload))
 }
 
 #[cfg(test)]

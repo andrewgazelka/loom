@@ -160,12 +160,12 @@ impl Builder {
             return Ok(None);
         }
         let inputs = self.preparation_inputs(definition, dependencies)?;
-        Ok(preparation::overlay_hash(&self.store, &inputs.key)?.map(|overlay_hash| {
-            Preparation {
+        Ok(
+            preparation::overlay_hash(&self.store, &inputs.key)?.map(|overlay_hash| Preparation {
                 key: inputs.key,
                 overlay_hash,
-            }
-        }))
+            }),
+        )
     }
 
     fn preparation_inputs(
@@ -184,7 +184,10 @@ impl Builder {
                 "src/lib.rs".into(),
                 SourceFile::Text(definition.source.clone()),
             );
-            files.insert("Cargo.toml".into(),SourceFile::Text(DEFAULT_MANIFEST.into()));
+            files.insert(
+                "Cargo.toml".into(),
+                SourceFile::Text(DEFAULT_MANIFEST.into()),
+            );
             SourceBundle { files }
         };
         if bundle.files.keys().any(|name| name.starts_with(".cargo/")) {

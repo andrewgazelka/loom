@@ -77,7 +77,10 @@ walls, builds, per_stage, failures = [], [], {}, 0
 worst_unattributed = 0.0
 for index in range(1, count + 1):
     source = template.replace(f'"{literal.group(1)}"', f'"{literal.group(1)}-{nonce}-{index}"', 1)
-    body = {"command": "add", "args": {"name": name, "lang": "rust", "source": source}}
+    # The first add creates the lineage; every later one is the edit loop: `update`
+    # of the same name, which keeps the per-lineage incremental directory warm.
+    verb = "add" if index == 1 else "update"
+    body = {"command": verb, "args": {"name": name, "lang": "rust", "source": source}}
     started = time.perf_counter()
     status, raw = request("POST", "/v1/command", body)
     wall_ms = (time.perf_counter() - started) * 1000
@@ -87,9 +90,30 @@ for index in range(1, count + 1):
         reply = {"ok": False, "result": raw.decode(errors="replace")}
     if status != 200 or not reply.get("ok"):
         failures += 1
-        print(f"add i={index} FAILED http={status} reply={json.dumps(reply)[:2000]}")
+        print(f"{verb} i={index} FAILED http={status} reply={json.dumps(reply)[:2000]}")
         continue
-    build = reply["result"]["build"]
+
+    def find_build(value):
+        """The first object carrying a build record (`ms` and `logs_ref`), at any depth."""
+        if isinstance(value, dict):
+            if "ms" in value and "logs_ref" in value:
+                return value
+            for child in value.values():
+                found = find_build(child)
+                if found is not None:
+                    return found
+        if isinstance(value, list):
+            for child in value:
+                found = find_build(child)
+                if found is not None:
+                    return found
+        return None
+
+    build = find_build(reply["result"])
+    if build is None:
+        failures += 1
+        print(f"{verb} i={index} FAILED no build record in reply={json.dumps(reply)[:2000]}")
+        continue
     build_ms = build["ms"]
     status, log = request("GET", f"/v1/cas/{build['logs_ref']}")
     if status != 200:

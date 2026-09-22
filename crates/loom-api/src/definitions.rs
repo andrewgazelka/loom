@@ -253,10 +253,18 @@ mod pin_tests {
             allowed_effects: None,
             observed_effects: Vec::new(),
         };
-        store.define(&definition, Some("util"), "pub fn twice() {}", &BTreeMap::new())?;
+        store.define(
+            &definition,
+            Some("util"),
+            "pub fn twice() {}",
+            &BTreeMap::new(),
+        )?;
         let resolved = resolve_dependency_pins(
             &store,
-            &BTreeMap::from([("a".to_owned(), "util".to_owned()), ("b".to_owned(), hash.clone())]),
+            &BTreeMap::from([
+                ("a".to_owned(), "util".to_owned()),
+                ("b".to_owned(), hash.clone()),
+            ]),
         )?;
         assert_eq!(resolved["a"], hash);
         assert_eq!(resolved["b"], hash);
@@ -266,7 +274,10 @@ mod pin_tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(missing.contains("dependency util") && missing.contains("\"absent\""), "{missing}");
+        assert!(
+            missing.contains("dependency util") && missing.contains("\"absent\""),
+            "{missing}"
+        );
         let unknown_hash = "0".repeat(64);
         let error = resolve_dependency_pins(
             &store,

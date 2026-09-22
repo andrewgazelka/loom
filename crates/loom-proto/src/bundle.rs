@@ -71,7 +71,9 @@ pub fn decode_car(bytes: &[u8]) -> Result<Car, String> {
         let cid = Cid::read_bytes(&mut reader).map_err(|error| error.to_string())?;
         let consumed = frame.len() - reader.len();
         if cid.to_bytes() != frame[..consumed] {
-            return Err(format!("bundle block {cid} has a noncanonical CID encoding"));
+            return Err(format!(
+                "bundle block {cid} has a noncanonical CID encoding"
+            ));
         }
         frames.push(Frame {
             cid: cid.to_string(),
@@ -124,9 +126,7 @@ fn write_varint(out: &mut Vec<u8>, mut value: u64) {
 fn read_varint(bytes: &[u8], position: &mut usize) -> Result<u64, String> {
     let mut value = 0u64;
     for index in 0..MAX_VARINT_BYTES {
-        let byte = *bytes
-            .get(*position)
-            .ok_or("bundle varint is truncated")?;
+        let byte = *bytes.get(*position).ok_or("bundle varint is truncated")?;
         *position += 1;
         let group = u64::from(byte & 0x7f);
         if index == MAX_VARINT_BYTES - 1 && group > 1 {

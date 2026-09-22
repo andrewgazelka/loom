@@ -88,7 +88,8 @@ async fn import(target: &Service, bytes: &[u8], into: Option<&str>) -> Result<Re
 }
 
 #[tokio::test]
-async fn export_import_preserves_hash_source_and_binds_names_with_or_without_prefix() -> Result<()> {
+async fn export_import_preserves_hash_source_and_binds_names_with_or_without_prefix() -> Result<()>
+{
     let (_, source) = scripted()?;
     let added = ok(
         &source,
@@ -121,7 +122,12 @@ async fn export_import_preserves_hash_source_and_binds_names_with_or_without_pre
     let viewed = ok(&target, "view", json!({"target":"friend/sum"})).await;
     assert_eq!(viewed["hash"], hash);
     assert_eq!(
-        ok(&target, "run", json!({"target":"friend/sum","args":[20,22]})).await["output"],
+        ok(
+            &target,
+            "run",
+            json!({"target":"friend/sum","args":[20,22]})
+        )
+        .await["output"],
         42
     );
     // Without a prefix the bundle's own name binds; repeating is a no-op.
@@ -155,7 +161,11 @@ async fn corrupted_block_is_rejected_before_anything_is_written() -> Result<()> 
     assert!(!refused.ok, "{refused:?}");
     let error = refused.result["error"].as_str().unwrap();
     assert!(error.contains("corrupt"), "{error}");
-    assert_eq!(counts(&target_store)?, before, "a refused import writes nothing");
+    assert_eq!(
+        counts(&target_store)?,
+        before,
+        "a refused import writes nothing"
+    );
     let stray = command(&target, "import", json!({"bundle": "0".repeat(64)})).await;
     assert!(
         stray.result["error"]
@@ -204,7 +214,10 @@ async fn name_bound_to_a_different_hash_refuses_the_import_unless_prefixed() -> 
     assert_eq!(target_store.resolve("sum")?.unwrap().hash, local["hash"]);
     let prefixed = import(&target, &bytes, Some("friend")).await?;
     assert!(prefixed.ok, "{prefixed:?}");
-    assert_eq!(target_store.resolve("friend/sum")?.unwrap().hash, added["hash"]);
+    assert_eq!(
+        target_store.resolve("friend/sum")?.unwrap().hash,
+        added["hash"]
+    );
     assert_eq!(target_store.resolve("sum")?.unwrap().hash, local["hash"]);
     Ok(())
 }
@@ -240,7 +253,10 @@ async fn import_admits_through_the_add_path_so_disabled_languages_refuse() -> Re
 async fn export_refuses_unknown_targets_and_hashes_without_a_current_name() -> Result<()> {
     let (store, service) = scripted()?;
     let error = failure(&service, "export", json!({"targets":["nope"]})).await;
-    assert!(error.contains("\"nope\"") && error.contains("not found"), "{error}");
+    assert!(
+        error.contains("\"nope\"") && error.contains("not found"),
+        "{error}"
+    );
     let unnamed = loom_proto::Def {
         hash: store.put("item-preimage", b"unnamed entry")?,
         lang: Lang::Rust,
@@ -329,19 +345,31 @@ async fn rust_caller_and_dependency_round_trip_with_identical_hashes() -> Result
     let target = Service::new(target_store.clone(), root(), vec![Lang::Rust])?;
     let imported = import(&target, &bytes, Some("friend")).await?;
     assert!(imported.ok, "{imported:?}");
-    assert_eq!(target_store.resolve("friend/caller")?.unwrap().hash, caller_hash);
+    assert_eq!(
+        target_store.resolve("friend/caller")?.unwrap().hash,
+        caller_hash
+    );
     assert_eq!(
         target_store.definition_deps(&caller_hash)?,
         BTreeMap::from([("util".to_owned(), util_hash.clone())])
     );
     assert!(target_store.definition(&util_hash)?.is_some());
     assert!(
-        !target_store.current_names()?.values().any(|hash| hash == &util_hash),
+        !target_store
+            .current_names()?
+            .values()
+            .any(|hash| hash == &util_hash),
         "only roots bind names"
     );
     assert_eq!(
-        target_store.build_identity(&caller_hash)?.unwrap().toolchain_hash,
-        source_store.build_identity(&caller_hash)?.unwrap().toolchain_hash
+        target_store
+            .build_identity(&caller_hash)?
+            .unwrap()
+            .toolchain_hash,
+        source_store
+            .build_identity(&caller_hash)?
+            .unwrap()
+            .toolchain_hash
     );
     assert_eq!(
         ok(&target, "run", json!({"target":"friend/caller"})).await["output"],

@@ -187,7 +187,10 @@ mod tests {
         let error = verify_bundle(&encode_car(&root.cid, &[root.clone(), corrupt]).unwrap())
             .unwrap_err()
             .to_string();
-        assert!(error.contains(&source.cid) && error.contains("corrupt"), "{error}");
+        assert!(
+            error.contains(&source.cid) && error.contains("corrupt"),
+            "{error}"
+        );
         let error = verify_bundle(
             &encode_car(&root.cid, &[root.clone(), source.clone(), source.clone()]).unwrap(),
         )

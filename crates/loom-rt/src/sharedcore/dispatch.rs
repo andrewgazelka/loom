@@ -41,7 +41,9 @@ impl Runtime {
                     .join(", ")
             )
         })?;
-        if entry.params.len() != argc as usize {
+        // JavaScript entries are variadic (`main(...args)`); only core wasm wrappers
+        // decode a fixed tuple, so only they can refuse a mismatched arity up front.
+        if !definition.lang.is_v8() && entry.params.len() != argc as usize {
             return Err(loom_proto::isolated::CallError::Arity {
                 hash: hash.into(),
                 entry: entry.name.clone(),

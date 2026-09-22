@@ -504,7 +504,11 @@ mod tests {
             verb.normalize(&mut args).unwrap();
             for invalid in [json!({"util":1}), json!(["util"]), json!("util")] {
                 args["deps"] = invalid;
-                assert!(verb.normalize(&mut args).is_err(), "{name} {}", args["deps"]);
+                assert!(
+                    verb.normalize(&mut args).is_err(),
+                    "{name} {}",
+                    args["deps"]
+                );
             }
         }
     }

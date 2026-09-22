@@ -191,7 +191,9 @@ impl Store {
     pub fn definition_source_hash(&self, hash: &str) -> Result<Option<String>> {
         Ok(self
             .lock()?
-            .query_row("SELECT source_hash FROM defs WHERE hash=?", [hash], |r| r.get(0))
+            .query_row("SELECT source_hash FROM defs WHERE hash=?", [hash], |r| {
+                r.get(0)
+            })
             .optional()?)
     }
     pub fn dependencies(&self, hash: &str) -> Result<Vec<String>> {

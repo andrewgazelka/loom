@@ -246,7 +246,10 @@ fn import_commit_is_atomic_and_refuses_moved_names() -> Result<()> {
     assert!(store.commit_import(&staged, &failing, &names).is_err());
     assert_eq!(store.latest_seq()?, before);
     assert!(store.resolve("friend/first")?.is_none());
-    assert!(store.get(&object)?.is_none(), "rolled back objects stay out");
+    assert!(
+        store.get(&object)?.is_none(),
+        "rolled back objects stay out"
+    );
     let publications = [
         IntakePublication {
             def: &first,
