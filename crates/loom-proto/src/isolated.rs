@@ -150,7 +150,8 @@ pub struct Request<'a> {
 }
 impl<'a> Request<'a> {
     pub fn encode(&self) -> Vec<u8> {
-        let mut frame = Vec::with_capacity(FIXED_HEADER_BYTES + self.entry.len() + 4 + self.payload.len());
+        let mut frame =
+            Vec::with_capacity(FIXED_HEADER_BYTES + self.entry.len() + 4 + self.payload.len());
         frame.push(VERSION);
         match self.target {
             Target::This => {
@@ -177,10 +178,7 @@ impl<'a> Request<'a> {
             return Err(malformed("shorter than the fixed header"));
         }
         if frame[0] != VERSION {
-            return Err(malformed(&format!(
-                "version {} is not {VERSION}",
-                frame[0]
-            )));
+            return Err(malformed(&format!("version {} is not {VERSION}", frame[0])));
         }
         let digest: [u8; DIGEST_BYTES] = frame[2..2 + DIGEST_BYTES]
             .try_into()
@@ -251,7 +249,10 @@ impl std::fmt::Display for CallError {
         match self {
             Self::NotFound { hash } => write!(f, "definition {hash} not found"),
             Self::Denied { effect, hash } => {
-                write!(f, "effect {effect} towards definition {hash} is not allowed")
+                write!(
+                    f,
+                    "effect {effect} towards definition {hash} is not allowed"
+                )
             }
             Self::Trapped { hash, message } => write!(f, "definition {hash} failed: {message}"),
             Self::Decode { message } => write!(f, "isolated call codec: {message}"),
@@ -265,7 +266,10 @@ impl std::fmt::Display for CallError {
                 "definition {hash} entry {entry} takes {expected} arguments, the call declares {actual}"
             ),
             Self::DepthExceeded { depth } => {
-                write!(f, "isolated call depth {depth} reached the limit {MAX_DEPTH}")
+                write!(
+                    f,
+                    "isolated call depth {depth} reached the limit {MAX_DEPTH}"
+                )
             }
         }
     }
@@ -304,7 +308,8 @@ pub fn response_frame(result: Result<&[u8], &CallError>) -> Vec<u8> {
         Err(error) => {
             let mut frame = vec![TAG_ERROR];
             frame.extend(
-                serde_ipld_dagcbor::to_vec(error).expect("CallError holds only strings and integers"),
+                serde_ipld_dagcbor::to_vec(error)
+                    .expect("CallError holds only strings and integers"),
             );
             frame
         }
@@ -434,8 +439,8 @@ mod tests {
         assert_eq!(
             payload,
             [
-                0x83, 0x1b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x3b, 0x7f, 0xff,
-                0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x20
+                0x83, 0x1b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x3b, 0x7f, 0xff, 0xff,
+                0xff, 0xff, 0xff, 0xff, 0xff, 0x20
             ]
         );
         let (max, min, minus): (u64, i64, i8) = decode_payload(&payload).unwrap();
@@ -482,7 +487,10 @@ mod tests {
         assert_eq!(frame[0], TAG_ERROR);
         assert_eq!(Response::parse(&frame).unwrap().unwrap_err(), error);
         let decoded: crate::Value = crate::decode_host(&frame[1..]).unwrap();
-        assert_eq!(decoded, serde_json::json!({"depth_exceeded": {"depth": 64}}));
+        assert_eq!(
+            decoded,
+            serde_json::json!({"depth_exceeded": {"depth": 64}})
+        );
 
         for variant in [
             CallError::NotFound { hash: "h".into() },

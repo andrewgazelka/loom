@@ -24,7 +24,10 @@ fn delegated(args: &loom::Value) -> Result<loom::Value, String> {
     let Some(hash) = args["def"].as_str() else {
         return Err("call def must be a string".into());
     };
-    let Some(argument) = args["args"].as_array().and_then(|arguments| arguments.first()) else {
+    let Some(argument) = args["args"]
+        .as_array()
+        .and_then(|arguments| arguments.first())
+    else {
         return Err("call args must hold one positional value".into());
     };
     let def = loom::isolated::Def::<fn(loom::Value) -> loom::Value>::from_hex(hash)

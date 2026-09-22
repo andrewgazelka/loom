@@ -72,12 +72,17 @@ impl Dependencies {
         let Some(dependency) = self.crates.get(crate_name) else {
             return Ok(None);
         };
-        dependency.items.get(path).copied().map(Some).ok_or_else(|| {
-            format!(
-                "dependency crate {crate_name} has no stored item {path} in {}",
-                dependency.document.display()
-            )
-        })
+        dependency
+            .items
+            .get(path)
+            .copied()
+            .map(Some)
+            .ok_or_else(|| {
+                format!(
+                    "dependency crate {crate_name} has no stored item {path} in {}",
+                    dependency.document.display()
+                )
+            })
     }
 }
 

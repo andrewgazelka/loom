@@ -1,5 +1,8 @@
 pub mod vm;
-pub use vm::{CasReference, VmArchitecture, VmImageEntry, VmImageFormat, VmImageManifest, VmLaunch, VmNetwork, VmSpec};
+pub use vm::{
+    CasReference, VmArchitecture, VmImageEntry, VmImageFormat, VmImageManifest, VmLaunch,
+    VmNetwork, VmSpec,
+};
 pub mod script_artifact;
 pub use script_artifact::ScriptArtifact;
 mod export_identity;

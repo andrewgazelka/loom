@@ -197,7 +197,10 @@ impl Driver {
     pub fn environment(directory: &Path) -> [(String, String); 3] {
         let value = |path: PathBuf| path.to_string_lossy().into_owned();
         [
-            ("LOOM_ITEM_HASHES".into(), value(directory.join("items.json"))),
+            (
+                "LOOM_ITEM_HASHES".into(),
+                value(directory.join("items.json")),
+            ),
             (
                 "LOOM_ITEM_PREIMAGES".into(),
                 value(directory.join("item-preimages")),
@@ -226,8 +229,9 @@ impl Driver {
         let path = directory.join("items.json");
         let bytes = std::fs::read(&path)
             .map_err(|error| rejected(format!("{}: {error}", path.display())))?;
-        let document: Document = serde_json::from_slice(&bytes)
-            .map_err(|error| rejected(format!("hash-rustc document {}: {error}", path.display())))?;
+        let document: Document = serde_json::from_slice(&bytes).map_err(|error| {
+            rejected(format!("hash-rustc document {}: {error}", path.display()))
+        })?;
         if document.toolchain.is_empty() {
             return Err(rejected("hash-rustc document has no toolchain"));
         }

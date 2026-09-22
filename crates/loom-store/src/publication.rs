@@ -81,9 +81,8 @@ pub(super) fn project(
             |row| row.get(0),
         )?;
         let document: Value = serde_json::from_slice(&bytes)?;
-        let exports: BTreeMap<String, String> =
-            serde_json::from_value(document["exports"].clone())
-                .context("driver document has no exports; rebuild with the current driver")?;
+        let exports: BTreeMap<String, String> = serde_json::from_value(document["exports"].clone())
+            .context("driver document has no exports; rebuild with the current driver")?;
         ensure!(!exports.is_empty(), "driver export root has no exports");
         let root = blake3::hash(&loom_proto::export_identity_preimage(&exports))
             .to_hex()

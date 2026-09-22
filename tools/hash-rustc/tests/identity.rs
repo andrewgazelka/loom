@@ -239,7 +239,12 @@ fn nested_public_function_body_change_moves_exports_not_entry() {
     assert_ne!(before.exports, after.exports);
     assert_eq!(
         before.exports.keys().collect::<Vec<_>>(),
-        ["ping", "shapes::Area", "shapes::Area::area", "shapes::largest"]
+        [
+            "ping",
+            "shapes::Area",
+            "shapes::Area::area",
+            "shapes::largest"
+        ]
     );
 }
 
@@ -249,7 +254,11 @@ fn nested_public_function_body_change_moves_exports_not_entry() {
 fn nested_public_function_alpha_renaming_keeps_exports() {
     let source = "pub mod shapes { pub fn largest(items: Vec<u32>) -> u32 { let mut best = items[0]; for elem in items { if elem > best { best = elem; } } best } } pub fn ping() -> u32 { 1 }";
     let before = compile(source);
-    let renamed_locals = compile(&source.replace("best", "winner").replace("elem", "candidate"));
+    let renamed_locals = compile(
+        &source
+            .replace("best", "winner")
+            .replace("elem", "candidate"),
+    );
     assert_eq!(before.exports, renamed_locals.exports);
     let renamed_function = compile(&source.replace("largest", "biggest"));
     assert_eq!(

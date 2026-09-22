@@ -322,7 +322,9 @@ mod tests {
         let frame = unsafe { Vec::from_raw_parts(pointer, length, length) };
         assert_eq!(frame[0], 1);
         assert_eq!(
-            loom_proto::isolated::Response::parse(&frame).unwrap().unwrap_err(),
+            loom_proto::isolated::Response::parse(&frame)
+                .unwrap()
+                .unwrap_err(),
             CallError::Decode {
                 message: "bad".into()
             }

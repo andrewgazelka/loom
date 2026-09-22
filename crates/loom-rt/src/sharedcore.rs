@@ -145,7 +145,10 @@ impl Execution {
 }
 enum Invocation {
     /// `args` is the opaque isolated-call payload; the host copies it in as is.
-    Call { args: Vec<u8>, export: String },
+    Call {
+        args: Vec<u8>,
+        export: String,
+    },
     Schema,
 }
 impl Entry<'_> {
@@ -244,7 +247,10 @@ async fn respond(caller: &mut Caller<'_, Guest>, bytes: Vec<u8>) -> Result<i64> 
 }
 pub(super) enum Entry<'a> {
     /// `args` is one DAG-CBOR array of typed arguments, never decoded here.
-    Call { args: &'a [u8], export: &'a str },
+    Call {
+        args: &'a [u8],
+        export: &'a str,
+    },
     Schema,
 }
 

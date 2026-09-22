@@ -42,7 +42,10 @@ fn build_dependency(directory: &Path, source: &str, metadata: &str) -> Value {
                 metadata,
             ])
             .env("LOOM_ITEM_HASHES", &document)
-            .env("LOOM_ITEM_PREIMAGES", directory.join("dependency-preimages"))
+            .env(
+                "LOOM_ITEM_PREIMAGES",
+                directory.join("dependency-preimages"),
+            )
             .output()
             .unwrap(),
     );
@@ -226,8 +229,7 @@ fn malformed_staging_entries_are_rejected_by_name() {
 #[test]
 fn variants_and_constructors_resolve_to_the_enclosing_dependency_type() {
     let directory = tempfile::tempdir().unwrap();
-    let dependency =
-        "pub enum Shape { Circle(f64), Square(f64) } pub struct Point(pub u32); pub fn value() -> u32 { 7 }";
+    let dependency = "pub enum Shape { Circle(f64), Square(f64) } pub struct Point(pub u32); pub fn value() -> u32 { 7 }";
     let dependent = "pub fn entry() -> f64 { match dependency::Shape::Circle(1.0) { dependency::Shape::Circle(r) => r, _ => 0.0 } } pub fn point() -> u32 { dependency::Point(3).0 }";
     stage(
         directory.path(),

@@ -197,7 +197,8 @@ impl Execution {
                     .map_err(error)?
                     .call_async(&mut running.store, ())
                     .await
-                    .map_err(|cause| running.error_context(cause))? as u64;
+                    .map_err(|cause| running.error_context(cause))?
+                    as u64;
                 let bytes = copy_out(&self.memory, packed as u32, (packed >> 32) as u32)
                     .map_err(|error| GuestFailure::new(format!("{error:#}")))?;
                 let envelope: Value = loom_proto::decode(&bytes).map_err(GuestFailure::new)?;
@@ -221,7 +222,8 @@ impl Execution {
                     .map_err(|cause| running.error_context(cause))?
                     .call_async(&mut running.store, (buffer.pointer, buffer.length))
                     .await
-                    .map_err(|cause| running.error_context(cause))? as u64;
+                    .map_err(|cause| running.error_context(cause))?
+                    as u64;
                 let frame = copy_out(&self.memory, packed as u32, (packed >> 32) as u32)
                     .map_err(|error| GuestFailure::new(format!("{error:#}")))?;
                 match loom_proto::isolated::Response::parse(&frame) {

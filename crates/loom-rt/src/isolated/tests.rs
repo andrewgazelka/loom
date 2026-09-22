@@ -129,12 +129,9 @@ async fn self_recursive_definition_stops_at_the_depth_limit_before_instantiating
     .encode();
     let hash = register(&store, &caller_module(&frame)?, &[("main", 0)], &["call"])?;
     let runtime = Runtime::new(store)?;
-    let error = tokio::time::timeout(
-        Duration::from_secs(60),
-        runtime.call_def(&hash, json!([])),
-    )
-    .await?
-    .unwrap_err();
+    let error = tokio::time::timeout(Duration::from_secs(60), runtime.call_def(&hash, json!([])))
+        .await?
+        .unwrap_err();
     assert_eq!(
         call_error(&error),
         Some(&CallError::DepthExceeded { depth: MAX_DEPTH }),
@@ -264,7 +261,10 @@ async fn denied_and_unresolvable_calls_never_reach_the_store() -> Result<()> {
         )
         .await
         .unwrap_err();
-    assert!(matches!(unresolved, CallError::Decode { .. }), "{unresolved}");
+    assert!(
+        matches!(unresolved, CallError::Decode { .. }),
+        "{unresolved}"
+    );
 
     let (sender, _receiver) = tokio::sync::mpsc::channel::<call::Request>(1);
     let borrowed = EffectContext {
@@ -302,7 +302,9 @@ async fn perform_refuses_the_value_shaped_call_descriptor_from_core_guests() -> 
     )?;
     let runtime = Runtime::new(store)?;
     let envelope = runtime.call_def(&hash, json!([])).await?;
-    let refusal = envelope["error"].as_str().context("perform error envelope")?;
+    let refusal = envelope["error"]
+        .as_str()
+        .context("perform error envelope")?;
     assert!(refusal.contains("use loom::isolated::call"), "{envelope}");
     assert_eq!(runtime.isolated_call_round_trip_us()["samples"], json!(0));
     // The control: an ordinary op through the same fixture still succeeds.

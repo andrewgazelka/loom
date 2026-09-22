@@ -63,8 +63,13 @@ pub(super) fn check_rust_file(
                     "A definition must export at least one crate-root pub fn; private functions and nested pub fn items are not entries.",
                 ));
             }
-            const AMBIENT_MACROS: [&str; 5] =
-                ["include", "include_str", "include_bytes", "env", "option_env"];
+            const AMBIENT_MACROS: [&str; 5] = [
+                "include",
+                "include_str",
+                "include_bytes",
+                "env",
+                "option_env",
+            ];
             const AMBIENT_MODULES: [&str; 5] = ["fs", "net", "time", "env", "process"];
             /// Macro bodies and inputs are tokens, not paths. An ambient-input
             /// macro is an identifier followed by `!`; an ambient module is the

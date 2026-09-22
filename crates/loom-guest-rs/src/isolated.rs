@@ -21,8 +21,8 @@
 //! Guest handler frames (`loom::handle`) never see an isolated call: the
 //! callee runs in its own memory and inherits no frames, and the call itself
 //! is not a `perform`. Effect-row inference labels it `"call"`.
-use loom_proto::isolated::{Request, Response};
 pub use loom_proto::isolated::{CallError, MAX_DEPTH, Target, decode_payload, encode_payload};
+use loom_proto::isolated::{Request, Response};
 use serde::{Serialize, de::DeserializeOwned};
 use std::marker::PhantomData;
 
@@ -89,7 +89,10 @@ impl<F> Def<F> {
     }
     /// Select an export by name. Without it the callee must have one export.
     pub const fn entry(self, name: &'static str) -> Self {
-        Self { entry: name, ..self }
+        Self {
+            entry: name,
+            ..self
+        }
     }
     pub const fn target(&self) -> Target {
         self.target
@@ -180,10 +183,7 @@ mod tests {
 
     #[test]
     fn every_arity_encodes_one_array() {
-        assert_eq!(
-            <fn() -> u8 as Invocation>::encode_args(()).unwrap(),
-            [0x80]
-        );
+        assert_eq!(<fn() -> u8 as Invocation>::encode_args(()).unwrap(), [0x80]);
         assert_eq!(
             <fn(Vec<i64>) -> i64 as Invocation>::encode_args(vec![1, 2]).unwrap(),
             [0x81, 0x82, 0x01, 0x02]
@@ -197,10 +197,15 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(eight, [0x88, 1, 2, 3, 4, 5, 6, 7, 8]);
-        assert_eq!(<fn(u8, u8, u8, u8, u8, u8, u8, u8) -> () as Invocation>::ARITY, 8);
-        let (max, blob): (u64, Bytes) =
-            decode_payload(&<fn(u64, Bytes) -> () as Invocation>::encode_args((u64::MAX, Bytes::from(vec![9; 3]))).unwrap())
-                .unwrap();
+        assert_eq!(
+            <fn(u8, u8, u8, u8, u8, u8, u8, u8) -> () as Invocation>::ARITY,
+            8
+        );
+        let (max, blob): (u64, Bytes) = decode_payload(
+            &<fn(u64, Bytes) -> () as Invocation>::encode_args((u64::MAX, Bytes::from(vec![9; 3])))
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(max, u64::MAX);
         assert_eq!(&*blob, &[9, 9, 9]);
     }

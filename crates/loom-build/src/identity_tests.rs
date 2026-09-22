@@ -244,7 +244,10 @@ async fn rejects_entry_missing_from_exports() {
     document["exports"] = serde_json::json!({});
     fixture.write_document(&document);
     let error = fixture.ingest().unwrap_err().to_string();
-    assert!(error.contains("entry main is not among the exports"), "{error}");
+    assert!(
+        error.contains("entry main is not among the exports"),
+        "{error}"
+    );
 }
 
 #[tokio::test]

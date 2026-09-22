@@ -68,7 +68,10 @@ impl<'de> Deserialize<'de> for Bytes {
             fn visit_bytes<E: serde::de::Error>(self, bytes: &[u8]) -> Result<Bytes, E> {
                 Ok(Bytes(bytes.to_vec()))
             }
-            fn visit_borrowed_bytes<E: serde::de::Error>(self, bytes: &'de [u8]) -> Result<Bytes, E> {
+            fn visit_borrowed_bytes<E: serde::de::Error>(
+                self,
+                bytes: &'de [u8],
+            ) -> Result<Bytes, E> {
                 Ok(Bytes(bytes.to_vec()))
             }
             fn visit_byte_buf<E: serde::de::Error>(self, bytes: Vec<u8>) -> Result<Bytes, E> {
@@ -77,7 +80,10 @@ impl<'de> Deserialize<'de> for Bytes {
             // The host `Value` API (JSON) has no byte string; it hands a
             // `Vec<u8>` as an array of numbers and serde_json routes that
             // through `visit_seq`. DAG-CBOR decoders never reach this arm.
-            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Bytes, A::Error> {
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Bytes, A::Error> {
                 let mut bytes = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(1 << 16));
                 while let Some(byte) = seq.next_element::<u8>()? {
                     bytes.push(byte);
@@ -103,6 +109,9 @@ mod tests {
         assert_eq!(from_json, value);
         assert!(serde_json::from_value::<Bytes>(serde_json::json!([256])).is_err());
         // A plain Vec<u8> stays an array of numbers: the newtype is the opt-in.
-        assert_eq!(serde_ipld_dagcbor::to_vec(&vec![1u8, 2]).unwrap(), [0x82, 1, 2]);
+        assert_eq!(
+            serde_ipld_dagcbor::to_vec(&vec![1u8, 2]).unwrap(),
+            [0x82, 1, 2]
+        );
     }
 }

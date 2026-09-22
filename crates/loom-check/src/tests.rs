@@ -94,7 +94,11 @@ async fn macros_expand_inside_rustc_so_builtin_forms_pass_and_procedural_forms_f
         ))
         .await
         .unwrap();
-    assert!(accepted.diagnostics.is_empty(), "{:?}", accepted.diagnostics);
+    assert!(
+        accepted.diagnostics.is_empty(),
+        "{:?}",
+        accepted.diagnostics
+    );
     assert_eq!(accepted.sig.exports[0].name, "area");
     let rejected = checker
         .check(&request(
@@ -107,7 +111,11 @@ async fn macros_expand_inside_rustc_so_builtin_forms_pass_and_procedural_forms_f
         .iter()
         .find(|error| error.code == "LOOM_MACRO")
         .expect("procedural derive is refused");
-    assert!(error.message.contains("serde::Serialize"), "{}", error.message);
+    assert!(
+        error.message.contains("serde::Serialize"),
+        "{}",
+        error.message
+    );
     // A macro body is tokens to the source passes; ambient input inside it is
     // still refused, by LOOM_IO, without the macro itself being refused.
     let smuggled = checker

@@ -449,8 +449,7 @@ fn invocation_path(tokens: &[proc_macro2::TokenTree]) -> Option<syn::Path> {
     use proc_macro2::TokenTree;
     let mut segments: Vec<proc_macro2::Ident> = Vec::new();
     let mut end = tokens.len();
-    while let Some(TokenTree::Ident(ident)) = end.checked_sub(1).and_then(|last| tokens.get(last))
-    {
+    while let Some(TokenTree::Ident(ident)) = end.checked_sub(1).and_then(|last| tokens.get(last)) {
         let path_keyword = matches!(
             ident.to_string().as_str(),
             "self" | "super" | "crate" | "Self"
@@ -574,27 +573,72 @@ mod tests {
     #[test]
     fn rejections_name_the_item_and_print_the_table() {
         for (source, named) in [
-            ("#[derive(Serialize)] struct Value; pub fn main() {}", "Derive `Serialize`"),
-            ("#[derive(serde::Serialize, Clone)] struct Value; pub fn main() {}", "Derive `serde::Serialize`"),
-            ("#[derive(std::fmt::Display)] struct Value; pub fn main() {}", "Derive `std::fmt::Display`"),
+            (
+                "#[derive(Serialize)] struct Value; pub fn main() {}",
+                "Derive `Serialize`",
+            ),
+            (
+                "#[derive(serde::Serialize, Clone)] struct Value; pub fn main() {}",
+                "Derive `serde::Serialize`",
+            ),
+            (
+                "#[derive(std::fmt::Display)] struct Value; pub fn main() {}",
+                "Derive `std::fmt::Display`",
+            ),
             ("pub fn main() { foo!(); }", "Macro `foo!`"),
             ("pub fn main() { println!(\"hello\"); }", "Macro `println!`"),
             ("pub fn main() { dbg!(1); }", "Macro `dbg!`"),
             ("pub fn main() -> u32 { line!() }", "Macro `line!`"),
-            ("pub fn main() -> &'static str { include_str!(\"x\") }", "Macro `include_str!`"),
-            ("#[tokio::main] pub async fn main() {}", "Attribute `#[tokio::main]`"),
-            ("#[custom::expand] pub fn main() {}", "Attribute `#[custom::expand]`"),
-            ("#[cfg_attr(all(), derive(Clone))] struct Value; pub fn main() {}", "Attribute `#[cfg_attr("),
-            ("#[cfg(feature = \"x\")] pub fn main() {}", "Attribute `#[cfg(feature"),
+            (
+                "pub fn main() -> &'static str { include_str!(\"x\") }",
+                "Macro `include_str!`",
+            ),
+            (
+                "#[tokio::main] pub async fn main() {}",
+                "Attribute `#[tokio::main]`",
+            ),
+            (
+                "#[custom::expand] pub fn main() {}",
+                "Attribute `#[custom::expand]`",
+            ),
+            (
+                "#[cfg_attr(all(), derive(Clone))] struct Value; pub fn main() {}",
+                "Attribute `#[cfg_attr(",
+            ),
+            (
+                "#[cfg(feature = \"x\")] pub fn main() {}",
+                "Attribute `#[cfg(feature",
+            ),
             ("#[cfg] pub fn main() {}", "Attribute `#[cfg]`"),
-            ("#[macro_export] macro_rules! helper { () => {} } pub fn main() {}", "Attribute `#[macro_export]`"),
-            ("macro_rules! helper { () => {} } pub fn main() { self::helper!(); }", "Macro `self::helper!`"),
-            ("pub fn main() { other!(); } macro_rules! helper { () => {} }", "Macro `other!`"),
-            ("macro_rules! hidden { () => { println!(\"x\") } } pub fn main() { hidden!(); }", "Macro `println!`"),
-            ("macro_rules! hidden { () => { #[derive(Serialize)] struct S; } } hidden!(); pub fn main() {}", "Derive `Serialize`"),
-            ("macro_rules! hidden { () => { #[tokio::main] fn f() {} } } hidden!(); pub fn main() {}", "Attribute `#[tokio::main]`"),
+            (
+                "#[macro_export] macro_rules! helper { () => {} } pub fn main() {}",
+                "Attribute `#[macro_export]`",
+            ),
+            (
+                "macro_rules! helper { () => {} } pub fn main() { self::helper!(); }",
+                "Macro `self::helper!`",
+            ),
+            (
+                "pub fn main() { other!(); } macro_rules! helper { () => {} }",
+                "Macro `other!`",
+            ),
+            (
+                "macro_rules! hidden { () => { println!(\"x\") } } pub fn main() { hidden!(); }",
+                "Macro `println!`",
+            ),
+            (
+                "macro_rules! hidden { () => { #[derive(Serialize)] struct S; } } hidden!(); pub fn main() {}",
+                "Derive `Serialize`",
+            ),
+            (
+                "macro_rules! hidden { () => { #[tokio::main] fn f() {} } } hidden!(); pub fn main() {}",
+                "Attribute `#[tokio::main]`",
+            ),
             ("pub fn main() { vec![dbg!(1)]; }", "Macro `dbg!`"),
-            ("macro_rules! call { ($m:ident) => { $m!() } } pub fn main() { call!(vec); }", "Macro `m!`"),
+            (
+                "macro_rules! call { ($m:ident) => { $m!() } } pub fn main() { call!(vec); }",
+                "Macro `m!`",
+            ),
         ] {
             let messages = messages(source);
             assert!(
@@ -622,7 +666,9 @@ mod tests {
         for derive in BUILTIN_DERIVES {
             assert!(message.contains(derive.name), "{message}");
         }
-        let [message] = messages("#[tokio::main] pub fn main() {}").try_into().unwrap();
+        let [message] = messages("#[tokio::main] pub fn main() {}")
+            .try_into()
+            .unwrap();
         for attribute in GUEST_ATTRIBUTES {
             assert!(message.contains(attribute.name), "{message}");
         }

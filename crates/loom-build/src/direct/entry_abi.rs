@@ -174,12 +174,21 @@ mod tests {
         let generated = generate(source, &contract).unwrap();
         syn::parse_file(&generated).unwrap();
         assert!(generated.contains("let []: [(); 0] = ::loom::isolated::decode_payload(bytes)?;"));
-        assert!(generated.contains("let (argument_0,): (_,) = ::loom::isolated::decode_payload(bytes)?;"));
+        assert!(
+            generated
+                .contains("let (argument_0,): (_,) = ::loom::isolated::decode_payload(bytes)?;")
+        );
         assert!(generated.contains(
             "let (argument_0, argument_1,): (_, _,) = ::loom::isolated::decode_payload(bytes)?;"
         ));
-        assert!(generated.contains("::loom::isolated::encode_payload(&crate::two(argument_0, argument_1))"));
-        assert!(!generated.contains("serde_json"), "the wrapper must not build a Value tree");
+        assert!(
+            generated
+                .contains("::loom::isolated::encode_payload(&crate::two(argument_0, argument_1))")
+        );
+        assert!(
+            !generated.contains("serde_json"),
+            "the wrapper must not build a Value tree"
+        );
     }
 
     /// The wrapper is compiled against a stand-in `loom` crate that mimics the

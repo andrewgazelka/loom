@@ -4,8 +4,8 @@ mod runtime;
 pub use receipts::{DriverReceipt, DriverReceipts};
 pub mod container;
 pub mod process;
-pub mod vm;
 pub mod tcp;
+pub mod vm;
 
 use crate::{Cap, Ctx, Rights, Trap, cap_ops::Operation};
 use anyhow::{Context, Result, ensure};
