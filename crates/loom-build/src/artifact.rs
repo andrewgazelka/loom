@@ -63,6 +63,7 @@ pub(super) fn build_fingerprint(root: &Path) -> Result<String, BuildError> {
     hash.update(include_bytes!("direct/admission.rs"));
     hash.update(include_bytes!("manifest.rs"));
     hash.update(include_bytes!("threaded_module.rs"));
+    hash.update(include_bytes!("dwarf.rs"));
     hash.update(include_bytes!("direct/artifacts.rs"));
     hash.update(include_bytes!("direct/definition_rlibs.rs"));
     hash.update(include_bytes!("direct/compiler_cache.rs"));

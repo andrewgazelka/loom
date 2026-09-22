@@ -29,7 +29,34 @@ impl Service {
         }
         Ok(items)
     }
-    pub(super) fn view_definition(&self, target: &str) -> Result<Value> {
+    /// rustfmt's rendering of `source`, recorded once per source revision
+    /// (`Store::formatted_source`, CAS kind `source-formatted`, keyed by the
+    /// revision's source hash). `(None, Some(reason))` when the pinned
+    /// toolchain's rustfmt refuses the source or is unavailable; the stored text
+    /// is never returned under the formatted name. Failures are not recorded,
+    /// so a repaired toolchain formats on the next view.
+    async fn formatted_source(
+        &self,
+        hash: &str,
+        source: &str,
+    ) -> Result<(Option<String>, Option<String>)> {
+        let source_hash = self
+            .store
+            .definition_source_hash(hash)?
+            .context("definition source hash missing")?;
+        if let Some(formatted) = self.store.formatted_source(&source_hash)? {
+            return Ok((Some(formatted), None));
+        }
+        match self.builder.format_rust(source).await {
+            Ok(formatted) => {
+                self.store
+                    .record_formatted_source(&source_hash, &formatted)?;
+                Ok((Some(formatted), None))
+            }
+            Err(error) => Ok((None, Some(error.to_string()))),
+        }
+    }
+    pub(super) async fn view_definition(&self, target: &str) -> Result<Value> {
         let def = self
             .store
             .resolve(target)?
@@ -78,11 +105,14 @@ impl Service {
                 }}),
             );
         }
+        // For a source bundle this formats `src/lib.rs`, the file `source` shows.
+        let (formatted_source, format_error) = self.formatted_source(&def.hash, &source).await?;
         Ok(
             json!({"name":self.store.current_names()?.get(target).map(|_| target.to_owned()).or(self.store.definition_name(&def.hash)?),"hash":def.hash,"def":def,
             "behavior_hash":identity.behavior_hash,"wasm_hash":identity.wasm_hash,
             "toolchain_hash":identity.toolchain_hash,"items":self.items(&def.hash)?,
-            "source":source,"entries":entries,"entry":selected_entry.map(|entry| entry.name)}),
+            "source":source,"formatted_source":formatted_source,"format_error":format_error,
+            "entries":entries,"entry":selected_entry.map(|entry| entry.name)}),
         )
     }
     fn resolve_run_target(&self, target: &str) -> Result<Def> {
@@ -197,16 +227,18 @@ impl Service {
                     "definition build failed: {}",
                     serde_json::to_string(&response)?
                 );
-                let mut result = self.view_definition(
-                    response.result["def"]["hash"]
-                        .as_str()
-                        .context("built definition hash missing")?,
-                )?;
+                let mut result = self
+                    .view_definition(
+                        response.result["def"]["hash"]
+                            .as_str()
+                            .context("built definition hash missing")?,
+                    )
+                    .await?;
                 result["name"] = json!(name);
                 result["build"] = response.result["build"].clone();
                 Ok(result)
             }
-            "view" => self.view_definition(field(args, "target")?),
+            "view" => self.view_definition(field(args, "target")?).await,
             "diff" => self.diff_items(field(args, "old")?, field(args, "new")?),
             "history" => {
                 let name = field(args, "name")?;

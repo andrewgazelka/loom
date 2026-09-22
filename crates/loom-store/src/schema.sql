@@ -30,3 +30,5 @@ UNION ALL SELECT * FROM trace_effects;
 CREATE TABLE IF NOT EXISTS machine_roots(id TEXT PRIMARY KEY,root TEXT NOT NULL,identity TEXT NOT NULL);
 
 CREATE TABLE IF NOT EXISTS update_sessions(id TEXT PRIMARY KEY,revision INTEGER NOT NULL CHECK(revision >= 0),state TEXT NOT NULL CHECK(json_valid(state)));
+
+CREATE TABLE IF NOT EXISTS formatted_sources(source_hash TEXT PRIMARY KEY REFERENCES cas(hash),formatted_hash TEXT NOT NULL REFERENCES cas(hash));

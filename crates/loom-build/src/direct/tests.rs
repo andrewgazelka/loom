@@ -277,6 +277,37 @@ fn capture_preserves_spaces_and_package_values() {
     );
 }
 #[test]
+fn line_tables_replace_cargo_debuginfo_and_strip_only() {
+    let mut recipe = Recipe::parse(
+        b"LOOM_RUSTC_ARGUMENTS\0rustc\0--crate-name\0loom_definition\0-C\0debuginfo=0\0-C\0opt-level=2\0-Cstrip=debuginfo\0-Cdebuginfo=2\0-C\0strip=debuginfo\0-Cpanic=immediate-abort\0",
+        Path::new("/source"),
+    )
+    .unwrap();
+    recipe.line_tables();
+    assert_eq!(
+        recipe.arguments,
+        [
+            "--crate-name",
+            "loom_definition",
+            "-C",
+            "opt-level=2",
+            "-Cpanic=immediate-abort",
+            "-C",
+            "debuginfo=1",
+        ]
+    );
+    recipe.line_tables();
+    assert_eq!(
+        recipe
+            .arguments
+            .iter()
+            .filter(|argument| argument.starts_with("debuginfo="))
+            .count(),
+        1,
+        "normalizing twice keeps one debuginfo setting"
+    );
+}
+#[test]
 fn direct_compiler_errors_become_checker_diagnostics() {
     let messages = rustc_diagnostics(
         "warning\n{\"level\":\"error\",\"message\":\"bad type\",\"code\":{\"code\":\"E0308\"},\"spans\":[],\"children\":[]}\n",

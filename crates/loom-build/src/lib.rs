@@ -15,6 +15,7 @@ pub use intake::Preparation;
 mod materialize;
 use materialize::{Materialization, materialize_rust};
 mod direct;
+mod dwarf;
 mod handler_dependencies;
 mod manifest;
 mod preparation;
@@ -31,7 +32,7 @@ use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
     sync::Arc,
-    time::Instant,
+    time::{Duration, Instant},
 };
 use tokio::{fs, process::Command, sync::Mutex};
 
@@ -176,6 +177,54 @@ impl Builder {
     pub async fn preflight(&self) -> Result<(), BuildError> {
         let _guard = self.gate.lock().await;
         self.prepared().await.map(|_| ())
+    }
+    /// `source` as the pinned guest toolchain's rustfmt prints it: `<sysroot>/
+    /// bin/rustfmt --edition 2024 --emit stdout`, the source on stdin, at most
+    /// ten seconds, in the same cleared environment as every other compiler
+    /// invocation, with the toolchain's sysroot as working directory so no
+    /// caller `rustfmt.toml` is found. Uses the same memoized toolchain
+    /// resolution as a build, so the first call in a process pays that
+    /// resolution (and, before any build, the driver preparation). A rustfmt
+    /// failure is an error naming its diagnostic; nothing is formatted
+    /// approximately.
+    pub async fn format_rust(&self, source: &str) -> Result<String, BuildError> {
+        let (toolchain, _) = self.prepared().await?;
+        let rustfmt = toolchain.sysroot.join("bin/rustfmt");
+        let owner = format!("rustfmt {}", rustfmt.display());
+        let mut command = Command::new(&rustfmt);
+        direct::compiler_environment(&mut command);
+        command
+            .args(["--edition", "2024", "--emit", "stdout"])
+            .current_dir(&toolchain.sysroot)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        let mut child = command
+            .spawn()
+            .map_err(|error| BuildError::Rejected(format!("{owner}: {error}")))?;
+        let mut stdin = child.stdin.take().expect("rustfmt stdin is piped");
+        let input = source.as_bytes().to_vec();
+        let output = tokio::time::timeout(Duration::from_secs(10), async move {
+            use tokio::io::AsyncWriteExt;
+            // rustfmt reads all of stdin before it writes anything, so the
+            // write completes before the output is awaited.
+            stdin.write_all(&input).await?;
+            stdin.shutdown().await?;
+            drop(stdin);
+            child.wait_with_output().await
+        })
+        .await
+        .map_err(|_| BuildError::Rejected(format!("{owner} exceeded 10 seconds")))?
+        .map_err(|error| BuildError::Rejected(format!("{owner}: {error}")))?;
+        if !output.status.success() {
+            return Err(BuildError::Rejected(format!(
+                "{owner}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        String::from_utf8(output.stdout)
+            .map_err(|error| BuildError::Rejected(format!("{owner}: {error}")))
     }
     /// The guest toolchain and hash-rustc driver, resolved once and reused while
     /// `prepared::fingerprint` and the resolved binaries are unchanged.

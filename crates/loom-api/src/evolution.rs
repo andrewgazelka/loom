@@ -78,7 +78,9 @@ impl Service {
             if let Some(id) = request_id
                 && let Some(session) = self.store.update_session(id)?
             {
-                return self.existing_update(&session, &original_request);
+                return self
+                    .existing_update(&session, &original_request)
+                    .await;
             }
             let expected_names = self.store.current_names()?;
             let hash = expected_names
@@ -112,13 +114,15 @@ impl Service {
                     Ok(session) => session,
                     Err(error) => {
                         if let Some(session) = self.store.update_session(id)? {
-                            return self.existing_update(
-                                &session,
-                                state
-                                    .original_request
-                                    .as_ref()
-                                    .context("original request missing")?,
-                            );
+                            return self
+                                .existing_update(
+                                    &session,
+                                    state
+                                        .original_request
+                                        .as_ref()
+                                        .context("original request missing")?,
+                                )
+                                .await;
                         }
                         return Err(error);
                     }
@@ -133,7 +137,7 @@ impl Service {
             .update_session(id)?
             .context("update session not found")?;
         if operation == "update_view" {
-            return self.update_result(&session);
+            return self.update_result(&session).await;
         }
         let revision = args
             .get("revision")
@@ -155,7 +159,7 @@ impl Service {
             let session =
                 self.store
                     .save_update_session(id, revision, &serde_json::to_value(state)?)?;
-            return self.update_result(&session);
+            return self.update_result(&session).await;
         }
         if operation == "update_rebase" {
             let current_names = self.store.current_names()?;
@@ -206,7 +210,7 @@ impl Service {
                 let saved =
                     self.store
                         .save_update_session(id, revision, &serde_json::to_value(&state)?)?;
-                return self.update_result(&saved);
+                return self.update_result(&saved).await;
             }
             state.expected_names = current_names;
             state.status = Status::Pending;
@@ -263,7 +267,7 @@ impl Service {
         self.attempt_update(session, state).await
     }
 
-    fn existing_update(
+    async fn existing_update(
         &self,
         session: &loom_store::UpdateSession,
         request: &OriginalRequest,
@@ -273,7 +277,7 @@ impl Service {
             state.original_request.as_ref() == Some(request),
             "update request_id conflict: original request differs"
         );
-        self.update_result(session)
+        self.update_result(session).await
     }
 
     fn resolve_edit(&self, hash: &str, mut edit: Edit) -> Result<Edit> {
@@ -307,7 +311,7 @@ impl Service {
         Ok(edit)
     }
 
-    fn update_result(&self, session: &loom_store::UpdateSession) -> Result<Value> {
+    async fn update_result(&self, session: &loom_store::UpdateSession) -> Result<Value> {
         let mut update = session.state.clone();
         update["id"] = json!(session.id);
         update["revision"] = json!(session.revision);
@@ -324,7 +328,7 @@ impl Service {
                 .find(|change| &change.old_hash == old)
                 .map(|change| &change.new_hash)
                 .unwrap_or(old);
-            let mut view = self.view_definition(hash)?;
+            let mut view = self.view_definition(hash).await?;
             view["name"] = json!(state.target);
             view
         } else {
@@ -346,7 +350,7 @@ impl Service {
                 session.revision,
                 &serde_json::to_value(state)?,
             )?;
-            return self.update_result(&saved);
+            return self.update_result(&saved).await;
         }
         let mut staged = self.clone();
         staged.store = self.store.stage_intake()?;
@@ -476,7 +480,7 @@ impl Service {
                 session.revision,
                 &serde_json::to_value(state)?,
             )?;
-            return self.update_result(&saved);
+            return self.update_result(&saved).await;
         }
         state.status = Status::Complete;
         let mut intake = Vec::new();
@@ -523,7 +527,7 @@ impl Service {
                 )?
             }
         };
-        self.update_result(&saved)
+        self.update_result(&saved).await
     }
 }
 

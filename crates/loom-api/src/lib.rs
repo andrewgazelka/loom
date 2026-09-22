@@ -21,6 +21,7 @@ mod actor_websocket;
 pub use actor_websocket::WebSocketHub;
 mod build_progress;
 mod cas_browser;
+mod wasm;
 use anyhow::{Context, Result, bail, ensure};
 pub use auth::{Access, Authorizer, Scope, TokenConfig};
 use axum::{

@@ -55,8 +55,10 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
     let target_name = "wasm32-unknown-unknown";
     let sysroot = toolchain.sysroot.clone();
     let mut hasher = blake3::Hasher::new();
-    // v8: `ArtifactFile` gained `len`; graphs recorded before it are never read.
-    hasher.update(b"rustc-contract-v8-artifact-stamp");
+    // v9: the stored root recipe carries `-C debuginfo=1` (`Recipe::line_tables`);
+    // graphs recorded before it would replay without line tables and are never
+    // read. v8 added `ArtifactFile::len`.
+    hasher.update(b"rustc-contract-v9-line-tables");
     let manifest_bytes = fs::read_to_string(directory.join("Cargo.toml"))
         .await?
         .replace(root.to_string_lossy().as_ref(), "$SDK")
@@ -317,6 +319,9 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
         directory,
     )?;
     root_recipe.compiler = driver.path.to_string_lossy().into_owned();
+    // Cargo compiled the root with `-C debuginfo=0`; the hashing replay below
+    // and the entry ABI compile that overwrites its output carry line tables.
+    root_recipe.line_tables();
     let mut hash_command = Command::new(&driver.path);
     compiler_environment(&mut hash_command);
     hash_command
@@ -366,6 +371,8 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
             &fs::read(target.join("root-rustc.recipe")).await?,
             directory,
         )?;
+        // The stored graph replays exactly what `hash_command` ran.
+        recipe.line_tables();
         let mut source_roots = vec![
             cache.to_owned(),
             root.join("crates/loom-guest-rs"),
