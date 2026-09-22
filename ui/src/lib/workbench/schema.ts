@@ -17,6 +17,9 @@ export interface EffectRow {
 }
 export interface DefinitionView extends Definition {
   source: string;
+  /** rustfmt rendering of `source` for Rust definitions; `null` with `format_error` naming why. */
+  formatted_source: string | null;
+  format_error: string | null;
   def: Row;
   behavior_hash: string;
   wasm_hash?: string;
@@ -173,9 +176,23 @@ export function definitionView(value: unknown): DefinitionView {
       },
     };
   }
+  const formatted_source =
+    data.formatted_source === undefined
+      ? null
+      : nullableString(data.formatted_source, "formatted_source");
+  const format_error =
+    data.format_error === undefined
+      ? data.formatted_source === undefined
+        ? "the server sent no formatted_source field"
+        : null
+      : nullableString(data.format_error, "format_error");
+  if (formatted_source !== null && format_error !== null)
+    throw new Error("format_error: must be null when formatted_source is present");
   return {
     ...definition(value),
     source: string(data.source, "source"),
+    formatted_source,
+    format_error,
     def: json(object(data.def, "def"), "def") as Row,
     behavior_hash: string(data.behavior_hash, "behavior_hash"),
     ...(data.wasm_hash === undefined ? {} : { wasm_hash: string(data.wasm_hash, "wasm_hash") }),

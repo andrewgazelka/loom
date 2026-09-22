@@ -1,5 +1,6 @@
 /** Snapshot `/v1/events` by pages, then follow `/v1/stream`; reconnect with capped backoff and re-snapshot from the last seq. */
 import { parseJournalEvent, type JournalEvent } from "./feed";
+import { parseWasmModule, type WasmModule } from "./wasm";
 
 export type Fetcher = (input: string, init?: RequestInit) => Promise<Response>;
 /** The subset of `WebSocket` the client drives; tests inject a fake. */
@@ -83,6 +84,8 @@ export class BoardClient {
   private cancelTimer: (() => void) | undefined;
   private stopped = false;
   private attempt = 0;
+  /** In-flight or settled GETs by key; a rejected entry is evicted so the next reader retries. */
+  private readonly memo = new Map<string, Promise<unknown>>();
   /** Last seq folded in; the next snapshot and the stream subscription start after it. */
   after = 0;
   state: ConnectionState = { kind: "idle" };
@@ -142,14 +145,50 @@ export class BoardClient {
     return this.envelope(response, command);
   }
 
-  /** `GET /v1/cas/<hash>` as text. */
-  async text(hash: string): Promise<string> {
-    if (!/^[a-f0-9]{64}$/.test(hash)) throw new Error(`cas: invalid hash ${hash}`);
-    const response = await this.fetcher(`${this.base}/v1/cas/${hash}`, {
-      headers: this.headers(),
+  private once<T>(key: string, load: () => Promise<T>): Promise<T> {
+    const cached = this.memo.get(key);
+    if (cached) return cached as Promise<T>;
+    const pending = load();
+    this.memo.set(key, pending);
+    pending.catch(() => {
+      if (this.memo.get(key) === pending) this.memo.delete(key);
     });
-    if (!response.ok) throw new Error(`cas ${hash.slice(0, 8)}: HTTP ${response.status}`);
-    return response.text();
+    return pending;
+  }
+
+  /** `GET /v1/cas/<hash>` as text, fetched once per hash for the client's lifetime. */
+  text(hash: string): Promise<string> {
+    if (!/^[a-f0-9]{64}$/.test(hash))
+      return Promise.reject(new Error(`cas: invalid hash ${hash}`));
+    return this.once(`cas:${hash}`, async () => {
+      const response = await this.fetcher(`${this.base}/v1/cas/${hash}`, {
+        headers: this.headers(),
+      });
+      if (!response.ok) throw new Error(`cas ${hash.slice(0, 8)}: HTTP ${response.status}`);
+      return response.text();
+    });
+  }
+
+  /** `GET /v1/wasm/<component hash>`: wat, functions and the line map, fetched once per hash. */
+  wasm(componentHash: string): Promise<WasmModule> {
+    if (!/^[a-f0-9]{64}$/.test(componentHash))
+      return Promise.reject(new Error(`wasm: invalid component hash ${componentHash}`));
+    return this.once(`wasm:${componentHash}`, async () => {
+      const what = `wasm ${componentHash.slice(0, 8)}`;
+      const response = await this.fetcher(`${this.base}/v1/wasm/${componentHash}`, {
+        headers: this.headers(),
+      });
+      const body = await response.text();
+      if (!response.ok)
+        throw new Error(`${what}: HTTP ${response.status}: ${body.slice(0, 400)}`);
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(body);
+      } catch {
+        throw new Error(`${what}: HTTP ${response.status} returned invalid JSON`);
+      }
+      return parseWasmModule(parsed);
+    });
   }
 
   /** Page `/v1/events` from `after` until a page is shorter than the page size. */

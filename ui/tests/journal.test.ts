@@ -4,6 +4,7 @@ import { get } from "svelte/store";
 import {
   Journal,
   invocationSummary,
+  parameterSummary,
   resultSummary,
 } from "../src/lib/workbench/journal";
 import { commandById } from "../src/lib/workbench/commands";
@@ -166,5 +167,32 @@ describe("persistent endpoint history", () => {
     expect(get(journal)).toHaveLength(100);
     expect(get(journal).at(-1)?.id).toBe(111);
     expect(JSON.parse(journal.exportJson()).entries).toHaveLength(100);
+  });
+});
+
+describe("history row summaries", () => {
+  test("parameter summaries omit blank parameters; run rows keep the human invocation", () => {
+    const journal = new Journal();
+    const target = "85d8".padEnd(64, "0");
+    const view = journal.begin(commandById(V.view), {
+      target,
+      actor: "",
+      table: "",
+      template: "",
+      order_by: "",
+    });
+    journal.finish(view, {
+      name: "counter",
+      hash: "a41e908fc7a21f43bc7292fa4457641ecbab51e58d59a060393d243c2b7f9001",
+    });
+    const entry = get(journal)[0]!;
+    expect(parameterSummary(entry)).toBe(`target=${target}`);
+    expect(parameterSummary(entry)).not.toContain("actor=");
+    expect(invocationSummary(entry)).toBe(parameterSummary(entry));
+    expect(resultSummary(entry)).toBe("counter · a41e908f");
+    const blank = journal.begin(commandById(V.find), { text: "" });
+    journal.finish(blank, []);
+    expect(parameterSummary(get(journal)[1]!)).toBe("");
+    expect(resultSummary(get(journal)[1]!)).toBe("0 definitions");
   });
 });

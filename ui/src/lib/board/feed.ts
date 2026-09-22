@@ -328,6 +328,51 @@ export function definitionByComponent(
 export function buildOf(model: Model, def: Definition): Build | undefined {
   return def.componentHash === null ? undefined : model.builds[def.componentHash];
 }
+/** Definitions whose `deps` name `hash`, sorted by name then hash. */
+export function dependentsOf(model: Model, hash: string): Definition[] {
+  return Object.values(model.definitions)
+    .filter((def) => def.hash !== hash && Object.values(def.deps).includes(hash))
+    .sort((a, b) => {
+      const ka = `${a.name ?? "￿"}\n${a.hash}`;
+      const kb = `${b.name ?? "￿"}\n${b.hash}`;
+      return ka < kb ? -1 : ka > kb ? 1 : 0;
+    });
+}
+
+export interface Run {
+  scope: string;
+  seq: number;
+  ts: number;
+  completed: boolean;
+  definitionHash: string | null;
+  entry: string | null;
+  outcome: string | null;
+  elapsedMs: number | null;
+  argsHash: string | null;
+  traceHash: string | null;
+}
+/** The newest `call_completed` (or, failing that, `call_checkpoint`) row for a trace scope still held in the feed. */
+export function runOf(model: Model, scope: string): Run | null {
+  const row = model.feed.find(
+    (row) =>
+      (row.type === "call_completed" || row.type === "call_checkpoint") &&
+      row.event.scope === scope,
+  );
+  if (!row) return null;
+  const event = row.event;
+  return {
+    scope,
+    seq: row.seq,
+    ts: row.ts,
+    completed: row.type === "call_completed",
+    definitionHash: text(event.definition_hash),
+    entry: text(event.entry),
+    outcome: outcomeLabel(event.outcome),
+    elapsedMs: integer(event.elapsed_ms),
+    argsHash: text(event.args_hash),
+    traceHash: text(event.trace_hash),
+  };
+}
 
 /** `TraceOutcome` is `#[serde(tag = "status")]`: `success`, `error`, `cancelled`. */
 export function outcomeLabel(outcome: unknown): string | null {
@@ -346,6 +391,8 @@ export interface RowSummary {
   elapsedMs: number | null;
   actor: string | null;
   cursor: number | null;
+  /** Trace scope of a call row, if any. */
+  scope: string | null;
 }
 /** What the feed shows for a row, resolved against the model's definitions. */
 export function summarize(model: Model, row: FeedRow): RowSummary {
@@ -376,5 +423,29 @@ export function summarize(model: Model, row: FeedRow): RowSummary {
     elapsedMs: row.type === "call_completed" ? integer(event.elapsed_ms) : null,
     actor: text(event.actor),
     cursor: integer(event.cursor),
+    scope:
+      row.type === "call_completed" || row.type === "call_checkpoint"
+        ? text(event.scope)
+        : null,
   };
+}
+
+export type RowTarget =
+  | { kind: "def"; hash: string }
+  | { kind: "actor"; id: string }
+  | { kind: "build"; hash: string }
+  | { kind: "run"; scope: string };
+/** What clicking a feed row opens: the build, the run, the actor, or the definition it names. */
+export function targetOfRow(model: Model, row: FeedRow): RowTarget | null {
+  const summary = summarize(model, row);
+  if (row.type === "component_built") {
+    const component = text(row.event.component_hash);
+    return component === null ? null : { kind: "build", hash: component };
+  }
+  if (summary.scope !== null) return { kind: "run", scope: summary.scope };
+  if (row.type === "actor_message" && summary.actor !== null)
+    return { kind: "actor", id: summary.actor };
+  if (summary.hash !== null && model.definitions[summary.hash])
+    return { kind: "def", hash: summary.hash };
+  return null;
 }

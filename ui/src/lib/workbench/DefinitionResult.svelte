@@ -16,6 +16,9 @@
   import UpdateResult from "./UpdateResult.svelte";
   import Hash from "./Hash.svelte";
   import DataTable from "./DataTable.svelte";
+  import { displayedSource } from "../board/source";
+  /** Source shows the rustfmt rendering; this toggle is the only place the stored bytes appear. */
+  let asSubmitted = false;
   export let operation: string;
   export let value: Json;
   export let navigate: (
@@ -29,52 +32,65 @@
 {/if}
 {#if [V.view, V.add, V.update, V.update_repair, V.update_view, V.update_rebase].some((verb) => verb === operation) && typeof object(value, "definition result").hash === "string"}
   {@const def = definitionView(value)}
+  {@const lang = sourceLanguage(def.def.lang)}
+  {@const shown = displayedSource(
+    {
+      lang,
+      source: def.source,
+      formatted_source: def.formatted_source,
+      format_error: def.format_error,
+    },
+    asSubmitted,
+  )}
   <div class="section-bar">
-    <h2>{def.name ?? def.hash}</h2>
-    <span class="muted">{sourceLanguage(def.def.lang)}</span><button
+    <h2>{def.name ?? def.hash.slice(0, 8)}</h2>
+    <span class="muted">{lang}</span>
+    <Hash value={def.hash} />
+    <span class="muted">{shown.code.split("\n").length} lines</span>
+    {#if def.formatted_source !== null}<button
+        class="text-control"
+        aria-pressed={asSubmitted}
+        data-testid="as-submitted"
+        on:click={() => (asSubmitted = !asSubmitted)}
+        >{asSubmitted ? "formatted" : "as submitted"}</button
+      >{/if}
+    <button
       class="push text-control"
       on:click={() => navigate(V.run, { target: def.name ?? def.hash })}
       >Run</button
     >
   </div>
-  <div class="identity-strip">
-    <span>Definition <Hash value={def.hash} /></span><span
-      >Behavior <Hash value={def.behavior_hash} /></span
-    >{#if def.wasm_hash}<span>Wasm <Hash value={def.wasm_hash} /></span>{/if}{#if def.toolchain_hash}<span
-      >Toolchain <Hash value={def.toolchain_hash} /></span
-    >{/if}
+  {#if shown.note !== null}<p class="format-note muted" data-testid="format-note">{shown.note}</p>{/if}
+  <div class="source-block" data-testid="view-source">
+    <CodeBlock code={shown.code} language={lang} />
   </div>
-  <div class="section-bar"><h3>Inferred effects per entry</h3></div>
-  <DataTable
-    label="Inferred entry effects"
-    rows={Object.keys(def.entries).map((name) => ({
-      name,
-      labels: def.entries[name]!.effects.labels,
-      unknown: def.entries[name]!.effects.unknown,
-    }))}
-  />
-  <div class="source-items">
-    <section class="source">
-      <div class="section-bar">
-        <h3>Source</h3>
-        <span class="muted">{def.source.split("\n").length} lines</span>
-      </div>
-      <CodeBlock code={def.source} language={sourceLanguage(def.def.lang)} />
-    </section>
-    <section class="items">
-      <div class="section-bar">
-        <h3>Items</h3>
-        <span class="muted">{Object.keys(def.items).length}</span>
-      </div>
-      <DataTable
-        label="Definition items"
-        rows={Object.keys(def.items).map((name) => ({
-          name,
-          hash: def.items[name]!,
-        }))}
-      />
-    </section>
-  </div>
+  <details class="extras">
+    <summary>Identities, entry effects and {Object.keys(def.items).length} items</summary>
+    <div class="identity-strip">
+      <span>Definition <Hash value={def.hash} /></span><span
+        >Behavior <Hash value={def.behavior_hash} /></span
+      >{#if def.wasm_hash}<span>Wasm <Hash value={def.wasm_hash} /></span>{/if}{#if def.toolchain_hash}<span
+        >Toolchain <Hash value={def.toolchain_hash} /></span
+      >{/if}
+    </div>
+    <div class="section-bar"><h3>Inferred effects per entry</h3></div>
+    <DataTable
+      label="Inferred entry effects"
+      rows={Object.keys(def.entries).map((name) => ({
+        name,
+        labels: def.entries[name]!.effects.labels,
+        unknown: def.entries[name]!.effects.unknown,
+      }))}
+    />
+    <div class="section-bar"><h3>Items</h3></div>
+    <DataTable
+      label="Definition items"
+      rows={Object.keys(def.items).map((name) => ({
+        name,
+        hash: def.items[name]!,
+      }))}
+    />
+  </details>
 {:else if operation === V.find}
   {@const definitions = array(value, operation).map(definition)}
   <div class="section-bar">
@@ -180,25 +196,24 @@
     font-size: 0.92em;
     color: var(--muted);
   }
-  .source-items {
-    display: grid;
-    grid-template-columns: minmax(280px, 1fr) minmax(290px, 0.8fr);
-    min-height: 340px;
+  .format-note {
+    padding: 4px 12px;
+    font-size: 0.92em;
+    border-bottom: 1px solid var(--line);
+    overflow-wrap: anywhere;
   }
-  .items {
-    border-left: 1px solid var(--line);
-    overflow: auto;
+  .source-block :global(.code-block) {
+    max-height: none;
+  }
+  .extras {
+    border-top: 1px solid var(--line);
+  }
+  .extras > summary {
+    padding: 8px 12px;
+    color: var(--muted);
+    cursor: pointer;
   }
   .revision {
     border-bottom: 1px solid var(--line);
-  }
-  @media (max-width: 1100px) {
-    .source-items {
-      grid-template-columns: 1fr;
-    }
-    .items {
-      border-left: 0;
-      border-top: 1px solid var(--line);
-    }
   }
 </style>

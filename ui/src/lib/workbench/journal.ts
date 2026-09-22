@@ -49,6 +49,16 @@ export function preview(value: unknown, limit = 160): string {
   const compact = text.replace(/\s+/g, " ");
   return compact.length > limit ? `${compact.slice(0, limit - 1)}…` : compact;
 }
+/** `key=value · key=value` for the parameters that were actually given; blank ones are omitted. */
+export function parameterSummary(entry: JournalEntry): string {
+  return preview(
+    Object.entries(entry.values)
+      .filter(([, value]) => value.trim() !== "")
+      .map(([key, value]) => `${key}=${preview(value, 70)}`)
+      .join(" · "),
+  );
+}
+/** The human line for a row: `entry(args)` for run, the given parameters otherwise. */
 export function invocationSummary(entry: JournalEntry): string {
   if (entry.command === "run") {
     const target = entry.values.target ?? "";
@@ -60,11 +70,7 @@ export function invocationSummary(entry: JournalEntry): string {
           : target;
     return preview(`${label}(${entry.values.args ?? "[]"})`);
   }
-  return preview(
-    Object.entries(entry.values)
-      .map(([key, value]) => `${key}=${preview(value, 70)}`)
-      .join(" · "),
-  );
+  return parameterSummary(entry);
 }
 export function resultSummary(entry: JournalEntry): string {
   const result = entry.result;

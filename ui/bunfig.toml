@@ -1,0 +1,4 @@
+# `bun test` runs from this directory (scripts/verify.ts, README); the preload compiles .svelte
+# imports so registry tests can load pane and tab descriptors that reference components.
+[test]
+preload = ["./tests/svelte-loader.ts"]

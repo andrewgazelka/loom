@@ -33,6 +33,14 @@
   ) => void;
   const session = workspace.open(command, defaults, replay);
   let form: HTMLFormElement;
+  /** The view panel shows the source first; its query form sits behind this toggle once a result exists. */
+  let editQuery = false;
+  $: sourceFirst = command.id === V.view;
+  $: showForm =
+    !sourceFirst ||
+    editQuery ||
+    ($session.result === undefined && !$session.busy) ||
+    !!$session.error;
   let now = Date.now();
   let build: ActiveBuild | null = null;
   let progressError = "";
@@ -107,6 +115,14 @@
       <h1>{command.name}</h1>
       <p>{command.description}</p>
     </div>
+    {#if sourceFirst && $session.result !== undefined}<button
+        type="button"
+        class="edit-query"
+        aria-pressed={editQuery}
+        data-testid="edit-query"
+        on:click={() => (editQuery = !editQuery)}
+        >{editQuery ? "hide query" : "edit query"}</button
+      >{/if}
     <span class="scope">{command.read ? "Read" : "Execute"}</span>
   </div>
   {#if command.id === V.run}<RunArguments
@@ -116,6 +132,7 @@
   <form
     bind:this={form}
     aria-label={`${command.name} input`}
+    class:hidden={!showForm}
     on:submit|preventDefault={execute}
   >
     <fieldset disabled={$session.busy}>
@@ -185,6 +202,7 @@
   {#if $session.error}<p class="error" role="alert">{$session.error}</p>{/if}
   {#if $session.result !== undefined}<section
       class="operation-result"
+      class:first={sourceFirst}
       aria-label={`${command.name} result`}
     >
       {#if command.group === "Definitions"}<DefinitionResult
@@ -208,12 +226,39 @@
 </section>
 
 <style>
+  /* A flex column so the view panel can put its result before its form by order alone. */
+  .command-panel {
+    display: flex;
+    flex-direction: column;
+  }
   .panel-title {
+    order: -2;
     display: flex;
     align-items: flex-start;
     padding: 14px 16px;
     border-bottom: 1px solid var(--line);
     gap: 12px;
+  }
+  .operation-result.first {
+    order: -1;
+  }
+  form.hidden {
+    display: none;
+  }
+  .edit-query {
+    margin-left: auto;
+    color: var(--muted);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 0.9em;
+  }
+  .edit-query[aria-pressed="true"] {
+    color: var(--ink);
+    background: var(--selection);
+  }
+  .edit-query + .scope {
+    margin-left: 0;
   }
   .panel-title p {
     margin: 4px 0 0;
