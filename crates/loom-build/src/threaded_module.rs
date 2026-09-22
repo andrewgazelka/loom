@@ -727,8 +727,8 @@ mod tests {
         while let Some(entry) = entries.next_dfs().unwrap() {
             if entry.tag() == gimli::DW_TAG_subprogram {
                 function = Some((
-                    entry.attr_value(gimli::DW_AT_low_pc).unwrap().unwrap(),
-                    entry.attr_value(gimli::DW_AT_high_pc).unwrap().unwrap(),
+                    entry.attr_value(gimli::DW_AT_low_pc).unwrap(),
+                    entry.attr_value(gimli::DW_AT_high_pc).unwrap(),
                 ));
             }
         }
