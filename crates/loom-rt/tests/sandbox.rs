@@ -268,7 +268,7 @@ async fn javascript_callees_accept_any_arity() -> Result<()> {
             payload: &payload,
         },
     )?;
-    let value = Runtime::new(store)?.call_def(&wasm, json!([])).await?.value;
+    let value = Runtime::new(store)?.call_def(&wasm, json!([])).await?;
     assert_eq!(value, json!(21));
     Ok(())
 }
