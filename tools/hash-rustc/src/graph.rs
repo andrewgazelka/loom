@@ -7,6 +7,7 @@ use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_middle::ty::TyCtxt;
 use serde::Serialize;
 
+use crate::dependencies::Dependencies;
 use crate::encode::{Encoder, Part};
 mod canonical;
 
@@ -19,6 +20,7 @@ pub struct Document {
     pub preimages: crate::preimages::Preimages,
     items: BTreeMap<String, Item>,
     entry: BTreeMap<String, String>,
+    exports: BTreeMap<String, String>,
 }
 
 #[derive(Serialize)]
@@ -39,6 +41,7 @@ struct Definition {
     path: String,
     parts: Vec<Part>,
     entry: bool,
+    exported: bool,
 }
 
 pub(crate) fn supported(kind: DefKind) -> bool {
@@ -60,13 +63,22 @@ pub(crate) fn supported(kind: DefKind) -> bool {
     )
 }
 
-pub(crate) fn item_path(tcx: TyCtxt<'_>, id: DefId) -> String {
+/// rustc's verbose disambiguated definition path without its crate: the
+/// spelling a crate's own item document records, and the key a dependent
+/// looks up in that document.
+pub(crate) fn definition_path(tcx: TyCtxt<'_>, id: DefId) -> String {
     // Diagnostic labels must preserve rustc's declaration disambiguators.
     // Pretty paths can alias an impl with its ADT or anonymous constants.
     let path = tcx.def_path(id).to_string_no_crate_verbose();
-    let path = path.trim_start_matches("::");
+    path.trim_start_matches("::").to_owned()
+}
+
+/// Document path: local items are their definition path; external referents
+/// carry their crate name in front.
+pub(crate) fn item_path(tcx: TyCtxt<'_>, id: DefId) -> String {
+    let path = definition_path(tcx, id);
     if id.is_local() {
-        path.to_owned()
+        path
     } else {
         format!("{}::{path}", tcx.crate_name(id.krate))
     }
@@ -90,7 +102,13 @@ pub(crate) fn implementations(tcx: TyCtxt<'_>) -> HashMap<DefId, Vec<DefId>> {
 }
 
 pub fn collect(tcx: TyCtxt<'_>) -> Document {
+    let dependencies = Dependencies::load()
+        .unwrap_or_else(|error| tcx.dcx().fatal(format!("hash-rustc: {error}")));
     let implementations = implementations(tcx);
+    // Exports are what another crate can observe: rustc's effective
+    // visibilities mark every definition reachable from outside, through pub
+    // modules, `pub use`, impl and trait members, and signature-leaked types.
+    let visibilities = tcx.effective_visibilities(());
     let mut definitions: Vec<Definition> = tcx
         .iter_local_def_id()
         .filter(|id| supported(tcx.def_kind(*id)))
@@ -109,6 +127,7 @@ pub fn collect(tcx: TyCtxt<'_>) -> Document {
             )
             .encode(),
             entry: crate::entries::is_entry(tcx, id),
+            exported: visibilities.is_reachable(id),
         })
         .collect();
     definitions.sort_by(|a, b| a.path.cmp(&b.path));
@@ -117,29 +136,34 @@ pub fn collect(tcx: TyCtxt<'_>) -> Document {
     for (index, definition) in definitions.iter().enumerate() {
         indices.insert(definition.id.to_def_id(), graph.add_node(index));
     }
+    // External referents are dependency sinks: resolve them before any local
+    // component so every reference resolves through one table.
+    let mut hashes: HashMap<DefId, blake3::Hash> = HashMap::new();
     for definition in &mut definitions {
         if definition.entry {
             crate::effects::append_contract(tcx, &mut definition.parts);
         }
-        // Constructors and variants carry their structural position plus the
-        // enclosing ADT hash. They are not independent HIR owners.
         definition.parts = expand_references(tcx, std::mem::take(&mut definition.parts), &indices);
         for id in definition.parts.iter().flat_map(Part::references) {
             if id.is_local() {
                 graph.add_edge(indices[&definition.id.to_def_id()], indices[&id], ());
+            } else {
+                hashes
+                    .entry(id)
+                    .or_insert_with(|| external(tcx, id, &dependencies));
             }
         }
     }
 
-    let mut hashes: HashMap<DefId, blake3::Hash> = HashMap::new();
     let mut items = BTreeMap::new();
     let mut entry = BTreeMap::new();
+    let mut exports = BTreeMap::new();
     let mut preimages = crate::preimages::Preimages::default();
     // kosaraju_scc emits sinks first: every outbound dependency outside a
     // component has already been hashed.
     for component in kosaraju_scc(&graph) {
         let cycle = component.len() > 1 || graph.contains_edge(component[0], component[0]);
-        let canonical = canonical::component(tcx, component, &graph, &definitions, &hashes);
+        let canonical = canonical::component(component, &graph, &definitions, &hashes);
         let names: Vec<String> = canonical
             .groups
             .iter()
@@ -155,7 +179,6 @@ pub fn collect(tcx: TyCtxt<'_>) -> Document {
         let mut encoded = Vec::new();
         for group in &canonical.groups {
             let bytes = canonical::encode(
-                tcx,
                 &definitions[graph[group[0]]].parts,
                 &canonical.positions,
                 &hashes,
@@ -206,8 +229,19 @@ pub fn collect(tcx: TyCtxt<'_>) -> Document {
                 if definition.entry {
                     entry.insert(definition.path.clone(), hash.to_hex().to_string());
                 }
+                if definition.exported {
+                    exports.insert(definition.path.clone(), hash.to_hex().to_string());
+                }
             }
         }
+    }
+    for path in entry.keys() {
+        // A root `pub fn` is directly public; the effective-visibility table
+        // cannot mark it unreachable.
+        assert!(
+            exports.contains_key(path),
+            "entry {path} is not among the exported definitions"
+        );
     }
     Document {
         toolchain: String::new(),
@@ -216,6 +250,7 @@ pub fn collect(tcx: TyCtxt<'_>) -> Document {
         preimages,
         items,
         entry,
+        exports,
     }
 }
 
@@ -224,7 +259,24 @@ fn frame(bytes: &mut Vec<u8>, value: &[u8]) {
     bytes.extend_from_slice(value);
 }
 
-pub(crate) fn external(tcx: TyCtxt<'_>, id: DefId) -> blake3::Hash {
+/// HIR identity of a referent in another crate. A Loom definition dependency
+/// contributes the referent's stored item hash, so the caller's identity is a
+/// function of the callee's content. Every other crate contributes its
+/// whole-crate reference. A dependency that never recorded the referent's path
+/// is a fatal error; no whole-crate substitute is made.
+pub(crate) fn external(tcx: TyCtxt<'_>, id: DefId, dependencies: &Dependencies) -> blake3::Hash {
+    let name = tcx.crate_name(id.krate);
+    let path = definition_path(tcx, id);
+    match dependencies.hash(name.as_str(), &path) {
+        Ok(Some(hash)) => hash,
+        Ok(None) => crate_reference(tcx, id),
+        Err(error) => tcx.dcx().fatal(format!("hash-rustc: {error}")),
+    }
+}
+
+/// Whole-crate reference: `blake3(framed crate name || SVH || DefPathHash)`.
+/// The strict version hash moves with any change to the dependency crate.
+pub(crate) fn crate_reference(tcx: TyCtxt<'_>, id: DefId) -> blake3::Hash {
     let mut hasher = blake3::Hasher::new();
     let name = tcx.crate_name(id.krate);
     hasher.update(&(name.as_str().len() as u64).to_le_bytes());
@@ -234,6 +286,10 @@ pub(crate) fn external(tcx: TyCtxt<'_>, id: DefId) -> blake3::Hash {
     hasher.finalize()
 }
 
+/// Constructors, variants, and fields are not independent definitions, local
+/// or external: each contributes its kind, declaration disambiguator, and
+/// variant position, then the reference moves to the enclosing definition.
+/// A local reference that never reaches a selected definition is unsupported.
 fn expand_references(
     tcx: TyCtxt<'_>,
     parts: Vec<Part>,
@@ -242,13 +298,16 @@ fn expand_references(
     let mut output = Vec::new();
     for part in parts {
         if let Part::Reference(mut id) = part {
-            while id.is_local() && !indices.contains_key(&id) {
+            while !indices.contains_key(&id) {
                 let kind = tcx.def_kind(id);
                 if !matches!(kind, DefKind::Ctor(..) | DefKind::Variant | DefKind::Field) {
-                    tcx.dcx().fatal(format!(
-                        "hash-rustc: reference to unsupported {} ({kind:?})",
-                        tcx.def_path_str(id)
-                    ));
+                    if id.is_local() {
+                        tcx.dcx().fatal(format!(
+                            "hash-rustc: reference to unsupported {} ({kind:?})",
+                            tcx.def_path_str(id)
+                        ));
+                    }
+                    break;
                 }
                 let key = tcx.def_key(id);
                 output.push(Part::Bytes(

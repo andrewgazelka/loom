@@ -63,7 +63,8 @@ pub(super) async fn compile(request: Request<'_>) -> Result<(), BuildError> {
     }
     command
         .env_remove("LOOM_ITEM_HASHES")
-        .env_remove("LOOM_ITEM_PREIMAGES");
+        .env_remove("LOOM_ITEM_PREIMAGES")
+        .env_remove("LOOM_DEP_ITEMS");
     let output = run(command).await;
     // Do not let generated wrappers enter a later build's source identity.
     fs::write(&source_path, source).await?;

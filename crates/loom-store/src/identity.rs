@@ -58,9 +58,12 @@ mod tests {
         let store = Store::memory()?;
         let source = "pub fn main() {}";
         let deps = BTreeMap::new();
-        let entries =
+        let exports =
             BTreeMap::from([("main".to_owned(), store.put("item-preimage", b"behavior")?)]);
-        let root = store.put("entry-root", &loom_proto::entry_identity_preimage(&entries))?;
+        let root = store.put(
+            "export-root",
+            &loom_proto::export_identity_preimage(&exports),
+        )?;
         let definition = Def {
             hash: root.clone(),
             lang: loom_proto::Lang::Rust,
@@ -75,7 +78,7 @@ mod tests {
             toolchain_hash: store.put("blob", b"toolchain")?,
             item_hashes_ref: store.put(
                 "item-hashes",
-                &serde_json::to_vec(&serde_json::json!({"entry":entries}))?,
+                &serde_json::to_vec(&serde_json::json!({"entry":exports,"exports":exports}))?,
             )?,
         };
         store.define_with_identity(&definition, Some("main"), source, &deps, Some(&identity))?;

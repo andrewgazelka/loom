@@ -20,6 +20,7 @@ mod cache_backend;
 mod cache_flags;
 mod cache_metrics;
 mod coverage;
+mod dependencies;
 mod effects;
 mod encode;
 mod entries;

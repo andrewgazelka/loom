@@ -73,7 +73,7 @@ impl<'tcx> Encoder<'tcx> {
     }
 
     pub fn encode(mut self) -> Vec<Part> {
-        self.text("loom-hir-v3");
+        self.text("loom-hir-v4");
         self.metadata(self.owner);
         self.item(self.owner);
         self.parts

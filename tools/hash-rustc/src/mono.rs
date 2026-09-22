@@ -44,7 +44,7 @@ impl<'a, 'tcx> Encoder<'a, 'tcx> {
 
     fn definition_hash(&mut self, id: DefId) -> Result<blake3::Hash, String> {
         if !id.is_local() {
-            return Ok(crate::graph::external(self.tcx, id));
+            return Ok(crate::graph::crate_reference(self.tcx, id));
         }
         self.local = true;
         let path = crate::graph::item_path(self.tcx, id);

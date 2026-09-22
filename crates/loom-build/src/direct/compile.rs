@@ -78,6 +78,9 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
     let staged_identity_directory = target.join("item-identity").join(&definition.hash);
     fs::create_dir_all(&staged_identity_directory).await?;
     let identity_directory = staged_identity_directory.as_path();
+    // Cross-crate references into definition dependencies hash the stored
+    // item, so the driver needs each dependency's document at hand.
+    crate::identity::stage_dependency_items(store, definition, identity_directory)?;
     let lineage = blake3::hash(definition.name.as_bytes())
         .to_hex()
         .to_string();
@@ -122,20 +125,9 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
             fs::create_dir_all(&root_incremental).await?;
             recipe.relocate(directory, &target.join("root-output"), &root_incremental)?;
             recipe.compiler = driver.path.to_string_lossy().into_owned();
-            recipe.environment.insert(
-                "LOOM_ITEM_HASHES".into(),
-                identity_directory
-                    .join("items.json")
-                    .to_string_lossy()
-                    .into_owned(),
-            );
-            recipe.environment.insert(
-                "LOOM_ITEM_PREIMAGES".into(),
-                identity_directory
-                    .join("item-preimages")
-                    .to_string_lossy()
-                    .into_owned(),
-            );
+            recipe
+                .environment
+                .extend(crate::identity::Driver::environment(identity_directory));
             let mut command = if isolated {
                 fs::write(target.join("direct.sh"), recipe.shell()).await?;
                 let mut command = Command::new(root.join("rustc/sandbox.sh"));
@@ -280,20 +272,9 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
         .current_dir(root_recipe.working_directory());
     driver.configure(&mut hash_command, identity_directory);
     let hash_command = if isolated {
-        root_recipe.environment.insert(
-            "LOOM_ITEM_HASHES".into(),
-            identity_directory
-                .join("items.json")
-                .to_string_lossy()
-                .into_owned(),
-        );
-        root_recipe.environment.insert(
-            "LOOM_ITEM_PREIMAGES".into(),
-            identity_directory
-                .join("item-preimages")
-                .to_string_lossy()
-                .into_owned(),
-        );
+        root_recipe
+            .environment
+            .extend(crate::identity::Driver::environment(identity_directory));
         fs::write(target.join("direct.sh"), root_recipe.shell()).await?;
         let mut command = Command::new(root.join("rustc/sandbox.sh"));
         compiler_environment(&mut command);

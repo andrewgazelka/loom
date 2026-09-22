@@ -19,6 +19,8 @@ SCRIPT
 export LOOM_SANDBOX_SECRET=must-not-enter
 export LOOM_ITEM_HASHES="$work/target/items.json"
 export LOOM_ITEM_PREIMAGES="$work/target/item-preimages"
+export LOOM_DEP_ITEMS="$work/target/dependency-items"
+mkdir -p "$LOOM_DEP_ITEMS"
 bash "$repo/rustc/sandbox.sh" rustc "$work/source" "$work/source/root" "$work/target" "$repo"
 test -s "$work/target/libwitness.rlib"
 test -s "$LOOM_ITEM_HASHES"

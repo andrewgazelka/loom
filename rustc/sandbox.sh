@@ -74,7 +74,8 @@ args+=(--ro-bind "$rust_root" "$rust_root"
   --ro-bind "$compiler_executable" "$compiler_executable")
 if [[ $mode == rustc && -n ${LOOM_ITEM_HASHES:-} ]]; then
   args+=(--setenv LOOM_ITEM_HASHES "$LOOM_ITEM_HASHES"
-    --setenv LOOM_ITEM_PREIMAGES "${LOOM_ITEM_PREIMAGES:?missing item preimages directory}")
+    --setenv LOOM_ITEM_PREIMAGES "${LOOM_ITEM_PREIMAGES:?missing item preimages directory}"
+    --setenv LOOM_DEP_ITEMS "${LOOM_DEP_ITEMS:?missing dependency items directory}")
 fi
 for guest in loom-guest-rs loom-proto; do
   args+=(--ro-bind "$repo_root/crates/$guest" "$repo_root/crates/$guest")

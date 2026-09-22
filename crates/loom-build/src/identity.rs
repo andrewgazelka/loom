@@ -10,7 +10,11 @@ use tokio::process::Command;
 struct Document {
     toolchain: String,
     items: BTreeMap<String, Item>,
+    /// Root `pub fn` items: the wasm ABI surface.
     entry: BTreeMap<String, String>,
+    /// Every definition reachable through `pub` visibility from the crate
+    /// root: the identity surface. Entries are a subset.
+    exports: BTreeMap<String, String>,
 }
 #[derive(serde::Deserialize)]
 struct Item {
@@ -26,6 +30,58 @@ pub(crate) struct Driver {
 fn rejected(error: impl std::fmt::Display) -> BuildError {
     BuildError::Rejected(error.to_string())
 }
+
+/// Directory under the identity directory holding one stored item document
+/// per Loom definition dependency, named by rustc crate name.
+const DEPENDENCY_ITEMS: &str = "dependency-items";
+
+/// The rustc crate name Cargo gives a materialized definition dependency
+/// (`materialize.rs` names the package `loom-definition-<hash16>`).
+pub(crate) fn dependency_crate_name(hash: &str) -> String {
+    format!("loom_definition_{}", &hash[..16])
+}
+
+/// Write each direct dependency's stored item document to
+/// `<directory>/dependency-items/<crate_name>.json` for the driver's
+/// `LOOM_DEP_ITEMS`. A dependency without a stored build identity or
+/// document is an error naming it; nothing is written for a partial set.
+pub(crate) fn stage_dependency_items(
+    store: &loom_store::Store,
+    definition: &loom_check::CheckedDef,
+    directory: &Path,
+) -> Result<(), BuildError> {
+    let mut documents = Vec::new();
+    for (alias, hash) in &definition.deps {
+        let identity = store
+            .build_identity(hash)
+            .map_err(rejected)?
+            .ok_or_else(|| {
+                rejected(format!(
+                    "dependency {alias} ({hash}) has no stored build identity"
+                ))
+            })?;
+        let bytes = store
+            .get(&identity.item_hashes_ref)
+            .map_err(rejected)?
+            .ok_or_else(|| {
+                rejected(format!(
+                    "dependency {alias} ({hash}): item document {} missing from CAS",
+                    identity.item_hashes_ref
+                ))
+            })?;
+        documents.push((dependency_crate_name(hash), bytes));
+    }
+    let staged = directory.join(DEPENDENCY_ITEMS);
+    if staged.exists() {
+        std::fs::remove_dir_all(&staged)?;
+    }
+    std::fs::create_dir_all(&staged)?;
+    for (name, bytes) in documents {
+        std::fs::write(staged.join(format!("{name}.json")), bytes)?;
+    }
+    Ok(())
+}
+
 impl Driver {
     #[cfg(test)]
     pub async fn prepare(root: &Path, cache: &Path) -> Result<Self, BuildError> {
@@ -123,12 +179,31 @@ impl Driver {
             toolchain_hash: hasher.finalize().to_hex().to_string(),
         })
     }
+    /// The driver's side-output contract for a hashing compilation whose
+    /// outputs live in `directory`: the item document, the preimage store,
+    /// and the staged dependency documents from `stage_dependency_items`.
+    pub fn environment(directory: &Path) -> [(String, String); 3] {
+        let value = |path: PathBuf| path.to_string_lossy().into_owned();
+        [
+            ("LOOM_ITEM_HASHES".into(), value(directory.join("items.json"))),
+            (
+                "LOOM_ITEM_PREIMAGES".into(),
+                value(directory.join("item-preimages")),
+            ),
+            (
+                "LOOM_DEP_ITEMS".into(),
+                value(directory.join(DEPENDENCY_ITEMS)),
+            ),
+        ]
+    }
     pub fn configure(&self, command: &mut Command, directory: &Path) {
         command
             .env("RUSTC", &self.path)
-            .env("LOOM_ITEM_HASHES", directory.join("items.json"))
-            .env("LOOM_ITEM_PREIMAGES", directory.join("item-preimages"));
+            .envs(Self::environment(directory));
     }
+    /// Verify the driver's document and preimages, import them into the CAS,
+    /// and derive the definition identity: the Merkle root over the exported
+    /// definitions' path/hash pairs.
     pub fn ingest(
         &self,
         store: &loom_store::Store,
@@ -139,7 +214,8 @@ impl Driver {
         let path = directory.join("items.json");
         let bytes = std::fs::read(&path)
             .map_err(|error| rejected(format!("{}: {error}", path.display())))?;
-        let document: Document = serde_json::from_slice(&bytes).map_err(rejected)?;
+        let document: Document = serde_json::from_slice(&bytes)
+            .map_err(|error| rejected(format!("hash-rustc document {}: {error}", path.display())))?;
         if document.toolchain.is_empty() {
             return Err(rejected("hash-rustc document has no toolchain"));
         }
@@ -155,17 +231,24 @@ impl Driver {
             }
         }
         for (name, hash) in &document.entry {
+            if document.exports.get(name) != Some(hash) {
+                return Err(rejected(format!(
+                    "hash-rustc entry {name} is not among the exports"
+                )));
+            }
+        }
+        for (name, hash) in &document.exports {
             if document
                 .items
                 .get(name)
                 .is_none_or(|item| &item.hash != hash)
             {
                 return Err(rejected(format!(
-                    "hash-rustc entry {name} disagrees with item table"
+                    "hash-rustc export {name} disagrees with item table"
                 )));
             }
         }
-        let root_preimage = loom_proto::entry_identity_preimage(&document.entry);
+        let root_preimage = loom_proto::export_identity_preimage(&document.exports);
         let behavior_hash = blake3::hash(&root_preimage).to_hex().to_string();
         let preimages = directory.join("item-preimages");
         for item in document.items.values() {
@@ -183,7 +266,7 @@ impl Driver {
                 return Err(rejected("empty hash-rustc item reference"));
             }
         }
-        store.put("entry-root", &root_preimage).map_err(rejected)?;
+        store.put("export-root", &root_preimage).map_err(rejected)?;
         Ok(loom_proto::BuildIdentity {
             behavior_hash,
             wasm_hash: blake3::hash(wasm).to_hex().to_string(),
@@ -218,6 +301,7 @@ fn ingest_object(
 }
 
 /// Move successful compiler side outputs out of the sandbox's writable target.
+/// Staged dependency documents are build inputs, not outputs, and stay behind.
 pub(crate) fn publish(source: &Path, destination: &Path) -> Result<(), BuildError> {
     fn copy_objects(source: &Path, destination: &Path) -> Result<(), BuildError> {
         std::fs::create_dir_all(destination)?;
