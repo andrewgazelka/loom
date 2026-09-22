@@ -143,6 +143,11 @@ impl RootHandler for Recording {
     }
 }
 
+/// The `Value`-shaped `{"op":"call","args":{"def","entry","args":[...]}}`
+/// descriptor is the JavaScript caller's form (V8 has no DAG-CBOR). This
+/// adapter encodes its argument array once and hands the same request the
+/// `loom.call` import builds to `Runtime::isolated_call`; core guests never
+/// reach it (the `perform` import refuses the op).
 struct Scheduling;
 impl RootHandler for Scheduling {
     fn handle<'a>(&'a self, request: Request<'a>, next: Next<'a>) -> HandlerFuture<'a> {
@@ -155,14 +160,28 @@ impl RootHandler for Scheduling {
             let args = request.desc.get("args").cloned().unwrap_or(Value::Null);
             match op {
                 "call" => {
-                    runtime
-                        .call_scoped(
-                            required_str(&args, "def")?,
-                            args.get("args").cloned().unwrap_or(Value::Null),
-                            &format!("{scope}/call:{occurrence}"),
-                            effects.clone(),
+                    let target =
+                        loom_proto::isolated::Target::from_hex(required_str(&args, "def")?)?;
+                    let entry = match args.get("entry") {
+                        None | Some(Value::Null) => "",
+                        Some(entry) => entry.as_str().context("call entry must be a string")?,
+                    };
+                    let positional = args.get("args").cloned().unwrap_or(json!([]));
+                    let (argc, payload) = positional_payload(&positional)?;
+                    let bytes = runtime
+                        .isolated_call(
+                            loom_proto::isolated::Request {
+                                target,
+                                entry,
+                                argc,
+                                payload: &payload,
+                            },
+                            scope,
+                            occurrence,
+                            effects,
                         )
-                        .await
+                        .await?;
+                    Ok(EffectOutput { bytes })
                 }
                 _ => next.run(request).await,
             }

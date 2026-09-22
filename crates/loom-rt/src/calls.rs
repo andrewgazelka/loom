@@ -1,3 +1,7 @@
+//! Host `Value` API over definitions. Arguments arrive as a JSON array and
+//! leave as the canonical DAG-CBOR payload the callee decodes; results come
+//! back as bytes and decode to a `Value` here. Both are the host boundary's
+//! own codec passes; guest-to-guest isolated calls never take this path.
 use super::*;
 
 impl Runtime {
@@ -24,6 +28,8 @@ impl Runtime {
         )
         .await
     }
+    /// A borrowed-effects call (`call_with_effects`): the caller owns the
+    /// root handler, so no trace identity is recorded here.
     pub(super) async fn call_scoped(
         &self,
         hash: &str,
@@ -31,8 +37,9 @@ impl Runtime {
         scope: &str,
         effects: EffectContext,
     ) -> Result<EffectOutput> {
+        let (argc, payload) = positional_payload(&args)?;
         Ok(self
-            .call_scoped_delegated(hash, args, scope, effects)
+            .core_call_entry(hash, None, argc, &payload, scope, &effects)
             .await?
             .output)
     }
@@ -90,14 +97,15 @@ impl Runtime {
         scope: &str,
         execution: Arc<trace::ExecutionTrace>,
     ) -> Result<TimedCall> {
-        execution.identity(hash, &args)?;
+        let (argc, payload) = positional_payload(&args)?;
+        execution.identity(hash, &payload)?;
         let session = trace::TraceSession::new(self.inner.store.clone(), execution.clone());
         let effects = EffectContext {
             trace: Some(execution),
             ..EffectContext::default()
         };
         let result = self
-            .core_call_entry(hash, entry, &args, scope, &effects)
+            .core_call_entry(hash, entry, argc, &payload, scope, &effects)
             .await;
         let outcome = match &result {
             Ok(call) => Ok(call.output.clone()),
@@ -110,14 +118,5 @@ impl Runtime {
             value: call.output.decode()?,
             timing: call.timing,
         })
-    }
-    pub(super) async fn call_scoped_delegated(
-        &self,
-        hash: &str,
-        args: Value,
-        scope: &str,
-        effects: EffectContext,
-    ) -> Result<EncodedCall> {
-        self.core_call(hash, &args, scope, &effects).await
     }
 }

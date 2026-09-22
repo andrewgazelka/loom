@@ -1,13 +1,14 @@
 use super::*;
 
 #[test]
-fn resolve_self_rewrites_only_self_calls() {
-    let mut call = json!({"op":"call","args":{"def":"$self"}});
-    resolve_self(&mut call, "definition-hash");
-    assert_eq!(call["args"]["def"], json!("definition-hash"));
-    let mut other = json!({"op":"call","args":{"def":"other-hash"}});
-    resolve_self(&mut other, "definition-hash");
-    assert_eq!(other["args"]["def"], json!("other-hash"));
+fn positional_payload_requires_an_array_and_encodes_it_once() {
+    let (argc, payload) = positional_payload(&json!([1, "two"])).unwrap();
+    assert_eq!(argc, 2);
+    assert_eq!(payload, encode(&json!([1, "two"])).unwrap());
+    let (argc, payload) = positional_payload(&json!([])).unwrap();
+    assert_eq!((argc, payload), (0, vec![0x80]));
+    assert!(positional_payload(&json!({"def": "x"})).is_err());
+    assert!(positional_payload(&Value::Null).is_err());
 }
 #[tokio::test]
 async fn scoped_children_record_independently_and_replay_in_reverse_order() -> Result<()> {

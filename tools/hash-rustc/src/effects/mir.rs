@@ -207,6 +207,13 @@ fn selected_call<'tcx>(
                 dynamic_label(analysis.tcx, span);
             }
         }
+        Some("$isolated_call") => {
+            node.edges.push(Edge {
+                callee,
+                handled: BTreeSet::new(),
+            });
+            node.row.labels.insert("call".into());
+        }
         Some("$handle") if args.len() == 3 => {
             // Dynamic selection discharges no statically proven label; retain
             // the callback's complete residual row.

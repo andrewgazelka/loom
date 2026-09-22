@@ -156,6 +156,13 @@ impl<'tcx> Scan<'_, 'tcx> {
                     dynamic_label(self.analysis.tcx, expr.span);
                 }
             }
+            Some("$isolated_call") => {
+                self.node.edges.push(Edge {
+                    callee,
+                    handled: BTreeSet::new(),
+                });
+                self.node.row.labels.insert("call".into());
+            }
             Some("$handle") if inputs.len() == 3 => {
                 self.callable(inputs[1], BTreeSet::new());
                 self.callable(inputs[2], labels(inputs[0]).unwrap_or_default());

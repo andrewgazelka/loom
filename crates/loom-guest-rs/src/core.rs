@@ -1,5 +1,5 @@
 //! Trusted shared-memory ABI glue. Host pointers must name live guest allocations.
-use crate::EffectError;
+use crate::{CallError, EffectError};
 use serde::Serialize;
 
 #[cfg(target_arch = "wasm32")]
@@ -22,6 +22,8 @@ unsafe extern "C" {
     pub(crate) fn host_continuation_drop(k: u64) -> i32;
     #[link_name = "perform"]
     fn host_perform(pointer: u32, length: u32) -> u64;
+    #[link_name = "call"]
+    fn host_call(pointer: u32, length: u32) -> u64;
     #[link_name = "spawn"]
     pub(crate) fn host_spawn(function: u32, data: u32, detached: i32) -> u64;
     #[link_name = "join"]
@@ -47,6 +49,43 @@ pub fn perform<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, Effect
         let _ = bytes;
         Err("core effects require wasm32".into())
     }
+}
+
+/// Hand an isolated-call request frame to the host and take ownership of the
+/// response frame it allocated through `loom_alloc(length, 1)`. The frame is
+/// parsed by `crate::isolated::call`; this function moves bytes only.
+pub(crate) fn isolated(frame: &[u8], hash: &str) -> Result<Vec<u8>, CallError> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = hash;
+        // SAFETY: the frame stays live across host suspension; the host returns
+        // an allocation made through loom_alloc(length, 1), transferring ownership.
+        let packed = unsafe { host_call(frame.as_ptr() as u32, frame.len() as u32) };
+        let pointer = packed as u32 as *mut u8;
+        let length = (packed >> 32) as usize;
+        Ok(unsafe { Vec::from_raw_parts(pointer, length, length) })
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = frame;
+        Err(CallError::Trapped {
+            hash: hash.to_owned(),
+            message: "isolated calls require wasm32".into(),
+        })
+    }
+}
+
+/// Pack a callee's response frame for the host: `[0][result]` or
+/// `[1][CallError]`. Used by the generated `loom_call_<entry>` wrappers.
+pub fn isolated_response(result: Result<Vec<u8>, CallError>) -> u64 {
+    let frame = loom_proto::isolated::response_frame(match &result {
+        Ok(payload) => Ok(payload.as_slice()),
+        Err(error) => Err(error),
+    })
+    .into_boxed_slice();
+    let length = frame.len() as u64;
+    let pointer = Box::into_raw(frame) as *mut u8 as u32;
+    (length << 32) | pointer as u64
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -187,44 +226,6 @@ mod allocator {
     };
 }
 
-pub trait Guest {
-    fn call(definition: Vec<u8>, args: Vec<u8>) -> Result<Vec<u8>, String>;
-}
-
-pub fn encoded_response(result: Result<Vec<u8>, String>) -> u64 {
-    let bytes = encoded_response_bytes(result).into_boxed_slice();
-    let length = bytes.len() as u64;
-    let pointer = Box::into_raw(bytes) as *mut u8 as u32;
-    (length << 32) | pointer as u64
-}
-
-fn encoded_response_bytes(result: Result<Vec<u8>, String>) -> Vec<u8> {
-    match result {
-        Ok(bytes) => {
-            // The generated Guest methods already encode canonical CBOR. Wrap
-            // that owned result without decoding it into a second value tree.
-            let mut envelope = Vec::with_capacity(4 + bytes.len());
-            envelope.extend_from_slice(b"\xa1\x62ok");
-            envelope.extend_from_slice(&bytes);
-            envelope
-        }
-        Err(error) => {
-            crate::encode(&Response::<()>::Failure { error }).expect("invalid core response")
-        }
-    }
-}
-
-#[macro_export]
-macro_rules! export_core {
-    ($guest:ty) => {
-        #[unsafe(no_mangle)]
-        pub unsafe extern "C" fn loom_call(pointer: u32, length: u32) -> u64 {
-            let args = unsafe { $crate::core::input(pointer, length) }.to_vec();
-            $crate::core::encoded_response(<$guest as $crate::core::Guest>::call(Vec::new(), args))
-        }
-    };
-}
-
 /// # Safety
 /// Host supplies an installed frame, serializes its callbacks, and retains the
 /// immutable op allocation until return. Returned bytes transfer to the host,
@@ -288,44 +289,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn encoded_envelopes_match_typed_arrays_null_and_errors() {
+    fn host_response_envelopes_decode_typed_results_and_errors() {
         let entries = vec![crate::DirEntry {
             name: "file.rs".into(),
             size: 42,
             kind: crate::EntryKind::File,
         }];
-        let typed = encoded_response_bytes(Ok(crate::encode(&entries).unwrap()));
-        assert_eq!(
-            typed,
-            crate::encode(&Response::Success { ok: &entries }).unwrap()
-        );
+        let typed = crate::encode(&Response::Success { ok: &entries }).unwrap();
         let decoded: HostResponse<Vec<crate::DirEntry>> = crate::decode_host(&typed).unwrap();
         assert_eq!(decoded.result.unwrap(), entries);
-
-        let null = encoded_response_bytes(Ok(crate::encode(&()).unwrap()));
-        assert_eq!(null, crate::encode(&Response::Success { ok: () }).unwrap());
-        let decoded: HostResponse<()> = crate::decode_host(&null).unwrap();
-        assert_eq!(decoded.result, Ok(()));
-
-        let error = "task failed".to_string();
-        let failed = encoded_response_bytes(Err(error.clone()));
-        assert_eq!(
-            failed,
-            crate::encode(&Response::<()>::Failure {
-                error: error.clone()
-            })
-            .unwrap()
-        );
+        let failed = crate::encode(&Response::<()>::Failure {
+            error: "task failed".into(),
+        })
+        .unwrap();
         let decoded: HostResponse<()> = crate::decode_host(&failed).unwrap();
-        assert_eq!(decoded.result, Err(error));
+        assert_eq!(decoded.result, Err("task failed".into()));
     }
 
     #[test]
-    fn malformed_guest_payloads_remain_for_strict_host_admission() {
-        for payload in [vec![0, 0], vec![0x18, 0]] {
-            let wrapped = encoded_response_bytes(Ok(payload.clone()));
-            assert_eq!(&wrapped[4..], payload);
-            assert!(crate::decode::<crate::Value>(&wrapped).is_err());
-        }
+    fn isolated_response_frames_are_tagged_and_owned() {
+        let payload = loom_proto::isolated::encode_payload(&7u8).unwrap();
+        let packed = isolated_response(Ok(payload.clone()));
+        let (pointer, length) = (packed as u32 as *mut u8, (packed >> 32) as usize);
+        // SAFETY: the test owns the leaked frame and frees it once.
+        let frame = unsafe { Vec::from_raw_parts(pointer, length, length) };
+        assert_eq!(frame[0], 0);
+        assert_eq!(&frame[1..], payload);
+        let packed = isolated_response(Err(CallError::Decode {
+            message: "bad".into(),
+        }));
+        let (pointer, length) = (packed as u32 as *mut u8, (packed >> 32) as usize);
+        let frame = unsafe { Vec::from_raw_parts(pointer, length, length) };
+        assert_eq!(frame[0], 1);
+        assert_eq!(
+            loom_proto::isolated::Response::parse(&frame).unwrap().unwrap_err(),
+            CallError::Decode {
+                message: "bad".into()
+            }
+        );
     }
 }

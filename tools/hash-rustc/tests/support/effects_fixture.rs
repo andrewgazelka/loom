@@ -9,6 +9,10 @@ pub fn exec() { perform("exec", ()); }
 pub fn now() { perform("now", ()); }
 pub fn arbitrary_wrapper() { perform("custom.arbitrary", ()); }
 pub fn perform(_label: &str, _payload: ()) {}
+pub mod isolated {
+    pub struct Def<F>(pub &'static str, pub core::marker::PhantomData<F>);
+    pub fn call<F, A>(_def: Def<F>, _args: A) -> Result<(), ()> { Ok(()) }
+}
 pub mod handlers {
     pub fn handle<H: Fn(), B: Fn()>(_labels: &[&str], handler: H, body: B) {
         handler(); body();

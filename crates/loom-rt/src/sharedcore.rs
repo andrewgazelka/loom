@@ -144,18 +144,19 @@ impl Execution {
     }
 }
 enum Invocation {
+    /// `args` is the opaque isolated-call payload; the host copies it in as is.
     Call { args: Vec<u8>, export: String },
     Schema,
 }
 impl Entry<'_> {
-    fn prepare(self) -> Result<Invocation> {
-        Ok(match self {
+    fn prepare(self) -> Invocation {
+        match self {
             Self::Call { args, export } => Invocation::Call {
                 export: export.into(),
-                args: encode(args)?,
+                args: args.to_vec(),
             },
             Self::Schema => Invocation::Schema,
-        })
+        }
     }
 }
 fn error(error: wasmtime::Error) -> anyhow::Error {
@@ -242,7 +243,8 @@ async fn respond(caller: &mut Caller<'_, Guest>, bytes: Vec<u8>) -> Result<i64> 
     Ok(((bytes.len() as u64) << 32 | pointer as u64) as i64)
 }
 pub(super) enum Entry<'a> {
-    Call { args: &'a Value, export: &'a str },
+    /// `args` is one DAG-CBOR array of typed arguments, never decoded here.
+    Call { args: &'a [u8], export: &'a str },
     Schema,
 }
 

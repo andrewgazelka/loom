@@ -8,13 +8,14 @@ pub use scoped::{Scope, ScopedJoinHandle, scope};
 mod handlers;
 pub mod preview;
 pub use handlers::{Continuation, Effect, Reply, handle, handle_any, handle_pinned};
+pub mod isolated;
+pub use isolated::CallError;
 pub use serde;
 use serde::{Serialize, de::DeserializeOwned};
 pub use serde_json;
-use std::marker::PhantomData;
 
 pub type EffectError = String;
-pub use loom_proto::{DirEntry, EntryKind, TypeSig, Value, decode, decode_host, encode};
+pub use loom_proto::{Bytes, DirEntry, EntryKind, TypeSig, Value, decode, decode_host, encode};
 
 /// Perform an effect and decode its result. The call suspends until it completes.
 pub fn perform<T: DeserializeOwned>(name: &str, args: impl Serialize) -> Result<T, EffectError> {
@@ -22,41 +23,6 @@ pub fn perform<T: DeserializeOwned>(name: &str, args: impl Serialize) -> Result<
     let desc = loom_proto::Desc::<T>::new(name, args);
     let bytes = encode(&desc)?;
     core::perform(&bytes)
-}
-
-pub struct Def<F> {
-    pub hash: &'static str,
-    marker: PhantomData<F>,
-}
-impl<F> Def<F> {
-    pub const fn new(hash: &'static str) -> Self {
-        Self {
-            hash,
-            marker: PhantomData,
-        }
-    }
-}
-/// Typed argument encoding at the positional guest protocol boundary.
-pub trait Invocation {
-    type Args;
-    type Output: DeserializeOwned;
-    fn arguments(args: Self::Args) -> Result<Vec<Value>, EffectError>;
-}
-impl<A: Serialize, R: DeserializeOwned> Invocation for fn(A) -> R {
-    type Args = A;
-    type Output = R;
-    fn arguments(args: A) -> Result<Vec<Value>, EffectError> {
-        Ok(vec![
-            serde_json::to_value(args).map_err(|error| error.to_string())?,
-        ])
-    }
-}
-/// Call another definition synchronously with typed positional arguments.
-pub fn call<F: Invocation>(def: Def<F>, args: F::Args) -> Result<F::Output, EffectError> {
-    perform(
-        "call",
-        serde_json::json!({"def":def.hash,"args":F::arguments(args)?}),
-    )
 }
 
 pub fn now() -> Result<Value, EffectError> {
@@ -153,10 +119,5 @@ mod tests {
         assert_eq!(decode::<Value>(&bytes).unwrap(), value);
         bytes.push(0);
         assert!(decode::<Value>(&bytes).is_err());
-    }
-    #[test]
-    fn unary_array_remains_one_argument() {
-        let args = <fn(Vec<i64>) -> i64 as Invocation>::arguments(vec![1, 2]).unwrap();
-        assert_eq!(args, vec![serde_json::json!([1, 2])]);
     }
 }
