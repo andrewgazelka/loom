@@ -73,7 +73,8 @@ impl Builder {
                 .is_some_and(|package| package.get("build").is_some())
             || dependencies.values().any(is_vendored);
         if !isolated {
-            prepare_compiler_dependencies(&self.root, self.driver_path.as_deref()).await?;
+            let (toolchain, _) = self.prepared().await?;
+            prepare_compiler_dependencies(&self.compiler_dependencies, &toolchain).await?;
         }
         let preparation_inputs = serde_json::json!({
             "contract": "loom-preparation-v2-registry-identity",
@@ -148,9 +149,7 @@ impl Builder {
                 seed_build_lock(&self.root.join("Cargo.lock"), &crate_dir.join("Cargo.lock"))
                     .await?;
             }
-            let toolchain =
-                crate::resolve_guest_toolchain_with_driver(&self.root, self.driver_path.as_deref())
-                    .await?;
+            let (toolchain, _) = self.prepared().await?;
             let mut command = Command::new(&toolchain.cargo);
             toolchain.configure(&mut command)?;
             command

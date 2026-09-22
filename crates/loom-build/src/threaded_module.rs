@@ -6,12 +6,6 @@ use wasm_encoder::{
 };
 use wasmparser::{BlockType, ExternalKind, FunctionBody, Operator, Parser, Payload, TypeRef};
 
-struct LocatedOperator<'a> {
-    start: usize,
-    end: usize,
-    operation: Operator<'a>,
-}
-
 struct StackBounds {
     pointer: u32,
     low: u32,
@@ -29,10 +23,12 @@ struct Export {
     index: u32,
 }
 
+/// Lower the compiler's core module for serialized startup: export stack
+/// bounds, trap on stack overflow, and replace the linker initializer's
+/// wait/notify pair. The input is parsed, not validated: it comes from the
+/// pinned compiler, and the one validation pass runs over the result, which
+/// fails closed on anything malformed in either the input or the rewrite.
 pub fn prepare(bytes: &[u8]) -> Result<Vec<u8>, String> {
-    wasmparser::Validator::new()
-        .validate_all(bytes)
-        .map_err(|error| error.to_string())?;
     let mut imports = 0u32;
     let mut start = None;
     let mut imported_globals = 0u32;
@@ -193,6 +189,12 @@ pub fn prepare(bytes: &[u8]) -> Result<Vec<u8>, String> {
     Ok(result)
 }
 
+/// Rewrite one function body in a single streaming pass over its operators.
+/// Only the start function may contain a wait or notify (the linker
+/// initializer), and recognising that initializer needs its whole operator
+/// list, so only the start body is collected; every other body is rewritten
+/// as it is read, without an operator list. A wait or notify anywhere else is
+/// an error at the first occurrence.
 fn prepare_body(
     body: &FunctionBody<'_>,
     is_start: bool,
@@ -201,43 +203,30 @@ fn prepare_body(
     let mut reader = body
         .get_operators_reader()
         .map_err(|error| error.to_string())?;
-    let mut operations = Vec::new();
-    while !reader.eof() {
-        let start = reader.original_position();
-        let operation = reader.read().map_err(|error| error.to_string())?;
-        operations.push(LocatedOperator {
-            start,
-            end: reader.original_position(),
-            operation,
-        });
-    }
-    let has_wait = operations.iter().any(|located| {
-        matches!(
-            located.operation,
-            Operator::MemoryAtomicWait32 { .. }
-                | Operator::MemoryAtomicWait64 { .. }
-                | Operator::MemoryAtomicNotify { .. }
-        )
-    });
-    if has_wait && (!is_start || !is_linker_initializer(&operations)) {
-        return Err(
-            "shared core contains a wait/notify outside the verified linker initializer".into(),
-        );
-    }
-    if has_wait
-        && body
-            .get_locals_reader()
-            .map_err(|error| error.to_string())?
-            .get_count()
-            != 0
-    {
-        return Err("shared linker initializer unexpectedly has locals".into());
-    }
+    let mut collected: Option<Vec<Operator<'_>>> = is_start.then(Vec::new);
+    let mut has_wait = false;
     let mut output = Vec::new();
     let base = body.range().start;
     let mut cursor = 0;
-    for located in operations {
-        let replacement = match located.operation {
+    while !reader.eof() {
+        let start = reader.original_position();
+        let operation = reader.read().map_err(|error| error.to_string())?;
+        let end = reader.original_position();
+        if matches!(
+            operation,
+            Operator::MemoryAtomicWait32 { .. }
+                | Operator::MemoryAtomicWait64 { .. }
+                | Operator::MemoryAtomicNotify { .. }
+        ) {
+            if !is_start {
+                return Err(
+                    "shared core contains a wait/notify outside the verified linker initializer"
+                        .into(),
+                );
+            }
+            has_wait = true;
+        }
+        let replacement = match &operation {
             Operator::MemoryAtomicNotify { .. } => Some(vec![
                 Instruction::Drop,
                 Instruction::Drop,
@@ -251,7 +240,7 @@ fn prepare_body(
                 Instruction::Drop,
                 Instruction::Unreachable,
             ]),
-            Operator::GlobalSet { global_index }
+            &Operator::GlobalSet { global_index }
                 if stack.is_some_and(|stack| stack.pointer == global_index) =>
             {
                 let stack = stack.unwrap();
@@ -274,19 +263,40 @@ fn prepare_body(
             _ => None,
         };
         if let Some(replacement) = replacement {
-            output.extend_from_slice(&body.as_bytes()[cursor..located.start - base]);
+            output.extend_from_slice(&body.as_bytes()[cursor..start - base]);
             for instruction in replacement {
                 instruction.encode(&mut output);
             }
-            cursor = located.end - base;
+            cursor = end - base;
+        }
+        if let Some(collected) = &mut collected {
+            collected.push(operation);
+        }
+    }
+    if has_wait {
+        let operations = collected
+            .as_deref()
+            .expect("the start body collects its operators");
+        if !is_linker_initializer(operations) {
+            return Err(
+                "shared core contains a wait/notify outside the verified linker initializer".into(),
+            );
+        }
+        if body
+            .get_locals_reader()
+            .map_err(|error| error.to_string())?
+            .get_count()
+            != 0
+        {
+            return Err("shared linker initializer unexpectedly has locals".into());
         }
     }
     output.extend_from_slice(&body.as_bytes()[cursor..]);
     Ok(output)
 }
 
-fn is_linker_initializer(ops: &[LocatedOperator<'_>]) -> bool {
-    let operations: Vec<&Operator<'_>> = ops.iter().map(|op| &op.operation).collect();
+fn is_linker_initializer(ops: &[Operator<'_>]) -> bool {
+    let operations: Vec<&Operator<'_>> = ops.iter().collect();
     let [
         Operator::Block {
             blockty: BlockType::Empty,

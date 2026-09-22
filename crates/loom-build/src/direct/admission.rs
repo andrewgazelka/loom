@@ -1,5 +1,10 @@
 use super::*;
 
+/// Decide from Cargo metadata, before any build script or proc macro runs,
+/// whether every host-executed package is an approved source. `toolchain` is
+/// the builder's memoized resolution; `compiler_sysroot` is `Some` when the
+/// compiler's own library sources must be admitted as well (every real build;
+/// tests of the package walk pass `None`).
 pub(super) async fn graph_shareable(
     root: &Path,
     cache: &Path,
@@ -7,9 +12,8 @@ pub(super) async fn graph_shareable(
     target: &Path,
     isolated: bool,
     compiler_sysroot: Option<&Path>,
-    driver: Option<&Path>,
+    toolchain: &crate::GuestToolchain,
 ) -> Result<bool, BuildError> {
-    let toolchain = crate::resolve_guest_toolchain_with_driver(root, driver).await?;
     let mut command = if isolated {
         let mut command = Command::new(root.join("rustc/sandbox.sh"));
         command

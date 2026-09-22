@@ -20,6 +20,9 @@ async fn host_execution_is_admitted_before_build_scripts_run() {
         .unwrap()
         .parent()
         .unwrap();
+    let toolchain = crate::resolve_guest_toolchain_with_driver(root, None)
+        .await
+        .unwrap();
     assert!(
         graph_shareable(
             root,
@@ -28,7 +31,7 @@ async fn host_execution_is_admitted_before_build_scripts_run() {
             &directory.join("target"),
             false,
             None,
-            None,
+            &toolchain,
         )
         .await
         .unwrap()
@@ -46,7 +49,7 @@ async fn host_execution_is_admitted_before_build_scripts_run() {
             &directory.join("target"),
             false,
             None,
-            None,
+            &toolchain,
         )
         .await
         .is_err()
@@ -88,7 +91,7 @@ async fn host_execution_is_admitted_before_build_scripts_run() {
         &directory.join("target"),
         false,
         None,
-        None,
+        &toolchain,
     )
     .await
     .unwrap_or(false);
@@ -298,11 +301,131 @@ fn corrupt_materialization_is_replaced_from_cas() {
         ArtifactFile {
             hash,
             executable: false,
+            len: b"verified artifact".len() as u64,
         },
+    );
+    // Same length as the verified bytes: the metadata-only presence check cannot
+    // tell, so no stamp may exist before the content-hash restore has run.
+    assert!(
+        recipe
+            .artifacts_stamped(&directory)
+            .unwrap_err()
+            .contains("artifact stamp unreadable")
     );
     assert!(recipe.restore_artifacts(&store).unwrap());
     assert_eq!(std::fs::read(path).unwrap(), b"verified artifact");
     std::fs::remove_dir_all(directory).unwrap();
+}
+
+/// The stamp lets a warm replay skip reading and hashing every artifact. It is
+/// honoured only when it names this exact artifact set and every file is still
+/// present with the recorded length and mode; each other state names its reason.
+#[test]
+fn artifact_stamp_matches_only_the_verified_artifact_set() {
+    let store = Store::memory().unwrap();
+    let graph = std::env::temp_dir().join(format!(
+        "loom-artifact-stamp-01a0866a-{}",
+        std::process::id()
+    ));
+    let target = graph.join("target/deps");
+    std::fs::create_dir_all(&target).unwrap();
+    let mut recipe = Recipe::parse(b"LOOM_RUSTC_ARGUMENTS\0rustc\0", &graph).unwrap();
+    for (name, bytes) in [("liba.rlib", &b"aaaa"[..]), ("libb.rmeta", &b"bb"[..])] {
+        let path = target.join(name);
+        let hash = store.put("rust-artifact", bytes).unwrap();
+        recipe.artifacts.insert(
+            path,
+            ArtifactFile {
+                hash,
+                executable: false,
+                len: bytes.len() as u64,
+            },
+        );
+    }
+    // No files yet: the stamp is absent and presence fails.
+    assert!(
+        recipe
+            .artifacts_stamped(&graph)
+            .unwrap_err()
+            .contains("stamp unreadable")
+    );
+    assert!(
+        recipe
+            .artifacts_present()
+            .unwrap_err()
+            .contains("liba.rlib missing")
+    );
+    // The cold path: a full content-hash restore, then the stamp.
+    assert!(recipe.restore_artifacts(&store).unwrap());
+    recipe.write_artifact_stamp(&graph).unwrap();
+    assert_eq!(recipe.artifacts_stamped(&graph), Ok(()));
+    // A stamp left by a recipe with another artifact set is refused by digest.
+    let mut other = recipe.clone();
+    other.artifacts.remove(&target.join("libb.rmeta"));
+    assert_ne!(other.artifact_set_digest(), recipe.artifact_set_digest());
+    assert!(
+        other
+            .artifacts_stamped(&graph)
+            .unwrap_err()
+            .contains("does not match recipe artifact set")
+    );
+    // A truncated artifact fails presence even though the stamp still matches.
+    std::fs::write(target.join("liba.rlib"), b"aa").unwrap();
+    assert!(
+        recipe
+            .artifacts_stamped(&graph)
+            .unwrap_err()
+            .contains("has 2 bytes, recipe recorded 4")
+    );
+    // The full restore repairs it and the stamp is honoured again.
+    assert!(recipe.restore_artifacts(&store).unwrap());
+    assert_eq!(recipe.artifacts_stamped(&graph), Ok(()));
+    // A directory in place of an artifact is not presence.
+    std::fs::remove_file(target.join("libb.rmeta")).unwrap();
+    std::fs::create_dir(target.join("libb.rmeta")).unwrap();
+    assert!(
+        recipe
+            .artifacts_stamped(&graph)
+            .unwrap_err()
+            .contains("not a regular file")
+    );
+    std::fs::remove_dir_all(graph).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn artifact_stamp_requires_the_recorded_executable_bit() {
+    use std::os::unix::fs::PermissionsExt;
+    let store = Store::memory().unwrap();
+    let graph = std::env::temp_dir().join(format!(
+        "loom-artifact-stamp-mode-01a0866a-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(graph.join("target")).unwrap();
+    let path = graph.join("target/build-script-build");
+    let hash = store
+        .put("rust-artifact", b"compiled build script")
+        .unwrap();
+    let mut recipe = Recipe::parse(b"LOOM_RUSTC_ARGUMENTS\0rustc\0", &graph).unwrap();
+    recipe.artifacts.insert(
+        path.clone(),
+        ArtifactFile {
+            hash,
+            executable: true,
+            len: b"compiled build script".len() as u64,
+        },
+    );
+    assert!(recipe.restore_artifacts(&store).unwrap());
+    recipe.write_artifact_stamp(&graph).unwrap();
+    assert_eq!(recipe.artifacts_stamped(&graph), Ok(()));
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(
+        recipe
+            .artifacts_stamped(&graph)
+            .unwrap_err()
+            .contains("executable bit differs")
+    );
+    std::fs::remove_dir_all(graph).unwrap();
 }
 
 #[cfg(unix)]
@@ -327,6 +450,7 @@ fn restored_build_script_retains_execute_permission() {
         ArtifactFile {
             hash,
             executable: true,
+            len: b"compiled build script".len() as u64,
         },
     );
     assert!(recipe.restore_artifacts(&store).unwrap());

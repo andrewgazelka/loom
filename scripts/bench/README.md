@@ -1,3 +1,21 @@
+# Warm `add` latency
+
+`add-latency.sh` is the goal command for build latency: against a running
+daemon it adds N (default 5) fresh single-file Rust definitions differing by one
+string constant, reads `build.ms` and the `build_stages` line of each build log,
+and prints one median per stage plus a final
+`add-latency median_wall_ms=<n> median_build_ms=<n> n=<N>`. It needs only bash,
+curl and python3:
+
+```sh
+LOOM_URL=http://127.0.0.1:18894 LOOM_TOKEN="$(cat "$bench_dir/state/token")" \
+  scripts/bench/add-latency.sh 5
+```
+
+Targets: median wall under 300 ms for a one-function change on a warm graph;
+a dependent-definition add under 2 s once
+[dependency rlib reuse](../../docs/future/dependency-rlib-reuse.md) lands.
+
 # Largest-file scan with scoped children
 
 The benchmark calls [`largest-scoped.rs`](largest-scoped.rs) through streamable HTTP MCP and compares it with [`largest-native.rs`](largest-native.rs). Scoped children borrow the traversal state and perform directory listings concurrently. Both scans find the largest regular file, skip symlinks, and break size ties by relative path.
