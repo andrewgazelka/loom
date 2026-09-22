@@ -8,6 +8,7 @@ struct Document {
     toolchain: String,
     items: BTreeMap<String, Item>,
     entry: BTreeMap<String, String>,
+    exports: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -219,4 +220,87 @@ fn aliased_self_types_and_empty_impls_are_dependencies() {
     assert_ne!(before.item("Alpha").hash, changed.item("Alpha").hash);
     let empty = compile(&format!("{source} impl Alpha {{}}"));
     assert_ne!(before.item("Alpha").hash, empty.item("Alpha").hash);
+}
+
+/// The defect this guards: `largest` lives in a public module, is not an
+/// entry, and is unreachable from `ping`. Its body change must still move the
+/// export set, which is what the definition identity is rooted in.
+#[test]
+fn nested_public_function_body_change_moves_exports_not_entry() {
+    let source = "pub mod shapes { pub trait Area { fn area(&self) -> f64; } pub fn largest<T: Area + Copy>(items: Vec<T>) -> T { let mut best = items[0]; for item in items.into_iter().skip(1) { if item.area() > best.area() { best = item; } } best } } pub fn ping() -> u32 { 1 }";
+    let before = compile(source);
+    let after = compile(&source.replace("skip(1)", "skip(0)"));
+    assert_eq!(before.entry(), after.entry());
+    assert_eq!(before.entry, before.exports_named(&["ping"]));
+    assert_ne!(
+        before.exports["shapes::largest"],
+        after.exports["shapes::largest"]
+    );
+    assert_ne!(before.exports, after.exports);
+    assert_eq!(
+        before.exports.keys().collect::<Vec<_>>(),
+        ["ping", "shapes::Area", "shapes::Area::area", "shapes::largest"]
+    );
+}
+
+/// Alpha-renaming a local inside the nested function leaves every export
+/// unchanged; renaming the function itself only renames its key.
+#[test]
+fn nested_public_function_alpha_renaming_keeps_exports() {
+    let source = "pub mod shapes { pub fn largest(items: Vec<u32>) -> u32 { let mut best = items[0]; for elem in items { if elem > best { best = elem; } } best } } pub fn ping() -> u32 { 1 }";
+    let before = compile(source);
+    let renamed_locals = compile(&source.replace("best", "winner").replace("elem", "candidate"));
+    assert_eq!(before.exports, renamed_locals.exports);
+    let renamed_function = compile(&source.replace("largest", "biggest"));
+    assert_eq!(
+        before.exports["shapes::largest"],
+        renamed_function.exports["shapes::biggest"]
+    );
+}
+
+/// Exports follow rustc's effective visibility: a `pub fn` inside a private
+/// module is not exported, a `pub use` of it is, impl members of a public type
+/// are exported by their own visibility, and private items never are.
+#[test]
+fn exports_are_the_publicly_reachable_definitions() {
+    let hidden = compile(
+        "mod inner { pub fn hidden() -> u32 { 1 } fn private() -> u32 { 2 } } pub fn entry() -> u32 { 3 }",
+    );
+    assert_eq!(hidden.exports.keys().collect::<Vec<_>>(), ["entry"]);
+    assert!(hidden.items.contains_key("inner::hidden"));
+    let reexported = compile(
+        "mod inner { pub fn hidden() -> u32 { 1 } } pub use inner::hidden; pub fn entry() -> u32 { 3 }",
+    );
+    assert_eq!(
+        reexported.exports.keys().collect::<Vec<_>>(),
+        ["entry", "inner::hidden"]
+    );
+    let with_type = compile(
+        "pub struct Alpha(pub u32); impl Alpha { pub fn read(&self) -> u32 { self.0 } fn secret(&self) -> u32 { 0 } } pub fn entry() -> u32 { 3 }",
+    );
+    assert_eq!(
+        with_type.exports.keys().collect::<Vec<_>>(),
+        ["Alpha", "entry", "{impl#0}", "{impl#0}::read"]
+    );
+}
+
+#[test]
+fn entries_are_a_subset_of_exports() {
+    let document = compile(
+        "pub fn entry() -> u32 { 1 } pub fn other() -> u32 { 2 } fn private() -> u32 { 3 }",
+    );
+    for (name, hash) in &document.entry {
+        assert_eq!(document.exports.get(name), Some(hash), "{document:#?}");
+    }
+    assert_eq!(document.entry.len(), 2);
+    assert!(!document.exports.contains_key("private"));
+}
+
+impl Document {
+    fn exports_named(&self, names: &[&str]) -> BTreeMap<String, String> {
+        names
+            .iter()
+            .map(|name| ((*name).to_owned(), self.exports[*name].clone()))
+            .collect()
+    }
 }

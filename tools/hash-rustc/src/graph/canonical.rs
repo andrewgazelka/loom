@@ -3,9 +3,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use petgraph::graph::{DiGraph, NodeIndex};
 use rustc_hir::def_id::DefId;
-use rustc_middle::ty::TyCtxt;
 
-use super::{Definition, external, frame};
+use super::{Definition, frame};
 use crate::encode::Part;
 
 pub(super) struct Component {
@@ -14,7 +13,6 @@ pub(super) struct Component {
 }
 
 pub(super) fn component(
-    tcx: TyCtxt<'_>,
     nodes: Vec<NodeIndex>,
     graph: &DiGraph<usize, ()>,
     definitions: &[Definition],
@@ -34,7 +32,7 @@ pub(super) fn component(
             let mut signature = (positions[&definition.id.to_def_id()] as u64)
                 .to_le_bytes()
                 .to_vec();
-            signature.extend(encode(tcx, &definition.parts, &positions, hashes));
+            signature.extend(encode(&definition.parts, &positions, hashes));
             classes.entry(signature).or_default().push(*node);
         }
         let groups: Vec<Vec<NodeIndex>> = classes.into_values().collect();
@@ -52,8 +50,10 @@ pub(super) fn component(
     }
 }
 
+/// Serialize one definition's stream. References inside the component use
+/// their class position; every other reference, local or external, has an
+/// entry in `hashes` before this component is encoded.
 pub(super) fn encode(
-    tcx: TyCtxt<'_>,
     parts: &[Part],
     positions: &HashMap<DefId, usize>,
     hashes: &HashMap<DefId, blake3::Hash>,
@@ -71,12 +71,7 @@ pub(super) fn encode(
                     bytes.extend_from_slice(&(*position as u64).to_le_bytes());
                 } else {
                     bytes.push(2);
-                    let hash = if id.is_local() {
-                        hashes[id]
-                    } else {
-                        external(tcx, *id)
-                    };
-                    bytes.extend_from_slice(hash.as_bytes());
+                    bytes.extend_from_slice(hashes[id].as_bytes());
                 }
             }
             Part::Unordered(entries) => {
@@ -84,7 +79,7 @@ pub(super) fn encode(
                 bytes.extend_from_slice(&(entries.len() as u64).to_le_bytes());
                 let mut entries: Vec<Vec<u8>> = entries
                     .iter()
-                    .map(|entry| encode(tcx, entry, positions, hashes))
+                    .map(|entry| encode(entry, positions, hashes))
                     .collect();
                 entries.sort();
                 for entry in entries {

@@ -71,7 +71,7 @@ pub(super) fn project(
     if let Some(identity) = identity {
         ensure!(
             definition.hash == identity.behavior_hash,
-            "definition hash {} differs from driver entry root {}",
+            "definition hash {} differs from driver export root {}",
             definition.hash,
             identity.behavior_hash
         );
@@ -81,14 +81,16 @@ pub(super) fn project(
             |row| row.get(0),
         )?;
         let document: Value = serde_json::from_slice(&bytes)?;
-        let entries: BTreeMap<String, String> = serde_json::from_value(document["entry"].clone())?;
-        ensure!(!entries.is_empty(), "driver entry root has no entries");
-        let root = blake3::hash(&loom_proto::entry_identity_preimage(&entries))
+        let exports: BTreeMap<String, String> =
+            serde_json::from_value(document["exports"].clone())
+                .context("driver document has no exports; rebuild with the current driver")?;
+        ensure!(!exports.is_empty(), "driver export root has no exports");
+        let root = blake3::hash(&loom_proto::export_identity_preimage(&exports))
             .to_hex()
             .to_string();
         ensure!(
             root == definition.hash,
-            "definition hash {} differs from computed driver entry root {root}",
+            "definition hash {} differs from computed driver export root {root}",
             definition.hash
         );
         ensure!(
@@ -97,7 +99,7 @@ pub(super) fn project(
                 [&definition.hash],
                 |row| row.get::<_, bool>(0)
             )?,
-            "driver entry root preimage {} not found in CAS",
+            "driver export root preimage {} not found in CAS",
             definition.hash
         );
     }
