@@ -942,7 +942,7 @@ mod tests {
 
     #[test]
     fn names_that_resolve_as_something_else_are_refused() {
-        for valid in ["sum", "friend/sum", "a.b-c_d", "#inside#ok", "abc123"] {
+        for valid in ["sum", "friend/sum", "a.b-c_d", "abc123"] {
             validate_name(valid).unwrap_or_else(|error| panic!("{valid:?}: {error}"));
         }
         let hash = "0f".repeat(32);

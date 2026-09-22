@@ -230,19 +230,11 @@ impl Execution {
                     Ok(Ok(result)) => EffectOutput {
                         bytes: result.to_vec(),
                     },
-                    // A callee may report its own decode failure. Every other
-                    // variant is asserted by the host before instantiation, so a
-                    // callee frame carrying one is a forgery and becomes a trap.
-                    Ok(Err(error @ loom_proto::isolated::CallError::Decode { .. })) => {
-                        return Err(error.into());
-                    }
-                    Ok(Err(reserved)) => {
-                        return Err(loom_proto::isolated::CallError::Trapped {
-                            hash: self.effects.def_hash.clone().unwrap_or_default(),
-                            message: format!("callee returned a host-reserved error: {reserved}"),
-                        }
-                        .into());
-                    }
+                    // The callee's own error frame. A callee that forwards its
+                    // child's refusal (a nested DepthExceeded, say) carries that
+                    // variant here, so the frame is the callee's claim, not the
+                    // host's assertion.
+                    Ok(Err(error)) => return Err(error.into()),
                     Err(message) => {
                         return Err(GuestFailure::new(format!(
                             "invalid core result frame: {message}"

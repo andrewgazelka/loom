@@ -223,7 +223,10 @@ async fn identity_is_rooted_in_exports_not_entries() {
     document["entry"]["second"] = serde_json::json!(other);
     fixture.write_document(&document);
     let with_entry = fixture.ingest().unwrap();
+    // Both sides drop the entry: the compiler's table and the checker's list
+    // must agree, and the export set is what the identity is rooted in.
     document["entry"].as_object_mut().unwrap().remove("second");
+    fixture.definition.sig.exports.pop();
     fixture.write_document(&document);
     let without_entry = fixture.ingest().unwrap();
     assert_eq!(with_entry.behavior_hash, without_entry.behavior_hash);

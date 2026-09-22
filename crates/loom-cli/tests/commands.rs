@@ -286,12 +286,23 @@ async fn definition_commands_reach_shared_service() {
     assert!(revised_caller.ok, "{revised_caller:?}");
     // 42 from the propagated dependency plus the caller's own `+ 1`.
     assert_eq!(server.invoke(&["run", "caller"]).await.result["output"], 43);
+    // The original caller still pins the old dependency by hash; the revised
+    // caller was built against the propagated one, so each hash lists exactly
+    // its own dependents.
     let dependents = server.invoke(&["dependents", old]).await;
     assert!(dependents.ok, "{dependents:?}");
     let dependent_hashes = dependents.result.as_array().unwrap();
-    assert_eq!(dependent_hashes.len(), 2);
-    assert!(dependent_hashes.contains(&caller.result["hash"]));
-    assert!(dependent_hashes.contains(&revised_caller.result["hash"]));
+    assert_eq!(dependent_hashes, &vec![caller.result["hash"].clone()]);
+    let dependents = server.invoke(&["dependents", new]).await;
+    assert!(dependents.ok, "{dependents:?}");
+    assert!(
+        dependents
+            .result
+            .as_array()
+            .unwrap()
+            .contains(&revised_caller.result["hash"]),
+        "{dependents:?}"
+    );
 }
 
 #[tokio::test]

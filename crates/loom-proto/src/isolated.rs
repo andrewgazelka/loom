@@ -241,7 +241,9 @@ pub enum CallError {
         expected: u32,
         actual: u32,
     },
-    /// Nesting reached `MAX_DEPTH`; reported before the callee is instantiated.
+    /// Nesting reached `MAX_DEPTH`; the host reports it before the callee is
+    /// instantiated. A callee that forwards its child's refusal returns the
+    /// same variant, so in a callee frame it is the callee's claim.
     DepthExceeded { depth: u32 },
 }
 impl std::fmt::Display for CallError {
