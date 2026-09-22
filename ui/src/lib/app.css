@@ -506,5 +506,22 @@ kbd {
 :root { --verdict-green: #22863a; --verdict-red: #cb2431; }
 @media (prefers-color-scheme: dark) { :root { --verdict-green: #85b992; --verdict-red: #e29a9d; } }
 
+/* Chart series (board build bars); data never uses the accent. */
+:root { --series-a: #eb6834; --series-b: #1baf7a; }
+@media (prefers-color-scheme: dark) { :root { --series-a: #d95926; --series-b: #199e70; } }
+
+.header-link {
+  color: var(--muted);
+  text-decoration: none;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 0.9em;
+}
+.header-link:hover {
+  color: var(--ink);
+  background: var(--selection);
+}
+
 .definition-row { display: flex; align-items: center; padding-right: 8px; }
 .definition-row .definition-entry { flex: 1; min-width: 0; }

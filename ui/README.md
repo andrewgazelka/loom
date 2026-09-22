@@ -77,6 +77,53 @@ replay conflicts, history export/clear, and navigating away during compilation.
 Restart a static preview after rebuilding so its entry script matches the
 current build. Keep the preview build fixed while capturing screenshots.
 
+## Live board
+
+`/board/` is a second page over the same daemon: one model, fed by the journal, drawn as four
+panes (definitions with their builds, the dependency graph, the event feed, the actor tree).
+Open `/board/#token=<URL-encoded token>`; the connection store is shared with the workspace
+page (`src/lib/workbench/connection.ts`), so the fragment is removed from the URL before any
+request, saved to `loom.connection`, and a saved connection from the workspace page works
+without a fragment. The route is prerendered as `build/board/index.html` because loomd's
+static file service has no SPA fallback; ServeDir redirects `/board` to `/board/` and the
+browser keeps the fragment.
+
+Data path (`src/lib/board/`):
+
+- `connect.ts` pages `GET /v1/events?after=<seq>&limit=1000` from 0 until a page is short, then
+  opens `/v1/stream`, sends `{token, after}` and folds every `{seq, ts, event}` frame; frames
+  without `seq` (actor table subscriptions) are ignored. A closed socket reconnects after
+  1, 2, 4, 8 then 10 seconds and re-snapshots from the last seq. The header badge
+  (`data-testid="board-status"`) reads `live` while the socket is open; every failure is a red
+  strip with the error text.
+- `feed.ts` is the reducer: `defined` creates or updates a definition (name, lang, exports,
+  effect labels, deps, component hash); `component_built` creates a build keyed by component
+  hash and joined to its definition at render time; `call_completed` lights the definition
+  for 1.5 s; `actor_message` moves an actor's cursor at once and the tree poll reconciles;
+  unknown types are feed rows only. The feed keeps the newest 500 rows. A replayed seq is dropped.
+- `layout.ts` layers the graph by longest path from dependencies (leftmost) to dependents,
+  orders each column by name, and places synthetic `isolated call` (`call` label, dashed red)
+  and `host` (every other label, dotted) targets in the last column. No overlaps by construction.
+- `stages.ts` reads a build log from `GET /v1/cas/<logs_ref>` and sums every `build_stages`
+  object; the builds pane draws the stages as bars sorted by milliseconds, named stages in
+  `--series-a`, `unattributed_ms` in `--series-b`.
+
+The actors pane polls `POST /v1/command {"command":"tree"}` every second while the page is
+visible and pauses when hidden; a changed cursor highlights the row for 1.5 s. Keys: `j`/`k`
+move through the focused pane's rows, `/` focuses the feed filter, drag pans and the wheel
+zooms the graph (`0` or the fit button fits it), `+`/`-` change the type scale, `?` shows
+these hints. DOM hooks for end-to-end scripts: `board-status`, `board-error`, `board-def`
+(`data-hash`, `data-name`), graph edges (`data-kind`, `data-from`, `data-to`), `board-event`
+(`data-type`, `data-seq`), `board-actor` (`data-id`, `data-cursor`), `board-build`
+(`data-hash`, bars `data-stage`).
+
+```sh
+bun test ui/tests/board
+```
+
+The board tests cover the reducer, the layout, stage parsing and the connection (injected
+fetch and a fake socket). They were written in a write-only lane and have not been run.
+
 ## Binding core
 
 `src/lib/bind/{bind,patch,stream}.ts` is plain TypeScript without Svelte or Vite imports.
