@@ -121,7 +121,7 @@ loom --token "$LOOM_TOKEN" history sum
 
 Updates and repair sessions are described in [the scripting guide](../examples/evolution/README.md). Inspect `result.update.status`; an accepted command may still need repairs. `update_repair <id> <revision> <changes-json>` submits a batch, `update_view <id>` reads the latest revision, and `update_rebase <id> <revision>` retries after disjoint namespace changes.
 
-Guest Rust has no macros. Every crate-root `pub fn` is an entry. An optional schema is declared as `pub const LOOM_SCHEMA: &str`; effect rows are inferred by the compiler driver. There are no effect declarations. `add` reports each entry’s inferred row in `entries.<name>.effects`, with `labels` and `unknown` fields.
+Guest Rust is ordinary Rust: built-in derives (`Clone`, `Copy`, `Debug`, `Default`, `Eq`, `Hash`, `Ord`, `PartialEq`, `PartialOrd`), the standard macros (`vec!`, `format!`, `matches!`, `assert!`, `write!`, `panic!`, `todo!`, `unreachable!`, and their siblings), `loom::serde_json::json!`, and your own `macro_rules!` all work; macros expand inside rustc before identity and effects are computed. Procedural macros from crates (`#[derive(Serialize)]`, `#[tokio::main]`), `println!`/`dbg!` (the guest has no stdio), `line!`/`file!`, and `cfg` other than `cfg(test)` are refused with `LOOM_MACRO`, and the diagnostic names the item and lists what is available; the full table and its reasons are in [content-addressed code](content-addressed-code.md#macros-in-guest-source). There are no export attributes. Every crate-root `pub fn` is an entry. An optional schema is declared as `pub const LOOM_SCHEMA: &str`; effect rows are inferred by the compiler driver. There are no effect declarations. `add` reports each entry’s inferred row in `entries.<name>.effects`, with `labels` and `unknown` fields.
 
 ```rust
 pub fn sum(a: i64, b: i64) -> i64 { a + b }
@@ -202,7 +202,7 @@ Stores containing retired actor tables are rejected at open with an error naming
 | `loom-store` | CAS, definitions, names, call traces, effect results |
 | `loom-check` | Language checking and definition identity |
 | `loom-build` | Rust compiler sidecars and build cache |
-| `loom-guest-rs`, `loom-guest-macros` | Synchronous Rust guest API and exports |
+| `loom-guest-rs` | Synchronous Rust guest API; entries are plain crate-root `pub fn` items, so there is no guest macro crate |
 | `loom-rt` | Wasmtime fibers, definition calls, effects, machine filesystem roots |
 | `loom-actor`, `loom-behavior` | Turso actors and transactional Loom definitions |
 | `loom-maintenance` | Backups, bounded index and build-cache maintenance |

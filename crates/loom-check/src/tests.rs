@@ -78,3 +78,64 @@ fn bundle_bytes_roundtrip_and_paths_are_bounded() {
     files.insert("../escape".into(), SourceFile::Text(String::new()));
     assert!(SourceBundle { files }.validate().is_err());
 }
+#[tokio::test]
+async fn macros_expand_inside_rustc_so_builtin_forms_pass_and_procedural_forms_fail() {
+    let checker = Checker::new();
+    let request = |source: &str| DefineRequest {
+        lang: Lang::Rust,
+        name: "test".into(),
+        source: source.into(),
+        deps: BTreeMap::new(),
+        allowed_effects: None,
+    };
+    let accepted = checker
+        .check(&request(
+            "#[derive(Clone, Copy, PartialEq)] struct Square(f64); pub fn area(square: Square) -> String { let sides = vec![square.0, square.0]; assert!(square == square.clone()); format!(\"{}\", sides.iter().product::<f64>()) }",
+        ))
+        .await
+        .unwrap();
+    assert!(accepted.diagnostics.is_empty(), "{:?}", accepted.diagnostics);
+    assert_eq!(accepted.sig.exports[0].name, "area");
+    let rejected = checker
+        .check(&request(
+            "#[derive(serde::Serialize)] struct Square(f64); pub fn main() {}",
+        ))
+        .await
+        .unwrap();
+    let error = rejected
+        .diagnostics
+        .iter()
+        .find(|error| error.code == "LOOM_MACRO")
+        .expect("procedural derive is refused");
+    assert!(error.message.contains("serde::Serialize"), "{}", error.message);
+    // A macro body is tokens to the source passes; ambient input inside it is
+    // still refused, by LOOM_IO, without the macro itself being refused.
+    let smuggled = checker
+        .check(&request(
+            "macro_rules! secret { () => { std::fs::read(\"x\") } } pub fn main() { secret!(); }",
+        ))
+        .await
+        .unwrap();
+    assert!(
+        smuggled
+            .diagnostics
+            .iter()
+            .any(|error| error.code == "LOOM_IO" && error.message.contains("std::fs")),
+        "{:?}",
+        smuggled.diagnostics
+    );
+    assert!(
+        smuggled
+            .diagnostics
+            .iter()
+            .all(|error| error.code != "LOOM_MACRO"),
+        "{:?}",
+        smuggled.diagnostics
+    );
+    // A local merely named like an ambient macro is not one.
+    let named = checker
+        .check(&request("pub fn main(env: u8) -> Vec<u8> { vec![env] }"))
+        .await
+        .unwrap();
+    assert!(named.diagnostics.is_empty(), "{:?}", named.diagnostics);
+}
