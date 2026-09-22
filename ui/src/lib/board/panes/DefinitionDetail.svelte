@@ -8,6 +8,7 @@
   import { definitionView, type DefinitionView } from "../../workbench/schema";
   import DetailTabs from "../detail/DetailTabs.svelte";
   import { reason, short } from "../detail/format";
+  import { fetched } from "../fetched.svelte";
   import type { PaneShared } from "./types";
   let {
     hash,
@@ -28,42 +29,27 @@
     build: Build | null;
   } & PaneShared = $props();
 
-  let view = $state.raw<DefinitionView | null>(null);
-  let viewError = $state<string | null>(null);
+  const loaded = fetched(
+    () => [client, hash],
+    (owner, target) =>
+      owner === null
+        ? Promise.reject(new Error("Not connected."))
+        : owner.command("view", { target }).then((result): DefinitionView => {
+            try {
+              return definitionView(result);
+            } catch (problem) {
+              throw new Error(`view ${short(target)}: ${reason(problem)}`);
+            }
+          }),
+  );
+  const view = $derived(loaded.value);
+  const viewError = $derived(loaded.error);
   let runOpen = $state(false);
   let runArgs = $state("[]");
   let runBusy = $state(false);
   let runResult = $state<string | null>(null);
   let runError = $state<string | null>(null);
   let runEffects = $state<number | null>(null);
-
-  $effect(() => {
-    const owner = client;
-    const target = hash;
-    view = null;
-    viewError = null;
-    runOpen = false;
-    runResult = null;
-    runError = null;
-    runEffects = null;
-    if (owner === null) {
-      viewError = "Not connected.";
-      return;
-    }
-    owner.command("view", { target }).then(
-      (result) => {
-        if (client !== owner || hash !== target) return;
-        try {
-          view = definitionView(result);
-        } catch (problem) {
-          viewError = `view ${short(target)}: ${reason(problem)}`;
-        }
-      },
-      (problem: unknown) => {
-        if (client === owner && hash === target) viewError = reason(problem);
-      },
-    );
-  });
 
   async function run() {
     const owner = client;

@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { untrack } from "svelte";
   /**
    * Source on the left, the component's wat on the right, joined by the DWARF line map: hovering
    * or clicking a source line lights every wat line compiled from it; clicking a wat line lights
@@ -10,6 +9,7 @@
   import type { DefinitionView } from "../../workbench/schema";
   import SourceView from "../SourceView.svelte";
   import WasmView from "../WasmView.svelte";
+  import { fetched } from "../fetched.svelte";
   import { displayedSource } from "../source";
   import {
     NO_DEBUG_INFO,
@@ -19,7 +19,7 @@
     watLinesFor,
     type WasmModule,
   } from "../wasm";
-  import { reason, short } from "./format";
+  import { short } from "./format";
   let {
     lang,
     componentHash,
@@ -36,8 +36,12 @@
     client: BoardClient | null;
   } = $props();
 
-  let module = $state.raw<WasmModule | null>(null);
-  let moduleError = $state<string | null>(null);
+  const loaded = fetched(
+    () => [client, componentHash],
+    (owner, hash) => (owner === null || hash === null ? null : owner.wasm(hash)),
+  );
+  const module = $derived(loaded.value);
+  const moduleError = $derived(loaded.error);
   let hotSource = $state<number | null>(null);
   let hotWat = $state<number[]>([]);
   /** Which side produced the current mark; the other side scrolls to follow. */
@@ -80,32 +84,14 @@
     null,
   );
 
-  // The module is fetched once per artifact. The parent spreads a fresh props
-  // object into this tab on every render, so this effect must key on the hash
-  // alone: re-running on an unchanged hash would wipe the reader's selection.
-  let requested: string | null = null;
+  // A different module starts with nothing marked.
   $effect(() => {
-    const hash = componentHash;
-    const owner = client;
-    if (hash === requested) return;
-    requested = hash;
-    untrack(() => {
-      module = null;
-      moduleError = null;
-      hotSource = null;
-      hotWat = [];
-      foreign = null;
-      pinned = null;
-    });
-    if (hash === null || owner === null) return;
-    owner.wasm(hash).then(
-      (loaded) => {
-        if (componentHash === hash && client === owner) module = loaded;
-      },
-      (problem: unknown) => {
-        if (componentHash === hash && client === owner) moduleError = reason(problem);
-      },
-    );
+    void module;
+    hotSource = null;
+    hotWat = [];
+    origin = null;
+    foreign = null;
+    pinned = null;
   });
 
   function markSource(line: number | null) {

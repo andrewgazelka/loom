@@ -6,6 +6,7 @@
   import type { BoardClient } from "../connect";
   import { rows as parseRows, type Row } from "../../workbench/schema";
   import RowsTable from "./RowsTable.svelte";
+  import { fetched } from "../fetched.svelte";
   import { identifier, reason } from "./format";
   let { id, client }: { id: string; client: BoardClient | null } = $props();
 
@@ -14,52 +15,56 @@
     count: number | null;
     countError: string | null;
   }
-  let tables = $state.raw<Table[] | null>(null);
-  let error = $state<string | null>(null);
+  type Count = { count: number; countError: null } | { count: null; countError: string };
   let chosen = $state<string | null>(null);
   let rows = $state.raw<Row[] | null>(null);
   let rowsError = $state<string | null>(null);
 
-  async function sql(owner: BoardClient, query: string): Promise<Row[]> {
-    return parseRows(await owner.command("sql", { id, query }), "sql");
+  async function sql(owner: BoardClient, actor: string, query: string): Promise<Row[]> {
+    return parseRows(await owner.command("sql", { id: actor, query }), "sql");
   }
 
-  $effect(() => {
-    const owner = client;
-    const actor = id;
-    tables = null;
-    error = null;
-    chosen = null;
-    rows = null;
-    rowsError = null;
-    if (owner === null) return;
-    (async () => {
-      const names = (
-        await sql(owner, "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
-      ).map((row) => {
-        if (typeof row.name !== "string") throw new Error("sqlite_master row without a name");
-        return row.name;
-      });
-      const listed: Table[] = names.map((name) => ({ name, count: null, countError: null }));
-      if (client === owner && id === actor) tables = listed;
-      await Promise.all(
-        listed.map(async (table, position) => {
-          let next: Table;
-          try {
-            const [row] = await sql(owner, `SELECT COUNT(*) AS n FROM ${identifier(table.name)}`);
-            if (!row || typeof row.n !== "number") throw new Error("COUNT(*) returned no number");
-            next = { ...table, count: row.n };
-          } catch (problem) {
-            next = { ...table, countError: reason(problem) };
-          }
-          if (client === owner && id === actor && tables)
-            tables = tables.map((item, index) => (index === position ? next : item));
-        }),
-      );
-    })().catch((problem: unknown) => {
-      if (client === owner && id === actor) error = reason(problem);
-    });
-  });
+  // Row counts land one table at a time, keyed by actor and table so a count for another
+  // actor (or a late one) never shows under this one.
+  let counts = $state<Record<string, Count>>({});
+  const countKey = (actor: string, name: string) => `${actor}\n${name}`;
+  async function count(owner: BoardClient, actor: string, name: string) {
+    let next: Count;
+    try {
+      const [row] = await sql(owner, actor, `SELECT COUNT(*) AS n FROM ${identifier(name)}`);
+      if (!row || typeof row.n !== "number") throw new Error("COUNT(*) returned no number");
+      next = { count: row.n, countError: null };
+    } catch (problem) {
+      next = { count: null, countError: reason(problem) };
+    }
+    counts = { ...counts, [countKey(actor, name)]: next };
+  }
+  const loaded = fetched(
+    () => [client, id],
+    (owner, actor) =>
+      owner === null
+        ? null
+        : sql(owner, actor, "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").then(
+            (listed): string[] => {
+              const names = listed.map((row) => {
+                if (typeof row.name !== "string")
+                  throw new Error("sqlite_master row without a name");
+                return row.name;
+              });
+              for (const name of names) void count(owner, actor, name);
+              return names;
+            },
+          ),
+  );
+  const error = $derived(loaded.error);
+  const tables = $derived<Table[] | null>(
+    loaded.value === null
+      ? null
+      : loaded.value.map((name) => ({
+          name,
+          ...(counts[countKey(id, name)] ?? { count: null, countError: null }),
+        })),
+  );
 
   function open(name: string) {
     const owner = client;
@@ -67,7 +72,7 @@
     chosen = name;
     rows = null;
     rowsError = null;
-    sql(owner, `SELECT * FROM ${identifier(name)} ORDER BY rowid DESC LIMIT 50`).then(
+    sql(owner, id, `SELECT * FROM ${identifier(name)} ORDER BY rowid DESC LIMIT 50`).then(
       (loaded) => {
         if (client === owner && chosen === name) rows = loaded;
       },

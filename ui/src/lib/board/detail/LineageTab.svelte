@@ -3,30 +3,19 @@
   import type { BoardClient } from "../connect";
   import { rows as parseRows, type Row } from "../../workbench/schema";
   import RowsTable from "./RowsTable.svelte";
-  import { reason } from "./format";
+  import { fetched } from "../fetched.svelte";
   let { id, client }: { id: string; client: BoardClient | null } = $props();
-  let rows = $state.raw<Row[] | null>(null);
-  let error = $state<string | null>(null);
-  $effect(() => {
-    const owner = client;
-    const actor = id;
-    rows = null;
-    error = null;
-    if (owner === null) return;
-    owner.command("lineage", { id: actor }).then(
-      (result) => {
-        if (client !== owner || id !== actor) return;
-        try {
-          rows = parseRows(result, "lineage");
-        } catch (problem) {
-          error = reason(problem);
-        }
-      },
-      (problem: unknown) => {
-        if (client === owner && id === actor) error = reason(problem);
-      },
-    );
-  });
+  const loaded = fetched(
+    () => [client, id],
+    (owner, actor) =>
+      owner === null
+        ? null
+        : owner
+            .command("lineage", { id: actor })
+            .then((result): Row[] => parseRows(result, "lineage")),
+  );
+  const rows = $derived(loaded.value);
+  const error = $derived(loaded.error);
 </script>
 
 {#if client === null}

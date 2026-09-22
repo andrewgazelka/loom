@@ -12,6 +12,7 @@
     type DefinitionDiff,
     type Revision,
   } from "../../workbench/schema";
+  import { fetched } from "../fetched.svelte";
   import { reason, short, stamp } from "./format";
   let {
     name,
@@ -29,35 +30,21 @@
     names: Record<string, string | null>;
   } = $props();
 
-  let revisions = $state.raw<Revision[] | null>(null);
-  let error = $state<string | null>(null);
+  const loaded = fetched(
+    () => [client, name],
+    (owner, target) =>
+      owner === null || target === null
+        ? null
+        : owner
+            .command("history", { name: target })
+            .then((result): Revision[] => [...parseHistory(result)].reverse()),
+  );
+  const revisions = $derived(loaded.value);
+  const error = $derived(loaded.error);
+  // Expanded revisions and their diffs are keyed by revision hash, valid across reconnects.
   let open = $state<Set<string>>(new Set());
   type Loaded = { diff: DefinitionDiff } | { error: string } | { loading: true };
   let diffs = $state<Record<string, Loaded>>({});
-
-  $effect(() => {
-    const owner = client;
-    const target = name;
-    revisions = null;
-    error = null;
-    open = new Set();
-    diffs = {};
-    if (owner === null || target === null) return;
-    owner.command("history", { name: target }).then(
-      (result) => {
-        if (client === owner && name === target) {
-          try {
-            revisions = [...parseHistory(result)].reverse();
-          } catch (problem) {
-            error = reason(problem);
-          }
-        }
-      },
-      (problem: unknown) => {
-        if (client === owner && name === target) error = reason(problem);
-      },
-    );
-  });
 
   /** The revision before `position` in the chain (older); `null` for the first revision. */
   function previous(position: number): Revision | null {

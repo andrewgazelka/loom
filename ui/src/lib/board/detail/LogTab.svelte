@@ -1,29 +1,19 @@
 <script lang="ts">
   /** The raw build log from the CAS, fetched once per component (the client caches it), monospace. */
   import type { BoardClient } from "../connect";
-  import { reason, short } from "./format";
+  import { fetched } from "../fetched.svelte";
+  import { short } from "./format";
   let {
     logsRef,
     componentHash,
     client,
   }: { logsRef: string | null; componentHash: string; client: BoardClient | null } = $props();
-  let log = $state<string | null>(null);
-  let error = $state<string | null>(null);
-  $effect(() => {
-    const owner = client;
-    const ref = logsRef;
-    log = null;
-    error = null;
-    if (owner === null || ref === null) return;
-    owner.text(ref).then(
-      (text) => {
-        if (client === owner && logsRef === ref) log = text;
-      },
-      (problem: unknown) => {
-        if (client === owner && logsRef === ref) error = reason(problem);
-      },
-    );
-  });
+  const loaded = fetched(
+    () => [client, logsRef],
+    (owner, ref) => (owner === null || ref === null ? null : owner.text(ref)),
+  );
+  const log = $derived(loaded.value);
+  const error = $derived(loaded.error);
   const lines = $derived(log === null ? [] : log.split("\n"));
 </script>
 

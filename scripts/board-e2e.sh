@@ -124,7 +124,7 @@ v=$(B eval "document.body.textContent.includes('order_by=')" 2>/dev/null | tr -d
 B open "$URL/#token=$LOOM_TOKEN" >/dev/null 2>&1; wait_dom "!!document.querySelector('[data-testid=board-status]')" 5 >/dev/null
 
 # 10 no console errors, and the old routes still work
-errs=$(B errors 2>&1 | grep -vE '^\s*$' | wc -l | tr -d ' '); [ "$errs" = 0 ]; check $? "no browser console errors" "$(B errors 2>&1 | head -c 300)"
+errs=$(B errors 2>&1 | grep -vE '^\s*$' | wc -l | tr -d ' '); [ "$errs" = 0 ]; check $? "no browser console errors" "$(B errors --json 2>&1 | head -c 600)"
 code=$(curl -sL -o /dev/null -w '%{http_code}' "$URL/workspace"); [ "$code" = 200 ]; check $? "/workspace serves the app (SPA fallback, redirects followed)" "http $code"
 code=$(curl -s -o /dev/null -w '%{http_code}' "$URL/view"); [ "$code" = 200 ]; check $? "/view serves the app (SPA fallback)" "http $code"
 code=$(curl -s -o /dev/null -w '%{http_code}' "$URL/missing.js"); [ "$code" = 404 ]; check $? "/missing.js stays 404" "http $code"
