@@ -40,6 +40,10 @@ pub(crate) struct Body {
     pub edits: Vec<Edit>,
 }
 
+/// wasm-ld's tombstone addresses for dead-stripped code, in the 32-bit form
+/// the linker writes and the 64-bit form a reader may widen them to.
+const TOMBSTONES: [u64; 4] = [0xffff_ffff, 0xffff_fffe, u64::MAX, u64::MAX - 1];
+
 /// Old-to-new address map for the code section, one entry per body in order.
 pub(crate) struct CodeMap {
     bodies: Vec<Body>,
@@ -58,6 +62,14 @@ impl CodeMap {
     pub(crate) fn translate(&self, address: u64) -> Option<u64> {
         if address == 0 {
             return Some(0);
+        }
+        // wasm-ld marks code it dead-stripped with tombstones instead of
+        // deleting the DWARF that described it: -1 in `.debug_ranges`,
+        // `.debug_rnglists` and `DW_AT_low_pc`, -2 for `.debug_line` sequences
+        // (lld/wasm/Relocations.cpp). A real module carries thousands. They are
+        // not addresses in this module and stay exactly as written.
+        if TOMBSTONES.contains(&address) {
+            return Some(address);
         }
         let index = self
             .bodies
@@ -269,6 +281,17 @@ mod tests {
         assert_eq!(map.translate(9), Some(27), "first body end");
         assert_eq!(map.translate(10), Some(29), "second body start");
         assert_eq!(map.translate(14), Some(33), "second body end");
+    }
+
+    #[test]
+    fn linker_tombstones_pass_through_unchanged() {
+        let map = map();
+        for tombstone in [0xffff_ffff_u64, 0xffff_fffe, u64::MAX, u64::MAX - 1] {
+            assert_eq!(map.translate(tombstone), Some(tombstone));
+        }
+        // An ordinary address past the last body is still refused.
+        let last_end = map.bodies.last().unwrap().old.end;
+        assert_eq!(map.translate(last_end + 1), None);
     }
 
     #[test]
