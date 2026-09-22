@@ -36,7 +36,7 @@ pub async fn evict_build_cache(builder: &Builder, policy: &CachePolicy) -> Resul
     );
     builder
         .with_cache_exclusive(|root| evict(root, policy))
-        .await
+        .await?
 }
 
 fn measure(path: &Path) -> Result<Entry> {
@@ -157,7 +157,7 @@ mod tests {
                 let mut context = std::task::Context::from_waker(waker);
                 assert!(std::future::Future::poll(eviction.as_mut(), &mut context).is_pending());
             })
-            .await;
+            .await?;
         assert!(evict_build_cache(&builder, &policy).await?.byte_limit_met);
         Ok(())
     }

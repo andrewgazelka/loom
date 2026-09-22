@@ -15,12 +15,18 @@
     count: number | null;
     countError: string | null;
   }
-  type Count = { count: number; countError: null } | { count: null; countError: string };
+  type Count =
+    | { count: number; countError: null }
+    | { count: null; countError: string };
   let chosen = $state<string | null>(null);
   let rows = $state.raw<Row[] | null>(null);
   let rowsError = $state<string | null>(null);
 
-  async function sql(owner: BoardClient, actor: string, query: string): Promise<Row[]> {
+  async function sql(
+    owner: BoardClient,
+    actor: string,
+    query: string,
+  ): Promise<Row[]> {
     return parseRows(await owner.command("sql", { id: actor, query }), "sql");
   }
 
@@ -31,8 +37,13 @@
   async function count(owner: BoardClient, actor: string, name: string) {
     let next: Count;
     try {
-      const [row] = await sql(owner, actor, `SELECT COUNT(*) AS n FROM ${identifier(name)}`);
-      if (!row || typeof row.n !== "number") throw new Error("COUNT(*) returned no number");
+      const [row] = await sql(
+        owner,
+        actor,
+        `SELECT COUNT(*) AS n FROM ${identifier(name)}`,
+      );
+      if (!row || typeof row.n !== "number")
+        throw new Error("COUNT(*) returned no number");
       next = { count: row.n, countError: null };
     } catch (problem) {
       next = { count: null, countError: reason(problem) };
@@ -44,17 +55,19 @@
     (owner, actor) =>
       owner === null
         ? null
-        : sql(owner, actor, "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").then(
-            (listed): string[] => {
-              const names = listed.map((row) => {
-                if (typeof row.name !== "string")
-                  throw new Error("sqlite_master row without a name");
-                return row.name;
-              });
-              for (const name of names) void count(owner, actor, name);
-              return names;
-            },
-          ),
+        : sql(
+            owner,
+            actor,
+            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name",
+          ).then((listed): string[] => {
+            const names = listed.map((row) => {
+              if (typeof row.name !== "string")
+                throw new Error("sqlite_master row without a name");
+              return row.name;
+            });
+            for (const name of names) void count(owner, actor, name);
+            return names;
+          }),
   );
   const error = $derived(loaded.error);
   const tables = $derived<Table[] | null>(
@@ -72,7 +85,11 @@
     chosen = name;
     rows = null;
     rowsError = null;
-    sql(owner, id, `SELECT * FROM ${identifier(name)} ORDER BY rowid DESC LIMIT 50`).then(
+    sql(
+      owner,
+      id,
+      `SELECT * FROM ${identifier(name)} ORDER BY rowid DESC LIMIT 50`,
+    ).then(
       (loaded) => {
         if (client === owner && chosen === name) rows = loaded;
       },
@@ -109,8 +126,9 @@
           }}
         >
           <span class="table-name">{table.name}</span>
-          {#if table.countError !== null}<span class="error-text" title={table.countError}
-              >count failed</span
+          {#if table.countError !== null}<span
+              class="error-text"
+              title={table.countError}>count failed</span
             >{:else if table.count === null}<span class="muted">…</span
             >{:else}<span class="numeric muted">{table.count} rows</span>{/if}
         </div>

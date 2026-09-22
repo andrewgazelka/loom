@@ -16,7 +16,14 @@ pub(super) struct Request<'a> {
     pub isolated: bool,
 }
 
-pub(super) async fn compile(request: Request<'_>) -> Result<(), BuildError> {
+/// The comment line `generate` writes between the guest source and the
+/// wrappers it appends. Its 1-based line in the compiled text is where the
+/// definition's own lines end and generated code begins.
+pub const WRAPPER_MARKER: &str = "// loom: generated entry wrappers follow";
+
+/// Compile the entry wrappers and return the exact text the compiler saw: the
+/// materialized source, the marker line, then the wrappers.
+pub(super) async fn compile(request: Request<'_>) -> Result<String, BuildError> {
     let Request {
         recipe,
         identity,
@@ -30,7 +37,7 @@ pub(super) async fn compile(request: Request<'_>) -> Result<(), BuildError> {
     let source_path = recipe.source.join("src/lib.rs");
     let source = fs::read_to_string(&source_path).await?;
     let generated = generate(&source, &contract)?;
-    fs::write(&source_path, generated).await?;
+    fs::write(&source_path, &generated).await?;
     let mut recipe = recipe.clone();
     recipe
         .arguments
@@ -77,30 +84,17 @@ pub(super) async fn compile(request: Request<'_>) -> Result<(), BuildError> {
             String::from_utf8_lossy(&output.stderr)
         )));
     }
-    Ok(())
-}
-
-/// The text the wrapper compile actually saw: the stored source followed by the
-/// generated `loom_call_<entry>` wrappers, so a DWARF line beyond the stored
-/// file's length names a wrapper line. Deterministic for a given source,
-/// entry table and schema.
-pub fn compiled_source(
-    source: &str,
-    entries: &BTreeMap<String, String>,
-    schema: Option<String>,
-) -> Result<String, BuildError> {
-    generate(
-        source,
-        &Contract {
-            entry: entries.clone(),
-            schema,
-        },
-    )
+    Ok(generated)
 }
 
 fn generate(source: &str, contract: &Contract) -> Result<String, BuildError> {
     let file = syn::parse_file(source).map_err(rejected)?;
     let mut generated = source.to_owned();
+    if !generated.ends_with('\n') {
+        generated.push('\n');
+    }
+    generated.push_str(WRAPPER_MARKER);
+    generated.push('\n');
     for name in contract.entry.keys() {
         let function = file
             .items

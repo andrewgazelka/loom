@@ -1,4 +1,6 @@
-# `bun test` runs from this directory (scripts/verify.ts, README); the preload compiles .svelte
-# imports so registry tests can load pane and tab descriptors that reference components.
+# Run tests as `bun run test` (= `bun test --conditions=browser`): without the browser condition
+# the bare "svelte" entry resolves to the server build, whose `untrack`, `tick` and `flushSync`
+# are stubs, so a test about tracking would pass for the wrong reason. The preload compiles
+# .svelte and .svelte.ts imports so registry tests can load pane and tab descriptors.
 [test]
 preload = ["./tests/svelte-loader.ts"]

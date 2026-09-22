@@ -7,7 +7,8 @@
   import { splitLines } from "./source";
   // Shiki (and its WASM engine) loads on first use, not on import: the registry tests import
   // this component without a browser.
-  const highlighter = () => import("../highlight").then((module) => module.highlighter);
+  const highlighter = () =>
+    import("../highlight").then((module) => module.highlighter);
   let {
     code,
     language,
@@ -30,25 +31,29 @@
     text: string;
     style: string;
   }
-  const plain = $derived(splitLines(code));
+  // Primitive deriveds: the parent may hand these down through an object it rebuilds on every
+  // render, and a derived that returns the same string stops that churn here.
+  const source = $derived(code);
+  const lang = $derived(language);
+  const plain = $derived(splitLines(source));
   let tokens = $state.raw<Token[][] | null>(null);
   let highlightError = $state("");
   let root = $state<HTMLElement | null>(null);
   let revision = 0;
 
   $effect(() => {
-    const source = code;
-    const lang = language;
+    const text = source;
+    const grammar = lang;
     const current = ++revision;
     tokens = null;
     highlightError = "";
-    if (lang === "text") return;
+    if (grammar === "text") return;
     highlighter().then(
       (engine) => {
         if (current !== revision) return;
         try {
-          const result = engine.codeToTokens(source, {
-            lang,
+          const result = engine.codeToTokens(text, {
+            lang: grammar,
             themes: { light: "github-light", dark: "github-dark" },
             defaultColor: false,
           });
@@ -88,7 +93,9 @@
   role="presentation"
   onmouseleave={() => onhover?.(null)}
 >
-  {#if highlightError}<div class="highlight-error" role="alert">{highlightError}</div>{/if}
+  {#if highlightError}<div class="highlight-error" role="alert">
+      {highlightError}
+    </div>{/if}
   {#each plain as text, index (index)}
     {@const line = index + 1}
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->

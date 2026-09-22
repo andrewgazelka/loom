@@ -64,10 +64,14 @@ impl CodeMap {
             return Some(0);
         }
         // wasm-ld marks code it dead-stripped with tombstones instead of
-        // deleting the DWARF that described it: -1 in `.debug_ranges`,
-        // `.debug_rnglists` and `DW_AT_low_pc`, -2 for `.debug_line` sequences
-        // (lld/wasm/Relocations.cpp). A real module carries thousands. They are
-        // not addresses in this module and stay exactly as written.
+        // deleting the DWARF that described it: -2 in `.debug_ranges` and
+        // `.debug_loc` (where -1 would read as a base-address selection entry),
+        // -1 everywhere else (`.debug_line` sequences, `DW_AT_low_pc`;
+        // lld/wasm/InputChunks.cpp getTombstoneForSection). A real module
+        // carries thousands. They are not addresses in this module and stay
+        // exactly as written; gimli then drops the dead line sequences and the
+        // empty range pairs they produce (write/line.rs, write/range.rs
+        // "Filtering empty ranges out").
         if TOMBSTONES.contains(&address) {
             return Some(address);
         }
@@ -229,18 +233,33 @@ fn convert_entry<'u, 'a>(
     convert_address: &dyn Fn(u64) -> Option<Address>,
     convert_error: &dyn Fn(gimli::write::ConvertError) -> String,
 ) -> Result<(), String> {
-    let low_pc =
-        entry
-            .attrs
-            .iter()
-            .find_map(|attribute| match (attribute.name(), attribute.value()) {
-                (gimli::DW_AT_low_pc, gimli::AttributeValue::Addr(address)) => Some(address),
-                _ => None,
-            });
+    let low_pc = entry
+        .attrs
+        .iter()
+        .find_map(|attribute| match (attribute.name(), attribute.value()) {
+            (gimli::DW_AT_low_pc, gimli::AttributeValue::Addr(address)) => Some(Ok(address)),
+            // DWARF 5 indexes `.debug_addr` instead of embedding the address.
+            (gimli::DW_AT_low_pc, gimli::AttributeValue::DebugAddrIndex(index)) => Some(
+                entry
+                    .read_unit
+                    .address(index)
+                    .map_err(|error| format!("DWARF DW_AT_low_pc address index: {error}")),
+            ),
+            _ => None,
+        })
+        .transpose()?;
     for attribute in &entry.attrs {
         let value = match (attribute.name(), attribute.udata_value(), low_pc) {
             (gimli::DW_AT_high_pc, Some(length), Some(low)) => {
                 AttributeValue::Udata(span(map, low, translate(map, low)?, length)?)
+            }
+            // A length with no anchor cannot be relocated; passing it through
+            // would leave a silently wrong span.
+            (gimli::DW_AT_high_pc, Some(_), None) => {
+                return Err(
+                    "DWARF DW_AT_high_pc is a length but the entry has no DW_AT_low_pc address"
+                        .into(),
+                );
             }
             _ => unit
                 .convert_attribute_value(entry.read_unit, attribute, convert_address)
@@ -272,10 +291,6 @@ fn span(map: &CodeMap, old_base: u64, new_base: u64, length: u64) -> Result<u64,
             "DWARF range {old_base:#x}+{length:#x} relocates to {end:#x}, before its start {new_base:#x}"
         )
     })
-}
-
-fn convert_error(error: gimli::write::ConvertError) -> String {
-    format!("DWARF conversion: {error}")
 }
 
 #[cfg(test)]
@@ -333,7 +348,7 @@ mod tests {
     }
 
     #[test]
-    fn addresses_that_are_not_instruction_boundaries_are_refused() {
+    fn addresses_inside_a_prefix_or_a_replaced_instruction_snap_to_the_next_boundary() {
         let map = map();
         assert_eq!(
             map.translate(7),

@@ -108,6 +108,12 @@ impl Service {
         );
         progress.stage("publish");
         let component_hash = self.store.put("component", &built.component)?;
+        let compiled = built
+            .compiled_source
+            .as_deref()
+            .context("builder returned a component without its compiled text")?;
+        self.store
+            .record_compiled_source(&component_hash, compiled)?;
         let logs_ref = self.store.put("blob", built.logs.as_bytes())?;
         let identity = built
             .identity

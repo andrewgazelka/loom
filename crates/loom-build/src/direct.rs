@@ -16,6 +16,9 @@ mod trusted_sources;
 
 pub(crate) struct Built {
     pub bytes: Vec<u8>,
+    /// The text the wrapper compile saw (`entry_abi::compile`); empty when the
+    /// build stopped at diagnostics.
+    pub compiled_source: String,
     pub logs: String,
     pub diagnostics: Vec<Diagnostic>,
     pub rustc_invocations: usize,
@@ -60,7 +63,7 @@ fn rejected(error: impl std::fmt::Display) -> BuildError {
 
 mod compile;
 mod entry_abi;
-pub use entry_abi::compiled_source;
+pub use entry_abi::WRAPPER_MARKER;
 mod recipe;
 pub(crate) use compile::{Request, build};
 mod graph;

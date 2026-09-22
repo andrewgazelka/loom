@@ -8,11 +8,9 @@ ROOT=$PWD
 TARGET=${CARGO_TARGET_DIR:-$ROOT/target}
 LOOMD=${LOOMD:-$TARGET/debug/loomd}
 LOOM=${LOOM:-$TARGET/debug/loom}
-PORT=${BOARD_E2E_PORT:-8798}
 SESSION=board-e2e-$$
 D=$(mktemp -d "${TMPDIR:-/tmp}/board-e2e.XXXXXX")
 export LOOM_TOKEN=board-token
-URL=http://127.0.0.1:$PORT
 export RUSTC=${RUSTC:-$HOME/.rustup/toolchains/nightly-2026-08-24-aarch64-apple-darwin/bin/rustc}
 export LOOM_HASH_RUSTC=${LOOM_HASH_RUSTC:-$ROOT/tools/hash-rustc/target/release/hash-rustc}
 pass=0; total=0
@@ -21,11 +19,16 @@ for bin in "$LOOMD" "$LOOM"; do [ -x "$bin" ] || { echo "missing executable $bin
 [ -f "$ROOT/ui/build/index.html" ] || { echo "ui/build missing: run bun run build in ui/"; echo "0/1"; exit 1; }
 command -v agent-browser >/dev/null || { echo "agent-browser is required"; echo "0/1"; exit 1; }
 mkdir -p "$D/actors" "$D/build"
-LOOM_BUILD_DIR=$D/build "$LOOMD" --db "$D/loom.sqlite" --actors-dir "$D/actors" --bind 127.0.0.1:$PORT --token "$LOOM_TOKEN" --root "$ROOT" > "$D/loomd.log" 2>&1 &
+# The daemon binds an ephemeral port and the script reads it back from the daemon's own
+# "listening on" line, so every check talks to this daemon and never to a leftover one.
+LOOM_BUILD_DIR=$D/build "$LOOMD" --db "$D/loom.sqlite" --actors-dir "$D/actors" --bind 127.0.0.1:${BOARD_E2E_PORT:-0} --token "$LOOM_TOKEN" --root "$ROOT" > "$D/loomd.log" 2>&1 &
 DPID=$!
 trap 'kill $DPID 2>/dev/null; agent-browser --session $SESSION close >/dev/null 2>&1; echo "state: $D"' EXIT
+PORT=
+for i in $(seq 1 100); do PORT=$(sed -n 's/^loomd listening on 127\.0\.0\.1:\([0-9]*\)$/\1/p' "$D/loomd.log" | head -1); [ -n "$PORT" ] && break; kill -0 $DPID 2>/dev/null || break; sleep 0.1; done
+[ -n "$PORT" ] || { echo "daemon did not report a listening port: $(tail -2 "$D/loomd.log")"; echo "0/1"; exit 1; }
+URL=http://127.0.0.1:$PORT
 for i in $(seq 1 100); do curl -s -o /dev/null "$URL/health" && break; sleep 0.1; done
-kill -0 $DPID 2>/dev/null || { echo "daemon exited at start (port $PORT busy?): $(tail -2 "$D/loomd.log")"; echo "0/1"; exit 1; }
 L() { "$LOOM" --url "$URL" "$@"; }
 J() { python3 -c "import json,sys; d=json.load(sys.stdin); print(eval(sys.argv[1]))" "$1"; }
 B() { agent-browser --session "$SESSION" "$@"; }
@@ -106,6 +109,15 @@ wait_dom "document.querySelectorAll('[data-testid=wasm-source] [data-line]').len
 first=$(B eval "(() => { const shown = document.querySelectorAll('[data-testid=wasm-source] [data-line]').length; const lines = [...document.querySelectorAll('[data-testid=detail-wasm] [data-src-line][data-src-file=\"src/lib.rs\"]')].map(e => Number(e.dataset.srcLine)).filter(n => n <= shown); return lines.length ? Math.min(...lines) : ''; })()" 2>/dev/null | tr -d '"')
 B eval "document.querySelector('[data-testid=wasm-source] [data-line=\"$first\"]').click(); 'ok'" >/dev/null 2>&1
 ms=$(wait_dom "document.querySelectorAll('[data-testid=detail-wasm] [data-src-line=\"$first\"].hot').length > 0" 2); check $? "clicking source line $first lights its wasm instructions (${ms} ms)" "no hot wat lines"
+# 7b a board event must not disturb the tab: an opened external function stays open and the
+# marked lines stay lit after two actor messages land (server cursor is the event witness).
+B eval "[...document.querySelectorAll('[data-testid=detail-wasm] .group.external .head')].find(h => h.getAttribute('aria-expanded') === 'false').click(); 'ok'" >/dev/null 2>&1
+opened=$(B eval "document.querySelectorAll('[data-testid=detail-wasm] .group.external .head[aria-expanded=true]').length" 2>/dev/null | tr -d '"')
+L send "$aid" 1 >/dev/null 2>&1; L send "$aid" 1 >/dev/null 2>&1
+for i in $(seq 1 30); do c=$(L actors 2>/dev/null | J "[a['cursor'] for a in d['result'] if a['id']=='$aid'][0]" 2>/dev/null); [ "$c" = 4 ] && break; sleep 0.1; done; sleep 1
+after=$(B eval "document.querySelectorAll('[data-testid=detail-wasm] .group.external .head[aria-expanded=true]').length" 2>/dev/null | tr -d '"')
+hot=$(B eval "document.querySelectorAll('[data-testid=detail-wasm] .hot').length" 2>/dev/null | tr -d '"')
+[ "$c" = 4 ] && [ "${opened:-0}" -ge 1 ] && [ "$after" = "$opened" ] && [ "${hot:-0}" -gt 0 ]; check $? "folds and marks survive board events (cursor $c, open $opened -> $after, hot $hot)" "cursor=$c opened=$opened after=$after hot=$hot"
 B eval "document.querySelector('[data-testid=detail-back]').click(); 'ok'" >/dev/null 2>&1
 ms=$(wait_dom "!document.querySelector('[data-testid=board-detail]') && !!document.querySelector('[data-kind=static]')" 2); check $? "back returns to the overview (${ms} ms)" "detail still open"
 
@@ -119,12 +131,12 @@ B eval "document.querySelector('[data-testid=detail-back]').click(); 'ok'" >/dev
 
 # 9 the workspace hides its parameter dumps by default
 B open "$URL/workspace" >/dev/null 2>&1
-ms=$(wait_dom "!!document.body && document.body.textContent.length > 0" 5) >/dev/null
-v=$(B eval "document.body.textContent.includes('order_by=')" 2>/dev/null | tr -d '"'); [ "$v" = "false" ]; check $? "workspace shows no parameter dump by default" "order_by= visible"
+ms=$(wait_dom "!!document.querySelector('[aria-label=\"Command workspace\"]') && document.querySelectorAll('[aria-label=\"Workspace explorer\"] li, [aria-label=\"Workspace explorer\"] [data-row]').length > 0" 5); rendered=$?
+v=$(B eval "document.body.textContent.includes('order_by=')" 2>/dev/null | tr -d '"'); [ "$rendered" = 0 ] && [ "$v" = "false" ]; check $? "workspace renders its explorer and shows no parameter dump by default" "rendered=$rendered order_by-visible=$v"
 B open "$URL/#token=$LOOM_TOKEN" >/dev/null 2>&1; wait_dom "!!document.querySelector('[data-testid=board-status]')" 5 >/dev/null
 
 # 10 no console errors, and the old routes still work
-errs=$(B errors 2>&1 | grep -vE '^\s*$' | wc -l | tr -d ' '); [ "$errs" = 0 ]; check $? "no browser console errors" "$(B errors --json 2>&1 | head -c 600)"
+errjson=$(B errors --json 2>&1); errs=$(printf '%s' "$errjson" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["data"]["errors"]))' 2>/dev/null); [ "$errs" = 0 ]; check $? "no browser console errors" "count=${errs:-unreadable} $(printf '%s' "$errjson" | head -c 600)"
 code=$(curl -sL -o /dev/null -w '%{http_code}' "$URL/workspace"); [ "$code" = 200 ]; check $? "/workspace serves the app (SPA fallback, redirects followed)" "http $code"
 code=$(curl -s -o /dev/null -w '%{http_code}' "$URL/view"); [ "$code" = 200 ]; check $? "/view serves the app (SPA fallback)" "http $code"
 code=$(curl -s -o /dev/null -w '%{http_code}' "$URL/missing.js"); [ "$code" = 404 ]; check $? "/missing.js stays 404" "http $code"

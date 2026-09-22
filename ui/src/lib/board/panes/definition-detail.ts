@@ -1,5 +1,5 @@
 import { FileCode2 } from "lucide-svelte";
-import { buildOf, dependentsOf } from "../feed";
+import { buildOf, dependentsOf, namesOf } from "../feed";
 import DefinitionDetail from "./DefinitionDetail.svelte";
 import { definePane, detailOf, type PaneIcon } from "./types";
 
@@ -28,9 +28,7 @@ export const pane = definePane({
                 name: model.definitions[hash]?.name ?? null,
               })),
       dependents: dependentsOf(model, selection.hash),
-      names: Object.fromEntries(
-        Object.values(model.definitions).map((item) => [item.hash, item.name]),
-      ),
+      names: namesOf(model),
       build: def === null ? null : (buildOf(model, def) ?? null),
     };
   },

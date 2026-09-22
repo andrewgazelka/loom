@@ -97,6 +97,23 @@ describe("fetched: one request per key", () => {
     h.stop();
   });
 
+  test("a signal read inside run is not a dependency: changing it does not fetch again", async () => {
+    const calls: number[] = [];
+    const h = harness({ client, id: "a" }, (owner, _id, noise) => {
+      if (owner === null) return null;
+      calls.push(noise());
+      return Promise.resolve("A");
+    });
+    await settle();
+    expect(calls).toEqual([0]);
+    h.poke();
+    h.poke();
+    await settle();
+    expect(calls).toEqual([0]);
+    expect(h.value).toBe("A");
+    h.stop();
+  });
+
   test("a run that throws synchronously reports the error instead of breaking the effect", async () => {
     const h = harness({ client, id: "a" }, () => {
       throw new Error("bad query");

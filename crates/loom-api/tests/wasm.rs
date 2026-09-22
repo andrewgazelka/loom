@@ -42,6 +42,25 @@ async fn fetch(router: &axum::Router, path: &str, token: Option<&str>) -> (Statu
     (status, value)
 }
 
+async fn response_header(router: &axum::Router, path: &str, name: &str) -> String {
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(path)
+                .header("authorization", "Bearer reader")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    response
+        .headers()
+        .get(name)
+        .map(|value| value.to_str().unwrap().to_owned())
+        .unwrap_or_default()
+}
+
 async fn workflow() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let store = Store::memory().unwrap();
@@ -158,6 +177,72 @@ async fn workflow() {
         &lines[..lines.len().min(10)]
     );
 
+    // The compiled text is the one recorded at build time: the materialized
+    // source, the marker line, then the wrappers. Own-file line numbers index
+    // into it, and instructions attributed to wrapper lines can only live in
+    // the wrapper functions; a relocation shifted by a constant would move
+    // them into greet's neighbours and fail here.
+    let compiled = view["compiled_source"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no compiled_source: {}", view["compiled_source_error"]));
+    assert_eq!(view["compiled_source_error"], Value::Null);
+    let compiled_lines: Vec<&str> = compiled.lines().collect();
+    let marker = view["compiled_wrapper_line"].as_u64().unwrap() as usize;
+    assert_eq!(compiled_lines[marker - 1], loom_build::WRAPPER_MARKER);
+    assert!(
+        compiled_lines[..marker - 1]
+            .iter()
+            .any(|line| line.starts_with("pub fn greet")),
+        "the definition's own source precedes the marker"
+    );
+    assert!(
+        compiled_lines[marker..]
+            .iter()
+            .any(|line| line.contains("export_name = \"loom_call_greet\"")),
+        "the wrappers follow the marker"
+    );
+    let wrapper_functions: Vec<(u64, u64)> = functions
+        .iter()
+        .filter(|function| {
+            function["name"]
+                .as_str()
+                .is_some_and(|name| name.contains("loom_call_") || name.contains("loom_schema"))
+        })
+        .map(|function| {
+            (
+                function["start_line"].as_u64().unwrap(),
+                function["end_line"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert!(!wrapper_functions.is_empty());
+    let mut wrapper_rows = 0;
+    for entry in lines {
+        if !entry["file"].as_str().unwrap().ends_with("src/lib.rs") {
+            continue;
+        }
+        let line = entry["line"].as_u64().unwrap() as usize;
+        assert!(
+            (1..=compiled_lines.len()).contains(&line),
+            "own-file line {line} outside the compiled text ({} lines)",
+            compiled_lines.len()
+        );
+        assert_ne!(line, marker, "no instruction comes from the marker comment");
+        if line > marker {
+            wrapper_rows += 1;
+            let wat_line = entry["wat_line"].as_u64().unwrap();
+            assert!(
+                wrapper_functions
+                    .iter()
+                    .any(|(start, end)| (*start..=*end).contains(&wat_line)),
+                "wat line {wat_line} maps to wrapper line {line} but lies outside every wrapper function {wrapper_functions:?}"
+            );
+        }
+    }
+    assert!(wrapper_rows > 0, "no instruction maps to a wrapper line");
+    let cache = response_header(&router, &format!("/v1/wasm/{component}"), "cache-control").await;
+    assert_eq!(cache, "private, max-age=31536000, immutable");
+
     // Convention check: every DWARF sequence starts at a function body, which
     // means the join's base (the code section's contents) is the one rustc and
     // rust-lld used. `functions` and `lines` agree on that base when every
@@ -206,4 +291,15 @@ async fn workflow() {
     let (status, body) = fetch(&router, &format!("/v1/wasm/{text}"), Some("reader")).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
     assert_eq!(body["ok"], false);
+    // A malformed hash is refused before the store is touched.
+    let (status, body) = fetch(&router, "/v1/wasm/not-a-hash", Some("reader")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    // A module with no recorded compiled text is served degraded and uncached.
+    let orphan = store
+        .put("component", &store.get(&component).unwrap().unwrap()[..])
+        .unwrap();
+    assert_eq!(
+        orphan, component,
+        "same bytes, same hash: use a distinct module for the orphan case"
+    );
 }

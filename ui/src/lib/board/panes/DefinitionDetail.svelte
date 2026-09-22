@@ -91,8 +91,8 @@
 
 {#if def === null}
   <div class="note">
-    Definition {short(hash)} is not in the journal this board has read. It may predate the
-    snapshot or the hash may be wrong.
+    Definition {short(hash)} is not in the journal this board has read. It may predate
+    the snapshot or the hash may be wrong.
     <a class="header-link" href={workspaceHref}>open in workspace</a>
   </div>
 {:else}
@@ -100,8 +100,9 @@
     <h1 class="name">{def.name ?? short(def.hash)}</h1>
     <span class="muted">{def.lang}</span>
     <span class="pill mono" title={def.hash}>{short(def.hash)}</span>
-    {#each def.effects as label (label)}<span class="pill effect" class:call={label === "call"}
-        >{label}</span
+    {#each def.effects as label (label)}<span
+        class="pill effect"
+        class:call={label === "call"}>{label}</span
       >{/each}
     {#if deps.length}
       <span class="muted">deps</span>
@@ -119,11 +120,13 @@
     {/if}
     <span
       class="muted"
-      title={dependents.map((item) => item.name ?? short(item.hash)).join(", ") || "none"}
+      title={dependents
+        .map((item) => item.name ?? short(item.hash))
+        .join(", ") || "none"}
       >{dependents.length} dependent{dependents.length === 1 ? "" : "s"}</span
     >
-    {#if build?.ms !== null && build?.ms !== undefined}<span class="muted numeric"
-        >built in {build.ms} ms</span
+    {#if build?.ms !== null && build?.ms !== undefined}<span
+        class="muted numeric">built in {build.ms} ms</span
       >{/if}
     <span class="push"></span>
     <button
@@ -158,9 +161,13 @@
       <button type="submit" class="action" disabled={runBusy || client === null}
         >{runBusy ? "Running…" : "Enter to run"}</button
       >
-      {#if runError !== null}<span class="error-text" role="alert">{runError}</span>{/if}
-      {#if runResult !== null}<pre class="run-result" data-testid="detail-run-result">{runResult}</pre
-        >{#if runEffects !== null}<span class="muted"
+      {#if runError !== null}<span class="error-text" role="alert"
+          >{runError}</span
+        >{/if}
+      {#if runResult !== null}<pre
+          class="run-result"
+          data-testid="detail-run-result">{runResult}</pre>
+        {#if runEffects !== null}<span class="muted"
             >{runEffects} effect{runEffects === 1 ? "" : "s"}</span
           >{/if}{/if}
     </form>

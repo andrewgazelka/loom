@@ -210,13 +210,14 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
                 }
                 return Ok(Built {
                     bytes: Vec::new(),
+                    compiled_source: String::new(),
                     logs,
                     diagnostics,
                     rustc_invocations: repairs + 1,
                     stages,
                 });
             }
-            super::entry_abi::compile(super::entry_abi::Request {
+            let compiled_source = super::entry_abi::compile(super::entry_abi::Request {
                 recipe: &recipe,
                 identity: identity_directory,
                 root,
@@ -231,6 +232,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
             stages.checkpoint("identity_publish_ms");
             return Ok(Built {
                 bytes,
+                compiled_source,
                 logs,
                 diagnostics,
                 rustc_invocations: repairs + 2,
@@ -307,6 +309,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
         }
         return Ok(Built {
             bytes: Vec::new(),
+            compiled_source: String::new(),
             logs,
             diagnostics,
             rustc_invocations,
@@ -356,7 +359,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
         )));
     }
     stages.checkpoint("root_rustc_ms");
-    super::entry_abi::compile(super::entry_abi::Request {
+    let compiled_source = super::entry_abi::compile(super::entry_abi::Request {
         recipe: &root_recipe,
         identity: identity_directory,
         root,
@@ -422,6 +425,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
     stages.checkpoint("identity_publish_ms");
     Ok(Built {
         bytes,
+        compiled_source,
         logs,
         diagnostics,
         rustc_invocations: rustc_invocations + 2,

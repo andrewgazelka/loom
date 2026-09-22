@@ -6,11 +6,22 @@
    */
   import Segmented from "../Segmented.svelte";
   import type { Selection } from "../selection";
+  import { memo, sameRecord } from "../stable.svelte";
   import { tabsFor, type DetailContext } from "./tabs";
-  let { selection, context }: { selection: Selection; context: DetailContext } = $props();
+  let { selection, context }: { selection: Selection; context: DetailContext } =
+    $props();
   const available = $derived(tabsFor(selection));
   let chosen = $state<string | null>(null);
-  const active = $derived(available.find((tab) => tab.id === chosen) ?? available[0] ?? null);
+  const active = $derived(
+    available.find((tab) => tab.id === chosen) ?? available[0] ?? null,
+  );
+  // The parent rebuilds `context` on every board event; the tab sees a new props object only
+  // when one of the values its `select` picked actually changed.
+  const tabProps = memo(
+    (): Record<string, unknown> =>
+      active === null ? {} : active.select(context),
+    sameRecord,
+  );
 </script>
 
 {#if available.length}
@@ -25,7 +36,7 @@
   {#if active}
     {@const Tab = active.component}
     <div class="tab-body" data-tab-body={active.id}>
-      <Tab {...active.select(context)} />
+      <Tab {...tabProps.value} />
     </div>
   {/if}
 {/if}

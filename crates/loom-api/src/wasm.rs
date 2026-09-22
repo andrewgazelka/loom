@@ -17,66 +17,23 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use wasmparser::{ExternalKind, KnownCustom, Name, Parser, Payload, TypeRef};
 
-/// The exact text the wrapper compile saw for the definition whose build
-/// produced `component_hash`: the checker's normalized reprint of the stored
-/// source (what materialization writes to `src/lib.rs`) followed by the
-/// generated entry wrappers from the identity document's `entry` table and
-/// `schema`.
-pub(crate) async fn compiled_source_for(
-    service: &crate::Service,
+/// The text `component_hash` was compiled from, as the builder recorded it at
+/// build time, and the 1-based line of `loom_build::WRAPPER_MARKER` in it:
+/// lines before the marker are the definition's own, lines after it are the
+/// generated entry wrappers. An artifact built before the text was recorded
+/// has none; the caller reports that rather than guessing.
+pub(crate) fn compiled_source(
+    store: &loom_store::Store,
     component_hash: &str,
 ) -> Result<(String, u32)> {
-    let store = &service.store;
-    let definition = store
-        .definitions()?
-        .into_iter()
-        .find(|def| def.component_hash.as_deref() == Some(component_hash))
-        .context("no stored definition was built into this artifact")?;
-    let stored = store
-        .source(&definition.hash)?
-        .context("definition source missing")?;
-    let name = store
-        .definition_name(&definition.hash)?
-        .unwrap_or_else(|| definition.hash.clone());
-    let checked = service
-        .checker
-        .check_with_signatures(
-            &loom_proto::DefineRequest {
-                lang: definition.lang,
-                name,
-                source: stored,
-                deps: BTreeMap::new(),
-                allowed_effects: definition.allowed_effects.clone(),
-            },
-            &BTreeMap::new(),
-        )
-        .await
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
-    let source = if checked.source.trim_start().starts_with('{') {
-        let bundle: serde_json::Value = serde_json::from_str(&checked.source)?;
-        let file = &bundle["files"]["src/lib.rs"];
-        file.as_str()
-            .or_else(|| file["text"].as_str())
-            .map(str::to_owned)
-            .context("source bundle has no text src/lib.rs")?
-    } else {
-        checked.source
-    };
-    let identity = store
-        .build_identity(&definition.hash)?
-        .context("definition has no build identity")?;
-    let document: serde_json::Value = serde_json::from_slice(
-        &store
-            .get(&identity.item_hashes_ref)?
-            .context("item document missing from CAS")?,
-    )?;
-    let entries: BTreeMap<String, String> = serde_json::from_value(document["entry"].clone())
-        .context("item document has no entry table")?;
-    let schema = document["schema"].as_str().map(str::to_owned);
-    let wrapper_line = source.lines().count() as u32 + 1;
-    let text = loom_build::compiled_source(&source, &entries, schema)
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
-    Ok((text, wrapper_line))
+    let text = store
+        .compiled_source(component_hash)?
+        .context("no compiled text recorded for this artifact; rebuild the definition")?;
+    let marker = text
+        .lines()
+        .position(|line| line == loom_build::WRAPPER_MARKER)
+        .context("recorded compiled text has no wrapper marker line")?;
+    Ok((text, marker as u32 + 1))
 }
 
 /// Largest module the text view renders.
@@ -92,14 +49,15 @@ pub(crate) struct WasmView {
     pub lines: Vec<Line>,
     /// Whether the module carries `.debug_*` sections at all.
     pub debug: bool,
-    /// The text the compiler saw for this artifact: the stored source followed
-    /// by the generated entry wrappers, so every `lines[].line` for the
-    /// definition's own file indexes into it. `None` when the artifact belongs
-    /// to no stored definition or the wrappers cannot be regenerated; the
-    /// reason is in `compiled_source_error`.
+    /// The text the compiler saw for this artifact, recorded at build time:
+    /// the materialized source, one marker line, then the generated entry
+    /// wrappers, so every `lines[].line` for the definition's own file indexes
+    /// into it. `None` when no text was recorded for the artifact; the reason
+    /// is in `compiled_source_error`.
     pub compiled_source: Option<String>,
     pub compiled_source_error: Option<String>,
-    /// 1-based line of `compiled_source` where the generated wrappers begin.
+    /// 1-based line of the marker in `compiled_source`: the last line that is
+    /// not the definition's own source, after which the wrappers begin.
     pub compiled_wrapper_line: Option<u32>,
 }
 

@@ -43,7 +43,10 @@
   const error = $derived(loaded.error);
   // Expanded revisions and their diffs are keyed by revision hash, valid across reconnects.
   let open = $state<Set<string>>(new Set());
-  type Loaded = { diff: DefinitionDiff } | { error: string } | { loading: true };
+  type Loaded =
+    | { diff: DefinitionDiff }
+    | { error: string }
+    | { loading: true };
   let diffs = $state<Record<string, Loaded>>({});
 
   /** The revision before `position` in the chain (older); `null` for the first revision. */
@@ -67,13 +70,17 @@
       (result) => {
         if (client !== owner) return;
         try {
-          diffs = { ...diffs, [revision.hash]: { diff: definitionDiff(result) } };
+          diffs = {
+            ...diffs,
+            [revision.hash]: { diff: definitionDiff(result) },
+          };
         } catch (problem) {
           diffs = { ...diffs, [revision.hash]: { error: reason(problem) } };
         }
       },
       (problem: unknown) => {
-        if (client === owner) diffs = { ...diffs, [revision.hash]: { error: reason(problem) } };
+        if (client === owner)
+          diffs = { ...diffs, [revision.hash]: { error: reason(problem) } };
       },
     );
   }
@@ -88,11 +95,19 @@
 {:else if revisions === null}
   <div class="note">Loading history of {name}…</div>
 {:else}
-  <div class="chain" role="list" aria-label={`Revisions of ${name}, newest first`}>
+  <div
+    class="chain"
+    role="list"
+    aria-label={`Revisions of ${name}, newest first`}
+  >
     {#each revisions as revision, position (revision.hash)}
       {@const older = previous(position)}
       {@const loaded = diffs[revision.hash]}
-      <div class="revision" role="listitem" class:current={revision.hash === hash}>
+      <div
+        class="revision"
+        role="listitem"
+        class:current={revision.hash === hash}
+      >
         <div class="row">
           <button
             type="button"
@@ -100,9 +115,9 @@
             aria-expanded={open.has(revision.hash)}
             aria-label={`${open.has(revision.hash) ? "Collapse" : "Expand"} revision ${short(revision.hash)}`}
             onclick={() => toggle(revision, position)}
-            >{#if open.has(revision.hash)}<ChevronDown size={12} />{:else}<ChevronRight
+            >{#if open.has(revision.hash)}<ChevronDown
                 size={12}
-              />{/if}</button
+              />{:else}<ChevronRight size={12} />{/if}</button
           >
           <button
             type="button"
@@ -128,20 +143,25 @@
             {:else}
               {@const diff = loaded.diff}
               {#if !diff.added.length && !diff.removed.length && !diff.changed.length}
-                <span class="muted">No item changed against {short(older.hash)}.</span>
+                <span class="muted"
+                  >No item changed against {short(older.hash)}.</span
+                >
               {/if}
               {#each diff.changed as item (item.name)}<div class="change">
-                  <span class="kind">changed</span><span class="item">{item.name}</span><span
-                    class="muted">{short(item.old)} → {short(item.new)}</span
+                  <span class="kind">changed</span><span class="item"
+                    >{item.name}</span
+                  ><span class="muted"
+                    >{short(item.old)} → {short(item.new)}</span
                   >
                 </div>{/each}
               {#each diff.added as item (item.name)}<div class="change">
-                  <span class="kind added">added</span><span class="item">{item.name}</span><span
-                    class="muted">{short(item.hash)}</span
-                  >
+                  <span class="kind added">added</span><span class="item"
+                    >{item.name}</span
+                  ><span class="muted">{short(item.hash)}</span>
                 </div>{/each}
               {#each diff.removed as item (item.name)}<div class="change">
-                  <span class="kind removed">removed</span><span class="item">{item.name}</span
+                  <span class="kind removed">removed</span><span class="item"
+                    >{item.name}</span
                   ><span class="muted">{short(item.hash)}</span>
                 </div>{/each}
             {/if}

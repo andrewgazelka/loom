@@ -44,7 +44,7 @@ async fn workflow() -> anyhow::Result<()> {
                 .join(version_hash)
                 .join("release/hash-rustc")
         })
-        .await
+        .await?
         .canonicalize()?;
     assert!(driver.is_file(), "prebuilt driver {}", driver.display());
 

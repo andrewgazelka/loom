@@ -4,6 +4,7 @@
    * collapse to one header line. Every drawn wat line is `[data-wat-line=N]` and, when the line
    * map covers it, carries `data-src-line` and `data-src-file`.
    */
+  import { untrack } from "svelte";
   import { ChevronDown, ChevronRight } from "lucide-svelte";
   import {
     OWN_FILE,
@@ -32,15 +33,26 @@
 
   const lines = $derived(splitLines(module.wat));
   const index = $derived(indexLines(module.lines));
-  const groups = $derived(groupFunctions(module.functions, exports, lines.length));
+  // `exports` arrives through a props object the parent rebuilds per board event; the same
+  // array reference passes through this derived unchanged, so `groups` recomputes only when
+  // the module or the export list really changed.
+  const exportNames = $derived(exports);
+  const groups = $derived(
+    groupFunctions(module.functions, exportNames, lines.length),
+  );
   let expanded = $state<Set<string>>(new Set());
   let root = $state<HTMLElement | null>(null);
   const hotSet = $derived(new Set(hot));
   const width = $derived(String(lines.length).length);
 
-  // A new module resets the fold state to "own functions open".
+  // A new module resets the fold state to "own functions open"; nothing else does.
   $effect(() => {
-    expanded = new Set(groups.filter((group) => group.own).map((group) => group.key));
+    void module;
+    expanded = new Set(
+      untrack(() => groups)
+        .filter((group) => group.own)
+        .map((group) => group.key),
+    );
   });
   // A hot line inside a collapsed function opens it, then the first hot line scrolls into view.
   $effect(() => {
@@ -81,11 +93,11 @@
         aria-expanded={open}
         data-function={group.fn?.index ?? ""}
         onclick={() => toggle(group)}
-        >{#if open}<ChevronDown size={12} />{:else}<ChevronRight size={12} />{/if}<span
-          class="fn-name"
-          title={group.label}>{group.label}</span
-        >{#if group.fn?.exported}<span class="tag">export</span>{/if}<span class="muted numeric"
-          >{group.end - group.start + 1} lines</span
+        >{#if open}<ChevronDown size={12} />{:else}<ChevronRight
+            size={12}
+          />{/if}<span class="fn-name" title={group.label}>{group.label}</span
+        >{#if group.fn?.exported}<span class="tag">export</span>{/if}<span
+          class="muted numeric">{group.end - group.start + 1} lines</span
         ></button
       >
       {#if open}

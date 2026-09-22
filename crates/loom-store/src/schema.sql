@@ -32,3 +32,4 @@ CREATE TABLE IF NOT EXISTS machine_roots(id TEXT PRIMARY KEY,root TEXT NOT NULL,
 CREATE TABLE IF NOT EXISTS update_sessions(id TEXT PRIMARY KEY,revision INTEGER NOT NULL CHECK(revision >= 0),state TEXT NOT NULL CHECK(json_valid(state)));
 
 CREATE TABLE IF NOT EXISTS formatted_sources(source_hash TEXT PRIMARY KEY REFERENCES cas(hash),formatted_hash TEXT NOT NULL REFERENCES cas(hash));
+CREATE TABLE IF NOT EXISTS compiled_sources(component_hash TEXT PRIMARY KEY REFERENCES cas(hash),compiled_hash TEXT NOT NULL REFERENCES cas(hash));

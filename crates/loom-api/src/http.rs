@@ -310,6 +310,12 @@ async fn wasm(
 ) -> HttpResponse {
     let service = &s.service;
     let fetched = (|| -> Result<Fetched> {
+        // Shape first: a durable barrier per request is not something a
+        // malformed path should be able to trigger.
+        ensure!(
+            hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "artifact hash must be 64 hex characters"
+        );
         service.store.flush()?;
         let Some(entry) = service.store.cas_entry(&hash)? else {
             return Ok(Fetched::Missing);
@@ -352,7 +358,7 @@ async fn wasm(
         .and_then(|view| view);
     let view = match view {
         Ok(mut view) => {
-            match crate::wasm::compiled_source_for(service, &hash).await {
+            match crate::wasm::compiled_source(&service.store, &hash) {
                 Ok((text, wrapper_line)) => {
                     view.compiled_source = Some(text);
                     view.compiled_wrapper_line = Some(wrapper_line);
@@ -365,10 +371,18 @@ async fn wasm(
     };
     match view {
         Ok(view) => {
+            // The whole body is a function of the artifact once its compiled
+            // text is recorded; a body missing that text may gain it later
+            // and must not be kept.
+            let cache = if view.compiled_source_error.is_some() {
+                "no-store"
+            } else {
+                "private, max-age=31536000, immutable"
+            };
             let mut response = Json(view).into_response();
             response.headers_mut().insert(
                 axum::http::header::CACHE_CONTROL,
-                axum::http::HeaderValue::from_static("private, max-age=31536000, immutable"),
+                axum::http::HeaderValue::from_static(cache),
             );
             response
         }

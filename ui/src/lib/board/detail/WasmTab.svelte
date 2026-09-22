@@ -38,7 +38,8 @@
 
   const loaded = fetched(
     () => [client, componentHash],
-    (owner, hash) => (owner === null || hash === null ? null : owner.wasm(hash)),
+    (owner, hash) =>
+      owner === null || hash === null ? null : owner.wasm(hash),
   );
   const module = $derived(loaded.value);
   const moduleError = $derived(loaded.error);
@@ -49,22 +50,27 @@
   let foreign = $state<string | null>(null);
 
   const language = $derived<CodeLanguage>(
-    lang === "rust" || lang === "typescript" || lang === "javascript" ? lang : "text",
+    lang === "rust" || lang === "typescript" || lang === "javascript"
+      ? lang
+      : "text",
   );
-  // The line table indexes the text the compiler saw: the stored bytes plus the
-  // generated entry wrappers. Prefer the server's reconstruction of exactly
-  // that; fall back to the stored bytes (never the rustfmt rendering).
+  // The line table indexes the text the compiler saw, which the server recorded
+  // at build time. Only when the artifact has no recorded text does the tab fall
+  // back to the stored bytes (never the rustfmt rendering), and only then does
+  // the `view` request matter here.
   const code = $derived(
-    view === null
-      ? null
-      : module?.compiledSource != null
-        ? {
-            code: module.compiledSource,
-            note: `Source as compiled: the checker's normalized reprint, then the generated entry wrappers${
-              module.compiledWrapperLine === null ? "" : ` from line ${module.compiledWrapperLine}`
-            }.`,
-            formatted: false,
-          }
+    module?.compiledSource != null
+      ? {
+          code: module.compiledSource,
+          note: `Source as compiled${
+            module.compiledWrapperLine === null
+              ? ""
+              : `; generated entry wrappers follow the marker on line ${module.compiledWrapperLine}`
+          }.`,
+          formatted: false,
+        }
+      : view === null
+        ? null
         : displayedSource(
             {
               lang,
@@ -75,14 +81,19 @@
             true,
           ),
   );
+  const fallbackError = $derived(
+    module?.compiledSource == null ? viewError : null,
+  );
   const index = $derived(module === null ? null : indexLines(module.lines));
-  const mapped = $derived(module !== null && module.debug && module.lines.length > 0);
+  const mapped = $derived(
+    module !== null && module.debug && module.lines.length > 0,
+  );
 
   // A click pins a selection; hovering shows a transient one and, on leaving,
   // returns to the pinned selection instead of clearing everything.
-  let pinned = $state<{ kind: "source"; line: number } | { kind: "wasm"; watLine: number } | null>(
-    null,
-  );
+  let pinned = $state<
+    { kind: "source"; line: number } | { kind: "wasm"; watLine: number } | null
+  >(null);
 
   // A different module starts with nothing marked.
   $effect(() => {
@@ -142,11 +153,7 @@
   }
 </script>
 
-<div
-  class="wasm-tab"
-  data-testid="detail-wasm"
-  data-debug={module?.debug}
->
+<div class="wasm-tab" data-testid="detail-wasm" data-debug={module?.debug}>
   {#if componentHash === null}
     <div class="note">No compiled component for this definition.</div>
   {:else if client === null}
@@ -161,8 +168,8 @@
         >{:else if !mapped}<span class="muted"
           >Debug info present, but the line map is empty.</span
         >{:else}<span class="muted"
-          >{module.functions.length} functions · {module.lines.length} mapped lines · hover or click a
-          source line</span
+          >{module.functions.length} functions · {module.lines.length} mapped lines
+          · hover or click a source line</span
         >{/if}
       {#if foreign !== null}<span class="foreign">{foreign}</span>{/if}
       {#if code?.note}<span class="muted">{code.note}</span>{/if}
@@ -172,9 +179,11 @@
     </div>
     <div class="columns">
       <div class="column source-column">
-        {#if viewError !== null}<div class="error" role="alert">{viewError}</div
-          >{:else if code === null}<div class="note">Loading source…</div
-          >{:else}<SourceView
+        {#if fallbackError !== null}<div class="error" role="alert">
+            {fallbackError}
+          </div>{:else if code === null}<div class="note">
+            Loading source…
+          </div>{:else}<SourceView
             code={code.code}
             {language}
             testid="wasm-source"

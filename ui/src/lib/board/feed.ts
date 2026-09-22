@@ -103,7 +103,9 @@ export function parseJournalEvent(value: unknown): JournalEvent {
   if (typeof row.ts !== "number")
     throw new Error(`journal event ${String(row.seq)}: ts must be a number`);
   if (typeof row.event !== "object" || row.event === null)
-    throw new Error(`journal event ${String(row.seq)}: event must be an object`);
+    throw new Error(
+      `journal event ${String(row.seq)}: event must be an object`,
+    );
   return {
     seq: row.seq as number,
     ts: row.ts,
@@ -326,12 +328,16 @@ export function definitionByComponent(
   );
 }
 export function buildOf(model: Model, def: Definition): Build | undefined {
-  return def.componentHash === null ? undefined : model.builds[def.componentHash];
+  return def.componentHash === null
+    ? undefined
+    : model.builds[def.componentHash];
 }
 /** Definitions whose `deps` name `hash`, sorted by name then hash. */
 export function dependentsOf(model: Model, hash: string): Definition[] {
   return Object.values(model.definitions)
-    .filter((def) => def.hash !== hash && Object.values(def.deps).includes(hash))
+    .filter(
+      (def) => def.hash !== hash && Object.values(def.deps).includes(hash),
+    )
     .sort((a, b) => {
       const ka = `${a.name ?? "￿"}\n${a.hash}`;
       const kb = `${b.name ?? "￿"}\n${b.hash}`;
@@ -435,6 +441,27 @@ export type RowTarget =
   | { kind: "actor"; id: string }
   | { kind: "build"; hash: string }
   | { kind: "run"; scope: string };
+/**
+ * Definition hash to name for every definition the board knows, one object per distinct
+ * `definitions` table: the reducer replaces that table only when a definition changes, so
+ * consumers keyed on identity (the detail tabs) see the same map across unrelated events.
+ */
+const NAMES = new WeakMap<
+  Record<string, Definition>,
+  Record<string, string | null>
+>();
+export function namesOf(model: Model): Record<string, string | null> {
+  let names = NAMES.get(model.definitions);
+  if (names === undefined) {
+    const built: Record<string, string | null> = Object.fromEntries(
+      Object.values(model.definitions).map((item) => [item.hash, item.name]),
+    );
+    NAMES.set(model.definitions, built);
+    return built;
+  }
+  return names;
+}
+
 /** What clicking a feed row opens: the build, the run, the actor, or the definition it names. */
 export function targetOfRow(model: Model, row: FeedRow): RowTarget | null {
   const summary = summarize(model, row);

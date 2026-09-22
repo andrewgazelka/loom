@@ -15,7 +15,7 @@ pub use intake::Preparation;
 mod materialize;
 use materialize::{Materialization, materialize_rust};
 mod direct;
-pub use direct::compiled_source;
+pub use direct::WRAPPER_MARKER;
 mod dwarf;
 mod handler_dependencies;
 mod manifest;
@@ -166,6 +166,11 @@ pub struct Builder {
 pub struct BuildOutput {
     pub identity: Option<loom_proto::BuildIdentity>,
     pub component: Vec<u8>,
+    /// The exact text the compiler saw for `component`: the materialized
+    /// source, `WRAPPER_MARKER`, then the generated entry wrappers. DWARF line
+    /// numbers for the definition's own file index into it. `None` when the
+    /// build stopped at diagnostics.
+    pub compiled_source: Option<String>,
     pub ms: u64,
     pub logs: String,
     pub diagnostics: Vec<Diagnostic>,
@@ -246,7 +251,9 @@ impl Builder {
     pub async fn format_rust(&self, source: &str) -> Result<String, BuildError> {
         let (toolchain, _) = self.prepared().await?;
         let rustfmt = toolchain.sysroot.join("bin/rustfmt");
-        let owner = format!("rustfmt {}", rustfmt.display());
+        // Errors name the toolchain, never the sysroot path: they travel to
+        // every client that can view a definition.
+        let owner = format!("rustfmt ({})", toolchain.version);
         let mut command = Command::new(&rustfmt);
         direct::compiler_environment(&mut command);
         command
@@ -319,6 +326,7 @@ impl Builder {
         let directory = self.cache.join(&definition.hash);
         fs::create_dir_all(&directory).await?;
         let component_path = directory.join("component.wasm");
+        let compiled_path = directory.join("compiled.rs");
         let (toolchain, driver) = self.prepared().await?;
         stages.checkpoint("toolchain_prepare_ms");
         let inputs = format!(
@@ -329,8 +337,12 @@ impl Builder {
         let cached_inputs = fs::read_to_string(directory.join("component.inputs"))
             .await
             .ok();
+        // A cache entry is the component plus the text it was compiled from;
+        // an entry missing either (a cache written before the text was kept)
+        // is rebuilt, never served half.
         if cached_inputs.as_deref() == Some(inputs.as_str())
             && let Ok(component) = fs::read(&component_path).await
+            && let Ok(compiled_source) = fs::read_to_string(&compiled_path).await
             && loom_proto::core_protocol::is_current(&component)
             && component_serves(&component, definition).is_ok()
         {
@@ -338,6 +350,7 @@ impl Builder {
             return Ok(BuildOutput {
                 identity: Some(driver.ingest(&self.store, &directory, definition, &component)?),
                 component,
+                compiled_source: Some(compiled_source),
                 ms: started.elapsed().as_millis() as u64,
                 logs: "component cache hit".into(),
                 diagnostics: Vec::new(),
@@ -408,6 +421,7 @@ impl Builder {
             return Ok(BuildOutput {
                 identity: None,
                 component: Vec::new(),
+                compiled_source: None,
                 ms: started.elapsed().as_millis() as u64,
                 logs: built.logs,
                 diagnostics: built.diagnostics,
@@ -419,13 +433,10 @@ impl Builder {
             Err(error) => {
                 // Keep the exact input so the refusal can be reproduced offline
                 // (`LOOM_DWARF_FIXTURE=<path> cargo test -p loom-build relocates_a_real -- --ignored`).
-                let kept = self
-                    .cache
-                    .join("rejected-modules")
-                    .join(format!("{}.wasm", definition.hash));
-                let note = match std::fs::create_dir_all(kept.parent().unwrap())
-                    .and_then(|()| std::fs::write(&kept, &built.bytes))
-                {
+                // It lives in the definition's own cache directory, which cache
+                // eviction already removes.
+                let kept = directory.join("rejected-input.wasm");
+                let note = match std::fs::write(&kept, &built.bytes) {
                     Ok(()) => format!("; input module kept at {}", kept.display()),
                     Err(io) => format!("; input module not kept: {io}"),
                 };
@@ -439,10 +450,15 @@ impl Builder {
             ));
         }
         validate_component(&component)?;
+        // The same contract the cache hit is held to: a fresh component that
+        // lacks an entry wrapper or the allocator is refused now, not served
+        // once and rebuilt on every later request.
+        component_serves(&component, definition).map_err(BuildError::Rejected)?;
         stages.checkpoint("component_encode_ms");
         let identity = driver.ingest(&self.store, &directory, definition, &component)?;
         stages.checkpoint("identity_ingest_ms");
         fs::write(&component_path, &component).await?;
+        fs::write(&compiled_path, &built.compiled_source).await?;
         fs::write(directory.join("component.inputs"), inputs).await?;
         stages.checkpoint("output_persist_ms");
         built.logs.push('\n');
@@ -451,6 +467,7 @@ impl Builder {
         Ok(BuildOutput {
             identity: Some(identity),
             component,
+            compiled_source: Some(built.compiled_source),
             ms: started.elapsed().as_millis() as u64,
             logs: built.logs,
             diagnostics: built.diagnostics,
@@ -463,10 +480,10 @@ impl Builder {
     pub async fn with_cache_exclusive<T>(
         &self,
         operation: impl FnOnce(&std::path::Path) -> T,
-    ) -> T {
+    ) -> Result<T, BuildError> {
         let _guard = self.gate.lock().await;
-        let _cache_lock = lock_cache(&self.cache).await;
-        operation(&self.cache)
+        let _cache_lock = lock_cache(&self.cache).await?;
+        Ok(operation(&self.cache))
     }
 }
 #[cfg(test)]

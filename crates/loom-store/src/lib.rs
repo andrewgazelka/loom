@@ -4,6 +4,7 @@ mod guest_cas;
 pub use guest_cas::CAS_GUEST_MAX_BYTES;
 mod bundle;
 mod cas_browser;
+mod compiled;
 mod dag_migration;
 mod definitions;
 mod effect_index;

@@ -11,9 +11,13 @@
  */
 import { untrack } from "svelte";
 import { reason } from "./detail/format";
+import { memo, sameParts } from "./stable.svelte";
 
 export interface Fetched<T> {
-  /** The answer for the current key; `null` while loading, after a failure, or when `run` declined. */
+  /**
+   * The answer for the current key; `null` while loading (including the batch right after a
+   * key change), after a failure, or when `run` declined.
+   */
   readonly value: T | null;
   /** Why the current key has no answer, when the request failed. */
   readonly error: string | null;
@@ -28,18 +32,7 @@ export function fetched<const K extends readonly unknown[], T>(
   key: () => K,
   run: (...key: K) => Promise<T> | null,
 ): Fetched<T> {
-  let previous: K | undefined;
-  const stable = $derived.by(() => {
-    const next = key();
-    if (
-      previous !== undefined &&
-      previous.length === next.length &&
-      previous.every((part, index) => part === next[index])
-    )
-      return previous;
-    previous = next;
-    return next;
-  });
+  const stable = memo(key, sameParts);
   interface Outcome {
     key: K;
     value: T | null;
@@ -47,7 +40,7 @@ export function fetched<const K extends readonly unknown[], T>(
   }
   let outcome = $state.raw<Outcome | null>(null);
   $effect(() => {
-    const current = stable;
+    const current = stable.value;
     let pending: Promise<T> | null;
     try {
       pending = untrack(() => run(...current));
@@ -58,16 +51,17 @@ export function fetched<const K extends readonly unknown[], T>(
     if (pending === null) return;
     pending.then(
       (value) => {
-        if (stable === current) outcome = { key: current, value, error: null };
+        if (stable.value === current)
+          outcome = { key: current, value, error: null };
       },
       (problem: unknown) => {
-        if (stable === current)
+        if (stable.value === current)
           outcome = { key: current, value: null, error: reason(problem) };
       },
     );
   });
   const settled = $derived(
-    outcome !== null && outcome.key === stable ? outcome : null,
+    outcome !== null && outcome.key === stable.value ? outcome : null,
   );
   return {
     get value() {

@@ -79,6 +79,14 @@ pub(super) fn import_build_objects(source: &Connection, destination: &Connection
         ])?;
     }
     copy_rows(source, destination, "cas_codecs", "hash,codec")?;
+    // The compiled text recorded for a staged build travels with its component
+    // (the object itself was copied above, so the foreign key holds).
+    copy_rows(
+        source,
+        destination,
+        "compiled_sources",
+        "component_hash,compiled_hash",
+    )?;
     import_caches(source, destination)
 }
 
@@ -244,6 +252,24 @@ mod tests {
         assert_eq!(live.resolve("built")?.unwrap().hash, def.hash);
         assert_eq!(live.resolve("concurrent")?.unwrap().hash, concurrent.hash);
         assert_eq!(live.effect_get("live effect", "scope", 0)?, Some(json!(42)));
+        Ok(())
+    }
+
+    #[test]
+    fn a_staged_build_brings_its_compiled_text_to_the_live_store() -> Result<()> {
+        let live = Store::memory()?;
+        let staged = live.stage_intake()?;
+        let component = staged.put("component", b"\0asm staged")?;
+        staged.record_compiled_source(&component, "pub fn f() {}\n// marker\n")?;
+        assert_eq!(live.compiled_source(&component)?, None);
+        let source = staged.lock()?;
+        let destination = live.lock()?;
+        import_build_objects(&source, &destination)?;
+        drop((source, destination));
+        assert_eq!(
+            live.compiled_source(&component)?.as_deref(),
+            Some("pub fn f() {}\n// marker\n")
+        );
         Ok(())
     }
 }

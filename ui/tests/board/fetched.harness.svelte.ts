@@ -15,17 +15,28 @@ export interface Harness<T> {
   readonly error: string | null;
   /** Replace the props object, as a parent re-render does; the flush follows on a microtask. */
   set(next: Props): void;
+  /** Change the unrelated signal. */
+  poke(): void;
   stop(): void;
 }
 
 export function harness<T>(
   initial: Props,
-  run: (client: object | null, id: string) => Promise<T> | null,
+  run: (
+    client: object | null,
+    id: string,
+    noise: () => number,
+  ) => Promise<T> | null,
 ): Harness<T> {
   let props = $state.raw(initial);
+  /** A signal unrelated to the key that `run` may read; changing it must not refetch. */
+  let noise = $state(0);
   let result: Fetched<T> | undefined;
   const stop = $effect.root(() => {
-    result = fetched(() => [props.client, props.id], run);
+    result = fetched(
+      () => [props.client, props.id],
+      (client, id) => run(client, id, () => noise),
+    );
   });
   if (result === undefined)
     throw new Error("fetched did not run inside the effect root");
@@ -39,6 +50,9 @@ export function harness<T>(
     },
     set(next) {
       props = next;
+    },
+    poke() {
+      noise += 1;
     },
     stop,
   };

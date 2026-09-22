@@ -7,7 +7,11 @@
     logsRef,
     componentHash,
     client,
-  }: { logsRef: string | null; componentHash: string; client: BoardClient | null } = $props();
+  }: {
+    logsRef: string | null;
+    componentHash: string;
+    client: BoardClient | null;
+  } = $props();
   const loaded = fetched(
     () => [client, logsRef],
     (owner, ref) => (owner === null || ref === null ? null : owner.text(ref)),
@@ -30,7 +34,8 @@
     <h3>Build log</h3>
     <span class="muted">{lines.length} lines</span>
   </div>
-  <pre class="log" data-testid="detail-log">{log || "The build produced no output."}</pre>
+  <pre class="log" data-testid="detail-log">{log ||
+      "The build produced no output."}</pre>
 {/if}
 
 <style>
