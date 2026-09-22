@@ -1,25 +1,38 @@
 <script lang="ts">
   import { Hammer } from "lucide-svelte";
-  import Hash from "../workbench/Hash.svelte";
-  import { definitionByComponent, type Model } from "./feed";
-  import { sortedStages } from "./stages";
-  let { model }: { model: Model } = $props();
-  const rows = $derived(
-    Object.values(model.builds).sort((a, b) => b.seq - a.seq),
-  );
+  import type { Build } from "../feed";
+  import { sortedStages } from "../stages";
+  import type { PaneShared } from "./types";
+  interface BuildItem {
+    build: Build;
+    /** The definition the component belongs to, when the board knows it. */
+    name: string | null;
+  }
+  let {
+    items,
+    onselect,
+  }: {
+    /** Newest first. */
+    items: BuildItem[];
+  } & PaneShared = $props();
+  function activate(event: KeyboardEvent, hash: string) {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      onselect({ kind: "build", hash });
+    }
+  }
 </script>
 
 <div class="section-bar">
   <Hammer size={14} class="icon-code" />
   <h2>Builds</h2>
-  <span class="muted">{rows.length}</span>
+  <span class="muted">{items.length}</span>
 </div>
 <div class="list" data-pane="builds" role="list" aria-label="Component builds, newest first">
-  {#each rows as build (build.componentHash)}
-    {@const def = definitionByComponent(model, build.componentHash)}
+  {#each items as { build, name } (build.componentHash)}
     {@const stages = build.stages === null ? [] : sortedStages(build.stages)}
     {@const max = stages.reduce((most, [, ms]) => Math.max(most, ms), 0)}
-    <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex a11y_no_noninteractive_element_interactions -->
     <div
       class="build"
       role="listitem"
@@ -27,11 +40,11 @@
       data-row
       data-testid="board-build"
       data-hash={build.componentHash}
-      data-definition={def?.hash ?? ""}
+      onclick={() => onselect({ kind: "build", hash: build.componentHash })}
+      onkeydown={(event) => activate(event, build.componentHash)}
     >
       <div class="head">
-        <span class="name">{def?.name ?? "unnamed"}</span>
-        <Hash value={build.componentHash} />
+        <span class="name">{name ?? build.componentHash.slice(0, 8)}</span>
         {#if build.ms !== null}<span class="numeric">{build.ms} ms</span>{/if}
         {#if build.rustcInvocations !== null}<span class="muted"
             >{build.rustcInvocations} rustc</span
@@ -48,14 +61,14 @@
         <div class="note muted">The log has no build_stages line.</div>
       {:else}
         <div class="bars">
-          {#each stages as [name, ms] (name)}
+          {#each stages as [stage, ms] (stage)}
             <div class="stage">
-              <span class="stage-name" title={name}>{name}</span>
+              <span class="stage-name" title={stage}>{stage}</span>
               <div class="track">
                 <div
                   class="bar"
-                  class:other={name === "unattributed_ms"}
-                  data-stage={name}
+                  class:other={stage === "unattributed_ms"}
+                  data-stage={stage}
                   style={`width:${max ? (ms / max) * 100 : 0}%`}
                 ></div>
               </div>
@@ -80,6 +93,10 @@
     padding: 6px 10px;
     border-bottom: 1px solid var(--line);
     outline: none;
+    cursor: pointer;
+  }
+  .build:hover {
+    background: var(--code);
   }
   .build:focus-visible {
     background: var(--selection);

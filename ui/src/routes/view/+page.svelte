@@ -107,7 +107,7 @@
 
 <svelte:head><title>Actor view · Loom</title></svelte:head>
 <main class="view-page">
-  <header><a href="/">Loom</a><h1>Actor view</h1><span>{viewId || "Choose a source and template"}</span></header>
+  <header><a href="/workspace/">Loom</a><h1>Actor view</h1><span>{viewId || "Choose a source and template"}</span></header>
   <form onsubmit={(event) => { event.preventDefault(); void connect(); }}>
     <fieldset disabled={busy}>
       <label>Endpoint<input bind:value={endpoint} placeholder="Page origin" autocomplete="url" /></label>

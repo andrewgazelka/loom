@@ -1,13 +1,26 @@
 <script lang="ts">
   import { Activity } from "lucide-svelte";
-  import Hash from "../workbench/Hash.svelte";
-  import { summarize, type FeedRow, type Model, type RowSummary } from "./feed";
-  let { model }: { model: Model } = $props();
+  import type { FeedRow, RowSummary, RowTarget } from "../feed";
+  import type { PaneShared } from "./types";
+  interface FeedItem {
+    row: FeedRow;
+    summary: RowSummary;
+    /** What the row opens, or `null` when it names nothing the board knows. */
+    target: RowTarget | null;
+  }
+  let {
+    items,
+    held,
+    onselect,
+  }: {
+    /** Newest first. */
+    items: FeedItem[];
+    /** Rows the model holds, for the "n of m" count. */
+    held: number;
+  } & PaneShared = $props();
   let hidden = $state<string[]>([]);
   let query = $state("");
-  const types = $derived(
-    [...new Set(model.feed.map((row) => row.type))].sort(),
-  );
+  const types = $derived([...new Set(items.map((item) => item.row.type))].sort());
   function matches(row: FeedRow, summary: RowSummary): boolean {
     const needle = query.trim().toLowerCase();
     if (!needle) return true;
@@ -20,11 +33,9 @@
     );
   }
   const rows = $derived(
-    model.feed
-      .map((row) => ({ row, summary: summarize(model, row) }))
-      .filter(
-        ({ row, summary }) => !hidden.includes(row.type) && matches(row, summary),
-      ),
+    items.filter(
+      ({ row, summary }) => !hidden.includes(row.type) && matches(row, summary),
+    ),
   );
   function toggle(type: string) {
     hidden = hidden.includes(type)
@@ -37,12 +48,21 @@
     const pad = (value: number) => String(value).padStart(2, "0");
     return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
   }
+  function open(item: FeedItem) {
+    if (item.target) onselect(item.target);
+  }
+  function activate(event: KeyboardEvent, item: FeedItem) {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      open(item);
+    }
+  }
 </script>
 
 <div class="section-bar">
   <Activity size={14} class="icon-run" />
   <h2>Feed</h2>
-  <span class="muted">{rows.length} of {model.feed.length}</span>
+  <span class="muted">{rows.length} of {held}</span>
   <input
     id="board-filter"
     class="push"
@@ -61,21 +81,25 @@
       >{/each}
   </div>{/if}
 <div class="list" data-pane="feed" role="list" aria-label="Journal events, newest first">
-  {#each rows as { row, summary } (row.seq)}
-    <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+  {#each rows as item (item.row.seq)}
+    {@const { row, summary } = item}
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex a11y_no_noninteractive_element_interactions -->
     <div
       class="row"
+      class:opens={item.target !== null}
       role="listitem"
       tabindex="0"
       data-row
       data-testid="board-event"
       data-type={row.type}
       data-seq={row.seq}
+      onclick={() => open(item)}
+      onkeydown={(event) => activate(event, item)}
     >
       <span class="time numeric">{time(row.ts)}</span>
       <span class="type">{row.type.replaceAll("_", " ")}</span>
       {#if summary.name}<span class="name">{summary.name}</span
-        >{:else if summary.hash}<Hash value={summary.hash} />{/if}
+        >{:else if summary.hash}<span class="name mono">{summary.hash.slice(0, 8)}</span>{/if}
       {#if summary.outcome !== null}<span
           class="outcome"
           class:ok={summary.outcome === "ok"}
@@ -93,7 +117,7 @@
     </div>
   {:else}
     <div class="empty">
-      {model.feed.length ? "Every event is filtered out." : "No events yet."}
+      {held ? "Every event is filtered out." : "No events yet."}
     </div>
   {/each}
 </div>
@@ -140,6 +164,9 @@
     outline: none;
     white-space: nowrap;
   }
+  .row.opens {
+    cursor: pointer;
+  }
   .row:hover {
     background: var(--code);
   }
@@ -157,6 +184,11 @@
     font-weight: 500;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .mono {
+    font-family: var(--mono);
+    font-weight: 400;
+    color: var(--muted);
   }
   .outcome {
     font: 0.86em var(--mono);

@@ -8,7 +8,7 @@
 </script>
 
 <header class="workspace-header">
-  <a href="/" class="wordmark">loom</a><span class="header-divider">/</span>
+  <a href="/workspace/" class="wordmark">loom</a><span class="header-divider">/</span>
   <div class="workspace-identity">
     <GitBranch size={14} /><span>workspace</span>
   </div>

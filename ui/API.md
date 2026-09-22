@@ -21,7 +21,7 @@ live and fixture responses at the same boundary.
 | Command | Arguments | Result |
 | --- | --- | --- |
 | `find` | `{text}` | Definitions with names, hashes and item hashes |
-| `view` | `{target}` | Source, item hashes, executable identities and entry effects |
+| `view` | `{target}` | Source (stored and rustfmt-formatted), item hashes, executable identities and entry effects |
 | `add` | `{name?,source,deps?,allowed_effects?}` | Published definition view |
 | `update` | `{name,source,expected_hash?,deps?,allowed_effects?}` | Update session, plus definition view when complete |
 | `update_view` | `{id}` | Current update session, plus view when complete |
@@ -32,6 +32,13 @@ live and fixture responses at the same boundary.
 | `diff` | `{old,new}` | Added, removed and changed items |
 | `run` | `{target,args?}` | Output JSON and performed effects |
 | `dependents` | `{hash}` | Dependent definition hashes |
+
+A `view` result carries the stored bytes as `source` and, for Rust definitions, a rustfmt
+rendering as `formatted_source` (`string | null`) with `format_error` (`string | null`) naming
+why formatting failed when it is null. The UI shows `formatted_source` by default and the stored
+bytes only behind "as submitted"; a null rendering shows the stored bytes with the error as a
+one-line note, and a response without the fields says so in that note. Both fields being
+non-null is rejected.
 
 Opening `update` loads source and its `expected_hash` together through `view`.
 That guard detects an agent changing the definition while a human edits it.
@@ -92,6 +99,27 @@ Event shapes the board reads (`crates/loom-store/src/publication.rs`, `crates/lo
 
 `tree` returns `{id, status, behavior_hash, cursor, children: [...]}` from the root supervisor;
 `actors` returns `[{id, status, behavior_hash, cursor, inbox_len, parent}]`.
+
+## Wasm inspection
+
+`GET /v1/wasm/{component_hash}` (bearer token) returns the compiled component as text with its
+DWARF line map, as a bare object (not the command envelope):
+
+```json
+{
+  "debug": true,
+  "wat": "(module\n  (type (;0;) (func))\n  ...",
+  "functions": [{ "index": 0, "name": "loom_definition::counter::h1a2b", "exported": false, "start_line": 21, "end_line": 45 }],
+  "lines": [{ "wat_line": 40, "file": "src/lib.rs", "line": 12 }]
+}
+```
+
+`wat` is the whole module, one instruction per line; `functions[].name` is null for unnamed
+functions and `start_line`/`end_line` are 1-based inclusive wat lines. `lines` maps wat lines to
+source positions: `file` is `src/lib.rs` for the guest's own code and a sysroot or registry path
+for anything else. `debug: false` means the artifact carries no DWARF and `lines` is empty. The
+board fetches the module once per component hash and keeps it in memory for the session
+(`src/lib/board/connect.ts`, `wasm()`); the shape is validated by `src/lib/board/wasm.ts`.
 
 ## Build inspection
 

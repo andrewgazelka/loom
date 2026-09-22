@@ -1,18 +1,18 @@
 <script lang="ts">
   import { Maximize2, Share2 } from "lucide-svelte";
-  import type { Model } from "./feed";
-  import { NODE_HEIGHT, NODE_WIDTH, type Layout } from "./layout";
+  import { NODE_HEIGHT, NODE_WIDTH, type Layout } from "../layout";
+  import type { PaneShared } from "./types";
   let {
-    model,
     graph,
+    active,
     selected,
     onselect,
   }: {
-    model: Model;
     graph: Layout;
-    selected: string;
-    onselect: (hash: string) => void;
-  } = $props();
+    /** Definition hashes lit by a recent call. */
+    active: Record<string, number>;
+    selected: string | null;
+  } & PaneShared = $props();
   let width = $state(0);
   let height = $state(0);
   let x = $state(24);
@@ -92,8 +92,7 @@
     else if (event.key === "0") {
       userMoved = false;
       fit();
-    }
-    else return;
+    } else return;
     event.preventDefault();
   }
   function truncate(label: string): string {
@@ -126,7 +125,7 @@
   data-pane="graph"
   role="application"
   tabindex="0"
-  aria-label="Definition graph. Drag to pan, wheel to zoom, arrows pan, zero fits."
+  aria-label="Definition graph. Drag to pan, wheel to zoom, arrows pan, zero fits. Click a node to open it."
   bind:clientWidth={width}
   bind:clientHeight={height}
   use:zoomable
@@ -152,12 +151,12 @@
         <g
           class="node"
           class:synthetic={node.synthetic}
-          class:active={model.activeUntil[node.id] !== undefined}
+          class:active={active[node.id] !== undefined}
           class:selected={selected === node.id}
           data-node={node.id}
           transform={`translate(${node.x},${node.y})`}
           onclick={() => {
-            if (!node.synthetic) onselect(node.id);
+            if (!node.synthetic) onselect({ kind: "def", hash: node.id });
           }}
         >
           <rect width={NODE_WIDTH} height={NODE_HEIGHT} rx="6" />
@@ -245,8 +244,12 @@
   .node:not(.synthetic) {
     cursor: pointer;
   }
+  .node:not(.synthetic):hover rect {
+    fill: var(--selection);
+  }
   .node.selected rect {
     fill: var(--selection);
+    stroke: var(--focus);
   }
   .node.synthetic rect {
     fill: var(--side);

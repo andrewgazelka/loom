@@ -51,7 +51,9 @@
         },
         "allowed_effects": null,
         "observed_effects": []
-      }
+      },
+      "formatted_source": "pub fn counter(value: i64) -> i64 {\n    increment(value)\n}\n\nfn increment(value: i64) -> i64 {\n    value + 1\n}\n",
+      "format_error": null
     },
     {
       "name": "forwarder",
@@ -66,7 +68,9 @@
       "entries": {
         "forwarder": {
           "effects": {
-            "labels": ["sleep"],
+            "labels": [
+              "sleep"
+            ],
             "unknown": false
           }
         }
@@ -91,19 +95,27 @@
                 "type": "number"
               },
               "effects": {
-                "labels": ["sleep"],
+                "labels": [
+                  "sleep"
+                ],
                 "unknown": false
               }
             }
           ],
           "effects": {
-            "labels": ["sleep"],
+            "labels": [
+              "sleep"
+            ],
             "unknown": false
           }
         },
         "allowed_effects": null,
-        "observed_effects": ["sleep"]
-      }
+        "observed_effects": [
+          "sleep"
+        ]
+      },
+      "formatted_source": null,
+      "format_error": "rustfmt is not installed in the build toolchain"
     },
     {
       "name": "counter_candidate",
@@ -155,7 +167,9 @@
         },
         "allowed_effects": null,
         "observed_effects": []
-      }
+      },
+      "formatted_source": "pub fn counter(value: i64) -> i64 {\n    value + 2\n}\n",
+      "format_error": null
     }
   ],
   "history": [
@@ -258,7 +272,20 @@
       "seq": 41,
       "key": "req:40:0",
       "sender": null,
-      "msg": [123, 34, 118, 97, 108, 117, 101, 34, 58, 52, 49, 125],
+      "msg": [
+        123,
+        34,
+        118,
+        97,
+        108,
+        117,
+        101,
+        34,
+        58,
+        52,
+        49,
+        125
+      ],
       "received_at": 1789152000,
       "state": "committed",
       "defer_epoch": -1,
@@ -268,7 +295,20 @@
       "seq": 42,
       "key": "external:42",
       "sender": null,
-      "msg": [123, 34, 118, 97, 108, 117, 101, 34, 58, 52, 50, 125],
+      "msg": [
+        123,
+        34,
+        118,
+        97,
+        108,
+        117,
+        101,
+        34,
+        58,
+        52,
+        50,
+        125
+      ],
       "received_at": 1789152001,
       "state": "committed",
       "defer_epoch": -1,
@@ -278,7 +318,20 @@
       "seq": 43,
       "key": "external:43",
       "sender": "a0-forwarder",
-      "msg": [123, 34, 118, 97, 108, 117, 101, 34, 58, 52, 51, 125],
+      "msg": [
+        123,
+        34,
+        118,
+        97,
+        108,
+        117,
+        101,
+        34,
+        58,
+        52,
+        51,
+        125
+      ],
       "received_at": 1789152002,
       "state": "pending",
       "defer_epoch": -1,
@@ -290,14 +343,20 @@
       "seq": 41,
       "idx": 0,
       "target": "a0-forwarder",
-      "msg": [52, 49],
+      "msg": [
+        52,
+        49
+      ],
       "delivered": 1
     },
     {
       "seq": 42,
       "idx": 0,
       "target": "a0-forwarder",
-      "msg": [52, 50],
+      "msg": [
+        52,
+        50
+      ],
       "delivered": 0
     }
   ],
@@ -307,14 +366,31 @@
       "idx": 0,
       "kind": "now",
       "request": [],
-      "result": [49, 55, 56, 57, 49, 53, 50, 48, 48, 48]
+      "result": [
+        49,
+        55,
+        56,
+        57,
+        49,
+        53,
+        50,
+        48,
+        48,
+        48
+      ]
     },
     {
       "seq": 42,
       "idx": 0,
       "kind": "echo",
-      "request": [52, 50],
-      "result": [52, 50]
+      "request": [
+        52,
+        50
+      ],
+      "result": [
+        52,
+        50
+      ]
     }
   ],
   "lineage": [
@@ -362,7 +438,10 @@
   "dead_letters": [
     {
       "seq": 12,
-      "msg": [123, 125],
+      "msg": [
+        123,
+        125
+      ],
       "error": "missing target at seq 12",
       "at": 1789152000
     }
@@ -391,8 +470,17 @@
         "DivergedAt": {
           "seq": 41,
           "idx": 0,
-          "expected": [110, 111, 119],
-          "got": [101, 99, 104, 111]
+          "expected": [
+            110,
+            111,
+            119
+          ],
+          "got": [
+            101,
+            99,
+            104,
+            111
+          ]
         }
       },
       "assertions": []
@@ -447,7 +535,9 @@
     "restarted": {
       "id": "a0-counter"
     },
-    "promotedActors": ["a0-counter"],
+    "promotedActors": [
+      "a0-counter"
+    ],
     "forked": {
       "id": "a0-fork-40"
     },
@@ -460,7 +550,10 @@
       "id": "a0-counter",
       "name": "counter"
     },
-    "groupMembers": ["a0-counter", "a0-forwarder"],
+    "groupMembers": [
+      "a0-counter",
+      "a0-forwarder"
+    ],
     "knownBehaviors": [
       {
         "hash": "supervisor-v1",

@@ -1,25 +1,22 @@
 <script lang="ts">
   import { FileCode2 } from "lucide-svelte";
-  import Hash from "../workbench/Hash.svelte";
-  import { buildOf, type Definition, type Model } from "./feed";
+  import type { Definition } from "../feed";
+  import type { PaneShared } from "./types";
   let {
-    model,
+    rows,
+    active,
     selected,
     onselect,
-  }: { model: Model; selected: string; onselect: (hash: string) => void } =
-    $props();
-  function key(def: Definition): string {
-    return `${def.name ?? "￿"}\n${def.hash}`;
-  }
-  const rows = $derived(
-    Object.values(model.definitions).sort((a, b) =>
-      key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0,
-    ),
-  );
+  }: {
+    rows: Definition[];
+    /** Definition hashes lit by a recent call. */
+    active: Record<string, number>;
+    selected: string | null;
+  } & PaneShared = $props();
   function activate(event: KeyboardEvent, hash: string) {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
-      onselect(hash);
+      onselect({ kind: "def", hash });
     }
   }
 </script>
@@ -31,7 +28,6 @@
 </div>
 <div class="list" data-pane="definitions" role="listbox" aria-label="Definitions">
   {#each rows as def (def.hash)}
-    {@const build = buildOf(model, def)}
     <div
       class="row"
       role="option"
@@ -41,23 +37,15 @@
       data-hash={def.hash}
       data-name={def.name ?? ""}
       aria-selected={selected === def.hash}
-      class:active={model.activeUntil[def.hash] !== undefined}
-      onclick={() => onselect(def.hash)}
+      class:active={active[def.hash] !== undefined}
+      onclick={() => onselect({ kind: "def", hash: def.hash })}
       onkeydown={(event) => activate(event, def.hash)}
     >
       <span class="name">{def.name ?? def.hash.slice(0, 8)}</span>
-      <span class="meta muted"
-        >{def.lang}{#if def.exports.length}
-          · {def.exports.join(", ")}{/if}</span
-      >
-      {#each def.effects as label (label)}<span
-          class="effect"
-          class:call={label === "call"}>{label}</span
+      <span class="meta muted">{def.lang}</span>
+      {#each def.effects as label (label)}<span class="effect" class:call={label === "call"}
+          >{label}</span
         >{/each}
-      {#if build && build.ms !== null}<span class="numeric muted"
-          >{build.ms} ms</span
-        >{/if}
-      <Hash value={def.hash} />
     </div>
   {:else}
     <div class="empty">No definitions yet. Add one and it appears here.</div>
@@ -74,7 +62,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    min-height: 30px;
+    min-height: 28px;
     padding: 3px 10px;
     border-bottom: 1px solid var(--line);
     cursor: pointer;
@@ -96,14 +84,14 @@
   .name {
     font-weight: 500;
     white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 1;
+    min-width: 0;
   }
   .meta {
     font-size: 0.86em;
-    overflow: hidden;
-    text-overflow: ellipsis;
     white-space: nowrap;
-    flex: 1;
-    min-width: 0;
   }
   .effect {
     font: 0.78em var(--mono);
