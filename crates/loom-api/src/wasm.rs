@@ -18,12 +18,15 @@ use std::ops::Range;
 use wasmparser::{ExternalKind, KnownCustom, Name, Parser, Payload, TypeRef};
 
 /// The exact text the wrapper compile saw for the definition whose build
-/// produced `component_hash`: stored `src/lib.rs` plus the generated entry
-/// wrappers from the identity document's `entry` table and `schema`.
-pub(crate) fn compiled_source_for(
-    store: &loom_store::Store,
+/// produced `component_hash`: the checker's normalized reprint of the stored
+/// source (what materialization writes to `src/lib.rs`) followed by the
+/// generated entry wrappers from the identity document's `entry` table and
+/// `schema`.
+pub(crate) async fn compiled_source_for(
+    service: &crate::Service,
     component_hash: &str,
 ) -> Result<String> {
+    let store = &service.store;
     let definition = store
         .definitions()?
         .into_iter()
@@ -32,15 +35,32 @@ pub(crate) fn compiled_source_for(
     let stored = store
         .source(&definition.hash)?
         .context("definition source missing")?;
-    let source = if stored.trim_start().starts_with('{') {
-        let bundle: serde_json::Value = serde_json::from_str(&stored)?;
+    let name = store
+        .definition_name(&definition.hash)?
+        .unwrap_or_else(|| definition.hash.clone());
+    let checked = service
+        .checker
+        .check_with_signatures(
+            &loom_proto::DefineRequest {
+                lang: definition.lang,
+                name,
+                source: stored,
+                deps: BTreeMap::new(),
+                allowed_effects: definition.allowed_effects.clone(),
+            },
+            &BTreeMap::new(),
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let source = if checked.source.trim_start().starts_with('{') {
+        let bundle: serde_json::Value = serde_json::from_str(&checked.source)?;
         let file = &bundle["files"]["src/lib.rs"];
         file.as_str()
             .or_else(|| file["text"].as_str())
             .map(str::to_owned)
             .context("source bundle has no text src/lib.rs")?
     } else {
-        stored
+        checked.source
     };
     let identity = store
         .build_identity(&definition.hash)?

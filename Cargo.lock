@@ -2751,6 +2751,7 @@ dependencies = [
  "anyhow",
  "blake3",
  "flate2",
+ "fs4",
  "gimli",
  "loom-check",
  "loom-proto",

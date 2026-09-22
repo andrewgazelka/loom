@@ -123,6 +123,34 @@ fn component_serves(component: &[u8], definition: &CheckedDef) -> Result<(), Str
     }
 }
 
+/// The build cache has one writer at a time across processes as well as
+/// tasks: every `Builder` on the same cache directory, in this daemon or in a
+/// test process beside it, takes `<cache>/.builder.lock` (flock) before it
+/// touches the shared cargo graph. Released when dropped.
+struct CacheLock(std::fs::File);
+impl Drop for CacheLock {
+    fn drop(&mut self) {
+        let _ = fs4::fs_std::FileExt::unlock(&self.0);
+    }
+}
+async fn lock_cache(cache: &Path) -> Result<CacheLock, BuildError> {
+    std::fs::create_dir_all(cache)?;
+    let path = cache.join(".builder.lock");
+    let file = tokio::task::spawn_blocking(move || -> std::io::Result<std::fs::File> {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)?;
+        fs4::fs_std::FileExt::lock_exclusive(&file)?;
+        Ok(file)
+    })
+    .await
+    .map_err(|error| BuildError::Rejected(format!("build lock task: {error}")))??;
+    Ok(CacheLock(file))
+}
+
 pub struct Builder {
     store: loom_store::Store,
     root: PathBuf,
@@ -275,6 +303,7 @@ impl Builder {
         dependencies: &BTreeMap<String, CheckedDef>,
     ) -> Result<BuildOutput, BuildError> {
         let _guard = self.gate.lock().await;
+        let _cache_lock = lock_cache(&self.cache).await?;
         let started = Instant::now();
         let mut stages = Stages::start();
         if !definition.diagnostics.is_empty() {
@@ -436,6 +465,7 @@ impl Builder {
         operation: impl FnOnce(&std::path::Path) -> T,
     ) -> T {
         let _guard = self.gate.lock().await;
+        let _cache_lock = lock_cache(&self.cache).await;
         operation(&self.cache)
     }
 }
