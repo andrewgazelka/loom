@@ -63,19 +63,43 @@ pub(super) fn check_rust_file(
                     "A definition must export at least one crate-root pub fn; private functions and nested pub fn items are not entries.",
                 ));
             }
-            fn ambient_macro(tokens: proc_macro2::TokenStream) -> bool {
-                tokens.into_iter().any(|token| match token {
-                    proc_macro2::TokenTree::Ident(name) => [
-                        "include",
-                        "include_str",
-                        "include_bytes",
-                        "env",
-                        "option_env",
-                    ]
-                    .contains(&name.to_string().as_str()),
-                    proc_macro2::TokenTree::Group(group) => ambient_macro(group.stream()),
-                    _ => false,
-                })
+            const AMBIENT_MACROS: [&str; 5] =
+                ["include", "include_str", "include_bytes", "env", "option_env"];
+            const AMBIENT_MODULES: [&str; 5] = ["fs", "net", "time", "env", "process"];
+            /// Macro bodies and inputs are tokens, not paths. An ambient-input
+            /// macro is an identifier followed by `!`; an ambient module is the
+            /// `std :: <module>` sequence. A local merely named `env` is neither.
+            fn ambient_tokens(tokens: proc_macro2::TokenStream, violations: &mut Vec<String>) {
+                use proc_macro2::TokenTree;
+                let tokens: Vec<TokenTree> = tokens.into_iter().collect();
+                for (index, token) in tokens.iter().enumerate() {
+                    match token {
+                        TokenTree::Group(group) => ambient_tokens(group.stream(), violations),
+                        TokenTree::Ident(name) => {
+                            let name = name.to_string();
+                            let invoked = matches!(
+                                tokens.get(index + 1),
+                                Some(TokenTree::Punct(punct)) if punct.as_char() == '!'
+                            );
+                            if invoked && AMBIENT_MACROS.contains(&name.as_str()) {
+                                violations.push("compile-time ambient input macro".into());
+                            }
+                            let colons = matches!(
+                                (tokens.get(index + 1), tokens.get(index + 2)),
+                                (Some(TokenTree::Punct(first)), Some(TokenTree::Punct(second)))
+                                    if first.as_char() == ':' && second.as_char() == ':'
+                            );
+                            if name == "std"
+                                && colons
+                                && let Some(TokenTree::Ident(module)) = tokens.get(index + 3)
+                                && AMBIENT_MODULES.contains(&module.to_string().as_str())
+                            {
+                                violations.push(format!("std::{module}"));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
             }
             struct IoVisitor {
                 violations: Vec<String>,
@@ -83,19 +107,12 @@ pub(super) fn check_rust_file(
             impl<'ast> syn::visit::Visit<'ast> for IoVisitor {
                 fn visit_macro(&mut self, mac: &'ast syn::Macro) {
                     if mac.path.segments.last().is_some_and(|segment| {
-                        [
-                            "include",
-                            "include_str",
-                            "include_bytes",
-                            "env",
-                            "option_env",
-                        ]
-                        .contains(&segment.ident.to_string().as_str())
-                    }) || ambient_macro(mac.tokens.clone())
-                    {
+                        AMBIENT_MACROS.contains(&segment.ident.to_string().as_str())
+                    }) {
                         self.violations
                             .push("compile-time ambient input macro".into());
                     }
+                    ambient_tokens(mac.tokens.clone(), &mut self.violations);
                     syn::visit::visit_macro(self, mac);
                 }
                 fn visit_attribute(&mut self, attribute: &'ast syn::Attribute) {
@@ -114,29 +131,25 @@ pub(super) fn check_rust_file(
                     if conditional_path(&attribute.meta) {
                         self.violations.push("external module path".into());
                     }
-                    if let syn::Meta::List(list) = &attribute.meta
-                        && ambient_macro(list.tokens.clone())
-                    {
-                        self.violations
-                            .push("compile-time ambient input attribute".into());
+                    if let syn::Meta::List(list) = &attribute.meta {
+                        let before = self.violations.len();
+                        ambient_tokens(list.tokens.clone(), &mut self.violations);
+                        if self.violations.len() > before {
+                            self.violations
+                                .push("compile-time ambient input attribute".into());
+                        }
                     }
                     syn::visit::visit_attribute(self, attribute);
                 }
                 fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
                     fn forbidden(prefix: &[String]) -> bool {
-                        prefix.last().is_some_and(|name| {
-                            [
-                                "include",
-                                "include_str",
-                                "include_bytes",
-                                "env",
-                                "option_env",
-                            ]
-                            .contains(&name.as_str())
-                        }) || (prefix.first().is_some_and(|name| name == "std")
-                            && prefix.get(1).is_some_and(|name| {
-                                ["fs", "net", "time", "env", "process"].contains(&name.as_str())
-                            }))
+                        prefix
+                            .last()
+                            .is_some_and(|name| AMBIENT_MACROS.contains(&name.as_str()))
+                            || (prefix.first().is_some_and(|name| name == "std")
+                                && prefix
+                                    .get(1)
+                                    .is_some_and(|name| AMBIENT_MODULES.contains(&name.as_str())))
                     }
                     fn inspect(tree: &syn::UseTree, mut prefix: Vec<String>) -> bool {
                         match tree {
@@ -172,9 +185,9 @@ pub(super) fn check_rust_file(
                         .map(|segment| segment.ident.to_string())
                         .collect();
                     if segments.first().is_some_and(|s| s == "std")
-                        && segments.get(1).is_some_and(|s| {
-                            ["fs", "net", "time", "env", "process"].contains(&s.as_str())
-                        })
+                        && segments
+                            .get(1)
+                            .is_some_and(|s| AMBIENT_MODULES.contains(&s.as_str()))
                     {
                         self.violations.push(segments.join("::"));
                     }

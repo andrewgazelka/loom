@@ -92,7 +92,8 @@ async function call(cli: string[], tool: string, args: Record<string, unknown>):
 async function add(file: string, name: string): Promise<Record<string, unknown>> {
   const path = join(directory, file);
   const source = await readFile(path, 'utf8');
-  assert(!source.includes('#[') && !/\w+!\s*\(/.test(source), `${file}: guest must have no macros`);
+  // Entries and effect rows come from the compiler, never from source declarations.
+  assert(!/#\[\s*loom|LOOM_EFFECT|effects\s*=/.test(source), `${file}: guest must not declare entries or effects`);
   return object(await call(['add', path, '--name', name, '--lang', 'rust'], 'add', { lang: 'rust', source, name }));
 }
 async function runGreeting(reference: string, expected: string) {

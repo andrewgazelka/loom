@@ -45,7 +45,7 @@ loom --url "$LOOM_URL" send "$ID" 1
 loom --url "$LOOM_URL" info "$ID"                        # cursor 4
 ```
 
-The guests use plain root-level `pub fn` entries, no macros or effect declarations. The counter declares its SQL schema with `pub const LOOM_SCHEMA: &str`; `add` infers effect rows, including the sleeper's generic trait call.
+The guests use plain root-level `pub fn` entries, with no export attributes or effect declarations; ordinary Rust macros such as the counter's `json!` are fine, because they expand inside rustc before identity and effects are computed. The counter declares its SQL schema with `pub const LOOM_SCHEMA: &str`; `add` infers effect rows, including the sleeper's generic trait call.
 
 For the executable proof, stop the daemon on the test port, ensure `nix`, `bun`, and `curl` are on `PATH`, commit your changes, then run:
 
@@ -308,7 +308,7 @@ pub fn main() {
 ```
 
 The two scoped children run concurrently, so their sleeps overlap; `scope` waits for
-both before returning. Guest code has no macros and no effect declarations: an entry is
+both before returning. Guest code has no export attributes and no effect declarations: an entry is
 any `pub fn` at the crate root, and the set of host effects a definition can reach (its
 effect row, here `["sleep"]`) is inferred from the resolved call graph by the same rustc
 driver that computes its content hash, shown by `add` and `view`, and enforced by the

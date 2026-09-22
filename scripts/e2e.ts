@@ -17,8 +17,10 @@ try {
   await check('HTTP authentication',async()=>{const response=await fetch(`${endpoint}/v1/events`);assert(response.status===401,'unauthenticated read accepted');});
   let rustHash='';
   await check('Rust build and Wasmtime execution',async()=>{
-    const rejected=await request('define',{lang:'rust',name:'e2e-rust-rejected',source:'#[loom::def(effects=[])] pub fn main() -> i64 { "wrong" }'});
+    const rejected=await request('define',{lang:'rust',name:'e2e-rust-rejected',source:'pub fn main() -> i64 { "wrong" }'});
     assert(!rejected.ok && rejected.diagnostics.some(diagnostic=>diagnostic.code==='E0308'),'Rust type error lacked structured E0308');
+    const procedural=await request('define',{lang:'rust',name:'e2e-rust-proc-macro',source:'#[derive(serde::Serialize)] struct Value; pub fn main() -> i64 { 1 }'});
+    assert(!procedural.ok && procedural.diagnostics.some(diagnostic=>diagnostic.code==='LOOM_MACRO' && diagnostic.message.includes('serde::Serialize')),'procedural derive was not refused by name');
     const source=await readFile(new URL('../examples/rust-add/src/lib.rs',import.meta.url),'utf8');
     const reply=await accepted('define',{lang:'rust',name:'e2e-rust-add',source});rustHash=reply.result.def.hash;
     assert(reply.result.build.size>0,'empty wasm module');

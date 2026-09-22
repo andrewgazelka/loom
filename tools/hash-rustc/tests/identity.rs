@@ -220,3 +220,66 @@ fn aliased_self_types_and_empty_impls_are_dependencies() {
     let empty = compile(&format!("{source} impl Alpha {{}}"));
     assert_ne!(before.item("Alpha").hash, empty.item("Alpha").hash);
 }
+
+#[test]
+fn builtin_derives_are_expanded_impls_inside_adt_identity() {
+    let plain = "pub struct Square(pub f64); pub fn entry(value: Square) -> f64 { value.0 }";
+    let derived = "#[derive(Clone, Copy, PartialEq)] pub struct Square(pub f64); pub fn entry(value: Square) -> f64 { value.0 }";
+    let first = compile(derived);
+    let second = compile(derived);
+    assert_eq!(first.item("Square").hash, second.item("Square").hash);
+    assert_eq!(first.entry(), second.entry());
+    // The generated impl methods are ordinary encoded items.
+    for method in ["clone", "eq"] {
+        assert!(
+            first
+                .items
+                .keys()
+                .any(|path| path.ends_with(&format!("::{method}"))),
+            "missing derived {method}: {:#?}",
+            first.items.keys().collect::<Vec<_>>()
+        );
+    }
+    // Impls belong to the ADT's identity, so the derive moves the struct and
+    // its users; removing one derive moves it again.
+    let undecorated = compile(plain);
+    assert_ne!(undecorated.item("Square").hash, first.item("Square").hash);
+    assert_ne!(undecorated.entry(), first.entry());
+    let narrowed = compile(&derived.replace("Clone, Copy, PartialEq", "Clone, Copy"));
+    assert_ne!(narrowed.item("Square").hash, first.item("Square").hash);
+}
+
+#[test]
+fn builtin_derives_on_enums_expand_to_supported_hir() {
+    let source = "#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Default)] pub enum Kind { #[default] Alpha, Beta(u8) } pub fn entry(kind: Kind) -> bool { kind == Kind::default() && kind <= Kind::Beta(1) }";
+    let before = compile(source);
+    assert_eq!(before.entry(), compile(source).entry());
+    let widened = compile(&source.replace("Beta(u8)", "Beta(u16)"));
+    assert_ne!(before.item("Kind").hash, widened.item("Kind").hash);
+    assert_ne!(before.entry(), widened.entry());
+}
+
+#[test]
+fn format_and_vec_expansions_hash_their_literals_not_their_spellings() {
+    let source = r#"pub fn entry(count: usize) -> String { let items: Vec<usize> = vec![1, 2, count]; format!("{} out of {count}", items.len()) }"#;
+    let before = compile(source);
+    assert_eq!(before.entry(), compile(source).entry());
+    // Renaming locals, including one captured by the format string, is free.
+    let renamed = compile(&source.replace("items", "values").replace("count", "total"));
+    assert_eq!(before.entry(), renamed.entry());
+    // A change inside the format string is a literal change in HIR.
+    let reworded = compile(&source.replace(" out of ", " within "));
+    assert_ne!(before.entry(), reworded.entry());
+    // So is a change inside the vector literal.
+    let regrown = compile(&source.replace("vec![1, 2, count]", "vec![1, 3, count]"));
+    assert_ne!(before.entry(), regrown.entry());
+}
+
+#[test]
+fn matches_assert_and_write_expansions_hash() {
+    let source = r#"use std::fmt::Write; pub fn entry(value: Option<u8>) -> String { assert!(value.is_none() || value.is_some(), "{value:?}"); let mut out = String::new(); write!(out, "{}", matches!(value, Some(7))).unwrap(); out }"#;
+    let before = compile(source);
+    assert_eq!(before.entry(), compile(source).entry());
+    let changed = compile(&source.replace("Some(7)", "Some(8)"));
+    assert_ne!(before.entry(), changed.entry());
+}
