@@ -228,6 +228,11 @@ fn translate(map: &CodeMap, address: u64) -> Result<u64, String> {
 /// `new_base` is `old_base` relocated: row offsets, sequence lengths and
 /// `DW_AT_high_pc` lengths all take this shape.
 fn span(map: &CodeMap, old_base: u64, new_base: u64, length: u64) -> Result<u64, String> {
+    // A dead-stripped sequence or range starts at a linker tombstone; its rows
+    // and length describe code that no longer exists and stay as written.
+    if TOMBSTONES.contains(&old_base) {
+        return Ok(length);
+    }
     let end = translate(map, old_base + length)?;
     end.checked_sub(new_base).ok_or_else(|| {
         format!(

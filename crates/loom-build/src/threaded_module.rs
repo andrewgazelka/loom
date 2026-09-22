@@ -465,6 +465,30 @@ fn is_linker_initializer(ops: &[Operator<'_>]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// Offline check against a real rustc module: `LOOM_DWARF_FIXTURE=<path to a
+    /// wasm with .debug_* sections> cargo test -p loom-build relocates_a_real -- --ignored`.
+    #[test]
+    #[ignore = "needs LOOM_DWARF_FIXTURE pointing at a debug-info wasm module"]
+    fn relocates_a_real_module_fixture() {
+        let path = std::env::var("LOOM_DWARF_FIXTURE").expect("LOOM_DWARF_FIXTURE");
+        let bytes = std::fs::read(&path).expect("fixture readable");
+        let out = super::prepare(&bytes).unwrap_or_else(|error| panic!("{path}: {error}"));
+        let names: Vec<String> = wasmparser::Parser::new(0)
+            .parse_all(&out)
+            .filter_map(|payload| match payload {
+                Ok(wasmparser::Payload::CustomSection(section)) => Some(section.name().to_owned()),
+                _ => None,
+            })
+            .collect();
+        assert!(names.iter().any(|name| name == ".debug_line"), "{names:?}");
+        assert!(names.iter().any(|name| name == ".debug_info"), "{names:?}");
+        eprintln!(
+            "relocated {} -> {} bytes; custom sections {names:?}",
+            bytes.len(),
+            out.len()
+        );
+    }
+
     use super::*;
     use wasm_encoder::{
         BlockType, Function, FunctionSection, MemArg, MemorySection, MemoryType, StartSection,
