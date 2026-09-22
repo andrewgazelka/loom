@@ -3,6 +3,7 @@ name = "loomd"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+tower = { version = "0.5", features = ["util"] }
 loom-behavior = { path = "../loom-behavior" }
 loom-v8 = { path = "../loom-v8" }
 loom-process = { path = "../loom-process" }
