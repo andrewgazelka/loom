@@ -167,6 +167,7 @@ impl Service {
                 );
                 let deps = args
                     .get("deps")
+                    .filter(|value| !value.is_null())
                     .map(|value| serde_json::from_value(value.clone()))
                     .transpose()?
                     .unwrap_or_default();
@@ -176,17 +177,20 @@ impl Service {
                     .transpose()?
                     .flatten();
                 let response = self
-                    .define_inner(DefineRequest {
-                        lang: serde_json::from_value(
-                            args.get("lang")
-                                .cloned()
-                                .unwrap_or_else(|| json!("typescript")),
-                        )?,
-                        name: name.into(),
-                        source: field(args, "source")?.into(),
-                        deps,
-                        allowed_effects,
-                    })
+                    .admit(
+                        DefineRequest {
+                            lang: serde_json::from_value(
+                                args.get("lang")
+                                    .cloned()
+                                    .unwrap_or_else(|| json!("typescript")),
+                            )?,
+                            name: name.into(),
+                            source: field(args, "source")?.into(),
+                            deps,
+                            allowed_effects,
+                        },
+                        crate::definitions::Destination::Live,
+                    )
                     .await?;
                 ensure!(
                     response.ok,
@@ -272,6 +276,8 @@ impl Service {
                     .with_context(|| format!("definition {target:?} not found"))?;
                 Ok(json!(self.store.dependents(&definition.hash)?))
             }
+            "export" => self.export_bundle(args),
+            "import" => self.import_bundle(args).await,
             _ => bail!("unknown definition operation {operation}"),
         }
     }

@@ -20,76 +20,15 @@ impl Builder {
             return Ok(definition.source.clone());
         }
         let _guard = self.gate.lock().await;
-        let mut bundle = if definition.source.trim_start().starts_with('{') {
-            let bundle: SourceBundle = serde_json::from_str(&definition.source)
-                .map_err(|error| BuildError::Rejected(error.to_string()))?;
-            bundle.validate().map_err(BuildError::Rejected)?;
-            bundle
-        } else {
-            let mut files = BTreeMap::new();
-            files.insert(
-                "src/lib.rs".into(),
-                SourceFile::Text(definition.source.clone()),
-            );
-            files.insert("Cargo.toml".into(),SourceFile::Text("[package]\nname=\"loom-definition\"\nversion=\"0.1.0\"\nedition=\"2024\"\n[dependencies]\nserde={version=\"1\",features=[\"derive\"]}\nserde_json=\"1\"\n".into()));
-            SourceBundle { files }
-        };
-        if bundle.files.keys().any(|name| name.starts_with(".cargo/")) {
-            return Err(BuildError::Rejected(
-                "Caller Cargo configuration is forbidden".into(),
-            ));
-        }
-        let manifest = bundle
-            .files
-            .get("Cargo.toml")
-            .and_then(SourceFile::as_text)
-            .ok_or_else(|| BuildError::Rejected("Cargo.toml must be UTF-8".into()))?
-            .parse::<toml::Value>()
-            .map_err(|error| BuildError::Rejected(error.to_string()))?;
-        fn untrusted(value: &toml::Value) -> bool {
-            value.as_table().is_some_and(|table| {
-                table.iter().any(|(key, value)| {
-                    if ["dependencies", "build-dependencies", "dev-dependencies"]
-                        .contains(&key.as_str())
-                    {
-                        value.as_table().is_some_and(|deps| {
-                            deps.iter()
-                                .any(|(name, value)| !trusted_dependency(name, value))
-                        })
-                    } else {
-                        untrusted(value)
-                    }
-                })
-            })
-        }
-        let isolated = manifest
-            .get("loom")
-            .and_then(|loom| loom.get("crates"))
-            .is_some()
-            || untrusted(&manifest)
-            || bundle.files.contains_key("build.rs")
-            || manifest
-                .get("package")
-                .is_some_and(|package| package.get("build").is_some())
-            || dependencies.values().any(is_vendored);
+        let PreparationInputs {
+            mut bundle,
+            isolated,
+            key: preparation_key,
+        } = self.preparation_inputs(definition, dependencies)?;
         if !isolated {
             let (toolchain, _) = self.prepared().await?;
             prepare_compiler_dependencies(&self.compiler_dependencies, &toolchain).await?;
         }
-        let preparation_inputs = serde_json::json!({
-            "contract": "loom-preparation-v2-registry-identity",
-            "manifest": manifest,
-            "lock": bundle.files.get("Cargo.lock"),
-            "definitions": definition.deps,
-            "sdk": build_fingerprint(&self.root)?,
-            "isolated": isolated,
-        });
-        let preparation_key = blake3::hash(
-            &serde_json::to_vec(&preparation_inputs)
-                .map_err(|error| BuildError::Rejected(error.to_string()))?,
-        )
-        .to_hex()
-        .to_string();
         if let Some(overlay) = preparation::load(&self.store, &preparation_key)? {
             bundle.files.extend(overlay);
             bundle.validate().map_err(BuildError::Rejected)?;
@@ -190,3 +129,123 @@ impl Builder {
         Ok(result)
     }
 }
+
+/// The cached resolver overlay a rebuild of a stored definition would reuse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Preparation {
+    /// BLAKE3 over the manifest, lock, dependency pins, SDK fingerprint and
+    /// isolation flag; the `rust_preparations` row key.
+    pub key: String,
+    /// DAG-CBOR object holding `Cargo.lock` and, for isolated builds, the
+    /// `loom.vendor-tree` hash.
+    pub overlay_hash: String,
+}
+
+struct PreparationInputs {
+    bundle: SourceBundle,
+    isolated: bool,
+    key: String,
+}
+
+impl Builder {
+    /// Look up the resolver overlay for `definition` without resolving anything.
+    /// `None` when the definition carries its own vendor tree (no overlay is
+    /// ever written for it) or when this node has not resolved it yet.
+    pub fn preparation(
+        &self,
+        definition: &CheckedDef,
+        dependencies: &BTreeMap<String, CheckedDef>,
+    ) -> Result<Option<Preparation>, BuildError> {
+        if is_vendored(definition) {
+            return Ok(None);
+        }
+        let inputs = self.preparation_inputs(definition, dependencies)?;
+        Ok(preparation::overlay_hash(&self.store, &inputs.key)?.map(|overlay_hash| {
+            Preparation {
+                key: inputs.key,
+                overlay_hash,
+            }
+        }))
+    }
+
+    fn preparation_inputs(
+        &self,
+        definition: &CheckedDef,
+        dependencies: &BTreeMap<String, CheckedDef>,
+    ) -> Result<PreparationInputs, BuildError> {
+        let bundle = if definition.source.trim_start().starts_with('{') {
+            let bundle: SourceBundle = serde_json::from_str(&definition.source)
+                .map_err(|error| BuildError::Rejected(error.to_string()))?;
+            bundle.validate().map_err(BuildError::Rejected)?;
+            bundle
+        } else {
+            let mut files = BTreeMap::new();
+            files.insert(
+                "src/lib.rs".into(),
+                SourceFile::Text(definition.source.clone()),
+            );
+            files.insert("Cargo.toml".into(),SourceFile::Text(DEFAULT_MANIFEST.into()));
+            SourceBundle { files }
+        };
+        if bundle.files.keys().any(|name| name.starts_with(".cargo/")) {
+            return Err(BuildError::Rejected(
+                "Caller Cargo configuration is forbidden".into(),
+            ));
+        }
+        let manifest = bundle
+            .files
+            .get("Cargo.toml")
+            .and_then(SourceFile::as_text)
+            .ok_or_else(|| BuildError::Rejected("Cargo.toml must be UTF-8".into()))?
+            .parse::<toml::Value>()
+            .map_err(|error| BuildError::Rejected(error.to_string()))?;
+        fn untrusted(value: &toml::Value) -> bool {
+            value.as_table().is_some_and(|table| {
+                table.iter().any(|(key, value)| {
+                    if ["dependencies", "build-dependencies", "dev-dependencies"]
+                        .contains(&key.as_str())
+                    {
+                        value.as_table().is_some_and(|deps| {
+                            deps.iter()
+                                .any(|(name, value)| !trusted_dependency(name, value))
+                        })
+                    } else {
+                        untrusted(value)
+                    }
+                })
+            })
+        }
+        let isolated = manifest
+            .get("loom")
+            .and_then(|loom| loom.get("crates"))
+            .is_some()
+            || untrusted(&manifest)
+            || bundle.files.contains_key("build.rs")
+            || manifest
+                .get("package")
+                .is_some_and(|package| package.get("build").is_some())
+            || dependencies.values().any(is_vendored);
+        let preparation_inputs = serde_json::json!({
+            "contract": "loom-preparation-v2-registry-identity",
+            "manifest": manifest,
+            "lock": bundle.files.get("Cargo.lock"),
+            "definitions": definition.deps,
+            "sdk": build_fingerprint(&self.root)?,
+            "isolated": isolated,
+        });
+        let key = blake3::hash(
+            &serde_json::to_vec(&preparation_inputs)
+                .map_err(|error| BuildError::Rejected(error.to_string()))?,
+        )
+        .to_hex()
+        .to_string();
+        Ok(PreparationInputs {
+            bundle,
+            isolated,
+            key,
+        })
+    }
+}
+
+/// Manifest assumed for a bare `src/lib.rs` definition; mirrors materialize.
+const DEFAULT_MANIFEST: &str = "[package]\nname=\"loom-definition\"\nversion=\"0.1.0\"\nedition=\"2024\"\n[dependencies]\nserde={version=\"1\",features=[\"derive\"]}\nserde_json=\"1\"\n";

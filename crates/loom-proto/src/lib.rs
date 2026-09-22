@@ -5,6 +5,7 @@ pub use vm::{
 };
 pub mod script_artifact;
 pub use script_artifact::ScriptArtifact;
+pub mod bundle;
 mod export_identity;
 pub use export_identity::export_identity_preimage;
 mod cas;

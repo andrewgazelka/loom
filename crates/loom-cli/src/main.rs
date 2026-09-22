@@ -103,24 +103,102 @@ async fn execute(
     url: &str,
     token: &str,
     session: Option<&str>,
-    command: Command,
+    mut command: Command,
 ) -> anyhow::Result<bool> {
+    let base = url.trim_end_matches('/');
+    for upload in &command.uploads {
+        let cid = upload_file(client, base, token, &upload.path).await?;
+        command.args[upload.argument] = serde_json::Value::String(cid);
+    }
     let response = client
-        .post(format!("{}/v1/command", url.trim_end_matches('/')))
+        .post(format!("{base}/v1/command"))
         .bearer_auth(token)
         .json(&serde_json::json!({"session":session,"command":command.name,"args":command.args}))
         .send()
         .await?;
     let status = response.status();
     let bytes = response.bytes().await?;
-    let response: loom_proto::Response = serde_json::from_slice(&bytes).map_err(|error| {
+    let mut response: loom_proto::Response = serde_json::from_slice(&bytes).map_err(|error| {
         anyhow::anyhow!(
             "HTTP {status}: {error}: {}",
             String::from_utf8_lossy(&bytes)
         )
     })?;
+    let accepted = status.is_success() && response.ok;
+    if accepted && let Some(path) = &command.download {
+        let cid = response.result["bundle"]["$ref"]
+            .as_str()
+            .context("export response has no bundle reference")?;
+        let written = download_object(client, base, token, cid, path).await?;
+        response.result["out"] = serde_json::json!(path.display().to_string());
+        response.result["out_bytes"] = serde_json::json!(written);
+    }
     println!("{}", serde_json::to_string_pretty(&response)?);
-    Ok(status.is_success() && response.ok)
+    Ok(accepted)
+}
+
+/// Store a local file as a raw CAS object and return its CID.
+async fn upload_file(
+    client: &reqwest::Client,
+    base: &str,
+    token: &str,
+    path: &std::path::Path,
+) -> anyhow::Result<String> {
+    let bytes = tokio::fs::read(path)
+        .await
+        .with_context(|| format!("read {}", path.display()))?;
+    let response = client
+        .post(format!("{base}/v1/cas"))
+        .bearer_auth(token)
+        .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+        .body(bytes)
+        .send()
+        .await?;
+    let status = response.status();
+    let body = response.bytes().await?;
+    anyhow::ensure!(
+        status.is_success(),
+        "upload {}: HTTP {status}: {}",
+        path.display(),
+        String::from_utf8_lossy(&body)
+    );
+    let reply: serde_json::Value = serde_json::from_slice(&body)
+        .with_context(|| format!("upload {}: invalid reply", path.display()))?;
+    reply["$ref"]
+        .as_str()
+        .map(str::to_owned)
+        .context("upload reply has no $ref")
+}
+
+/// Fetch a CAS object and write it to a file that must not exist yet.
+async fn download_object(
+    client: &reqwest::Client,
+    base: &str,
+    token: &str,
+    cid: &str,
+    path: &std::path::Path,
+) -> anyhow::Result<usize> {
+    let response = client
+        .get(format!("{base}/v1/cas/{cid}"))
+        .bearer_auth(token)
+        .send()
+        .await?;
+    let status = response.status();
+    let bytes = response.bytes().await?;
+    anyhow::ensure!(
+        status.is_success(),
+        "download {cid}: HTTP {status}: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .with_context(|| format!("create {}", path.display()))?;
+    std::io::Write::write_all(&mut file, &bytes)
+        .with_context(|| format!("write {}", path.display()))?;
+    file.sync_all()?;
+    Ok(bytes.len())
 }
 
 fn print_failure(error: &anyhow::Error) {

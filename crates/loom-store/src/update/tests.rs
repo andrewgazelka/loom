@@ -213,3 +213,77 @@ fn caller_request_id_is_claimed_once_and_recoverable() -> Result<()> {
     assert!(store.create_update_session_with_id("", &json!({})).is_err());
     Ok(())
 }
+
+#[test]
+fn import_commit_is_atomic_and_refuses_moved_names() -> Result<()> {
+    let store = Store::memory()?;
+    let staged = store.stage_intake()?;
+    let object = staged.put("source_bundle", b"imported source")?;
+    let first = candidate("import first");
+    let second = candidate("import second");
+    let deps = BTreeMap::new();
+    let valid = json!({"type":"component_built"});
+    let names = store.current_names()?;
+    let before = store.latest_seq()?;
+    let failing = [
+        IntakePublication {
+            def: &first,
+            name: Some("friend/first"),
+            source: "first",
+            deps: &deps,
+            identity: None,
+            build_event: &valid,
+        },
+        IntakePublication {
+            def: &second,
+            name: Some("friend/second"),
+            source: "second",
+            deps: &deps,
+            identity: None,
+            build_event: &json!({"type":"invalid"}),
+        },
+    ];
+    assert!(store.commit_import(&staged, &failing, &names).is_err());
+    assert_eq!(store.latest_seq()?, before);
+    assert!(store.resolve("friend/first")?.is_none());
+    assert!(store.get(&object)?.is_none(), "rolled back objects stay out");
+    let publications = [
+        IntakePublication {
+            def: &first,
+            name: Some("friend/first"),
+            source: "first",
+            deps: &deps,
+            identity: None,
+            build_event: &valid,
+        },
+        IntakePublication {
+            def: &second,
+            name: Some("friend/second"),
+            source: "second",
+            deps: &deps,
+            identity: None,
+            build_event: &valid,
+        },
+    ];
+    // A name bound after planning invalidates the import.
+    let moved = candidate("moved");
+    store.define(&moved, Some("elsewhere"), "moved", &deps)?;
+    let error = store
+        .commit_import(&staged, &publications, &names)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("import conflict"), "{error}");
+    assert!(store.resolve("friend/first")?.is_none());
+    let seq = store.commit_import(&staged, &publications, &store.current_names()?)?;
+    assert_eq!(seq, store.latest_seq()?);
+    assert_eq!(store.resolve("friend/first")?.unwrap().hash, first.hash);
+    assert_eq!(store.resolve("friend/second")?.unwrap().hash, second.hash);
+    assert_eq!(store.get(&object)?, Some(b"imported source".to_vec()));
+    assert!(
+        store
+            .commit_import(&store, &publications, &store.current_names()?)
+            .is_err(),
+        "the staged store must be a separate handle"
+    );
+    Ok(())
+}

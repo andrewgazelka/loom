@@ -187,6 +187,13 @@ impl Store {
     pub fn source(&self, hash: &str) -> Result<Option<String>> {
         Ok(self.lock()?.query_row("SELECT CAST(c.bytes AS TEXT) FROM defs d JOIN cas c ON c.hash=d.source_hash WHERE d.hash=?",[hash],|r|r.get(0)).optional()?)
     }
+    /// BLAKE3 of the current source revision; the CAS object `source` reads.
+    pub fn definition_source_hash(&self, hash: &str) -> Result<Option<String>> {
+        Ok(self
+            .lock()?
+            .query_row("SELECT source_hash FROM defs WHERE hash=?", [hash], |r| r.get(0))
+            .optional()?)
+    }
     pub fn dependencies(&self, hash: &str) -> Result<Vec<String>> {
         let connection = self.lock()?;
         let mut q = connection

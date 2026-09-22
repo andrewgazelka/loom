@@ -52,13 +52,14 @@ struct Evolution {
     changes: Vec<Change>,
     diagnostics: Vec<Failure>,
 }
-struct Publication {
-    definition: Def,
-    names: Vec<String>,
-    source: String,
-    deps: BTreeMap<String, String>,
-    identity: Option<loom_proto::BuildIdentity>,
-    event: Value,
+/// One rebuilt definition waiting for the staged graph to commit as a whole.
+pub(super) struct Publication {
+    pub(super) definition: Def,
+    pub(super) names: Vec<String>,
+    pub(super) source: String,
+    pub(super) deps: BTreeMap<String, String>,
+    pub(super) identity: Option<loom_proto::BuildIdentity>,
+    pub(super) event: Value,
 }
 
 impl Service {

@@ -83,26 +83,68 @@ impl Store {
             "update session conflict: expected revision {expected_revision}, found {}",
             session.revision
         );
-        intake::import_build_objects(&source, &tx)?;
-        for publication in publications {
-            publication::write(
-                &tx,
-                publication.def,
-                publication.name,
-                publication.source,
-                publication.deps,
-                publication.identity,
-            )?;
-            ensure!(
-                publication.build_event["type"] == "component_built",
-                "update publication requires a component_built event"
-            );
-            record_definition_event(&tx, publication.build_event)?;
-        }
+        publish_staged(&source, &tx, publications)?;
         let session = save_session(&tx, session_id, expected_revision, final_state)?;
         tx.commit()?;
         Ok(session)
     }
+
+    /// Publish an imported dependency graph as one transaction. The live names
+    /// must still equal the snapshot the import was planned against, so a name
+    /// bound meanwhile cannot be overwritten. Returns the latest sequence.
+    pub fn commit_import(
+        &self,
+        staged: &Store,
+        publications: &[IntakePublication<'_>],
+        expected_names: &BTreeMap<String, String>,
+    ) -> Result<i64> {
+        ensure!(
+            !Arc::ptr_eq(&self.connection, &staged.connection),
+            "import requires a separate staged store"
+        );
+        staged.recording.barrier(false)?;
+        self.recording.barrier(false)?;
+        let source = staged.lock()?;
+        let mut destination = self.lock()?;
+        let tx = destination.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        ensure!(
+            identity::current_names(&tx)? == *expected_names,
+            "import conflict: current names changed while the bundle was building; retry the import"
+        );
+        publish_staged(&source, &tx, publications)?;
+        let seq: i64 = tx.query_row(
+            "SELECT coalesce(max(seq),0) FROM definition_records",
+            [],
+            |row| row.get(0),
+        )?;
+        tx.commit()?;
+        Ok(seq)
+    }
+}
+
+/// Copy staged build objects, then write every publication with its build event.
+fn publish_staged(
+    source: &Connection,
+    tx: &Connection,
+    publications: &[IntakePublication<'_>],
+) -> Result<()> {
+    intake::import_build_objects(source, tx)?;
+    for publication in publications {
+        publication::write(
+            tx,
+            publication.def,
+            publication.name,
+            publication.source,
+            publication.deps,
+            publication.identity,
+        )?;
+        ensure!(
+            publication.build_event["type"] == "component_built",
+            "staged publication requires a component_built event"
+        );
+        record_definition_event(tx, publication.build_event)?;
+    }
+    Ok(())
 }
 
 fn read_session(connection: &Connection, id: &str) -> Result<Option<UpdateSession>> {
