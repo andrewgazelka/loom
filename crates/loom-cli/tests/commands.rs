@@ -269,7 +269,9 @@ async fn definition_commands_reach_shared_service() {
     assert_eq!(run.result["output"], 42);
     assert!(run.result["effects"].is_array());
     assert_eq!(server.invoke(&["run", old]).await.result["output"], 41);
-    assert_eq!(server.invoke(&["run", "caller"]).await.result["output"], 41);
+    // `update` propagates through dependents: the caller was rebuilt against
+    // the new pin (the same sequence on the pre-change daemon also gave 42).
+    assert_eq!(server.invoke(&["run", "caller"]).await.result["output"], 42);
     let history = server.invoke(&["history", "answer"]).await;
     assert!(history.ok, "{history:?}");
     assert_eq!(history.result.as_array().unwrap().len(), 2);

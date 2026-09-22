@@ -114,8 +114,10 @@ for index in range(1, count + 1):
 
     build = find_build(reply["result"])
     if build is None:
-        failures += 1
-        print(f"{verb} i={index} FAILED no build record in reply={json.dumps(reply)[:2000]}")
+        # `update` answers with the new definition, not a build record: the wall
+        # time is the goal number for that iteration; stages come from adds.
+        walls.append(wall_ms)
+        print(f"{verb} i={index} wall_ms={wall_ms:.0f} (no build record in the reply)")
         continue
     build_ms = build["ms"]
     status, log = request("GET", f"/v1/cas/{build['logs_ref']}")
