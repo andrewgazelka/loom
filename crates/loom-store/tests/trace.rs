@@ -39,6 +39,8 @@ fn bundle(scope: &str) -> Result<TraceBundle> {
         blobs: vec![descriptor, result],
         memos: vec![],
         observations: vec![],
+        elapsed_ms: None,
+        entry: None,
     })
 }
 #[test]

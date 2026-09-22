@@ -82,6 +82,9 @@ pub struct TraceObservation {
     pub op: String,
 }
 
+/// One call's trace plus the surrounding facts the store publishes with it.
+/// Only `trace` is content-addressed (`encode_call_trace`); the other fields
+/// travel in the `call_completed` / `call_checkpoint` journal event.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TraceBundle {
     pub trace: CallTrace,
@@ -90,6 +93,15 @@ pub struct TraceBundle {
     pub memos: Vec<TraceMemo>,
     #[serde(default)]
     pub observations: Vec<TraceObservation>,
+    /// Wall-clock milliseconds from the runtime session opening to its final
+    /// snapshot. Stamped by the session that ran the call; absent for traces
+    /// rebuilt from legacy effect rows. Not part of the trace identity.
+    #[serde(default)]
+    pub elapsed_ms: Option<u64>,
+    /// Export the caller selected; absent when the call used the definition's
+    /// default entry or was a root effect. Not part of the trace identity.
+    #[serde(default)]
+    pub entry: Option<String>,
 }
 
 /// Compact persisted trace boundary: positional named records, binary digests,

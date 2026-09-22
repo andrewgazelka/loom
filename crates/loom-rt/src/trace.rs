@@ -7,6 +7,7 @@ use loom_proto::{
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
+    time::Instant,
 };
 
 pub(super) struct ExecutionTrace {
@@ -331,6 +332,9 @@ impl ExecutionTrace {
             blobs: state.blobs.values().cloned().collect(),
             memos: state.memos.clone(),
             observations: state.observations.iter().cloned().collect(),
+            // The session that owns this execution stamps timing and entry.
+            elapsed_ms: None,
+            entry: None,
         })
     }
 }
@@ -491,18 +495,38 @@ impl Drop for EffectGuard {
     }
 }
 
+/// Owns one call's publication: the final snapshot, its wall-clock duration
+/// and the requested entry reach the store together. Dropping an unfinished
+/// session publishes the call as cancelled.
 pub(super) struct TraceSession {
     store: loom_store::Store,
     execution: Arc<ExecutionTrace>,
+    entry: Option<String>,
+    started: Instant,
     finished: bool,
 }
 impl TraceSession {
-    pub fn new(store: loom_store::Store, execution: Arc<ExecutionTrace>) -> Self {
+    pub fn new(
+        store: loom_store::Store,
+        execution: Arc<ExecutionTrace>,
+        entry: Option<&str>,
+    ) -> Self {
         Self {
             store,
             execution,
+            entry: entry.map(str::to_owned),
+            started: Instant::now(),
             finished: false,
         }
+    }
+    /// Publish `bundle` as this session's result. Timing and entry live on
+    /// the bundle, outside the content-addressed trace.
+    fn publish(&self, mut bundle: TraceBundle) -> Result<()> {
+        bundle.elapsed_ms =
+            Some(u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX));
+        bundle.entry = self.entry.clone();
+        self.store.persist_call_trace(&bundle)?;
+        Ok(())
     }
     pub fn finish(mut self, outcome: &Result<EffectOutput>) -> Result<()> {
         let _publication = self.execution.publication.lock().unwrap();
@@ -512,14 +536,13 @@ impl TraceSession {
                 self.finished = true;
                 let failed = Err(anyhow::anyhow!("{error:#}"));
                 if let Ok(bundle) = self.execution.snapshot(Some(&failed), true) {
-                    self.store.persist_call_trace(&bundle)?;
+                    self.publish(bundle)?;
                 }
                 return Err(error);
             }
         };
         self.finished = true;
-        self.store.persist_call_trace(&bundle)?;
-        Ok(())
+        self.publish(bundle)
     }
 }
 impl Drop for TraceSession {
@@ -528,7 +551,7 @@ impl Drop for TraceSession {
             let _publication = self.execution.publication.lock().unwrap();
             if let Ok(mut bundle) = self.execution.snapshot(None, true) {
                 bundle.trace.outcome = Some(TraceOutcome::Cancelled);
-                if let Err(error) = self.store.persist_call_trace(&bundle) {
+                if let Err(error) = self.publish(bundle) {
                     eprintln!("persist cancelled execution trace: {error:#}");
                 }
             }
@@ -552,6 +575,45 @@ mod tests {
             StartedEffect::Recorded(guard) => guard.finish(result)?,
             StartedEffect::Replayed(_) => bail!("unexpected replay"),
         }
+        Ok(())
+    }
+    #[test]
+    fn session_stamps_call_completed_with_elapsed_ms_and_entry() -> Result<()> {
+        let store = loom_store::Store::memory()?;
+        let execution = ExecutionTrace::fresh("call:timed");
+        let session = TraceSession::new(store.clone(), execution, Some("main"));
+        session.finish(&EffectOutput::value(&json!(1)))?;
+        let events = store.definition_events(0, 16)?;
+        let completed: Vec<_> = events
+            .iter()
+            .filter(|event| event.event["type"] == "call_completed")
+            .collect();
+        assert_eq!(completed.len(), 1, "{events:?}");
+        let event = &completed[0].event;
+        assert_eq!(event["scope"], "call:timed");
+        assert!(event["elapsed_ms"].is_u64(), "{event}");
+        assert_eq!(event["entry"], "main");
+        let loaded = store
+            .load_call_trace("call:timed")?
+            .context("timed trace not stored")?;
+        assert_eq!(loaded.entry.as_deref(), Some("main"));
+        assert_eq!(loaded.elapsed_ms, event["elapsed_ms"].as_u64());
+        Ok(())
+    }
+    #[test]
+    fn dropped_session_publishes_cancelled_call_with_timing() -> Result<()> {
+        let store = loom_store::Store::memory()?;
+        let execution = ExecutionTrace::fresh("call:dropped");
+        drop(TraceSession::new(store.clone(), execution, None));
+        let events = store.definition_events(0, 16)?;
+        let event = &events
+            .iter()
+            .find(|event| event.event["type"] == "call_completed")
+            .context("cancelled call not journaled")?
+            .event;
+        assert_eq!(event["outcome"]["status"], "cancelled");
+        assert!(event["elapsed_ms"].is_u64(), "{event}");
+        assert!(event["entry"].is_null(), "{event}");
         Ok(())
     }
     #[test]

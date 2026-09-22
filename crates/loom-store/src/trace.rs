@@ -78,11 +78,16 @@ impl Store {
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!([])),
         )?;
+        let elapsed_ms =
+            serde_json::from_value(event.get("elapsed_ms").cloned().unwrap_or_default())?;
+        let entry = serde_json::from_value(event.get("entry").cloned().unwrap_or_default())?;
         Ok(Some(TraceBundle {
             trace,
             observations,
             blobs,
             memos: Vec::new(),
+            elapsed_ms,
+            entry,
         }))
     }
 }
@@ -228,7 +233,7 @@ pub(super) fn persist(
     }
     project_observations(connection, &bundle.observations)?;
     let completed = bundle.trace.outcome.is_some();
-    let event = serde_json::json!({"type":if completed {"call_completed"} else {"call_checkpoint"}, "scope":bundle.trace.scope,"definition_hash":bundle.trace.definition_hash,"args_hash":bundle.trace.args_hash,"trace_hash":hash,"outcome":bundle.trace.outcome,"memos":bundle.memos,"observations":bundle.observations});
+    let event = serde_json::json!({"type":if completed {"call_completed"} else {"call_checkpoint"}, "scope":bundle.trace.scope,"definition_hash":bundle.trace.definition_hash,"args_hash":bundle.trace.args_hash,"trace_hash":hash,"outcome":bundle.trace.outcome,"memos":bundle.memos,"observations":bundle.observations,"elapsed_ms":bundle.elapsed_ms,"entry":bundle.entry});
     let seq = record_definition_event(connection, &event)?;
     connection.execute("INSERT INTO call_traces(scope,trace_hash,completed,last_seq) VALUES (?,?,?,?) ON CONFLICT(scope) DO UPDATE SET trace_hash=excluded.trace_hash,completed=excluded.completed,last_seq=excluded.last_seq", params![bundle.trace.scope,hash,completed,seq])?;
     Ok(())
@@ -445,6 +450,8 @@ pub(super) fn migrate_legacy(connection: &Connection) -> Result<()> {
                 blobs: Vec::new(),
                 memos: Vec::new(),
                 observations: Vec::new(),
+                elapsed_ms: None,
+                entry: None,
             },
             &hash,
             &bytes,

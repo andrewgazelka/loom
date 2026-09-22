@@ -1,6 +1,7 @@
 mod args;
 mod cluster;
 mod inspection;
+mod journal;
 mod operations;
 use crate::{Access, Scope};
 use args::*;
@@ -258,6 +259,13 @@ impl crate::Service {
             "promote_where" => &["old", "new"],
             _ => &[],
         };
+        // The reference a spawn was addressed by, before it becomes a hash:
+        // the journal keeps the name when the caller used one.
+        let spawn_reference = if command == "spawn" {
+            args["def"].as_str().map(str::to_owned)
+        } else {
+            None
+        };
         for field in references {
             let target = crate::field(&args, field)?;
             if command == "spawn" && target == "view-v1" {
@@ -275,7 +283,12 @@ impl crate::Service {
             let hash = behavior.hash();
             args[*field] = json!(hash);
         }
-        actors.command(&self.access, command, args).await
+        let result = actors.command(&self.access, command, args.clone()).await?;
+        let name = spawn_reference.as_deref().filter(|reference| {
+            !reference.starts_with('#') && Some(*reference) != args["def"].as_str()
+        });
+        journal::record_verb(&self.store, actors, command, &args, &result, name).await?;
+        Ok(result)
     }
 }
 

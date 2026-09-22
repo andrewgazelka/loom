@@ -300,7 +300,9 @@ impl Runtime {
                 Some(bundle) => trace::ExecutionTrace::loaded(bundle)?,
                 None => trace::ExecutionTrace::fresh(scope),
             };
-            let session = trace::TraceSession::new(self.inner.store.clone(), execution.clone());
+            // A root effect selects no export; only definition calls carry an entry.
+            let session =
+                trace::TraceSession::new(self.inner.store.clone(), execution.clone(), None);
             let effects = EffectContext {
                 trace: Some(execution),
                 ..EffectContext::default()

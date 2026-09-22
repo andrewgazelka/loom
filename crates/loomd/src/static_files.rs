@@ -1,10 +1,41 @@
-use axum::{Router, extract::Request, http::header, middleware::Next, response::Response};
+use axum::{
+    Router,
+    extract::Request,
+    http::{StatusCode, header},
+    middleware::Next,
+    response::{IntoResponse, Response},
+};
 use std::path::PathBuf;
+use tower::ServiceExt;
+use tower_http::services::{ServeDir, ServeFile};
 
 pub fn router(directory: PathBuf) -> Router {
+    let index = directory.join("index.html");
+    let documents = Router::new().fallback(move |request: Request| {
+        let index = index.clone();
+        async move {
+            if !is_page_route(request.uri().path()) {
+                return StatusCode::NOT_FOUND.into_response();
+            }
+            ServeFile::new(index)
+                .oneshot(request)
+                .await
+                .unwrap_or_else(|never| match never {})
+                .into_response()
+        }
+    });
     Router::new()
-        .fallback_service(tower_http::services::ServeDir::new(directory))
+        .fallback_service(ServeDir::new(directory).fallback(documents))
         .layer(axum::middleware::from_fn(cache_policy))
+}
+
+/// The SvelteKit build is a single-page app: every page route renders
+/// client-side from `index.html`, so a path that names no file on disk is a
+/// page route when its last segment carries no extension. `/_app/` holds only
+/// built assets, and a missing asset must stay a 404: serving HTML where a
+/// stale page expects a script would execute the document as code.
+fn is_page_route(path: &str) -> bool {
+    !path.starts_with("/_app/") && !path.rsplit('/').next().unwrap_or(path).contains('.')
 }
 
 async fn cache_policy(mut request: Request, next: Next) -> Response {
@@ -98,5 +129,58 @@ mod tests {
             .unwrap();
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
         assert_eq!(missing.headers()[header::CACHE_CONTROL], "no-store");
+    }
+
+    #[tokio::test]
+    async fn page_routes_serve_index_html_and_missing_assets_stay_404() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(directory.path().join("_app/immutable")).unwrap();
+        std::fs::write(
+            directory.path().join("index.html"),
+            "<!doctype html><div id='loom-spa-shell'></div>",
+        )
+        .unwrap();
+        let app = router(directory.path().into());
+        for route in ["/board", "/view", "/board/actors/a0-1"] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(route).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{route}");
+            assert_eq!(
+                response.headers()[header::CACHE_CONTROL],
+                "no-store",
+                "{route}"
+            );
+            assert!(!response.headers().contains_key(header::LAST_MODIFIED));
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert!(
+                std::str::from_utf8(&body)
+                    .unwrap()
+                    .contains("loom-spa-shell"),
+                "{route} did not serve index.html"
+            );
+        }
+        for path in ["/missing.js", "/_app/immutable/x.js", "/_app/version"] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        }
+    }
+
+    #[test]
+    fn page_route_classification() {
+        assert!(is_page_route("/board"));
+        assert!(is_page_route("/view"));
+        assert!(is_page_route("/nested/route"));
+        assert!(!is_page_route("/missing.js"));
+        assert!(!is_page_route("/nested/file.css"));
+        assert!(!is_page_route("/_app/immutable/x.js"));
+        assert!(!is_page_route("/_app/version"));
     }
 }

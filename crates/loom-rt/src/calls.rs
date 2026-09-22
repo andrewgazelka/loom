@@ -99,7 +99,8 @@ impl Runtime {
     ) -> Result<TimedCall> {
         let (argc, payload) = positional_payload(&args)?;
         execution.identity(hash, &payload)?;
-        let session = trace::TraceSession::new(self.inner.store.clone(), execution.clone());
+        let session =
+            trace::TraceSession::new(self.inner.store.clone(), execution.clone(), entry);
         let effects = EffectContext {
             trace: Some(execution),
             ..EffectContext::default()

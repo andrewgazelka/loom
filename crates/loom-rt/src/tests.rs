@@ -252,6 +252,31 @@ async fn concurrent_execution_of_one_scope_publishes_one_observation() -> Result
     Ok(())
 }
 #[tokio::test]
+async fn root_effect_call_completed_carries_elapsed_ms_and_null_entry() -> Result<()> {
+    let store = Store::memory()?;
+    let runtime = Runtime::new(store.clone())?;
+    runtime
+        .perform(json!({"op":"random"}), "timed-root", 0)
+        .await?;
+    let events = store.definition_events(0, 100)?;
+    let completed: Vec<_> = events
+        .iter()
+        .filter(|event| event.event["type"] == "call_completed")
+        .collect();
+    assert_eq!(completed.len(), 1, "{events:?}");
+    let event = &completed[0].event;
+    assert_eq!(event["scope"], "timed-root");
+    assert!(event["elapsed_ms"].is_u64(), "{event}");
+    assert!(
+        event
+            .as_object()
+            .is_some_and(|fields| fields.contains_key("entry")),
+        "entry key must be present even when null: {event}"
+    );
+    assert!(event["entry"].is_null(), "{event}");
+    Ok(())
+}
+#[tokio::test]
 async fn fresh_observations_do_not_accumulate_global_locks_or_effect_rows() -> Result<()> {
     let store = Store::memory()?;
     let runtime = Runtime::new(store.clone())?;

@@ -191,6 +191,43 @@ Actor behaviors resolve from stored definitions when `spawn` runs; a running nod
 
 All responses, including MCP actor responses and failures, use `{ok, seq, result, diagnostics}`. `spawn` defaults omitted `init` to `null` everywhere. Promotions require `author` and `rationale`; validation uses an unsigned 32-bit `k`. `send` returns a cursor on success; a trapped message returns `ok: false` with its actor id, message sequence, and cause. WebSocket clients connect to `/v1/stream` and send `{ "token": "...", "after": 0 }` as their first message; the server streams durable events after that cursor.
 
+## Event journal
+
+The store keeps one append-only journal of durable events (`definition_events`). `GET /v1/events?after=<seq>&limit=<n>` pages it as `{seq, ts, event}` rows, at most 1000 per page, in `seq` order. `/v1/stream` sends the same rows over a WebSocket as they land: the first client message is `{ "token": "...", "after": <seq> }`, and the server polls the journal every 100 ms from that cursor. Every `event` is a JSON object with a `type`; the tables below give the whole shape of each. Hashes are hex BLAKE3 unless noted, and a field listed as nullable is always present.
+
+Definitions and calls:
+
+| `type` | Fields | Written when |
+| --- | --- | --- |
+| `component_built` | `component_hash`, `size` (bytes), `rustc_invocations`; Rust builds add `logs_ref` and `ms`, JavaScript adds `backend: "v8"` | a compiled component is admitted, immediately before its `defined` |
+| `defined` | `def` (`hash`, `lang`, `component_hash`, `sig`, `allowed_effects`), `name` (string or null), `source_hash`, `deps` (name to hash), `identity` (build identity or null) | a definition is published (`add`, `update`, bundle import) |
+| `call_completed` | `scope`, `definition_hash` (null for a root effect), `args_hash` (null likewise), `trace_hash`, `outcome` (`{status: "success", result_hash}`, `{status: "error", message}` or `{status: "cancelled"}`), `memos`, `observations`, `elapsed_ms` (wall-clock milliseconds from the call starting to its trace being sealed; null only for traces rebuilt from legacy effect rows), `entry` (the export the caller named; null for a definition's default entry and for root effects) | the runtime seals a call or root effect, including cancellation |
+| `call_checkpoint` | the `call_completed` fields with `outcome: null`; `elapsed_ms` and `entry` are null | an unfinished call persists its recovery state |
+| `effect_recorded` | `desc_hash`, `scope`, `occurrence`, `result_hash` | an effect result is admitted to the global memo table |
+| `crate_added` | `crate` (`name`, `version`, `hash`, `checksum`, `features_available`) | a dependency crate is registered |
+| `definition_signature_migrated` | `version`, `hash`, `sig` | a stored signature is rewritten to the typed form on open |
+| `dag_cbor_migrated` | `version` | a store is migrated to the DAG-CBOR codec on open |
+
+Actors. These record the verbs this daemon accepted, after they succeeded; a failed verb writes nothing, and a verb forwarded to the node that owns the actor is journaled by the daemon that accepted it, not the owner. Messages actors exchange among themselves (`cx.send`), children an actor spawns itself, `view` spawns and `promote_where` are not in the journal; the actor's own inbox and outbox tables (`actor://<id>/inbox`, `actor://<id>/outbox`) hold that history.
+
+| `type` | Fields | Written when |
+| --- | --- | --- |
+| `actor_spawned` | `actor` (id), `definition_hash`, `name` (the definition name the caller used; null when it spawned by hash), `parent` (actor id; the node root when the caller named none) | `spawn` succeeds |
+| `actor_message` | `actor`, `seq` (the message's inbox sequence), `cursor` (the actor's cursor after handling it, the value `send` returned) | `send` succeeds |
+| `actor_stopped` | `actor`, `definition_hash` (the pinned definition), `reason` | `stop` succeeds |
+| `actor_restarted` | `actor`, `definition_hash` (pinned after the restart), `verb` (`resume`, `skip` or `reset`) | `restart` succeeds |
+| `actor_promoted` | `actor`, `definition_hash` (the definition now pinned) | `promote` succeeds |
+
+Processes and models:
+
+| `type` | Fields | Written when |
+| --- | --- | --- |
+| `process_state` | `state` (`id`, `spec`, `phase`, `code`, `stdout`, `stderr`, `error`, `filesystem_changes`, `filesystem_capture`) | a host process changes phase |
+| `process_output` | `process`, `sequence`, `stderr` (bool), `bytes` | a running process emits an output chunk |
+| `model.request` | `model_provider`, `args` | a model completion is requested |
+| `model.result` | `model_provider`, `request_seq`, `result` | that completion returns |
+| `model.error` | `model_provider`, `request_seq`, `error` | that completion fails |
+
 ## DAG-CBOR and links
 
 Rust guests use deterministic DAG-CBOR at the core wasm effect boundary. Structured CAS values use the same codec; core wasm binaries, source bundles, and other raw bytes retain the raw codec. JSON clients represent a link as exactly `{ "$ref": "<CID>" }`. In DAG-CBOR this becomes tag 42 containing the zero-prefixed binary CID. Local links use CIDv1 with a BLAKE3-256 digest and distinguish DAG-CBOR (`0x71`) from raw bytes (`0x55`). Definition identities are Merkle roots over sorted export path/hash pairs; individual items retain their resolved-HIR hashes, and source revisions use separate source hashes.
@@ -290,7 +327,7 @@ Definition signatures record the residual effect row: the labels that can reach 
 
 The Effects view shows individual invocations and their outcomes. To capture file content changes from a process, pass `capture_paths: ["note.txt"]` to `exec` or `process.start`. Paths are resolved within the process root; the capture records actual before/after bytes in CAS and displays created, modified, and deleted files as diffs. Capture is limited to 64 explicitly selected regular files, at most 1 MiB each. Symlinks, unsupported files, and unavailable reads are reported explicitly.
 
-A completed call records one content-addressed trace and a `call_completed` event. Each trace occurrence identifies its job scope, effect and outcome; result blobs deduplicate across calls. The Effects view expands trace pages into individual recorded invocations.
+A completed call records one content-addressed trace and a `call_completed` event carrying the call's wall-clock `elapsed_ms` and the `entry` the caller named (see [Event journal](#event-journal)); neither is part of the trace hash. Each trace occurrence identifies its job scope, effect and outcome; result blobs deduplicate across calls. The Effects view expands trace pages into individual recorded invocations.
 
 Use `call.replay` with the original definition `hash`, `args`, and recorded call `scope` to replay a completed successful or failed call. Replay checks the definition and argument identity, consumes the recorded occurrences, and verifies the final outcome, including recorded errors. Cancelled calls cannot be resumed through `call.replay`. A fresh call executes its external effects again unless an effect has a valid global memoization key.
 

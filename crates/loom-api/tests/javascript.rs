@@ -301,3 +301,84 @@ const main = loom.messages.json(async message => {
     assert_eq!(rows.rows[1].get::<String>(1)?, "hello 👋");
     Ok(())
 }
+
+/// The journal `GET /v1/events` pages is `Store::definition_events`; the HTTP
+/// handler adds only the response envelope.
+#[tokio::test]
+async fn actor_spawn_and_sends_are_journaled() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let app = service(Store::memory()?)?;
+    let node = loom_actor::Node::new(
+        directory.path().join("actors"),
+        app.actor_registry(),
+        std::sync::Arc::new(loom_actor::DefaultEffects),
+        loom_actor::Config::default(),
+    )
+    .await?;
+    let app = app.with_actors(node.clone());
+    let source = r#"
+const LOOM_SCHEMA = "CREATE TABLE arrivals(value INTEGER)";
+async function main(message) {
+    await loom.perform("sql", {sql: "INSERT INTO arrivals VALUES (42)", params: []});
+}
+"#;
+    let added = command(
+        &app,
+        "add",
+        json!({"name":"journaled", "lang":"javascript", "source":source}),
+    )
+    .await;
+    assert!(added.ok, "{added:?}");
+    let hash = added.result["hash"]
+        .as_str()
+        .context("admitted hash missing")?;
+    let spawned = command(&app, "spawn", json!({"def":"journaled", "init":null})).await;
+    assert!(spawned.ok, "{spawned:?}");
+    let id = spawned.result["id"]
+        .as_str()
+        .context("spawned actor ID missing")?;
+    let mut replied = Vec::new();
+    for value in [1, 2] {
+        let sent = command(&app, "send", json!({"id":id, "msg":{"value":value}})).await;
+        assert!(sent.ok, "{sent:?}");
+        replied.push(sent.result["cursor"].as_i64().context("send cursor")?);
+    }
+    assert_eq!(replied, vec![1, 2]);
+
+    let events = app.store.definition_events(0, 1000)?;
+    let spawns: Vec<&Value> = events
+        .iter()
+        .map(|event| &event.event)
+        .filter(|event| event["type"] == "actor_spawned")
+        .collect();
+    assert_eq!(spawns.len(), 1, "{events:?}");
+    assert_eq!(spawns[0]["actor"], id);
+    assert_eq!(spawns[0]["definition_hash"], hash);
+    assert_eq!(spawns[0]["name"], "journaled");
+    assert_eq!(spawns[0]["parent"], node.root());
+    let messages: Vec<(i64, i64)> = events
+        .iter()
+        .map(|event| &event.event)
+        .filter(|event| event["type"] == "actor_message" && event["actor"] == id)
+        .map(|event| {
+            Ok((
+                event["seq"].as_i64().context("message seq")?,
+                event["cursor"].as_i64().context("message cursor")?,
+            ))
+        })
+        .collect::<Result<_>>()?;
+    assert_eq!(messages, vec![(1, 1), (2, 2)]);
+    let spawn_seq = events
+        .iter()
+        .find(|event| event.event["type"] == "actor_spawned")
+        .map(|event| event.seq)
+        .context("spawn event seq")?;
+    assert!(
+        events
+            .iter()
+            .filter(|event| event.event["type"] == "actor_message")
+            .all(|event| event.seq > spawn_seq),
+        "messages must be journaled after the spawn"
+    );
+    Ok(())
+}
