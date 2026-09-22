@@ -90,10 +90,13 @@ impl Runtime {
                         .map_err(error)? as u64;
                     let elapsed = start.elapsed().as_secs_f64() * 1_000_000.0;
                     let bytes = copy_out(&child.memory, packed as u32, (packed >> 32) as u32)?;
-                    let response: Value = loom_proto::decode(&bytes).map_err(anyhow::Error::msg)?;
+                    // The entry returns an isolated-call response frame: tag 0
+                    // then the DAG-CBOR result, here the integer 1.
+                    let response = loom_proto::isolated::Response::parse(&bytes)
+                        .map_err(anyhow::Error::msg)?;
                     anyhow::ensure!(
-                        response == json!({"ok": 1}),
-                        "benchmark fixture returned {response}, expected 1"
+                        response == Ok(&[0x01][..]),
+                        "benchmark fixture returned {response:?}, expected 1"
                     );
                     anyhow::ensure!(
                         running.store.data().handlers.is_empty(),

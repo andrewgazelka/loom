@@ -172,13 +172,17 @@ impl Execution {
 }
 
 impl Execution {
+    /// Run the root export. A `Call` returns the callee's isolated response
+    /// frame: the host reads its tag byte and passes the result bytes through
+    /// untouched (a typed `CallError` for tag 1). `Schema` keeps the
+    /// `{ok: sql}` envelope because it returns to the host, not to a guest.
     pub(super) async fn invoke(
         self: &Arc<Self>,
         scope: String,
         invocation: Invocation,
     ) -> Result<EffectOutput> {
         let mut running = self.instantiate(scope, None, Vec::new()).await?;
-        let packed = match invocation {
+        let output = match invocation {
             Invocation::Schema => {
                 if running
                     .instance
@@ -187,38 +191,54 @@ impl Execution {
                 {
                     return EffectOutput::value(&json!(""));
                 }
-                running
+                let packed = running
                     .instance
                     .get_typed_func::<(), i64>(&mut running.store, "loom_schema")
                     .map_err(error)?
                     .call_async(&mut running.store, ())
                     .await
-                    .map_err(|cause| running.error_context(cause))? as u64
+                    .map_err(|cause| running.error_context(cause))? as u64;
+                let bytes = copy_out(&self.memory, packed as u32, (packed >> 32) as u32)
+                    .map_err(|error| GuestFailure::new(format!("{error:#}")))?;
+                let envelope: Value = loom_proto::decode(&bytes).map_err(GuestFailure::new)?;
+                if !envelope.as_object().is_some_and(|object| object.len() == 1) {
+                    return Err(GuestFailure::new("invalid core schema envelope").into());
+                }
+                if let Some(error) = envelope.get("error").and_then(Value::as_str) {
+                    return Err(GuestFailure::new(error).into());
+                }
+                EffectOutput::value(
+                    envelope
+                        .get("ok")
+                        .ok_or_else(|| GuestFailure::new("invalid core schema envelope"))?,
+                )?
             }
             Invocation::Call { args, export } => {
                 let buffer = running.input_encoded(&args).await?;
-                running
+                let packed = running
                     .instance
                     .get_typed_func::<(i32, i32), i64>(&mut running.store, &export)
                     .map_err(|cause| running.error_context(cause))?
                     .call_async(&mut running.store, (buffer.pointer, buffer.length))
                     .await
-                    .map_err(|cause| running.error_context(cause))? as u64
+                    .map_err(|cause| running.error_context(cause))? as u64;
+                let frame = copy_out(&self.memory, packed as u32, (packed >> 32) as u32)
+                    .map_err(|error| GuestFailure::new(format!("{error:#}")))?;
+                match loom_proto::isolated::Response::parse(&frame) {
+                    Ok(Ok(result)) => EffectOutput {
+                        bytes: result.to_vec(),
+                    },
+                    Ok(Err(error)) => return Err(error.into()),
+                    Err(message) => {
+                        return Err(GuestFailure::new(format!(
+                            "invalid core result frame: {message}"
+                        ))
+                        .into());
+                    }
+                }
             }
         };
-        let bytes = copy_out(&self.memory, packed as u32, (packed >> 32) as u32)
-            .map_err(|error| GuestFailure::new(format!("{error:#}")))?;
-        let envelope: Value = loom_proto::decode(&bytes).map_err(GuestFailure::new)?;
-        if !envelope.as_object().is_some_and(|object| object.len() == 1) {
-            return Err(GuestFailure::new("invalid core result envelope").into());
-        }
-        if let Some(error) = envelope.get("error").and_then(Value::as_str) {
-            return Err(GuestFailure::new(error).into());
-        }
         self.check()?;
-        let output = envelope
-            .get("ok")
-            .ok_or_else(|| GuestFailure::new("invalid core result envelope"))?;
         anyhow::ensure!(
             self.jobs
                 .lock()
@@ -227,7 +247,7 @@ impl Execution {
                 .all(|job| job.detached || job.result.lock().unwrap().is_some()),
             "core returned with unfinished scoped jobs"
         );
-        EffectOutput::value(output)
+        Ok(output)
     }
 }
 

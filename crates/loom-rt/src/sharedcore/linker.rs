@@ -19,37 +19,45 @@ pub(super) fn linker(
                         caller.data_mut().last_effect_error = None;
                         let execution = caller.data().execution.clone();
                         let bytes = copy_out(&execution.memory, pointer as u32, length as u32)?;
-                        let mut descriptor =
+                        let descriptor: Value =
                             loom_proto::decode(&bytes).map_err(anyhow::Error::msg)?;
-                        if let Some(definition) = &execution.effects.def_hash {
-                            resolve_self(&mut descriptor, definition);
-                        }
                         let occurrence = caller.data().occurrence;
                         caller.data_mut().occurrence += 1;
-                        if let Some(bytes) =
-                            handlers::dispatch(&mut caller, &descriptor, occurrence).await?
-                        {
-                            let response = respond(&mut caller, bytes).await?;
-                            let mut samples = execution.handler_round_trip_us.lock().unwrap();
-                            if samples.len() == 100_000 {
-                                samples.drain(..50_000);
+                        // Core guests have exactly one route to another
+                        // definition: the `loom.call` import below. A `perform`
+                        // of the JavaScript-shaped descriptor is refused, not
+                        // adapted, so the opaque-payload path is the only one.
+                        let output = if descriptor.get("op").and_then(Value::as_str) == Some("call") {
+                            Err(anyhow::anyhow!(
+                                "the call effect is not a perform op for core guests; use loom::isolated::call"
+                            ))
+                        } else {
+                            if let Some(bytes) =
+                                handlers::dispatch(&mut caller, &descriptor, occurrence).await?
+                            {
+                                let response = respond(&mut caller, bytes).await?;
+                                let mut samples = execution.handler_round_trip_us.lock().unwrap();
+                                if samples.len() == 100_000 {
+                                    samples.drain(..50_000);
+                                }
+                                samples.push(started.elapsed().as_secs_f64() * 1_000_000.0);
+                                return Ok(response);
                             }
-                            samples.push(started.elapsed().as_secs_f64() * 1_000_000.0);
-                            return Ok(response);
-                        }
-                        anyhow::ensure!(
-                            !execution.pure,
-                            "effects forbidden in pure core execution"
-                        );
-                        let scope = caller.data().scope.clone();
-                        let effects = execution.effects.clone();
-                        caller.data_mut().permit.take();
-                        let output = execution
-                            .runtime
-                            .dispatch_root(descriptor, &scope, occurrence, effects)
-                            .await;
-                        caller.data_mut().permit.take();
-                        caller.data_mut().permit = Some(execution.permit().await?);
+                            anyhow::ensure!(
+                                !execution.pure,
+                                "effects forbidden in pure core execution"
+                            );
+                            let scope = caller.data().scope.clone();
+                            let effects = execution.effects.clone();
+                            caller.data_mut().permit.take();
+                            let output = execution
+                                .runtime
+                                .dispatch_root(descriptor, &scope, occurrence, effects)
+                                .await;
+                            caller.data_mut().permit.take();
+                            caller.data_mut().permit = Some(execution.permit().await?);
+                            output
+                        };
                         let bytes = match output {
                             Ok(output) => {
                                 // The effect owner already produced canonical bytes.
@@ -66,6 +74,56 @@ pub(super) fn linker(
                             .effect_wire_bytes
                             .fetch_add(bytes.len() as u64, Ordering::Relaxed);
                         respond(&mut caller, bytes).await
+                    }
+                    .await;
+                    result.map_err(host_error)
+                })
+            },
+        )
+        .map_err(error)?;
+    // The isolated-call import. The host parses the header, never the payload,
+    // and answers with a response frame; `Runtime::isolated_call` holds every
+    // decision (target, policy, depth, arity, error mapping).
+    linker
+        .func_wrap_async(
+            "loom",
+            "call",
+            |mut caller: Caller<'_, Guest>, (pointer, length): (i32, i32)| {
+                Box::new(async move {
+                    let result: Result<i64> = async {
+                        let execution = caller.data().execution.clone();
+                        let bytes = copy_out(&execution.memory, pointer as u32, length as u32)?;
+                        let occurrence = caller.data().occurrence;
+                        caller.data_mut().occurrence += 1;
+                        let outcome = match loom_proto::isolated::Request::parse(&bytes) {
+                            Ok(request) => {
+                                anyhow::ensure!(
+                                    !execution.pure,
+                                    "isolated calls forbidden in pure core execution"
+                                );
+                                let scope = caller.data().scope.clone();
+                                let effects = execution.effects.clone();
+                                caller.data_mut().permit.take();
+                                let outcome = execution
+                                    .runtime
+                                    .isolated_call(request, &scope, occurrence, &effects)
+                                    .await;
+                                caller.data_mut().permit.take();
+                                caller.data_mut().permit = Some(execution.permit().await?);
+                                outcome
+                            }
+                            Err(error) => Err(error),
+                        };
+                        let frame = loom_proto::isolated::response_frame(match &outcome {
+                            Ok(result) => Ok(result.as_slice()),
+                            Err(error) => Err(error),
+                        });
+                        execution
+                            .runtime
+                            .inner
+                            .effect_wire_bytes
+                            .fetch_add(frame.len() as u64, Ordering::Relaxed);
+                        respond(&mut caller, frame).await
                     }
                     .await;
                     result.map_err(host_error)

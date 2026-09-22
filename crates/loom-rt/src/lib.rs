@@ -7,6 +7,7 @@ pub use compilation_cache::{CompilationCacheStats, LoomCompilationCache};
 mod calls;
 mod commands;
 mod filesystem;
+mod isolated;
 mod machine;
 mod root_handler;
 mod sharedcore;
@@ -52,6 +53,9 @@ struct Inner {
     component_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     effect_locks: Mutex<HashMap<String, Weak<AsyncMutex<()>>>>,
     handler_round_trip_us: Mutex<HandlerMeasurements>,
+    /// Host-side duration of each isolated call, header parsed to callee
+    /// result bytes ready; the caller's encode and the copy back are outside.
+    isolated_call_us: Mutex<Vec<f64>>,
     effect_wire_bytes: AtomicU64,
     trace_locks: Mutex<HashMap<String, Weak<AsyncMutex<()>>>>,
     machine_roots: Mutex<HashMap<String, Arc<filesystem::PinnedRoot>>>,
@@ -67,6 +71,9 @@ struct EffectContext {
     def_hash: Option<String>,
     allowed: Option<BTreeSet<String>>,
     trace: Option<Arc<trace::ExecutionTrace>>,
+    /// Isolated-call nesting below the root call. `isolated_call` increments
+    /// it for the callee and refuses at `loom_proto::isolated::MAX_DEPTH`.
+    depth: u32,
 }
 impl EffectContext {
     fn delegated(&self, def_hash: &str, allowed: Option<&[String]>) -> Self {
@@ -81,6 +88,7 @@ impl EffectContext {
             def_hash: Some(def_hash.into()),
             allowed,
             trace: self.trace.clone(),
+            depth: self.depth,
         }
     }
     fn with_inferred(mut self, labels: &[String]) -> Self {
@@ -181,6 +189,18 @@ impl Runtime {
     pub fn effect_wire_bytes(&self) -> u64 {
         self.inner.effect_wire_bytes.load(Ordering::Relaxed)
     }
+    /// Host-observed isolated-call samples since the runtime started: from the
+    /// parsed request header to the callee's result bytes, in microseconds.
+    /// Excludes the caller's argument encoding and the response copy-in.
+    pub fn isolated_call_round_trip_us(&self) -> Value {
+        let mut samples = self.inner.isolated_call_us.lock().unwrap().clone();
+        samples.sort_by(f64::total_cmp);
+        if samples.is_empty() {
+            return json!({"measurement": "isolated_call", "samples": 0, "median": null, "p99": null, "unit": "us"});
+        }
+        json!({"measurement": "isolated_call", "samples": samples.len(), "median": samples[samples.len() / 2],
+            "p99": samples[(samples.len() * 99 / 100).min(samples.len() - 1)], "unit": "us"})
+    }
     /// Narrow this caller without mutating shared engine or process ownership.
     pub fn without_host_authority(&self) -> Self {
         Self {
@@ -247,6 +267,7 @@ impl Runtime {
                 component_locks: Mutex::new(HashMap::new()),
                 effect_locks: Mutex::new(HashMap::new()),
                 handler_round_trip_us: Mutex::new(HandlerMeasurements::default()),
+                isolated_call_us: Mutex::new(Vec::new()),
                 effect_wire_bytes: AtomicU64::new(0),
                 trace_locks: Mutex::new(HashMap::new()),
                 machine_roots: Mutex::new(HashMap::new()),
@@ -323,12 +344,14 @@ fn required_str<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
         .with_context(|| format!("{key} must be a string"))
 }
 
-fn resolve_self(value: &mut Value, hash: &str) {
-    if let Some("call") = value.get("op").and_then(Value::as_str)
-        && value.pointer("/args/def").and_then(Value::as_str) == Some("$self")
-    {
-        value["args"]["def"] = json!(hash);
-    }
+/// The host `Value` API takes positional arguments as a JSON array and hands
+/// the callee the canonical DAG-CBOR encoding of that array as its payload.
+/// This is the host boundary's one codec pass; guests never take this path.
+fn positional_payload(args: &Value) -> Result<(u32, Vec<u8>)> {
+    let arguments = args
+        .as_array()
+        .context("call arguments must be a positional array")?;
+    Ok((arguments.len() as u32, encode(args)?))
 }
 
 #[cfg(test)]

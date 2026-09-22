@@ -67,7 +67,9 @@ impl<'tcx> Analysis<'tcx> {
             }
             let mut node = Node::default();
             if let Some(label) = sdk_effect(self.tcx, instance.def_id()) {
-                if label == "$perform" {
+                // Both primitives own wire dispatch; only the user's Serialize
+                // and Deserialize implementations they reach can perform.
+                if label == "$perform" || label == "$isolated_call" {
                     mir::scan_primitive(self, instance, &mut node);
                 }
             } else if let Some(local) = instance.def_id().as_local()

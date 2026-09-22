@@ -101,31 +101,35 @@ fn generate(source: &str, contract: &Contract) -> Result<String, BuildError> {
             )));
         }
         let count = function.sig.inputs.len();
-        let mut arguments = Vec::new();
-        let mut decode = String::new();
-        for index in 0..count {
-            decode.push_str(&format!("let argument_{index} = ::loom::serde_json::from_value(values.remove(0)).map_err(|error| ::std::string::ToString::to_string(&error))?;\n"));
-            arguments.push(format!("argument_{index}"));
-        }
+        let arguments = (0..count)
+            .map(|index| format!("argument_{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        // The payload is one DAG-CBOR array of `count` typed arguments, decoded
+        // straight into a tuple whose element types rustc infers from the
+        // entry's own parameter types. Arity 0 is the empty array `[(); 0]`
+        // (`()` would be CBOR null); arity 1 is a one-tuple.
+        let (pattern, tuple) = match count {
+            0 => ("[]".to_owned(), "[(); 0]".to_owned()),
+            _ => (
+                format!("({arguments},)"),
+                format!("({},)", vec!["_"; count].join(", ")),
+            ),
+        };
+        // Codec passes in this wrapper: one decode of the arguments (the
+        // caller encoded them once), one encode of the result (the caller
+        // decodes it once). The host copies both payloads without decoding.
         generated.push_str(&format!(r#"
 #[unsafe(export_name = "loom_call_{name}")]
 extern "C" fn __loom_call_{name}(pointer: ::core::primitive::u32, length: ::core::primitive::u32) -> ::core::primitive::u64 {{
-    let invoke = || -> ::std::result::Result<::loom::serde_json::Value, ::std::string::String> {{
+    let invoke = || -> ::std::result::Result<::std::vec::Vec<::core::primitive::u8>, ::loom::CallError> {{
         let bytes = unsafe {{ ::loom::core::input(pointer, length) }};
-        let value: ::loom::serde_json::Value = ::loom::decode_host(bytes)?;
-        let mut values = match value {{
-            ::loom::serde_json::Value::Array(values) => values,
-            ::loom::serde_json::Value::Null if {count} == 0 => ::std::vec::Vec::new(),
-            value if {count} == 1 => ::std::vec::Vec::from([value]),
-            _ => return ::std::result::Result::Err("entry {name}: arguments must be an array".into()),
-        }};
-        if values.len() != {count} {{ return ::std::result::Result::Err("entry {name}: incorrect argument count".into()); }}
-        {decode}
-        ::loom::serde_json::to_value(crate::{name}({arguments})).map_err(|error| ::std::string::ToString::to_string(&error))
+        let {pattern}: {tuple} = ::loom::isolated::decode_payload(bytes)?;
+        ::loom::isolated::encode_payload(&crate::{name}({arguments}))
     }};
-    ::loom::core::response(invoke())
+    ::loom::core::isolated_response(invoke())
 }}
-"#, arguments = arguments.join(",")));
+"#));
     }
     if let Some(schema) = &contract.schema {
         generated.push_str(&format!(
@@ -156,33 +160,63 @@ mod tests {
         assert!(!generated.contains("export_name = \"loom_call\""));
     }
     #[test]
+    fn wrapper_decodes_a_tuple_of_the_entry_arity() {
+        let source = "pub fn zero() -> i32 { 0 } pub fn one(x: i32) -> i32 { x } pub fn two(x: i32, y: String) -> i32 { x }";
+        let contract = Contract {
+            entry: BTreeMap::from([
+                ("zero".into(), "a".into()),
+                ("one".into(), "b".into()),
+                ("two".into(), "c".into()),
+            ]),
+            schema: None,
+        };
+        let generated = generate(source, &contract).unwrap();
+        syn::parse_file(&generated).unwrap();
+        assert!(generated.contains("let []: [(); 0] = ::loom::isolated::decode_payload(bytes)?;"));
+        assert!(generated.contains("let (argument_0,): (_,) = ::loom::isolated::decode_payload(bytes)?;"));
+        assert!(generated.contains(
+            "let (argument_0, argument_1,): (_, _,) = ::loom::isolated::decode_payload(bytes)?;"
+        ));
+        assert!(generated.contains("::loom::isolated::encode_payload(&crate::two(argument_0, argument_1))"));
+        assert!(!generated.contains("serde_json"), "the wrapper must not build a Value tree");
+    }
+
+    /// The wrapper is compiled against a stand-in `loom` crate that mimics the
+    /// SDK surface it uses (`core::input`, `isolated::decode_payload`,
+    /// `isolated::encode_payload`, `core::isolated_response`, `CallError`)
+    /// while shadowing prelude names the generated code must not rely on.
+    #[test]
     fn generated_wrapper_compiles_and_executes_entry_named_values() {
         let source = r#"
 extern crate self as loom;
-pub fn values() -> i32 { 42 }
+pub fn values(x: i32, y: i32) -> i32 { x + y }
 struct Result;
 struct String;
 struct Vec;
 struct u32;
 struct u64;
+struct u8;
 fn Err() {}
 fn Ok() {}
-pub mod serde_json {
-    pub enum Value { Array(std::vec::Vec<Value>), Null, Number(i32) }
-    pub fn to_value(value: i32) -> std::result::Result<Value, std::string::String> {
-        std::result::Result::Ok(Value::Number(value))
+#[derive(Debug)]
+pub struct CallError;
+pub mod isolated {
+    pub fn decode_payload<T: Decode>(bytes: &[::core::primitive::u8]) -> ::std::result::Result<T, super::CallError> {
+        ::std::result::Result::Ok(T::decode(bytes))
+    }
+    pub fn encode_payload(value: &i32) -> ::std::result::Result<::std::vec::Vec<::core::primitive::u8>, super::CallError> {
+        ::std::result::Result::Ok(::std::vec::Vec::from([*value as ::core::primitive::u8]))
+    }
+    pub trait Decode { fn decode(bytes: &[::core::primitive::u8]) -> Self; }
+    impl Decode for (i32, i32) {
+        fn decode(bytes: &[::core::primitive::u8]) -> Self { (bytes[0] as i32, bytes[1] as i32) }
     }
 }
-pub fn decode_host(_: &[u8]) -> std::result::Result<serde_json::Value, std::string::String> {
-    std::result::Result::Ok(serde_json::Value::Null)
-}
 pub mod core {
-    pub unsafe fn input(_: u32, _: u32) -> &'static [u8] { &[] }
-    pub fn response(result: std::result::Result<super::serde_json::Value, std::string::String>) -> u64 {
-        match result.unwrap() {
-            super::serde_json::Value::Number(value) => value as u64,
-            _ => panic!("expected entry output"),
-        }
+    static INPUT: [::core::primitive::u8; 2] = [40, 2];
+    pub unsafe fn input(_: ::core::primitive::u32, _: ::core::primitive::u32) -> &'static [::core::primitive::u8] { &INPUT }
+    pub fn isolated_response(result: ::std::result::Result<::std::vec::Vec<::core::primitive::u8>, super::CallError>) -> ::core::primitive::u64 {
+        result.unwrap()[0] as ::core::primitive::u64
     }
 }
 fn main() { assert_eq!(__loom_call_values(0, 0), 42); }

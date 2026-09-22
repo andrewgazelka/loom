@@ -1,20 +1,17 @@
 use super::*;
 
 impl Runtime {
-    pub(crate) async fn core_call(
-        &self,
-        hash: &str,
-        args: &Value,
-        scope: &str,
-        effects: &EffectContext,
-    ) -> Result<EncodedCall> {
-        self.core_call_entry(hash, None, args, scope, effects).await
-    }
+    /// Run one entry of a definition on an opaque argument payload: one
+    /// DAG-CBOR array of `argc` typed arguments. The host checks `argc`
+    /// against the stored signature before any instantiation and never
+    /// decodes the payload; a JavaScript callee decodes it to a `Value` on its
+    /// own side because V8 has no DAG-CBOR.
     pub(crate) async fn core_call_entry(
         &self,
         hash: &str,
         selected: Option<&str>,
-        args: &Value,
+        argc: u32,
+        payload: &[u8],
         scope: &str,
         effects: &EffectContext,
     ) -> Result<EncodedCall> {
@@ -22,7 +19,7 @@ impl Runtime {
             .inner
             .store
             .executable_definition(hash)?
-            .with_context(|| format!("definition {hash:?} not found"))?;
+            .ok_or_else(|| crate::isolated::DefinitionNotFound { hash: hash.into() })?;
         let entry = match selected {
             Some(name) => definition
                 .sig
@@ -44,10 +41,24 @@ impl Runtime {
                     .join(", ")
             )
         })?;
+        if entry.params.len() != argc as usize {
+            return Err(loom_proto::isolated::CallError::Arity {
+                hash: hash.into(),
+                entry: entry.name.clone(),
+                expected: entry.params.len() as u32,
+                actual: argc,
+            }
+            .into());
+        }
         if definition.lang.is_v8() {
             anyhow::ensure!(entry.name == "main", "JavaScript entry must be main");
+            let args: Value = loom_proto::decode_host(payload).map_err(|error| {
+                loom_proto::isolated::CallError::Decode {
+                    message: format!("JavaScript callee arguments must be JSON values: {error}"),
+                }
+            })?;
             return self
-                .javascript_call(&definition, args.clone(), scope, effects)
+                .javascript_call(&definition, args, scope, effects)
                 .await;
         }
         let export = format!("loom_call_{}", entry.name);
@@ -58,7 +69,7 @@ impl Runtime {
             &effects,
             false,
             Entry::Call {
-                args,
+                args: payload,
                 export: &export,
             },
         )
@@ -185,7 +196,7 @@ impl Runtime {
         let mut cleanup = Cleanup {
             execution: Some(execution.clone()),
         };
-        let invocation = entry.prepare()?;
+        let invocation = entry.prepare();
         let task_execution = execution.clone();
         let task_scope = scope.to_owned();
         let (sender, receiver) = tokio::sync::oneshot::channel();

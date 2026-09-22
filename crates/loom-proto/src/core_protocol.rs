@@ -1,6 +1,9 @@
 //! Executable admission for the typed effect wire protocol.
 const CORE_HEADER: &[u8] = b"\0asm\x01\0\0\0";
-const CORE_VERSION: &[u8] = b"core-handlers-v2";
+// v3: the isolated-call frame replaced the `{"op":"call"}` descriptor and the
+// entry wrappers return `[tag][payload]` frames instead of `{ok: value}` maps.
+// Artifacts stamped v2 fail admission and rebuild from their stored source.
+const CORE_VERSION: &[u8] = b"core-handlers-v3";
 const NAME: &[u8] = b"loom.effect-protocol";
 
 fn integer(bytes: &mut &[u8]) -> Option<usize> {
@@ -85,12 +88,13 @@ mod tests {
     }
     #[test]
     fn previous_shared_core_requires_rebuild() {
-        let mut old = CORE_HEADER.to_vec();
-        let previous = b"core-shared-v1";
-        old.extend_from_slice(&[0, (1 + NAME.len() + previous.len()) as u8, NAME.len() as u8]);
-        old.extend_from_slice(NAME);
-        old.extend_from_slice(previous);
-        assert!(!is_current(&old));
+        for previous in [b"core-shared-v1" as &[u8], b"core-handlers-v2"] {
+            let mut old = CORE_HEADER.to_vec();
+            old.extend_from_slice(&[0, (1 + NAME.len() + previous.len()) as u8, NAME.len() as u8]);
+            old.extend_from_slice(NAME);
+            old.extend_from_slice(previous);
+            assert!(!is_current(&old), "{previous:?}");
+        }
     }
     #[test]
     fn admits_only_one_current_complete_marker() {

@@ -64,6 +64,23 @@ pub fn entry() {
 }
 
 #[test]
+fn isolated_call_contributes_the_fixed_call_label() {
+    let directory = tempfile::tempdir().unwrap();
+    let document = compile(
+        directory.path(),
+        r#"
+const TARGET: renamed::isolated::Def<fn(u32) -> u32> =
+    renamed::isolated::Def("$self", core::marker::PhantomData);
+pub fn entry(depth: u32) { let _ = renamed::isolated::call(TARGET, depth); renamed::sleep(); }
+"#,
+        json!({}),
+    );
+    let row = entry_row(&document);
+    assert_eq!(row["labels"], json!(["call", "sleep"]), "{document:#}");
+    assert_eq!(row["unknown"], json!([]), "{document:#}");
+}
+
+#[test]
 fn non_literal_perform_is_rejected_with_span() {
     assert_rejected(
         "pub fn entry(label: &str) {\n    renamed::perform(label, ());\n}\n",

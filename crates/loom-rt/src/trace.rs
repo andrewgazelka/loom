@@ -137,8 +137,10 @@ impl ExecutionTrace {
         }
         Ok(trace)
     }
-    pub fn identity(&self, definition_hash: &str, args: &Value) -> Result<()> {
-        let bytes = super::encode(args)?;
+    /// Bind the trace to its root definition and argument payload bytes. The
+    /// payload is hashed as bytes; the host never decodes it.
+    pub fn identity(&self, definition_hash: &str, args: &[u8]) -> Result<()> {
+        let bytes = args.to_vec();
         let hash = blake3::hash(&bytes).to_hex().to_string();
         let mut state = self.state.lock().unwrap();
         if state.definition_hash.is_some() || state.replay {
@@ -650,20 +652,36 @@ mod tests {
     #[test]
     fn root_identity_is_checked_before_any_replayed_effect() -> Result<()> {
         let trace = ExecutionTrace::fresh("root");
-        trace.identity("definition-a", &json!([1]))?;
+        let one = super::super::encode(&json!([1]))?;
+        let two = super::super::encode(&json!([2]))?;
+        trace.identity("definition-a", &one)?;
         let result = EffectOutput::value(&Value::Null);
         let bundle = trace.snapshot(Some(&result), true)?;
         assert!(
             ExecutionTrace::loaded(bundle.clone())?
-                .identity("definition-b", &json!([1]))
+                .identity("definition-b", &one)
                 .is_err()
         );
         assert!(
             ExecutionTrace::loaded(bundle.clone())?
-                .identity("definition-a", &json!([2]))
+                .identity("definition-a", &two)
                 .is_err()
         );
-        ExecutionTrace::loaded(bundle)?.identity("definition-a", &json!([1]))?;
+        ExecutionTrace::loaded(bundle)?.identity("definition-a", &one)?;
+        Ok(())
+    }
+    #[test]
+    fn root_identity_hashes_payload_bytes_not_a_decoded_value() -> Result<()> {
+        // A payload the Value model cannot represent still identifies the call.
+        let payload = loom_proto::isolated::encode_payload(&(u64::MAX,)).unwrap();
+        let trace = ExecutionTrace::fresh("root");
+        trace.identity("definition-a", &payload)?;
+        let bundle = trace.snapshot(None, false)?;
+        assert_eq!(
+            bundle.trace.args_hash.as_deref(),
+            Some(blake3::hash(&payload).to_hex().as_str())
+        );
+        assert!(bundle.blobs.iter().any(|blob| blob.bytes == payload));
         Ok(())
     }
     #[test]
