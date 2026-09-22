@@ -356,7 +356,24 @@ impl Builder {
                 rustc_invocations: built.rustc_invocations,
             });
         }
-        let mut component = threaded_module::prepare(&built.bytes).map_err(BuildError::Rejected)?;
+        let mut component = match threaded_module::prepare(&built.bytes) {
+            Ok(component) => component,
+            Err(error) => {
+                // Keep the exact input so the refusal can be reproduced offline
+                // (`LOOM_DWARF_FIXTURE=<path> cargo test -p loom-build relocates_a_real -- --ignored`).
+                let kept = self
+                    .cache
+                    .join("rejected-modules")
+                    .join(format!("{}.wasm", definition.hash));
+                let note = match std::fs::create_dir_all(kept.parent().unwrap())
+                    .and_then(|()| std::fs::write(&kept, &built.bytes))
+                {
+                    Ok(()) => format!("; input module kept at {}", kept.display()),
+                    Err(io) => format!("; input module not kept: {io}"),
+                };
+                return Err(BuildError::Rejected(format!("{error}{note}")));
+            }
+        };
         loom_proto::core_protocol::stamp(&mut component);
         if !loom_proto::core_protocol::is_current(&component) {
             return Err(BuildError::Rejected(

@@ -54,9 +54,9 @@ impl CodeMap {
         Self { bodies }
     }
 
-    /// The new address of `address`, or `None` when no instruction boundary of
-    /// the old module has it: inside a replaced instruction, in the size prefix
-    /// before a body, or past the last body. Address 0 is the compilation unit's
+    /// The new address of `address`, or `None` when it lies past the last body.
+    /// An address inside a body's size prefix snaps to that body's code start;
+    /// one inside a replaced instruction maps to the replacement's start. Address 0 is the compilation unit's
     /// `DW_AT_low_pc` anchor for its range list and maps to 0. A body's end (its
     /// `DW_AT_high_pc` and the end of its line sequence) maps to the new end.
     pub(crate) fn translate(&self, address: u64) -> Option<u64> {
@@ -74,9 +74,18 @@ impl CodeMap {
         let index = self
             .bodies
             .partition_point(|body| body.old.start <= address);
-        let body = self.bodies.get(index.checked_sub(1)?)?;
+        let Some(previous) = index.checked_sub(1) else {
+            // Before the first body: inside the function count. LLVM does emit
+            // ranges that begin a byte or two before a body's code (inside its
+            // size prefix); they snap to the code they precede.
+            return self.bodies.first().map(|body| body.new.start);
+        };
+        let body = &self.bodies[previous];
         if address > body.old.end {
-            return None;
+            // Past this body's code: inside the next body's size prefix, which
+            // snaps to that body's code start, or past the last body, which is
+            // no code at all.
+            return self.bodies.get(index).map(|next| next.new.start);
         }
         let local = address - body.old.start;
         let mut delta: i128 = 0;
@@ -84,7 +93,11 @@ impl CodeMap {
             if local >= edit.start + edit.old_len {
                 delta += i128::from(edit.new_len) - i128::from(edit.old_len);
             } else if local > edit.start {
-                return None;
+                // Inside an instruction the rewrite replaced. The debug row
+                // described bytes that no longer exist; the nearest thing that
+                // does is the replacement, so the address lands on its start.
+                return u64::try_from(i128::from(body.new.start) + i128::from(edit.start) + delta)
+                    .ok();
             } else {
                 break;
             }
@@ -129,7 +142,19 @@ pub(crate) fn relocate<'a>(
         ))
     })
     .map_err(|error| format!("DWARF sections: {error}"))?;
-    let convert_address = |address: u64| map.translate(address).map(Address::Constant);
+    // gimli reports an unconvertible address without saying which; remember it.
+    let failed = std::cell::Cell::new(None);
+    let convert_address = |address: u64| {
+        let result = map.translate(address);
+        if result.is_none() {
+            failed.set(Some(address));
+        }
+        result.map(Address::Constant)
+    };
+    let convert_error = |error: gimli::write::ConvertError| match failed.get() {
+        Some(address) => format!("DWARF conversion: {error} (code offset {address:#x})"),
+        None => format!("DWARF conversion: {error}"),
+    };
     let mut converted = gimli::write::Dwarf::new();
     {
         let mut units = converted.convert(&dwarf).map_err(convert_error)?;
@@ -160,11 +185,18 @@ pub(crate) fn relocate<'a>(
                 unit.set_line_program(program, files);
             }
             let root_id = unit.unit.root();
-            convert_entry(&mut unit, root_id, &root, map, &convert_address)?;
+            convert_entry(
+                &mut unit,
+                root_id,
+                &root,
+                map,
+                &convert_address,
+                &convert_error,
+            )?;
             let mut entry = root;
             while let Some(id) = unit.read_entry(&mut entry).map_err(convert_error)? {
                 let id = unit.add_entry(id, &entry);
-                convert_entry(&mut unit, id, &entry, map, &convert_address)?;
+                convert_entry(&mut unit, id, &entry, map, &convert_address, &convert_error)?;
             }
         }
     }
@@ -195,6 +227,7 @@ fn convert_entry<'u, 'a>(
     entry: &gimli::write::ConvertUnitEntry<'u, Slice<'a>>,
     map: &CodeMap,
     convert_address: &dyn Fn(u64) -> Option<Address>,
+    convert_error: &dyn Fn(gimli::write::ConvertError) -> String,
 ) -> Result<(), String> {
     let low_pc =
         entry
@@ -302,8 +335,21 @@ mod tests {
     #[test]
     fn addresses_that_are_not_instruction_boundaries_are_refused() {
         let map = map();
-        assert_eq!(map.translate(7), None, "inside the replaced instruction");
-        assert_eq!(map.translate(2), None, "size prefix before the first body");
+        assert_eq!(
+            map.translate(7),
+            map.translate(map.bodies[0].old.start + map.bodies[0].edits[0].start),
+            "inside the replaced instruction: lands on the replacement's start"
+        );
+        assert_eq!(
+            map.translate(2),
+            Some(3),
+            "size prefix before the first body snaps to its code"
+        );
+        assert_eq!(
+            map.translate(9),
+            Some(27),
+            "a body's exclusive end (also the next size prefix) is the body's new end"
+        );
         assert_eq!(map.translate(15), None, "past the last body");
         assert_eq!(CodeMap::new(Vec::new()).translate(1), None);
         assert_eq!(CodeMap::new(Vec::new()).translate(0), Some(0));
