@@ -80,7 +80,10 @@ for index in range(1, count + 1):
     # The first add creates the lineage; every later one is the edit loop: `update`
     # of the same name, which keeps the per-lineage incremental directory warm.
     verb = "add" if index == 1 else "update"
-    body = {"command": verb, "args": {"name": name, "lang": "rust", "source": source}}
+    args = {"name": name, "source": source}
+    if verb == "add":
+        args["lang"] = "rust"  # update keeps the definition's language
+    body = {"command": verb, "args": args}
     started = time.perf_counter()
     status, raw = request("POST", "/v1/command", body)
     wall_ms = (time.perf_counter() - started) * 1000
