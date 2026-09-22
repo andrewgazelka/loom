@@ -17,14 +17,18 @@ mod direct;
 mod handler_dependencies;
 mod manifest;
 mod preparation;
+mod prepared;
 pub mod registry;
 mod sdk;
+mod stages;
+use stages::Stages;
 mod threaded_module;
 use loom_check::{CheckedDef, SourceBundle, SourceFile};
 use loom_proto::{Diagnostic, Lang};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
+    sync::Arc,
     time::Instant,
 };
 use tokio::{fs, process::Command, sync::Mutex};
@@ -34,17 +38,33 @@ async fn seed_build_lock(source: &Path, destination: &Path) -> Result<(), std::i
     fs::write(destination, fs::read(source).await?).await
 }
 
-// Fetching the compiler workspace resolves archives without executing build
-// scripts. Do this before cache lookup: prepared definition metadata can outlive
-// the host Cargo cache that supplies independently verified compiler sources.
+/// `cargo fetch --locked` over the guest compiler's standard library workspace,
+/// so a later `-Zbuild-std` bootstrap never reaches the network from inside the
+/// builder lock. Runs once per (sysroot, library lock) for the life of this
+/// process; the memo lives in `Builder::compiler_dependencies`, shared by every
+/// builder clone, and a different sysroot or a changed library lock reruns the
+/// fetch. A registry purged while the daemon runs is repaired by the next cold
+/// Cargo bootstrap, which fetches what it lacks; nothing on the warm replay
+/// path reads the registry.
 async fn prepare_compiler_dependencies(
-    root: &Path,
-    driver: Option<&Path>,
+    memo: &std::sync::Mutex<Option<String>>,
+    toolchain: &GuestToolchain,
 ) -> Result<(), BuildError> {
-    let toolchain = resolve_guest_toolchain_with_driver(root, driver).await?;
     let manifest = toolchain
         .sysroot
         .join("lib/rustlib/src/rust/library/Cargo.toml");
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(toolchain.sysroot.as_os_str().as_encoded_bytes());
+    hasher.update(&std::fs::read(manifest.with_file_name("Cargo.lock"))?);
+    let key = hasher.finalize().to_hex().to_string();
+    if memo
+        .lock()
+        .map_err(|_| BuildError::Rejected("compiler dependency memo poisoned".into()))?
+        .as_deref()
+        == Some(key.as_str())
+    {
+        return Ok(());
+    }
     let mut command = Command::new(&toolchain.cargo);
     direct::compiler_environment(&mut command);
     toolchain.configure(&mut command)?;
@@ -66,6 +86,9 @@ async fn prepare_compiler_dependencies(
             String::from_utf8_lossy(&output.stderr)
         )));
     }
+    *memo
+        .lock()
+        .map_err(|_| BuildError::Rejected("compiler dependency memo poisoned".into()))? = Some(key);
     Ok(())
 }
 
@@ -73,8 +96,12 @@ pub struct Builder {
     store: loom_store::Store,
     root: PathBuf,
     cache: PathBuf,
-    gate: std::sync::Arc<Mutex<()>>,
+    gate: Arc<Mutex<()>>,
     driver_path: Option<PathBuf>,
+    /// Last toolchain + driver resolution for this cache directory; see `prepared`.
+    prepared: Arc<prepared::Memo>,
+    /// Key of the last successful standard-library fetch; see `prepare_compiler_dependencies`.
+    compiler_dependencies: Arc<std::sync::Mutex<Option<String>>>,
 }
 #[derive(Debug)]
 pub struct BuildOutput {
@@ -102,27 +129,35 @@ impl Builder {
             store,
             root,
             cache,
-            gate: std::sync::Arc::new(Mutex::new(())),
+            gate: Arc::new(Mutex::new(())),
             driver_path: std::env::var_os("LOOM_HASH_RUSTC").map(PathBuf::from),
+            prepared: Arc::default(),
+            compiler_dependencies: Arc::default(),
         }
     }
     /// Mutable build workspaces have one owner. Tenant services select their
     /// cache directory explicitly; process-wide environment overrides cannot
     /// make tenant eviction or materialization touch a sibling's workspace.
+    /// The pinned driver is built under the cache, so the toolchain memo is
+    /// per cache directory too.
     pub fn for_cache_directory(&self, cache: PathBuf) -> Self {
         Self {
             store: self.store.clone(),
             root: self.root.clone(),
             cache,
-            gate: std::sync::Arc::new(Mutex::new(())),
+            gate: Arc::new(Mutex::new(())),
             driver_path: self.driver_path.clone(),
+            prepared: Arc::default(),
+            compiler_dependencies: self.compiler_dependencies.clone(),
         }
     }
     pub fn cache_directory(&self) -> &Path {
         &self.cache
     }
+    /// Selecting a driver changes what the memo resolves; drop it.
     pub fn with_driver_path(mut self, path: PathBuf) -> Self {
         self.driver_path = Some(path);
+        self.prepared = Arc::default();
         self
     }
     pub fn for_store(&self, store: loom_store::Store) -> Self {
@@ -132,20 +167,29 @@ impl Builder {
             cache: self.cache.clone(),
             gate: self.gate.clone(),
             driver_path: self.driver_path.clone(),
+            prepared: self.prepared.clone(),
+            compiler_dependencies: self.compiler_dependencies.clone(),
         }
     }
     pub async fn preflight(&self) -> Result<(), BuildError> {
         let _guard = self.gate.lock().await;
-        self.driver().await.map(|_| ())
+        self.prepared().await.map(|_| ())
     }
-    async fn driver(&self) -> Result<identity::Driver, BuildError> {
-        identity::Driver::prepare_with_path(&self.root, &self.cache, self.driver_path.as_deref())
+    /// The guest toolchain and hash-rustc driver, resolved once and reused while
+    /// `prepared::fingerprint` and the resolved binaries are unchanged.
+    async fn prepared(&self) -> Result<(Arc<GuestToolchain>, Arc<identity::Driver>), BuildError> {
+        self.prepared
+            .prepare(&self.root, &self.cache, self.driver_path.as_deref())
             .await
     }
     pub async fn build(&self, definition: &CheckedDef) -> Result<BuildOutput, BuildError> {
         self.build_with_dependencies(definition, &BTreeMap::new())
             .await
     }
+    /// Compile `definition` against its already checked dependency closure.
+    /// `logs` ends with one `build_stages` JSON line attributing the whole
+    /// `ms` span to named stages (`stages.rs`); a `build_stages_warning` line
+    /// follows when more than five percent belongs to no stage.
     pub async fn build_with_dependencies(
         &self,
         definition: &CheckedDef,
@@ -153,6 +197,7 @@ impl Builder {
     ) -> Result<BuildOutput, BuildError> {
         let _guard = self.gate.lock().await;
         let started = Instant::now();
+        let mut stages = Stages::start();
         if !definition.diagnostics.is_empty() {
             return Err(BuildError::Rejected(
                 "definition has checker diagnostics".into(),
@@ -166,7 +211,8 @@ impl Builder {
         let directory = self.cache.join(&definition.hash);
         fs::create_dir_all(&directory).await?;
         let component_path = directory.join("component.wasm");
-        let driver = self.driver().await?;
+        let (toolchain, driver) = self.prepared().await?;
+        stages.checkpoint("toolchain_prepare_ms");
         let inputs = format!(
             "{}:{}",
             build_fingerprint(&self.root)?,
@@ -223,7 +269,7 @@ impl Builder {
         })
         .await?;
         sdk::reconcile(sdk::Rebuild {
-            driver: self.driver_path.as_deref(),
+            toolchain: &toolchain,
             store: &self.store,
             root: &self.root,
             cache: &self.cache,
@@ -232,20 +278,24 @@ impl Builder {
             isolated,
         })
         .await?;
-        let materialization_ms = started.elapsed().as_millis();
+        stages.checkpoint("input_materialization_ms");
         let mut built = direct::build(direct::Request {
-            selected_driver: self.driver_path.as_deref(),
             root: &self.root,
             cache: &self.cache,
             directory: &directory,
             definition,
+            dependencies,
             sdk_fingerprint: &inputs,
+            toolchain: &toolchain,
             driver: &driver,
             identity_directory: &directory,
             store: &self.store,
         })
         .await?;
+        stages.absorb(built.stages);
         if !built.diagnostics.is_empty() {
+            built.logs.push('\n');
+            built.logs.push_str(&stages.log_lines());
             return Ok(BuildOutput {
                 identity: None,
                 component: Vec::new(),
@@ -255,7 +305,6 @@ impl Builder {
                 rustc_invocations: built.rustc_invocations,
             });
         }
-        let encoding_started = Instant::now();
         let mut component = threaded_module::prepare(&built.bytes).map_err(BuildError::Rejected)?;
         loom_proto::core_protocol::stamp(&mut component);
         if !loom_proto::core_protocol::is_current(&component) {
@@ -263,16 +312,15 @@ impl Builder {
                 "Rust compiler did not produce a core module".into(),
             ));
         }
-        built.logs.push_str(&format!(
-            "\n{}\n",
-            serde_json::json!({"build_stages":{
-                    "input_materialization_ms":materialization_ms,
-                    "component_encode_ms":encoding_started.elapsed().as_millis()}})
-        ));
         validate_component(&component)?;
+        stages.checkpoint("component_encode_ms");
         let identity = driver.ingest(&self.store, &directory, definition, &component)?;
+        stages.checkpoint("identity_ingest_ms");
         fs::write(&component_path, &component).await?;
         fs::write(directory.join("component.inputs"), inputs).await?;
+        stages.checkpoint("output_persist_ms");
+        built.logs.push('\n');
+        built.logs.push_str(&stages.log_lines());
         fs::write(directory.join("build.log"), &built.logs).await?;
         Ok(BuildOutput {
             identity: Some(identity),

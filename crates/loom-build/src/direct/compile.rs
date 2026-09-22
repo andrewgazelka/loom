@@ -2,26 +2,45 @@ use super::*;
 
 pub(crate) struct Request<'a> {
     pub root: &'a Path,
-    pub selected_driver: Option<&'a Path>,
     pub cache: &'a Path,
     pub directory: &'a Path,
     pub definition: &'a CheckedDef,
+    /// The checked dependency closure, keyed by definition hash.
+    pub dependencies: &'a BTreeMap<String, CheckedDef>,
     pub sdk_fingerprint: &'a str,
     pub store: &'a Store,
+    /// Resolved once per build by `Builder::prepared`; never re-resolved here.
+    pub toolchain: &'a crate::GuestToolchain,
     pub driver: &'a crate::identity::Driver,
     pub identity_directory: &'a Path,
 }
 
+/// Compile the root crate of `directory`. A graph key (manifest, lock, compiler
+/// identity, SDK fingerprint, target, vendored input) selects a dependency
+/// graph under `cache/rust-artifacts/<key>`; a graph with a stored recipe is
+/// replayed as one direct rustc invocation, otherwise Cargo resolves it cold.
+/// `Built::stages` names every millisecond of this function:
+///
+/// warm replay: `compiler_setup_ms` (path canonicalization, key, root
+/// workspace copy) → `graph_load_ms` (recipe read, path rebase, unit sources)
+/// → `artifact_restore_ms` (stamp check, or full CAS restore and repair) →
+/// `root_rustc_ms` → `entry_abi_rustc_ms` → `identity_publish_ms`.
+///
+/// cold bootstrap: `compiler_setup_ms` → `graph_load_ms` (miss) →
+/// `admission_ms` (cargo metadata, source policy) → `compiler_mirror_ms` →
+/// `cargo_bootstrap_ms` → `root_rustc_ms` → `entry_abi_rustc_ms` →
+/// `artifact_capture_ms` → `identity_publish_ms`.
 pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
-    let started = std::time::Instant::now();
+    let mut stages = crate::Stages::start();
     let Request {
         root,
-        selected_driver,
         cache,
         directory,
         definition,
+        dependencies,
         sdk_fingerprint,
         store,
+        toolchain,
         driver,
         identity_directory,
     } = request;
@@ -34,10 +53,10 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
     let cache = cache_path.as_path();
     let directory = directory_path.as_path();
     let target_name = "wasm32-unknown-unknown";
-    let toolchain = crate::resolve_guest_toolchain_with_driver(root, selected_driver).await?;
     let sysroot = toolchain.sysroot.clone();
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"rustc-contract-v7-dependency-artifact-digests");
+    // v8: `ArtifactFile` gained `len`; graphs recorded before it are never read.
+    hasher.update(b"rustc-contract-v8-artifact-stamp");
     let manifest_bytes = fs::read_to_string(directory.join("Cargo.toml"))
         .await?
         .replace(root.to_string_lossy().as_ref(), "$SDK")
@@ -47,9 +66,10 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
         "{}\nhash-rustc:{}",
         toolchain.version, driver.toolchain_hash
     );
+    let lock_bytes = fs::read(directory.join("Cargo.lock")).await?;
     for bytes in [
         manifest_bytes,
-        fs::read(directory.join("Cargo.lock")).await?,
+        lock_bytes.clone(),
         compiler_identity.as_bytes().to_vec(),
         sdk_fingerprint.as_bytes().to_vec(),
         target_name.as_bytes().to_vec(),
@@ -94,13 +114,32 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
             .get("package")
             .and_then(|package| package.get("build"))
             .is_some();
-    if !root_build_script && let Some(mut recipe) = read_graph(store, &key)? {
-        let setup_ms = started.elapsed().as_millis();
-        let restore_started = std::time::Instant::now();
+    stages.checkpoint("compiler_setup_ms");
+    let graph_identity = serde_json::json!({"dependency_graph":key});
+    let stored = if root_build_script {
+        None
+    } else {
+        read_graph(store, &key)?
+    };
+    if let Some(mut recipe) = stored {
         let replay_compiler = driver.path.to_string_lossy().into_owned();
         recipe.rebase_graph(root, cache, directory, &sysroot, &replay_compiler)?;
         recipe.restore_sources(store, cache, &graph)?;
-        let restored = recipe.restore_artifacts(store)?;
+        stages.checkpoint("graph_load_ms");
+        let mut notes = Vec::new();
+        let restored = match recipe.artifacts_stamped(&graph) {
+            Ok(()) => true,
+            Err(reason) => {
+                notes.push(format!(
+                    "artifact restore: {reason}; verifying every artifact"
+                ));
+                let restored = recipe.restore_artifacts(store)?;
+                if restored {
+                    recipe.write_artifact_stamp(&graph)?;
+                }
+                restored
+            }
+        };
         let repairs = if restored {
             0
         } else {
@@ -117,8 +156,15 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
             )
             .await?
         };
-        if restored || recipe.restore_artifacts(store)? {
-            let restore_ms = restore_started.elapsed().as_millis();
+        let complete = restored || {
+            let complete = recipe.restore_artifacts(store)?;
+            if complete {
+                recipe.write_artifact_stamp(&graph)?;
+            }
+            complete
+        };
+        stages.checkpoint("artifact_restore_ms");
+        if complete {
             fs::create_dir_all(&root_incremental).await?;
             recipe.relocate(directory, &target.join("root-output"), &root_incremental)?;
             recipe.compiler = driver.path.to_string_lossy().into_owned();
@@ -156,16 +202,13 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
                 command
             };
             driver.configure(&mut command, identity_directory);
-            let compiler_started = std::time::Instant::now();
             let output = run(command).await?;
-            let compiler_ms = compiler_started.elapsed().as_millis();
             let stderr = String::from_utf8_lossy(&output.stderr);
             let diagnostics = rustc_diagnostics(&stderr);
-            let stages = serde_json::json!({"build_stages":{"compiler_setup_ms":setup_ms,
-                "artifact_restore_ms":restore_ms,"root_rustc_ms":compiler_ms}});
-            let graph_identity = serde_json::json!({"dependency_graph":key});
+            stages.checkpoint("root_rustc_ms");
+            let notes = notes.join("\n");
             let logs = format!(
-                "{graph_identity}\ndirect rustc; dependency graph {key}\n{stages}\n{stderr}"
+                "{graph_identity}\ndirect rustc; dependency graph {key}\n{notes}\n{stderr}"
             );
             if !output.status.success() {
                 if diagnostics.is_empty() {
@@ -176,6 +219,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
                     logs,
                     diagnostics,
                     rustc_invocations: repairs + 1,
+                    stages,
                 });
             }
             super::entry_abi::compile(super::entry_abi::Request {
@@ -187,14 +231,20 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
                 isolated,
             })
             .await?;
+            stages.checkpoint("entry_abi_rustc_ms");
             crate::identity::publish(identity_directory, published_identity_directory)?;
+            let bytes = fs::read(recipe.output()?).await?;
+            stages.checkpoint("identity_publish_ms");
             return Ok(Built {
-                bytes: fs::read(recipe.output()?).await?,
+                bytes,
                 logs,
                 diagnostics,
                 rustc_invocations: repairs + 2,
+                stages,
             });
         }
+    } else {
+        stages.checkpoint("graph_load_ms");
     }
     artifacts::initialize_index(store)?;
     let shareable = graph_shareable(
@@ -204,7 +254,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
         &target,
         isolated,
         Some(&sysroot),
-        selected_driver,
+        toolchain,
     )
     .await?;
     if !shareable {
@@ -212,8 +262,10 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
             "untrusted host build scripts and procedural macros are not admitted",
         ));
     }
+    stages.checkpoint("admission_ms");
     let mirror = graph.join("unit-cache");
     compiler_cache::prepare(store, &mirror, &target, &compiler_identity)?;
+    stages.checkpoint("compiler_mirror_ms");
     let helper_owner = std::env::var_os("LOOM_COMPILER_CACHE_OWNER")
         .map(PathBuf::from)
         .unwrap_or(std::env::current_exe()?);
@@ -245,7 +297,6 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
         .env("LOOM_TRUSTED_SOURCES", graph.join("trusted-sources"));
     let output = bootstrap(command).await?;
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let graph_identity = serde_json::json!({"dependency_graph":key});
     let logs = format!(
         "{graph_identity}\ncargo dependency bootstrap; graph {key}; cross-graph publication {shareable}\n{stdout}{}",
         String::from_utf8_lossy(&output.stderr)
@@ -255,6 +306,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
         .lines()
         .filter(|line| *line == "rustc-invocation")
         .count();
+    stages.checkpoint("cargo_bootstrap_ms");
     if !output.status.success() {
         if diagnostics.is_empty() {
             return Err(rejected(logs));
@@ -264,6 +316,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
             logs,
             diagnostics,
             rustc_invocations,
+            stages,
         });
     }
     crate::cargo_artifact(&stdout, &directory.join("Cargo.toml"), &target)?;
@@ -316,6 +369,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
             String::from_utf8_lossy(&hash_output.stderr)
         )));
     }
+    stages.checkpoint("root_rustc_ms");
     super::entry_abi::compile(super::entry_abi::Request {
         recipe: &root_recipe,
         identity: identity_directory,
@@ -325,6 +379,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
         isolated,
     })
     .await?;
+    stages.checkpoint("entry_abi_rustc_ms");
     if !root_build_script {
         let mut recipe = Recipe::parse(
             &fs::read(target.join("root-rustc.recipe")).await?,
@@ -355,6 +410,17 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
             shareable,
         )?;
         recipe.capture_artifacts(store, &target)?;
+        recipe.write_artifact_stamp(&graph)?;
+        definition_rlibs::capture(
+            store,
+            &recipe.units,
+            dependencies,
+            &definition_rlibs::Context {
+                compiler_identity: &compiler_identity,
+                lock: &lock_bytes,
+                target: target_name,
+            },
+        )?;
         recipe.layout = Some(Layout {
             root: root.into(),
             cache: cache.into(),
@@ -362,11 +428,15 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
         });
         write_graph(store, &key, &recipe)?;
     }
+    stages.checkpoint("artifact_capture_ms");
     crate::identity::publish(identity_directory, published_identity_directory)?;
+    let bytes = fs::read(root_recipe.output()?).await?;
+    stages.checkpoint("identity_publish_ms");
     Ok(Built {
-        bytes: fs::read(root_recipe.output()?).await?,
+        bytes,
         logs,
         diagnostics,
         rustc_invocations: rustc_invocations + 2,
+        stages,
     })
 }

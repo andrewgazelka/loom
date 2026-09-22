@@ -217,7 +217,8 @@ fn sdk_graph_changed(original: &Lock, current: &Lock) -> bool {
 }
 
 pub(crate) struct Rebuild<'a> {
-    pub driver: Option<&'a Path>,
+    /// The resolved guest toolchain; `Builder::prepared` memoizes it per build.
+    pub toolchain: &'a crate::GuestToolchain,
     pub store: &'a loom_store::Store,
     pub root: &'a Path,
     pub cache: &'a Path,
@@ -249,7 +250,7 @@ pub(crate) async fn reconcile(job: Rebuild<'_>) -> Result<(), BuildError> {
     // (for example serde 1.0.210 with a workspace locked to serde 1.0.229).
     // Metadata resolves dependencies but never executes a build script. User
     // path/git/registry configuration has already been rejected by materialize.
-    let toolchain = crate::resolve_guest_toolchain_with_driver(job.root, job.driver).await?;
+    let toolchain = job.toolchain;
     let mut command = Command::new(&toolchain.cargo);
     toolchain.configure(&mut command)?;
     let config = job.directory.join(".cargo");

@@ -11,6 +11,7 @@ use std::{
 use tokio::{fs, process::Command};
 pub(crate) mod artifacts;
 pub(crate) mod compiler_cache;
+pub(crate) mod definition_rlibs;
 mod trusted_sources;
 
 pub(crate) struct Built {
@@ -18,6 +19,9 @@ pub(crate) struct Built {
     pub logs: String,
     pub diagnostics: Vec<Diagnostic>,
     pub rustc_invocations: usize,
+    /// Every millisecond of `build` attributed to a named stage; the caller
+    /// absorbs this chain into the build-wide one.
+    pub stages: crate::Stages,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -40,10 +44,14 @@ struct Layout {
     sysroot: PathBuf,
 }
 
+/// One file of a graph's `target` directory as captured after the cold Cargo
+/// bootstrap. `len` lets the warm replay confirm presence with a `stat`
+/// instead of reading and hashing every artifact (`Recipe::artifacts_present`).
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct ArtifactFile {
     hash: String,
     executable: bool,
+    len: u64,
 }
 
 fn rejected(error: impl std::fmt::Display) -> BuildError {

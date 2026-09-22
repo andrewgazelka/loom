@@ -29,22 +29,34 @@ fn rejected(error: impl std::fmt::Display) -> BuildError {
 impl Driver {
     #[cfg(test)]
     pub async fn prepare(root: &Path, cache: &Path) -> Result<Self, BuildError> {
-        Self::prepare_with_path(root, cache, None).await
+        Self::check_manifest(root, None)?;
+        let toolchain = crate::resolve_guest_toolchain_with_driver(root, None).await?;
+        Self::prepare_with_toolchain(root, cache, None, &toolchain).await
     }
-    pub async fn prepare_with_path(
-        root: &Path,
-        cache: &Path,
-        selected: Option<&Path>,
-    ) -> Result<Self, BuildError> {
-        let source = root.join("tools/hash-rustc");
-        let manifest = source.join("Cargo.toml");
+    /// A pinned driver is built from `tools/hash-rustc`; refuse before any
+    /// compiler process runs when those sources are absent.
+    pub fn check_manifest(root: &Path, selected: Option<&Path>) -> Result<(), BuildError> {
+        let manifest = root.join("tools/hash-rustc/Cargo.toml");
         if selected.is_none() && !manifest.is_file() {
             return Err(rejected(format!(
                 "hash-rustc driver unavailable: {}",
                 manifest.display()
             )));
         }
-        let toolchain = crate::resolve_guest_toolchain_with_driver(root, selected).await?;
+        Ok(())
+    }
+    /// Build (pinned) or locate (selected) the driver for an already resolved
+    /// guest toolchain, check that it answers `-vV` byte for byte like the guest
+    /// compiler, and hash the pair into `toolchain_hash`. Builds reach this
+    /// through `prepared::Memo`, which skips it while every input is unchanged.
+    pub async fn prepare_with_toolchain(
+        root: &Path,
+        cache: &Path,
+        selected: Option<&Path>,
+        toolchain: &crate::GuestToolchain,
+    ) -> Result<Self, BuildError> {
+        Self::check_manifest(root, selected)?;
+        let source = root.join("tools/hash-rustc");
         let guest_version = toolchain.version.as_bytes();
         let target = cache
             .join("hash-rustc")

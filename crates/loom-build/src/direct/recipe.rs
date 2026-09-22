@@ -156,16 +156,111 @@ impl Recipe {
             {
                 continue;
             }
-            let hash = store
-                .put("rust-artifact", &std::fs::read(&path)?)
-                .map_err(rejected)?;
+            let bytes = std::fs::read(&path)?;
+            let hash = store.put("rust-artifact", &bytes).map_err(rejected)?;
             let executable = artifacts::executable(&path)?;
-            self.artifacts
-                .insert(path, ArtifactFile { hash, executable });
+            self.artifacts.insert(
+                path,
+                ArtifactFile {
+                    hash,
+                    executable,
+                    len: bytes.len() as u64,
+                },
+            );
         }
         Ok(())
     }
 
+    /// Digest of the artifact set (path, hash, executable, length): the value
+    /// the stamp file records, so a recipe with a different artifact set can
+    /// never match a stamp left by another.
+    pub(super) fn artifact_set_digest(&self) -> String {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"loom-artifact-stamp-v1");
+        for (path, artifact) in &self.artifacts {
+            let length = artifact.len.to_le_bytes();
+            let fields: [&[u8]; 4] = [
+                path.as_os_str().as_encoded_bytes(),
+                artifact.hash.as_bytes(),
+                &[artifact.executable as u8],
+                &length,
+            ];
+            for field in fields {
+                hasher.update(&(field.len() as u64).to_le_bytes());
+                hasher.update(field);
+            }
+        }
+        hasher.finalize().to_hex().to_string()
+    }
+
+    fn stamp_path(graph: &Path) -> PathBuf {
+        graph.join("artifact-stamp")
+    }
+
+    /// Record that every artifact of this set was verified by content hash and
+    /// is present under `graph/target`. Written by the cold bootstrap after
+    /// `capture_artifacts` and by the warm replay after a full
+    /// `restore_artifacts`; invalidated by `artifacts_stamped` reading a
+    /// different digest (recipe changed) or by a file failing the presence check.
+    pub(super) fn write_artifact_stamp(&self, graph: &Path) -> Result<(), BuildError> {
+        let path = Self::stamp_path(graph);
+        let temporary = path.with_extension(format!("pending-{}", std::process::id()));
+        std::fs::write(&temporary, self.artifact_set_digest())?;
+        std::fs::rename(temporary, path)?;
+        Ok(())
+    }
+
+    /// `Ok(())` when the stamp names exactly this artifact set and every
+    /// artifact is a regular file of the recorded length and mode. The `Err`
+    /// names the first reason, for the build log; the caller then runs the full
+    /// content-hash restore. A file rewritten with identical length and mode is
+    /// not detected here: the stamp trusts the target directory between builds,
+    /// which only this crate writes to (root output, incremental state and
+    /// item identity live outside the captured set).
+    pub(super) fn artifacts_stamped(&self, graph: &Path) -> Result<(), String> {
+        let stamp = std::fs::read_to_string(Self::stamp_path(graph))
+            .map_err(|error| format!("artifact stamp unreadable: {error}"))?;
+        let digest = self.artifact_set_digest();
+        if stamp != digest {
+            return Err(format!(
+                "artifact stamp {} does not match recipe artifact set {}",
+                stamp.chars().take(12).collect::<String>(),
+                &digest[..12]
+            ));
+        }
+        self.artifacts_present()
+    }
+
+    /// Presence by metadata alone: regular file, recorded length, recorded mode.
+    pub(super) fn artifacts_present(&self) -> Result<(), String> {
+        for (path, artifact) in &self.artifacts {
+            let metadata = std::fs::symlink_metadata(path)
+                .map_err(|error| format!("artifact {} missing: {error}", path.display()))?;
+            if !metadata.file_type().is_file() {
+                return Err(format!("artifact {} is not a regular file", path.display()));
+            }
+            if metadata.len() != artifact.len {
+                return Err(format!(
+                    "artifact {} has {} bytes, recipe recorded {}",
+                    path.display(),
+                    metadata.len(),
+                    artifact.len
+                ));
+            }
+            let executable = artifacts::executable(path).map_err(|error| error.to_string())?;
+            if executable != artifact.executable {
+                return Err(format!(
+                    "artifact {} executable bit differs from the recipe",
+                    path.display()
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Verify every artifact by content hash against the CAS and rewrite any
+    /// that differ. `Ok(false)` means at least one artifact is absent from the
+    /// CAS and the unit must be recompiled (`graph::repair_units`).
     pub(super) fn restore_artifacts(&self, store: &Store) -> Result<bool, BuildError> {
         let mut complete = true;
         for (path, artifact) in &self.artifacts {
