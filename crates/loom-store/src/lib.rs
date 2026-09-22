@@ -2,6 +2,7 @@ pub use rusqlite::Error as DatabaseError;
 mod files;
 mod guest_cas;
 pub use guest_cas::CAS_GUEST_MAX_BYTES;
+mod bundle;
 mod cas_browser;
 mod dag_migration;
 mod definitions;
@@ -23,6 +24,7 @@ mod tests;
 mod trace;
 mod update;
 use anyhow::{Context, Result, anyhow, ensure};
+pub use bundle::{Block, ImportBlock, MAX_BUNDLE_BYTES, VerifiedBundle, verify_bundle};
 pub use intake::IntakePublication;
 use loom_proto::{Def, Event, Value};
 pub use machine::MachineRoot;
@@ -138,6 +140,10 @@ impl Store {
         self.recording.verify_connection(&connection)?;
         result
     }
+}
+/// BLAKE3-256 of `bytes` as lowercase hex: the CAS address those bytes would take.
+pub fn content_hash(bytes: &[u8]) -> String {
+    blake3::hash(bytes).to_hex().to_string()
 }
 fn put(c: &Connection, kind: &str, bytes: &[u8]) -> Result<String> {
     ensure!(

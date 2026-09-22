@@ -20,11 +20,20 @@ pub enum Permission {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     String,
+    /// UTF-8 text; the CLI reads it from a file path.
     Source,
     Json,
     Integer,
     Count,
     Boolean,
+    /// Object of string values; the CLI collects repeated `--flag key=value`
+    /// pairs and also accepts the singular flag spelling (`--dep` for `deps`).
+    Map,
+    /// Array of strings; the CLI collects repeated positional words.
+    List,
+    /// Raw CAS reference (CID) of an uploaded object; the CLI uploads the file
+    /// at the given path through `POST /v1/cas` and sends the returned CID.
+    Upload,
 }
 pub struct Argument {
     pub name: &'static str,
@@ -103,7 +112,7 @@ pub static VERBS: &[Verb] = &[
                 flag: true,
                 default: Some("\"typescript\"")
             },
-            arg!(deps, Json, optional),
+            arg!(deps, Map, optional),
             arg!(allowed_effects, Json, optional)
         ]
     ),
@@ -126,7 +135,7 @@ pub static VERBS: &[Verb] = &[
         [
             arg!(name, String),
             arg!(source, Source),
-            arg!(deps, Json, optional),
+            arg!(deps, Map, optional),
             arg!(allowed_effects, Json, optional),
             arg!(expected_hash, String, optional),
             arg!(request_id, String, optional)
@@ -166,6 +175,13 @@ pub static VERBS: &[Verb] = &[
     ),
     verb!(find, Definition, Read, [arg!(text, String)]),
     verb!(dependents, Definition, Read, [arg!(hash, String)]),
+    verb!(export, Definition, Read, [arg!(targets, List)]),
+    verb!(
+        import,
+        Definition,
+        Define,
+        [arg!(bundle, Upload), arg!(into, String, optional)]
+    ),
     verb!(
         spawn,
         Actor,
@@ -285,6 +301,18 @@ impl Verb {
                 Kind::Boolean => json!({"type":"boolean"}),
                 Kind::Integer => json!({"type":"integer"}),
                 Kind::Count => json!({"type":"integer","minimum":0,"maximum":ValidationCount::MAX}),
+                Kind::Map if !argument.required => {
+                    json!({"type":["object","null"],"additionalProperties":{"type":"string"}})
+                }
+                Kind::Map => json!({"type":"object","additionalProperties":{"type":"string"}}),
+                Kind::List if argument.required => {
+                    json!({"type":"array","items":{"type":"string"},"minItems":1})
+                }
+                Kind::List => json!({"type":"array","items":{"type":"string"}}),
+                Kind::Upload => json!({
+                    "type":"string",
+                    "description":"Raw CAS reference (CID) of the uploaded bytes; store them first with POST /v1/cas as application/octet-stream."
+                }),
             };
             if let Some(default) = argument.default {
                 schema["default"] = serde_json::from_str(default).expect("verb default is JSON");
@@ -352,6 +380,16 @@ impl Verb {
                 Kind::Count => value
                     .as_u64()
                     .is_some_and(|value| ValidationCount::try_from(value).is_ok()),
+                Kind::Map => {
+                    value
+                        .as_object()
+                        .is_some_and(|map| map.values().all(Value::is_string))
+                        || (!argument.required && value.is_null())
+                }
+                Kind::List => value.as_array().is_some_and(|items| {
+                    items.iter().all(Value::is_string) && (!argument.required || !items.is_empty())
+                }),
+                Kind::Upload => value.is_string(),
             };
             if !valid {
                 return Err(format!("{} invalid argument {}", self.name, argument.name));
@@ -447,6 +485,57 @@ mod tests {
         let verb = lookup("info").unwrap();
         assert_eq!(verb.schema()["properties"]["id"]["type"], "string");
         assert!(verb.normalize(&mut args).is_err());
+    }
+
+    #[test]
+    fn dependency_pins_are_string_maps_on_every_transport() {
+        for name in ["add", "update"] {
+            let verb = lookup(name).unwrap();
+            assert_eq!(
+                verb.schema()["properties"]["deps"],
+                json!({"type":["object","null"],"additionalProperties":{"type":"string"}})
+            );
+            let mut args = match name {
+                "add" => json!({"source":"pub fn main() {}","deps":{"util":"util"}}),
+                _ => json!({"name":"a","source":"pub fn main() {}","deps":{"util":"util"}}),
+            };
+            verb.normalize(&mut args).unwrap();
+            args["deps"] = Value::Null;
+            verb.normalize(&mut args).unwrap();
+            for invalid in [json!({"util":1}), json!(["util"]), json!("util")] {
+                args["deps"] = invalid;
+                assert!(verb.normalize(&mut args).is_err(), "{name} {}", args["deps"]);
+            }
+        }
+    }
+
+    #[test]
+    fn export_takes_target_words_and_import_takes_an_uploaded_reference() {
+        let export = lookup("export").unwrap();
+        assert!(export.family == Family::Definition);
+        assert_eq!(
+            export.schema()["properties"]["targets"],
+            json!({"type":"array","items":{"type":"string"},"minItems":1})
+        );
+        export
+            .normalize(&mut json!({"targets":["greet","util"]}))
+            .unwrap();
+        for mut invalid in [json!({"targets":[]}), json!({"targets":"greet"}), json!({})] {
+            assert!(export.normalize(&mut invalid).is_err(), "{invalid}");
+        }
+        let import = lookup("import").unwrap();
+        assert!(matches!(import.permission, Permission::Define));
+        assert_eq!(import.schema()["properties"]["bundle"]["type"], "string");
+        assert_eq!(
+            import.schema()["properties"]["into"]["type"],
+            json!(["string", "null"])
+        );
+        import
+            .normalize(&mut json!({"bundle":"bafk","into":"friend"}))
+            .unwrap();
+        import.normalize(&mut json!({"bundle":"bafk"})).unwrap();
+        assert!(import.normalize(&mut json!({"into":"friend"})).is_err());
+        assert!(import.normalize(&mut json!({"bundle":7})).is_err());
     }
 
     #[test]

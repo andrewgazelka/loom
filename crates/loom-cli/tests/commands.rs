@@ -36,6 +36,9 @@ impl Server {
         Self::with_registry(false).await
     }
     async fn with_registry(guest: bool) -> Self {
+        Self::with_languages(guest, vec![Lang::Rust]).await
+    }
+    async fn with_languages(guest: bool, languages: Vec<Lang>) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let store = Store::memory().unwrap();
         let registry: Arc<dyn loom_actor::Registry> = if guest {
@@ -55,7 +58,7 @@ impl Server {
             Service::new(
                 store,
                 PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
-                vec![Lang::Rust],
+                languages,
             )
             .unwrap()
             .with_actors(node.clone()),
@@ -286,4 +289,56 @@ async fn definition_commands_reach_shared_service() {
     assert_eq!(dependent_hashes.len(), 2);
     assert!(dependent_hashes.contains(&caller.result["hash"]));
     assert!(dependent_hashes.contains(&revised_caller.result["hash"]));
+}
+
+#[tokio::test]
+async fn export_writes_a_bundle_file_and_import_rebinds_it_under_a_prefix() {
+    // JavaScript admission needs no Rust toolchain, so the whole CLI path
+    // (upload through POST /v1/cas, download through GET /v1/cas) runs here.
+    let server = Server::with_languages(false, vec![Lang::Rust, Lang::JavaScript]).await;
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("sum.js");
+    std::fs::write(&source, "async function main(a, b) { return a + b; }").unwrap();
+    let added = server
+        .invoke(&[
+            "add",
+            source.to_str().unwrap(),
+            "--lang",
+            "javascript",
+            "--name",
+            "sum",
+        ])
+        .await;
+    assert!(added.ok, "{added:?}");
+    let hash = added.result["hash"].as_str().unwrap().to_owned();
+    let out = directory.path().join("sum.car");
+    let exported = server
+        .invoke(&["export", "sum", "--out", out.to_str().unwrap()])
+        .await;
+    assert!(exported.ok, "{exported:?}");
+    assert_eq!(exported.result["roots"]["sum"], hash);
+    let bytes = std::fs::read(&out).unwrap();
+    assert_eq!(exported.result["out_bytes"], bytes.len());
+    assert_eq!(exported.result["bytes"], bytes.len());
+    // The CLI refuses to overwrite an existing --out file.
+    let refused = server
+        .invoke(&["export", "sum", "--out", out.to_str().unwrap()])
+        .await;
+    assert!(!refused.ok, "{refused:?}");
+    let imported = server
+        .invoke(&["import", out.to_str().unwrap(), "--into", "friend"])
+        .await;
+    assert!(imported.ok, "{imported:?}");
+    assert_eq!(imported.result["imported"][0]["name"], "friend/sum");
+    assert_eq!(imported.result["imported"][0]["hash"], hash);
+    let viewed = server.invoke(&["view", "friend/sum"]).await;
+    assert!(viewed.ok, "{viewed:?}");
+    assert_eq!(viewed.result["hash"], hash);
+    assert_eq!(
+        viewed.result["source"],
+        "async function main(a, b) { return a + b; }"
+    );
+    // Same name, same hash: a no-op rather than an error.
+    let again = server.invoke(&["import", out.to_str().unwrap()]).await;
+    assert!(again.ok, "{again:?}");
 }

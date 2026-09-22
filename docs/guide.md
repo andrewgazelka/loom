@@ -26,7 +26,7 @@ The proof checks these results in order:
 6. Adding `counter.rs`, spawning it, and sending three messages leaves its cursor at 3.
 7. Adding `counter-v2.rs` preserves the effect row. Validating three messages under that candidate returns `Differs` and unequal original/fork hashes for the `counter` table.
 8. Promotion with rationale `e2e` puts both behavior hashes in lineage. One more message moves the cursor to 4.
-9. The HTTP MCP companion repeats checks 1–8 under separate names and actors, then checks discovery of the eight definition tools and 22 actor tools. It prints its own `N/9`.
+9. The HTTP MCP companion repeats checks 1–8 under separate names and actors, then checks discovery of the 14 definition tools, 22 actor tools and the `command` wrapper. It prints its own `N/9`.
 
 Stop the daemon on the test port and commit your changes before running the automated version. This machine’s Nix requires a committed Git input:
 
@@ -102,7 +102,7 @@ The CLI, HTTP commands, and MCP tools use the same definition operations. `add` 
 
 | CLI | MCP tool | Result |
 | --- | --- | --- |
-| `add <file> [--lang language] [--name n]` | `add` | Name, definition hash, entries, and backend metadata |
+| `add <file> [--lang language] [--name n] [--dep alias=name-or-hash]...` | `add` | Name, definition hash, entries, and backend metadata; each `--dep` pins `use alias::...` to a definition |
 | `view <name-or-hash>` | `view` | Stored source and item table |
 | `update <name> <file> [--expected_hash hash]` | `update` | Atomic caller propagation or a durable repair session; old hashes remain runnable |
 | `history <name>` | `history` | Hash chain, timestamps, and changed items between entries |
@@ -110,6 +110,8 @@ The CLI, HTTP commands, and MCP tools use the same definition operations. `add` 
 | `run <name-or-hash> [args-json]` | `run` | Output and recorded effects |
 | `find <text>` | `find` | Matching names and item names |
 | `dependents <hash>` | `dependents` | Definitions with a dependency pinned to the hash |
+| `export <name>... --out <file>` | `export` | One CARv1 bundle holding the named definitions, their dependency closure, sources, identities and vendored crate trees ([format](bundles.md)) |
+| `import <file> [--into prefix]` | `import` | Rebuilds every bundled definition from source and binds the bundle's names, optionally under `prefix/`; all or nothing |
 
 ```sh
 loom --token "$LOOM_TOKEN" add sum.rs --lang rust --name sum
@@ -117,7 +119,14 @@ loom --token "$LOOM_TOKEN" run sum '[20,22]'
 loom --token "$LOOM_TOKEN" view sum
 loom --token "$LOOM_TOKEN" update sum sum.rs
 loom --token "$LOOM_TOKEN" history sum
+loom --token "$LOOM_TOKEN" add caller.rs --lang rust --name caller --dep sum=sum
+loom --token "$LOOM_TOKEN" export caller --out caller.car
+loom --token "$LOOM_TOKEN" --url "$OTHER_LOOM_URL" import caller.car --into friend
 ```
+
+`--dep alias=value` is repeatable (`--deps` is the same flag). A 64-character hexadecimal value is used as the pinned hash; any other value is a definition name that the server resolves to its current hash at admission, on every transport. An unknown name is an error naming it. The caller writes `use alias::path::Item;`; the stored definition records the resolved hashes.
+
+`export` collects the transitive `deps` closure of every target and stores the bundle as a raw CAS object; the CLI downloads it to `--out`, which must not exist. A target given as a hash must be the current value of a name. `import` uploads the file to `POST /v1/cas`, then runs the `import` verb with the returned reference: every block is hashed against its CID, every definition is rebuilt through the same admission path as `add` in dependency order, and the whole bundle is refused when a rebuilt hash differs from the recorded one (the error names both hashes and both toolchain hashes) or when a bound name already points at a different hash. `--into friend` binds `friend/<name>` instead. Nothing reaches the live store unless every definition rebuilt; see [bundles.md](bundles.md) for the byte-level format and the object list.
 
 Updates and repair sessions are described in [the scripting guide](../examples/evolution/README.md). Inspect `result.update.status`; an accepted command may still need repairs. `update_repair <id> <revision> <changes-json>` submits a batch, `update_view <id>` reads the latest revision, and `update_rebase <id> <revision>` retries after disjoint namespace changes.
 
@@ -129,7 +138,7 @@ pub fn sum(a: i64, b: i64) -> i64 { a + b }
 
 A source file may expose several entries. `run <name>` selects the matching public function in a named definition, or a unique entry with that name among currently named definitions. Ambiguous names report the matching definition hashes. `run <definition hash>` requires a sole entry and otherwise reports the candidate names. Each entry hash is also addressable: `run <entry hash>` executes that entry, and `view <entry hash>` returns its owning definition and identifies the selected entry. An unchanged entry shared by several revisions retains its earliest published owner. Private helpers and nested functions are not entries.
 
-HTTP clients post `{ "command": "run", "args": { "target": "sum", "args": [20,22] } }` to `/v1/command` with the bearer token. `add` takes `source` and an optional `name`; `update` takes `name` and `source`. The remaining definition arguments are `target` for `view`, `name` for `history`, `old` and `new` for `diff`, `text` for `find`, and `hash` for `dependents`.
+HTTP clients post `{ "command": "run", "args": { "target": "sum", "args": [20,22] } }` to `/v1/command` with the bearer token. `add` takes `source`, an optional `name`, and an optional `deps` object mapping aliases to definition names or hashes; `update` takes `name` and `source`. The remaining definition arguments are `target` for `view`, `name` for `history`, `old` and `new` for `diff`, `text` for `find`, `hash` for `dependents`, `targets` (an array of names or hashes) for `export`, and `bundle` (the raw CAS reference returned by `POST /v1/cas`) plus an optional `into` prefix for `import`. `export` returns `result.bundle.$ref`; fetch the bytes from `GET /v1/cas/{cid}`.
 
 Item hashes describe compiler-resolved definitions. Renaming a local variable or reformatting source leaves them unchanged. A changed helper can change its callers' hashes too. The definition hash is a BLAKE3 Merkle root over the sorted entry name/hash pairs from the driver. Every public entry contributes, so changing a secondary entry changes the definition hash while unchanged entries retain their own resolved-HIR hashes. Alpha-renaming a local leaves both the definition hash and history unchanged; changing a constant changes the hash. Source revisions have their own BLAKE3 hashes. A published definition pins its executable and schema; a conflicting publication is rejected. The Wasm and toolchain hashes identify its executable build. Builds require the `hash-rustc` driver and reject missing identity outputs. Stores without `defs.behavior_hash` are rejected by column name.
 
@@ -283,7 +292,7 @@ Machine filesystem effects resolve from a pinned root directory handle. Parent t
 
 These snapshots observe selected files across the process interval. They do not enumerate every write, track metadata-only changes, or distinguish concurrent writers. Historical effects without snapshots remain browsable, with no invented diff.
 
-Dependencies remain pinned when a definition name moves. `update` retains its existing dependency pins and effect policy unless replacements are supplied. Use `--deps '{"alias":"<hash>"}'` to replace pins and `--allowed_effects '[]'` to deny effects; explicit `null` clears the effect policy. Use `dependents <hash>` to find callers and update each caller explicitly. Actor behavior changes use `promote` or MCP `promote`.
+Dependencies remain pinned when a definition name moves. `update` retains its existing dependency pins and effect policy unless replacements are supplied. Use `--dep alias=<name-or-hash>` (repeatable) to replace pins and `--allowed_effects '[]'` to deny effects; explicit `null` clears the effect policy. Use `dependents <hash>` to find callers and update each caller explicitly. Actor behavior changes use `promote` or MCP `promote`.
 
 ## Guest-defined effect handlers
 

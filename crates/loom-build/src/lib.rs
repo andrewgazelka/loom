@@ -11,12 +11,14 @@ mod identity;
 #[cfg(test)]
 mod identity_tests;
 mod intake;
+pub use intake::Preparation;
 mod materialize;
 use materialize::{Materialization, materialize_rust};
 mod direct;
 mod handler_dependencies;
 mod manifest;
 mod preparation;
+pub use preparation::VENDOR_TREE;
 pub mod registry;
 mod sdk;
 mod threaded_module;

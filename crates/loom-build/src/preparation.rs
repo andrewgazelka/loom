@@ -4,23 +4,27 @@ use loom_check::SourceFile;
 use loom_store::Store;
 use std::{collections::BTreeMap, path::Path};
 
-pub(crate) const VENDOR_TREE: &str = "loom.vendor-tree";
+/// Source-bundle key whose text is the BLAKE3 hash of a vendored crate tree.
+pub const VENDOR_TREE: &str = "loom.vendor-tree";
 
 fn rejected(error: impl std::fmt::Display) -> BuildError {
     BuildError::Rejected(error.to_string())
+}
+
+pub(crate) fn overlay_hash(store: &Store, key: &str) -> Result<Option<String>, BuildError> {
+    store.with_connection(|connection| {
+        connection.execute_batch("CREATE TABLE IF NOT EXISTS rust_preparations (key TEXT PRIMARY KEY, overlay_hash TEXT NOT NULL)")?;
+        let mut statement = connection.prepare("SELECT overlay_hash FROM rust_preparations WHERE key=?")?;
+        let mut rows = statement.query_map([key], |row| row.get::<_, String>(0))?;
+        Ok(rows.next().transpose()?)
+    }).map_err(rejected)
 }
 
 pub(crate) fn load(
     store: &Store,
     key: &str,
 ) -> Result<Option<BTreeMap<String, SourceFile>>, BuildError> {
-    let hash = store.with_connection(|connection| {
-        connection.execute_batch("CREATE TABLE IF NOT EXISTS rust_preparations (key TEXT PRIMARY KEY, overlay_hash TEXT NOT NULL)")?;
-        let mut statement = connection.prepare("SELECT overlay_hash FROM rust_preparations WHERE key=?")?;
-        let mut rows = statement.query_map([key], |row| row.get::<_, String>(0))?;
-        Ok(rows.next().transpose()?)
-    }).map_err(rejected)?;
-    let Some(hash) = hash else {
+    let Some(hash) = overlay_hash(store, key)? else {
         return Ok(None);
     };
     store.get_value(&hash).map_err(rejected)

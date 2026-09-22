@@ -16,6 +16,19 @@ impl Service {
             Err(error) => self.response(Err(error)),
         }
     }
+    /// Admit one definition through the `add` path: resolve dependency pins,
+    /// check, prepare, build and publish. `import` reuses this per definition.
+    pub(super) async fn admit(
+        &self,
+        mut request: DefineRequest,
+        destination: Destination,
+    ) -> Result<Response> {
+        request.deps = resolve_dependency_pins(&self.store, &request.deps)?;
+        match destination {
+            Destination::Live => self.define_inner(request).await,
+            Destination::Staged => self.define_update_node(request).await,
+        }
+    }
     pub(super) async fn define_inner(&self, request: DefineRequest) -> Result<Response> {
         let progress = self.build_progress.start(&request.name);
         let mut intake = self.clone();
@@ -25,7 +38,8 @@ impl Service {
             .define_staged(request, Some(&self.store), &progress)
             .await
     }
-    /// Compile one node directly into an already private update store.
+    /// Compile one node directly into an already private staged store; update
+    /// sessions and bundle imports publish the staged graph as one transaction.
     pub(super) async fn define_update_node(&self, request: DefineRequest) -> Result<Response> {
         let progress = self.build_progress.start(&request.name);
         self.define_staged(request, None, &progress).await
@@ -182,5 +196,85 @@ impl Service {
                 &dependency_signatures(&self.store, &prepared.deps)?,
             )
             .await?)
+    }
+}
+
+/// Where an admitted definition is published.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Destination {
+    /// Stage privately, then commit into this service's live store.
+    Live,
+    /// This service's store is already a private snapshot; write into it.
+    Staged,
+}
+
+/// Turn every dependency pin into a definition hash. A 64-character hexadecimal
+/// value must be a stored definition; anything else is a definition name and
+/// resolves to its current hash. Every transport sends the same `deps`, so the
+/// CLI never resolves names itself.
+pub(super) fn resolve_dependency_pins(
+    store: &Store,
+    deps: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>> {
+    let mut resolved = BTreeMap::new();
+    let names = store.current_names()?;
+    for (alias, target) in deps {
+        ensure!(!alias.is_empty(), "dependency alias is empty");
+        let hash = if target.len() == 64 && target.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            ensure!(
+                store.definition(target)?.is_some(),
+                "dependency {alias}: definition {target} not found"
+            );
+            target.clone()
+        } else {
+            names
+                .get(target)
+                .cloned()
+                .with_context(|| format!("dependency {alias}: name {target:?} not found"))?
+        };
+        resolved.insert(alias.clone(), hash);
+    }
+    Ok(resolved)
+}
+
+#[cfg(test)]
+mod pin_tests {
+    use super::*;
+
+    #[test]
+    fn pins_take_hashes_as_is_and_names_by_current_hash() -> Result<()> {
+        let store = Store::memory()?;
+        let hash = store.put("item-preimage", b"util entry")?;
+        let definition = Def {
+            hash: hash.clone(),
+            lang: Lang::Rust,
+            component_hash: None,
+            sig: Default::default(),
+            allowed_effects: None,
+            observed_effects: Vec::new(),
+        };
+        store.define(&definition, Some("util"), "pub fn twice() {}", &BTreeMap::new())?;
+        let resolved = resolve_dependency_pins(
+            &store,
+            &BTreeMap::from([("a".to_owned(), "util".to_owned()), ("b".to_owned(), hash.clone())]),
+        )?;
+        assert_eq!(resolved["a"], hash);
+        assert_eq!(resolved["b"], hash);
+        let missing = resolve_dependency_pins(
+            &store,
+            &BTreeMap::from([("util".to_owned(), "absent".to_owned())]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(missing.contains("dependency util") && missing.contains("\"absent\""), "{missing}");
+        let unknown_hash = "0".repeat(64);
+        let error = resolve_dependency_pins(
+            &store,
+            &BTreeMap::from([("util".to_owned(), unknown_hash.clone())]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains(&unknown_hash), "{error}");
+        Ok(())
     }
 }

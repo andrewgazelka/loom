@@ -1,6 +1,7 @@
 pub mod vm_images;
 pub use vm_images::StoreVmImages;
 pub mod actors;
+mod bundles;
 mod commands;
 mod definitions;
 mod evolution;
@@ -332,6 +333,8 @@ fn command_returns_direct(command: &str) -> bool {
             | "run"
             | "find"
             | "dependents"
+            | "export"
+            | "import"
             | "resolve"
             | "cas.list"
             | "cas.inspect"

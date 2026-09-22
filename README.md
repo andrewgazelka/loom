@@ -28,6 +28,9 @@ loom --url "$LOOM_URL" update greet examples/unison/greet-v2.rs  # same hash: lo
 loom --url "$LOOM_URL" update greet examples/unison/greet-v3.rs  # new hash: constant changed
 loom --url "$LOOM_URL" run "$OLD" '"loom"'                # still "hello, loom"
 loom --url "$LOOM_URL" history greet                     # both hashes
+loom --url "$LOOM_URL" add examples/unison/shout.rs --lang rust --name shout --dep greet=greet  # use greet::greet
+loom --url "$LOOM_URL" export shout --out shout.car      # shout, greet, sources and identities in one file
+loom --url "$LOOM_URL" import shout.car --into friend    # rebuilds friend/shout; same hashes or it refuses
 loom --url "$LOOM_URL" add examples/unison/sleeper.rs --lang rust --name sleeper     # inferred effects ["sleep"]
 loom --url "$LOOM_URL" add examples/unison/counter.rs --lang rust --name counter
 loom --url "$LOOM_URL" spawn counter
@@ -387,6 +390,7 @@ and return `{ok, seq, result, diagnostics}`, including failures. Omitted spawn
 | `update_rebase(id, revision)` / `update_abort(id, revision)` | retry after disjoint namespace changes or abort pending work |
 | `view(target)` / `history(name)` | stored source and definition history |
 | `diff(old, new)` / `dependents(hash)` | item differences and pinned callers |
+| `export(targets)` / `import(bundle, into?)` | one CARv1 bundle of definitions plus dependency closure; rebuild it from source on another node ([format](docs/bundles.md)) |
 | `run(target, args?)` / `find(text)` | execute or search definitions |
 | `actors(cluster?)` | actors with their owner; `cluster: true` lists the shared store (`loom actors --cluster`) |
 | `nodes()` | cluster nodes: node id, advertised address, start time, and liveness |

@@ -83,7 +83,7 @@ impl ServerHandler for LoomMcp {
         Ok(CallToolResult::structured(envelope))
     }
     fn get_info(&self) -> ServerInfo {
-        ServerInfo{instructions:Some("Loom runs Rust core WebAssembly guests. All I/O goes through loom effects. Use add to check and build Rust source, view to read stored source, update to propagate changes atomically through callers, and run to execute names or hashes. history and diff compare item identities; find searches names and dependents follows pinned dependencies. The actor tools inspect and drive the native actor network; behaviors lists spawnable hashes and tree shows the root supervisor.".into()),capabilities:ServerCapabilities::builder().enable_tools().enable_resources().enable_prompts().build(),..Default::default()}
+        ServerInfo{instructions:Some("Loom runs Rust core WebAssembly guests. All I/O goes through loom effects. Use add to check and build Rust source, view to read stored source, update to propagate changes atomically through callers, and run to execute names or hashes. history and diff compare item identities; find searches names and dependents follows pinned dependencies. export bundles definitions with their dependency closure into one CAS object and import rebuilds such a bundle from source on this node. The actor tools inspect and drive the native actor network; behaviors lists spawnable hashes and tree shows the root supervisor.".into()),capabilities:ServerCapabilities::builder().enable_tools().enable_resources().enable_prompts().build(),..Default::default()}
     }
     async fn list_prompts(
         &self,
@@ -234,6 +234,8 @@ fn command_description(name: &str) -> String {
         "update_repair" => "Apply a batch of source repairs to an update session and retry propagation. Supply the latest revision; stale submissions are rejected. Inspect result.update.status before treating this as published.",
         "update_rebase" => "Replan a conflicted update against current names while retaining repairs. Refuses to overwrite concurrently edited definitions. Supply the latest session revision.",
         "update_abort" => "Abort a pending, repair or conflicted update session without changing live definitions. Supply the latest revision.",
+        "export" => "Bundle named definitions with their dependency closure, sources, identities and vendored crate trees as one CARv1 file stored in the CAS. Download result.bundle.$ref from GET /v1/cas/{cid}. Compiled wasm is excluded; import rebuilds from source.",
+        "import" => "Import a bundle already stored with POST /v1/cas (application/octet-stream): verify every block, rebuild each definition from source in dependency order, and publish all of them in one transaction. Refuses the whole bundle when a rebuilt hash differs from the recorded one or a bound name collides; into prefixes every imported name.",
         _ => return format!("Run the {name} command."),
     }.to_owned()
 }

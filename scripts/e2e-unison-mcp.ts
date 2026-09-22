@@ -186,9 +186,11 @@ const checks: Array<() => Promise<void>> = [
   async () => {
     const discovery = object(await bounded(client.rpc('tools/list')));
     const tools = list(discovery.tools).map(item => text(object(item).name));
-    const definitions = ['add', 'view', 'update', 'history', 'diff', 'run', 'find', 'dependents'];
-    const actors = ['spawn', 'send', 'tree', 'info', 'lineage', 'validate', 'promote', 'fork', 'actors',
-      'stop', 'restart', 'dead_letters', 'sql', 'whereis', 'register', 'members', 'behaviors', 'promote_where', 'drain'];
+    const definitions = ['add', 'view', 'update', 'update_view', 'update_repair', 'update_abort', 'update_rebase',
+      'history', 'diff', 'run', 'find', 'dependents', 'export', 'import'];
+    const actors = ['spawn', 'send', 'tree', 'info', 'subscriptions', 'lineage', 'validate', 'promote', 'fork', 'actors',
+      'nodes', 'move', 'stop', 'restart', 'dead_letters', 'sql', 'whereis', 'register', 'members', 'behaviors',
+      'promote_where', 'drain'];
     equal(tools.sort(), ['command', ...definitions, ...actors].sort(), 'shared verb discovery');
   },
 ];
