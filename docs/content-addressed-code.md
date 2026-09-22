@@ -141,6 +141,10 @@ appear among the exports and every export must agree with `items`. Stored
 metadata keeps the behavior hash, Wasm hash, toolchain hash and item-document
 reference separate; `loom-store` recomputes the same root from the stored
 document at publication and at every reopen. `view` exposes these values.
+Guest modules carry DWARF line tables: the root crate is compiled with
+`-C debuginfo=1` and the `.debug_*` sections are relocated through the
+shared-memory rewrite (`loom-build::dwarf`). Debug information is not HIR and
+never enters the behavior hash; it enters the Wasm hash only.
 
 Before the hashing compilation, `loom-build` stages each direct dependency's
 stored `items.json` (the CAS object behind the dependency's `item_hashes_ref`)

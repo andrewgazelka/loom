@@ -36,6 +36,34 @@ impl Recipe {
         })
     }
 
+    /// Make the root invocation emit DWARF line tables. Cargo's release
+    /// profile asks for `-C debuginfo=0` and, with debug information off,
+    /// `-C strip=debuginfo`; both spellings (`-C x` and `-Cx`) are dropped and
+    /// `-C debuginfo=1` (line tables plus the compilation-unit and subprogram
+    /// entries they need, never full type information) is appended. Debug
+    /// information is not HIR and never enters the behavior hash; the Wasm hash
+    /// moves with it, as intended. Every other argument keeps its position.
+    pub(super) fn line_tables(&mut self) {
+        let mut previous = std::mem::take(&mut self.arguments).into_iter();
+        while let Some(argument) = previous.next() {
+            let codegen = if argument == "-C" {
+                previous.next().map(|option| (true, option))
+            } else {
+                argument
+                    .strip_prefix("-C")
+                    .map(|option| (false, option.to_owned()))
+            };
+            match codegen {
+                Some((_, option))
+                    if option.starts_with("debuginfo=") || option.starts_with("strip=") => {}
+                Some((true, option)) => self.arguments.extend(["-C".into(), option]),
+                Some((false, option)) => self.arguments.push(format!("-C{option}")),
+                None => self.arguments.push(argument),
+            }
+        }
+        self.arguments.extend(["-C".into(), "debuginfo=1".into()]);
+    }
+
     pub(super) fn working_directory(&self) -> &Path {
         self.environment
             .get("LOOM_RUSTC_CWD")

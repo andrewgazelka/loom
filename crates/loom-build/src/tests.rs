@@ -194,6 +194,66 @@ fn parses_cargo_error_amid_benign_warnings() {
     assert_eq!(diagnostics[0].code, "E0308");
 }
 
+/// Every guest build carries DWARF line tables (`Recipe::line_tables` on the
+/// root replay, relocated by `threaded_module`), on the cold Cargo graph and
+/// on a warm replay alike: the test builds the same definition twice and reads
+/// the sections from both modules.
+#[tokio::test]
+#[ignore = "requires Rust guest toolchain and LOOM_COMPILER_CACHE_OWNER"]
+async fn built_module_carries_dwarf_line_tables_on_every_stage() {
+    let store = loom_store::Store::memory().unwrap();
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let builder = Builder::new(root, store.clone());
+    let checker = loom_check::Checker::new();
+    let mut request = loom_proto::DefineRequest {
+        lang: Lang::Rust,
+        name: "line_tables".into(),
+        source: "pub fn main() -> i32 {\n    let value = 41;\n    value + 1\n}\n".into(),
+        deps: BTreeMap::new(),
+        allowed_effects: None,
+    };
+    let checked = checker.check(&request).await.unwrap();
+    assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+    request.source = builder
+        .prepare_rust_source(&checked, &BTreeMap::new())
+        .await
+        .unwrap();
+    let checked = checker.check(&request).await.unwrap();
+    let mut identities = Vec::new();
+    for stage in ["cold graph", "warm replay"] {
+        // The same cache directory keeps the stored graph for the replay; only
+        // the component cache is bypassed (its stamp is removed below).
+        let built = builder.build(&checked).await.unwrap();
+        assert!(built.diagnostics.is_empty(), "{stage}: {}", built.logs);
+        let mut sections = std::collections::BTreeSet::new();
+        for payload in wasmparser::Parser::new(0).parse_all(&built.component) {
+            if let wasmparser::Payload::CustomSection(section) = payload.unwrap() {
+                sections.insert(section.name().to_owned());
+            }
+        }
+        for required in [".debug_line", ".debug_info", ".debug_abbrev", "name"] {
+            assert!(
+                sections.contains(required),
+                "{stage}: module lacks {required}; custom sections {sections:?}"
+            );
+        }
+        identities.push(built.identity.unwrap());
+        // The second iteration must not be a component-cache hit.
+        std::fs::remove_file(
+            builder
+                .cache_directory()
+                .join(&checked.hash)
+                .join("component.inputs"),
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        identities[0].behavior_hash, identities[1].behavior_hash,
+        "debug information is not HIR"
+    );
+    assert_eq!(identities[0].wasm_hash, identities[1].wasm_hash);
+}
+
 #[tokio::test]
 async fn staged_builders_share_the_compiler_workspace_lock() {
     let store = loom_store::Store::memory().unwrap();

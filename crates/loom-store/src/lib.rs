@@ -9,6 +9,7 @@ mod definitions;
 mod effect_index;
 mod effects;
 mod events;
+mod formatting;
 mod identity;
 mod intake;
 mod language;

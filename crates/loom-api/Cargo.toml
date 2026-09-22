@@ -26,6 +26,9 @@ loom-check = { path = "../loom-check" }
 loom-build = { path = "../loom-build" }
 loom-rt = { path = "../loom-rt" }
 loom-maintenance = { path = "../loom-maintenance" }
+wasmparser = "0.254"
+wasmprinter = "0.254"
+gimli = { version = "0.33", default-features = false, features = ["read", "std"] }
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

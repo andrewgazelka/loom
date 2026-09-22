@@ -18,6 +18,7 @@ pub fn router(directory: impl Into<ServiceDirectory>, authorizer: Authorizer) ->
         .route("/v1/command", post(command))
         .route("/v1/ingress", post(ingress))
         .route("/v1/cas/{hash}", get(cas))
+        .route("/v1/wasm/{hash}", get(wasm))
         .route("/v1/cas", post(upload::upload))
         .route("/v1/events", get(events))
         .route("/v1/defs/{name}", get(definition))
@@ -291,6 +292,78 @@ async fn cas(
 struct CasBlock {
     codec: u64,
     bytes: Vec<u8>,
+}
+
+enum Fetched {
+    Missing,
+    TooLarge(u64),
+    Bytes(Vec<u8>),
+}
+
+/// A build artifact as WebAssembly text joined to its source lines
+/// (`crate::wasm`). Read scope like every GET. An unknown hash is 404 and a
+/// module over `MAX_MODULE_BYTES` is 413, both in the command error envelope;
+/// bytes that are not a core module, or DWARF that does not parse, are 422.
+async fn wasm(
+    axum::Extension(s): axum::Extension<TenantService>,
+    Path(hash): Path<String>,
+) -> HttpResponse {
+    let service = &s.service;
+    let fetched = (|| -> Result<Fetched> {
+        service.store.flush()?;
+        let Some(entry) = service.store.cas_entry(&hash)? else {
+            return Ok(Fetched::Missing);
+        };
+        if entry.size > crate::wasm::MAX_MODULE_BYTES {
+            return Ok(Fetched::TooLarge(entry.size));
+        }
+        let bytes = service
+            .store
+            .get(&hash)?
+            .context("CAS block disappeared")?;
+        Ok(Fetched::Bytes(bytes))
+    })();
+    let envelope = |status: StatusCode, error: anyhow::Error| {
+        let mut response = Json(service.response(Err(error))).into_response();
+        *response.status_mut() = status;
+        response
+    };
+    let bytes = match fetched {
+        Ok(Fetched::Bytes(bytes)) => bytes,
+        Ok(Fetched::Missing) => {
+            return envelope(
+                StatusCode::NOT_FOUND,
+                anyhow::anyhow!("build artifact {hash} not found"),
+            );
+        }
+        Ok(Fetched::TooLarge(size)) => {
+            return envelope(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                anyhow::anyhow!(
+                    "module {hash} is {size} bytes; the text view stops at {} bytes",
+                    crate::wasm::MAX_MODULE_BYTES
+                ),
+            );
+        }
+        Err(error) => return envelope(StatusCode::BAD_REQUEST, error),
+    };
+    // Printing a module is CPU work proportional to its size; keep it off the
+    // request executor.
+    let view = tokio::task::spawn_blocking(move || crate::wasm::wasm_view(&bytes))
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(|view| view);
+    match view {
+        Ok(view) => {
+            let mut response = Json(view).into_response();
+            response.headers_mut().insert(
+                axum::http::header::CACHE_CONTROL,
+                axum::http::HeaderValue::from_static("private, max-age=31536000, immutable"),
+            );
+            response
+        }
+        Err(error) => envelope(StatusCode::UNPROCESSABLE_ENTITY, error),
+    }
 }
 
 #[derive(Deserialize)]

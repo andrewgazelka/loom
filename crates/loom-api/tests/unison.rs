@@ -236,6 +236,45 @@ async fn named_entry_execution() {
     assert!(error.contains(added["hash"].as_str().unwrap()), "{error}");
 }
 
+#[test]
+fn view_returns_rustfmt_output_beside_the_verbatim_source() {
+    guest::run(
+        "view_returns_rustfmt_output_beside_the_verbatim_source",
+        formatted_view,
+    );
+}
+
+async fn formatted_view() {
+    let service = service();
+    let submitted = "pub fn main() -> i32 {\n        let value = 41;\n  value\n}\n";
+    let formatted = "pub fn main() -> i32 {\n    let value = 41;\n    value\n}\n";
+    let added = command(&service, "add", json!({"name":"ragged","source":submitted})).await;
+    assert_eq!(added["source"], submitted, "stored bytes are untouched");
+    assert_eq!(added["formatted_source"], formatted);
+    assert!(added["format_error"].is_null(), "{added}");
+    let viewed = command(&service, "view", json!({"target":added["hash"]})).await;
+    assert_eq!(viewed["source"], submitted);
+    assert_eq!(viewed["formatted_source"], formatted);
+    assert!(viewed["format_error"].is_null(), "{viewed}");
+    // Recorded once per source revision under CAS kind `source-formatted`.
+    let hash = added["hash"].as_str().unwrap();
+    let source_hash = service
+        .store
+        .definition_source_hash(hash)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        service.store.formatted_source(&source_hash).unwrap().as_deref(),
+        Some(formatted)
+    );
+    let entry = service
+        .store
+        .cas_entry(&loom_store::content_hash(formatted.as_bytes()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(entry.kind, "source-formatted");
+}
+
 #[tokio::test]
 #[ignore = "requires Rust guest toolchain and LOOM_COMPILER_CACHE_OWNER"]
 async fn named_entries_report_and_enforce_distinct_effect_rows() {

@@ -1,8 +1,15 @@
 //! Lower only LLVM's one-time shared-memory initializer for serialized startup.
 //! All task code must remain free of Wasm waits and notifications.
+//!
+//! The rewrite lengthens function bodies, so the compiler's DWARF (`.debug_*`
+//! custom sections, addressed by offset into the code section's contents) is
+//! relocated through `crate::dwarf` rather than copied; every other custom
+//! section (`name`, `producers`, `target_features`) is copied byte for byte.
+use crate::dwarf::{self, Body, CodeMap, Edit};
+use std::collections::BTreeMap;
 use wasm_encoder::{
     CodeSection, ConstExpr, Encode, ExportKind, ExportSection, GlobalSection, GlobalType,
-    Instruction, Module, RawSection, ValType,
+    Instruction, Module, RawSection, Section, ValType,
 };
 use wasmparser::{BlockType, ExternalKind, FunctionBody, Operator, Parser, Payload, TypeRef};
 
@@ -36,8 +43,10 @@ pub fn prepare(bytes: &[u8]) -> Result<Vec<u8>, String> {
     let mut globals_end = 0;
     let mut exports = Vec::new();
     let mut bodies = Vec::new();
+    let mut code_start = None;
     for payload in Parser::new(0).parse_all(bytes) {
         match payload.map_err(|error| error.to_string())? {
+            Payload::CodeSectionStart { range, .. } => code_start = Some(range.start),
             Payload::ImportSection(section) => {
                 for import in section.into_imports() {
                     match import.map_err(|error| error.to_string())?.ty {
@@ -150,15 +159,15 @@ pub fn prepare(bytes: &[u8]) -> Result<Vec<u8>, String> {
         exported.export("__loom_stack_high", ExportKind::Global, stack.high);
     }
     let mut code = CodeSection::new();
+    let mut edits = Vec::with_capacity(bodies.len());
     for (index, body) in bodies.iter().enumerate() {
         let function = imports + index as u32;
-        code.raw(&prepare_body(
-            body,
-            Some(function) == start,
-            stack.as_ref(),
-        )?);
+        let (rewritten, body_edits) = prepare_body(body, Some(function) == start, stack.as_ref())?;
+        code.raw(&rewritten);
+        edits.push(body_edits);
     }
     let mut module = Module::new();
+    let mut debug: BTreeMap<&str, &[u8]> = BTreeMap::new();
     for payload in Parser::new(0).parse_all(bytes) {
         let payload = payload.map_err(|error| error.to_string())?;
         match payload {
@@ -172,6 +181,11 @@ pub fn prepare(bytes: &[u8]) -> Result<Vec<u8>, String> {
                 module.section(&code);
             }
             Payload::CodeSectionEntry(_) => {}
+            Payload::CustomSection(section) if section.name().starts_with(".debug_") => {
+                if debug.insert(section.name(), section.data()).is_some() {
+                    return Err(format!("duplicate DWARF section {}", section.name()));
+                }
+            }
             _ => {
                 if let Some((id, range)) = payload.as_section() {
                     module.section(&RawSection {
@@ -182,11 +196,60 @@ pub fn prepare(bytes: &[u8]) -> Result<Vec<u8>, String> {
             }
         }
     }
-    let result = module.finish();
+    let mut result = module.finish();
+    if !debug.is_empty() {
+        let code_start =
+            code_start.ok_or("module carries DWARF but has no code section")?;
+        let (new_start, new_bodies) = code_layout(&result)?;
+        if new_bodies.len() != bodies.len() {
+            return Err(format!(
+                "rewrite produced {} function bodies from {}",
+                new_bodies.len(),
+                bodies.len()
+            ));
+        }
+        let relative = |range: std::ops::Range<usize>, start: usize| {
+            (range.start - start) as u64..(range.end - start) as u64
+        };
+        let map = CodeMap::new(
+            bodies
+                .iter()
+                .zip(new_bodies)
+                .zip(edits)
+                .map(|((old, new), edits)| Body {
+                    old: relative(old.range(), code_start),
+                    new: relative(new, new_start),
+                    edits,
+                })
+                .collect(),
+        );
+        for (name, data) in dwarf::relocate(&debug, &map)? {
+            wasm_encoder::CustomSection {
+                name: name.into(),
+                data: data.into(),
+            }
+            .append_to(&mut result);
+        }
+    }
     wasmparser::Validator::new()
         .validate_all(&result)
         .map_err(|error| error.to_string())?;
     Ok(result)
+}
+
+/// The code section's contents offset and every function body's byte range in
+/// `bytes`, the two quantities DWARF addresses are relative to.
+fn code_layout(bytes: &[u8]) -> Result<(usize, Vec<std::ops::Range<usize>>), String> {
+    let mut start = None;
+    let mut bodies = Vec::new();
+    for payload in Parser::new(0).parse_all(bytes) {
+        match payload.map_err(|error| error.to_string())? {
+            Payload::CodeSectionStart { range, .. } => start = Some(range.start),
+            Payload::CodeSectionEntry(body) => bodies.push(body.range()),
+            _ => {}
+        }
+    }
+    Ok((start.ok_or("module has no code section")?, bodies))
 }
 
 /// Rewrite one function body in a single streaming pass over its operators.
@@ -194,18 +257,21 @@ pub fn prepare(bytes: &[u8]) -> Result<Vec<u8>, String> {
 /// initializer), and recognising that initializer needs its whole operator
 /// list, so only the start body is collected; every other body is rewritten
 /// as it is read, without an operator list. A wait or notify anywhere else is
-/// an error at the first occurrence.
+/// an error at the first occurrence. Every replaced instruction is returned as
+/// an [`Edit`] (body-relative offset, old and new length) so the module's DWARF
+/// can follow the bytes that moved.
 fn prepare_body(
     body: &FunctionBody<'_>,
     is_start: bool,
     stack: Option<&StackBounds>,
-) -> Result<Vec<u8>, String> {
+) -> Result<(Vec<u8>, Vec<Edit>), String> {
     let mut reader = body
         .get_operators_reader()
         .map_err(|error| error.to_string())?;
     let mut collected: Option<Vec<Operator<'_>>> = is_start.then(Vec::new);
     let mut has_wait = false;
     let mut output = Vec::new();
+    let mut edits = Vec::new();
     let base = body.range().start;
     let mut cursor = 0;
     while !reader.eof() {
@@ -264,9 +330,15 @@ fn prepare_body(
         };
         if let Some(replacement) = replacement {
             output.extend_from_slice(&body.as_bytes()[cursor..start - base]);
+            let replaced_at = output.len();
             for instruction in replacement {
                 instruction.encode(&mut output);
             }
+            edits.push(Edit {
+                start: (start - base) as u64,
+                old_len: (end - start) as u64,
+                new_len: (output.len() - replaced_at) as u64,
+            });
             cursor = end - base;
         }
         if let Some(collected) = &mut collected {
@@ -292,7 +364,7 @@ fn prepare_body(
         }
     }
     output.extend_from_slice(&body.as_bytes()[cursor..]);
-    Ok(output)
+    Ok((output, edits))
 }
 
 fn is_linker_initializer(ops: &[Operator<'_>]) -> bool {
@@ -461,8 +533,9 @@ mod tests {
         module.finish()
     }
 
-    #[test]
-    fn stack_bounds_are_exported_and_checked_in_functions_without_waits() {
+    /// One function `local.get 0; global.set $__stack_pointer; end` with the
+    /// linker's stack exports, so `prepare` inserts the stack check.
+    fn stack_module() -> Vec<u8> {
         let mut module = Module::new();
         let mut types = TypeSection::new();
         types.ty().function([ValType::I32], []);
@@ -499,7 +572,178 @@ mod tests {
         let mut code = CodeSection::new();
         code.function(&function);
         module.section(&code);
-        let prepared = prepare(&module.finish()).unwrap();
+        module.finish()
+    }
+
+    /// DWARF 4 for one compilation unit (`/loom/source`, `src/lib.rs`) with a
+    /// subprogram `greet` spanning `start..start + length` and one line row per
+    /// `(body-relative offset, line)`; addresses are code-contents offsets.
+    fn dwarf_fixture(start: u64, length: u64, rows: &[(u64, u64)]) -> Vec<(&'static str, Vec<u8>)> {
+        use gimli::write::{Address, AttributeValue, EndianVec, LineProgram, LineString, Sections, Unit};
+        let encoding = gimli::Encoding {
+            format: gimli::Format::Dwarf32,
+            version: 4,
+            address_size: 4,
+        };
+        let mut program = LineProgram::new(
+            encoding,
+            gimli::LineEncoding::default(),
+            LineString::String(b"/loom/source".to_vec()),
+            None,
+            LineString::String(b"src/lib.rs".to_vec()),
+            None,
+        );
+        let directory = program.default_directory();
+        let file = program.add_file(LineString::String(b"src/lib.rs".to_vec()), directory, None);
+        program.begin_sequence(Some(Address::Constant(start)));
+        for &(offset, line) in rows {
+            let row = program.row();
+            row.address_offset = offset;
+            row.file = file;
+            row.line = line;
+            program.generate_row();
+        }
+        program.end_sequence(length);
+        let mut unit = Unit::new(encoding, program);
+        let root = unit.root();
+        let entry = unit.get_mut(root);
+        entry.set(gimli::DW_AT_name, AttributeValue::String(b"src/lib.rs".to_vec()));
+        entry.set(gimli::DW_AT_comp_dir, AttributeValue::String(b"/loom/source".to_vec()));
+        entry.set(gimli::DW_AT_low_pc, AttributeValue::Address(Address::Constant(start)));
+        entry.set(gimli::DW_AT_high_pc, AttributeValue::Udata(length));
+        let function = unit.add(root, gimli::DW_TAG_subprogram);
+        let entry = unit.get_mut(function);
+        entry.set(gimli::DW_AT_name, AttributeValue::String(b"greet".to_vec()));
+        entry.set(gimli::DW_AT_low_pc, AttributeValue::Address(Address::Constant(start)));
+        entry.set(gimli::DW_AT_high_pc, AttributeValue::Udata(length));
+        let mut dwarf = gimli::write::Dwarf::new();
+        dwarf.units.add(unit);
+        let mut sections = Sections::new(EndianVec::new(gimli::LittleEndian));
+        dwarf.write(&mut sections).unwrap();
+        let mut written = Vec::new();
+        sections
+            .for_each(|id, data| {
+                if !data.slice().is_empty() {
+                    written.push((id.name(), data.slice().to_vec()));
+                }
+                Ok::<(), gimli::write::Error>(())
+            })
+            .unwrap();
+        written
+    }
+
+    fn with_custom_sections(mut module: Vec<u8>, sections: &[(&str, Vec<u8>)]) -> Vec<u8> {
+        for (name, data) in sections {
+            wasm_encoder::CustomSection {
+                name: (*name).into(),
+                data: data.as_slice().into(),
+            }
+            .append_to(&mut module);
+        }
+        module
+    }
+
+    fn debug_sections(bytes: &[u8]) -> BTreeMap<String, Vec<u8>> {
+        let mut sections = BTreeMap::new();
+        for payload in Parser::new(0).parse_all(bytes) {
+            if let Payload::CustomSection(section) = payload.unwrap()
+                && section.name().starts_with(".debug_")
+            {
+                sections.insert(section.name().to_owned(), section.data().to_vec());
+            }
+        }
+        sections
+    }
+
+    /// The body of the single function of `bytes`, relative to the code
+    /// section's contents, as DWARF addresses it.
+    fn only_body(bytes: &[u8]) -> std::ops::Range<u64> {
+        let (start, bodies) = code_layout(bytes).unwrap();
+        assert_eq!(bodies.len(), 1);
+        (bodies[0].start - start) as u64..(bodies[0].end - start) as u64
+    }
+
+    #[test]
+    fn debug_sections_follow_the_rewritten_code() {
+        let module = stack_module();
+        let old = only_body(&module);
+        // locals vector (1 byte), local.get 0 (2), global.set 0 (2), end (1)
+        assert_eq!(old.end - old.start, 6);
+        let module = with_custom_sections(
+            module,
+            &dwarf_fixture(old.start, old.end - old.start, &[(1, 5), (3, 6)]),
+        );
+        let prepared = prepare(&module).unwrap();
+        let new = only_body(&prepared);
+        assert!(new.end - new.start > 6, "the stack check lengthened the body");
+        let sections = debug_sections(&prepared);
+        for required in [".debug_abbrev", ".debug_info", ".debug_line"] {
+            assert!(sections.contains_key(required), "{:?}", sections.keys());
+        }
+        let dwarf = gimli::Dwarf::load(|id: gimli::SectionId| {
+            Ok::<_, gimli::Error>(gimli::EndianSlice::new(
+                sections.get(id.name()).map_or(&[][..], Vec::as_slice),
+                gimli::LittleEndian,
+            ))
+        })
+        .unwrap();
+        let mut headers = dwarf.units();
+        let unit = dwarf.unit(headers.next().unwrap().unwrap()).unwrap();
+        assert!(headers.next().unwrap().is_none());
+        let mut rows = BTreeMap::new();
+        let mut sequence_end = None;
+        let mut line_rows = unit.line_program.clone().unwrap().rows();
+        while let Some((_, row)) = line_rows.next_row().unwrap() {
+            if row.end_sequence() {
+                sequence_end = Some(row.address());
+            } else {
+                rows.insert(row.address(), row.line().unwrap().get());
+            }
+        }
+        // local.get keeps its place; global.set starts where it did; the end moved.
+        assert_eq!(rows, BTreeMap::from([(new.start + 1, 5), (new.start + 3, 6)]));
+        assert_eq!(sequence_end, Some(new.end));
+        let mut entries = unit.entries();
+        let mut function = None;
+        while let Some((_, entry)) = entries.next_dfs().unwrap() {
+            if entry.tag() == gimli::DW_TAG_subprogram {
+                function = Some((
+                    entry.attr_value(gimli::DW_AT_low_pc).unwrap().unwrap(),
+                    entry.attr_value(gimli::DW_AT_high_pc).unwrap().unwrap(),
+                ));
+            }
+        }
+        assert_eq!(
+            function,
+            Some((
+                gimli::AttributeValue::Addr(new.start),
+                gimli::AttributeValue::Udata(new.end - new.start),
+            ))
+        );
+        let mut stamped = prepared;
+        loom_proto::core_protocol::stamp(&mut stamped);
+        assert!(loom_proto::core_protocol::is_current(&stamped));
+    }
+
+    #[test]
+    fn debug_rows_inside_a_replaced_instruction_fail_closed() {
+        let module = stack_module();
+        let old = only_body(&module);
+        // Offset 4 is the second byte of `global.set 0`, never an instruction start.
+        let module = with_custom_sections(
+            module,
+            &dwarf_fixture(old.start, old.end - old.start, &[(1, 5), (4, 6)]),
+        );
+        let error = prepare(&module).unwrap_err();
+        assert!(error.contains("not an instruction boundary"), "{error}");
+        let module = with_custom_sections(stack_module(), &[(".debug_frame", Vec::new())]);
+        let error = prepare(&module).unwrap_err();
+        assert!(error.contains(".debug_frame"), "{error}");
+    }
+
+    #[test]
+    fn stack_bounds_are_exported_and_checked_in_functions_without_waits() {
+        let prepared = prepare(&stack_module()).unwrap();
         let mut bounds = 0;
         let mut traps = 0;
         for payload in Parser::new(0).parse_all(&prepared) {
