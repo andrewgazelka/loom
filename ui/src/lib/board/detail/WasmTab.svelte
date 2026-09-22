@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   /**
    * Source on the left, the component's wat on the right, joined by the DWARF line map: hovering
    * or clicking a source line lights every wat line compiled from it; clicking a wat line lights
@@ -73,14 +74,29 @@
   const index = $derived(module === null ? null : indexLines(module.lines));
   const mapped = $derived(module !== null && module.debug && module.lines.length > 0);
 
+  // A click pins a selection; hovering shows a transient one and, on leaving,
+  // returns to the pinned selection instead of clearing everything.
+  let pinned = $state<{ kind: "source"; line: number } | { kind: "wasm"; watLine: number } | null>(
+    null,
+  );
+
+  // The module is fetched once per artifact. The parent spreads a fresh props
+  // object into this tab on every render, so this effect must key on the hash
+  // alone: re-running on an unchanged hash would wipe the reader's selection.
+  let requested: string | null = null;
   $effect(() => {
     const hash = componentHash;
     const owner = client;
-    module = null;
-    moduleError = null;
-    hotSource = null;
-    hotWat = [];
-    foreign = null;
+    if (hash === requested) return;
+    requested = hash;
+    untrack(() => {
+      module = null;
+      moduleError = null;
+      hotSource = null;
+      hotWat = [];
+      foreign = null;
+      pinned = null;
+    });
     if (hash === null || owner === null) return;
     owner.wasm(hash).then(
       (loaded) => {
@@ -92,11 +108,6 @@
     );
   });
 
-  // A click pins a selection; hovering shows a transient one and, on leaving,
-  // returns to the pinned selection instead of clearing everything.
-  let pinned = $state<{ kind: "source"; line: number } | { kind: "wasm"; watLine: number } | null>(
-    null,
-  );
   function markSource(line: number | null) {
     if (!index) return;
     origin = "source";
@@ -145,7 +156,11 @@
   }
 </script>
 
-<div class="wasm-tab" data-testid="detail-wasm" data-debug={module?.debug}>
+<div
+  class="wasm-tab"
+  data-testid="detail-wasm"
+  data-debug={module?.debug}
+>
   {#if componentHash === null}
     <div class="note">No compiled component for this definition.</div>
   {:else if client === null}
