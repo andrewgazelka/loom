@@ -56,7 +56,9 @@
             formatted_source: view.formatted_source,
             format_error: view.format_error,
           },
-          false,
+          // The line table indexes the bytes the compiler saw, so this column
+          // shows the stored source, never the rustfmt rendering.
+          true,
         ),
   );
   const index = $derived(module === null ? null : indexLines(module.lines));

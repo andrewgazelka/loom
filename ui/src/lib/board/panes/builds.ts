@@ -12,10 +12,10 @@ export const pane = definePane({
   select: (model) => ({
     items: Object.values(model.builds)
       .sort((a, b) => b.seq - a.seq)
-      .map((build) => ({
-        build,
-        name: definitionByComponent(model, build.componentHash)?.name ?? null,
-      })),
+      .map((build) => {
+        const definition = definitionByComponent(model, build.componentHash);
+        return { build, name: definition?.name ?? null, definition: definition?.hash ?? null };
+      }),
   }),
   component: BuildsPane,
 });

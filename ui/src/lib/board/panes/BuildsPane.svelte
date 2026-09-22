@@ -7,6 +7,8 @@
     build: Build;
     /** The definition the component belongs to, when the board knows it. */
     name: string | null;
+    /** Its hash, for the e2e hook and for linking. */
+    definition: string | null;
   }
   let {
     items,
@@ -29,7 +31,7 @@
   <span class="muted">{items.length}</span>
 </div>
 <div class="list" data-pane="builds" role="list" aria-label="Component builds, newest first">
-  {#each items as { build, name } (build.componentHash)}
+  {#each items as { build, name, definition } (build.componentHash)}
     {@const stages = build.stages === null ? [] : sortedStages(build.stages)}
     {@const max = stages.reduce((most, [, ms]) => Math.max(most, ms), 0)}
     <!-- svelte-ignore a11y_no_noninteractive_tabindex a11y_no_noninteractive_element_interactions -->
@@ -40,6 +42,7 @@
       data-row
       data-testid="board-build"
       data-hash={build.componentHash}
+      data-definition={definition ?? ""}
       onclick={() => onselect({ kind: "build", hash: build.componentHash })}
       onkeydown={(event) => activate(event, build.componentHash)}
     >

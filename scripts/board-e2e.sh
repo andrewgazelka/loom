@@ -102,8 +102,8 @@ ms=$(wait_dom "document.querySelector('[data-testid=board-detail]')?.dataset.has
 B eval "document.querySelector('[data-tab=wasm]').click(); 'ok'" >/dev/null 2>&1
 ms=$(wait_dom "document.querySelectorAll('[data-testid=detail-wasm] [data-wat-line]').length > 100" 10); check $? "wasm text renders (${ms} ms)" "lines: $(B eval "document.querySelectorAll('[data-testid=detail-wasm] [data-wat-line]').length" 2>/dev/null)"
 v=$(B eval "document.querySelectorAll('[data-testid=detail-wasm] [data-src-line][data-src-file=\"src/lib.rs\"]').length" 2>/dev/null | tr -d '"'); [ "${v:-0}" -gt 0 ]; check $? "wasm lines map to src/lib.rs lines via DWARF ($v mapped)" "mapped: $v"
-first=$(B eval "document.querySelector('[data-testid=detail-wasm] [data-src-line][data-src-file=\"src/lib.rs\"]')?.dataset.srcLine" 2>/dev/null | tr -d '"')
-B eval "document.querySelector('[data-testid=detail-source] [data-line=\"$first\"]').click(); 'ok'" >/dev/null 2>&1
+first=$(B eval "(() => { const shown = document.querySelectorAll('[data-testid=wasm-source] [data-line]').length; const lines = [...document.querySelectorAll('[data-testid=detail-wasm] [data-src-line][data-src-file=\"src/lib.rs\"]')].map(e => Number(e.dataset.srcLine)).filter(n => n <= shown); return lines.length ? Math.min(...lines) : ''; })()" 2>/dev/null | tr -d '"')
+B eval "document.querySelector('[data-testid=wasm-source] [data-line=\"$first\"]').click(); 'ok'" >/dev/null 2>&1
 ms=$(wait_dom "document.querySelectorAll('[data-testid=detail-wasm] [data-src-line=\"$first\"].hot').length > 0" 2); check $? "clicking source line $first lights its wasm instructions (${ms} ms)" "no hot wat lines"
 B eval "document.querySelector('[data-testid=detail-back]').click(); 'ok'" >/dev/null 2>&1
 ms=$(wait_dom "!document.querySelector('[data-testid=board-detail]') && !!document.querySelector('[data-kind=static]')" 2); check $? "back returns to the overview (${ms} ms)" "detail still open"
