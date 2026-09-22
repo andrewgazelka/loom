@@ -35,6 +35,7 @@ const defaults = {
   group: "workers",
   revision: "0",
   node_id: "01K4Y0000000000000000000N2",
+  bundle: "bafkr4iamivzlrsoebmdhnaqbwddb2ii4gjlw5hjnbzs2yu6zzxypwfqfxi",
 };
 function values(id: string): Record<string, string> {
   const command = commandById(id),
@@ -45,14 +46,14 @@ function values(id: string): Record<string, string> {
   return values;
 }
 describe("operation contract", () => {
-  test("twelve definition and twenty-two actor operations, all uniquely named", () => {
+  test("fourteen definition and twenty-two actor operations, all uniquely named", () => {
     expect(
       new Set(
         commands
           .filter((command) => command.group === "Definitions")
           .map((command) => command.operation),
       ).size,
-    ).toBe(12);
+    ).toBe(14);
     expect(
       new Set(
         commands
@@ -303,7 +304,8 @@ describe("Rust verb table parity", () => {
     const source = await Bun.file(
       new URL("../../crates/loom-proto/src/verbs.rs", import.meta.url),
     ).text();
-    const table = source.replace(/Argument \{ name: "lang", kind: Kind::String, required: false, flag: true, default: Some\("\\"(\w+)\\""\) \}/g, 'arg!(lang, String, "$1")')
+    // rustfmt may split the literal over several lines; match any whitespace.
+    const table = source.replace(/Argument \{\s*name: "lang",\s*kind: Kind::String,\s*required: false,\s*flag: true,\s*default: Some\("\\"(\w+)\\""\),?\s*\}/g, 'arg!(lang, String, "$1")')
       .split("pub static VERBS: &[Verb] = &[")[1]!
       .split("\n];")[0]!;
     const server = [
@@ -311,7 +313,7 @@ describe("Rust verb table parity", () => {
         /verb!\(\s*(\w+),\s*(Definition|Actor),\s*(\w+),\s*\[([\s\S]*?)\]\s*\)/g,
       ),
     ];
-    expect(server.length).toBe(34);
+    expect(server.length).toBe(36);
     expect(
       commands
         .filter((command) => !command.query)
@@ -348,6 +350,9 @@ describe("Rust verb table parity", () => {
               Count: "number",
               String: "string",
               Boolean: "boolean",
+              Map: "json",
+              List: "json",
+              Upload: "string",
             } as Record<string, string>
           )[arg[2]!]!,
         );

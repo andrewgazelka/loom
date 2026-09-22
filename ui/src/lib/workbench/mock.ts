@@ -49,6 +49,21 @@ export class MockTransport implements Transport {
             ),
           ),
         }));
+    if (op === V.export)
+      return {
+        root: "bafyr4ig3ksd5l3o6rqnh2xrsbckjkysojjw3eldh4bg5xjxxsn4rkbtl6i",
+        bundle: { $ref: "bafkr4iamivzlrsoebmdhnaqbwddb2ii4gjlw5hjnbzs2yu6zzxypwfqfxi" },
+        definitions: fixture.definitions.map((def) => def.hash),
+        bytes: 50749,
+      };
+    if (op === V.import)
+      return {
+        root: "bafyr4ig3ksd5l3o6rqnh2xrsbckjkysojjw3eldh4bg5xjxxsn4rkbtl6i",
+        imported: fixture.definitions.map((def) => ({
+          name: `${String(body.into ?? "")}${def.name}`,
+          hash: def.hash,
+        })),
+      };
     if (op === V.dependents) return [fixture.definitions[1]!.hash];
     if (op === V.history) return fixture.history;
     if (op === V.diff) {

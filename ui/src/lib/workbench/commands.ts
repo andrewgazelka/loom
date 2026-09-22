@@ -7,6 +7,8 @@ const verbNames = [
   "update_repair",
   "update_abort",
   "update_rebase",
+  "export",
+  "import",
   "history",
   "diff",
   "run",
@@ -120,6 +122,29 @@ const definitionCommands: Command[] = [
         kind: "json",
         optional: true,
       }),
+    ],
+  },
+  {
+    id: V.export,
+    name: V.export,
+    group: "Definitions",
+    operation: V.export,
+    description: "Export definitions and their dependency closure as one bundle (a CAS object)",
+    read: false,
+    fields: [
+      field("targets", "Names or hashes (JSON array)", { kind: "json", initial: "[]" }),
+    ],
+  },
+  {
+    id: V.import,
+    name: V.import,
+    group: "Definitions",
+    operation: V.import,
+    description: "Import a bundle uploaded to the CAS, rebuilding every definition from source",
+    read: false,
+    fields: [
+      field("bundle", "Bundle CAS reference"),
+      field("into", "Name prefix, e.g. friend/", { optional: true }),
     ],
   },
   {
