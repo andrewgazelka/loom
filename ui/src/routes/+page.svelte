@@ -14,8 +14,11 @@
     Circle,
     Plus,
   } from "lucide-svelte";
-  import { fragmentToken } from "$lib/workbench/fragment-token";
-  const connectionKey = "loom.connection";
+  import {
+    QueryTokenError,
+    connectionKey,
+    resolveConnection,
+  } from "$lib/workbench/connection";
   import { Journal, type JournalEntry } from "$lib/workbench/journal";
   import ReplHistory from "$lib/workbench/ReplHistory.svelte";
   const journal = new Journal();
@@ -333,41 +336,17 @@
       const params = new URLSearchParams(location.search);
       mock = params.get("mock") === "1";
       const requestedPanel = params.get("panel") ?? V.find;
+      let suppliedToken: string | null = null;
       try {
-        const fragment = location.hash;
-        // Remove credentials before parsing or making any request, including failures.
-        if (new URLSearchParams(fragment.slice(1)).has("token")) {
-          history.replaceState(
-            history.state,
-            "",
-            location.pathname + location.search,
-          );
-        }
-        if (params.has("token")) {
-          settings = true;
-          throw new Error(
-            "Query-string tokens are not accepted; use #token=… because ?token= reaches server logs.",
-          );
-        }
-        const suppliedToken = fragmentToken(fragment);
-        if (suppliedToken !== null) {
-          endpoint = "";
-          token = suppliedToken;
-        } else if (!mock) {
-          const saved = localStorage.getItem(connectionKey);
-          if (saved !== null) {
-            const connection = JSON.parse(saved);
-            if (
-              !connection ||
-              typeof connection.endpoint !== "string" ||
-              typeof connection.token !== "string"
-            )
-              throw new Error(
-                "Saved connection: expected endpoint and token strings.",
-              );
-            endpoint = connection.endpoint;
-            token = connection.token;
-          }
+        // The shared store removes a fragment token from the URL before any request, including failures.
+        const connection = resolveConnection(
+          { location, history, storage: localStorage },
+          { readSaved: !mock },
+        );
+        if (connection !== null) {
+          endpoint = connection.endpoint;
+          token = connection.token;
+          if (connection.source === "fragment") suppliedToken = connection.token;
         }
         commandById(requestedPanel);
         commandId = requestedPanel;
@@ -415,6 +394,7 @@
         else await connect();
         await tick();
       } catch (problem) {
+        if (problem instanceof QueryTokenError) settings = true;
         error = problem instanceof Error ? problem.message : String(problem);
       }
     };
@@ -433,7 +413,7 @@
     <Box size={20} class="icon-brand" /><strong class="wordmark">loom</strong
     ><span class="header-path">/</span><span>workspace</span><span
       class="environment">{mock ? "STATIC FIXTURES" : "LOCAL"}</span
-    ><button class="palette-trigger" on:click={() => (palette = true)}
+    ><a class="header-link" href="/board/">board</a><button class="palette-trigger" on:click={() => (palette = true)}
       ><Search size={13} /> Commands <kbd>⌘ K</kbd></button
     ><button
       aria-label="Refresh workspace"

@@ -71,10 +71,35 @@ when explicitly edited definitions are unchanged. Otherwise the source remains
 available to reconcile in a new update. Abort opens a command form and requires
 execution; it does not publish staged changes.
 
+## Journal events and stream
+
+`GET /v1/events?after=<seq>&limit=<n>` returns `{ok, seq, result: [{seq, ts, event}]}`; `limit`
+is capped at 1000 and `ts` is Unix seconds. `GET /v1/stream` upgrades to a WebSocket: the
+client sends `{"token": "<bearer>", "after": <seq>}`, the server answers `{"ok":true}` and then
+pushes every later journal row as `{seq, ts, event}` text frames; `{"error": "..."}` reports a
+failure. Actor table subscription frames share the socket and carry no `seq`.
+
+Event shapes the board reads (`crates/loom-store/src/publication.rs`, `crates/loom-api/src/definitions.rs`,
+`crates/loom-store/src/trace.rs`):
+
+| `event.type` | Fields read |
+| --- | --- |
+| `defined` | `name`, `def.hash`, `def.lang`, `def.component_hash`, `def.sig.exports[].name`, `def.sig.effects.labels`, `deps` (alias to hash) |
+| `component_built` | `component_hash`, `logs_ref`, `ms`, `size`, `rustc_invocations` |
+| `call_completed`, `call_checkpoint` | `definition_hash`, `outcome` (`{status: success \| error \| cancelled, ...}`); `call_completed` also `elapsed_ms` when present |
+| `actor_message` | `actor`, `definition_hash`, `cursor` |
+| anything else | `type` only; shown as a feed row |
+
+`tree` returns `{id, status, behavior_hash, cursor, children: [...]}` from the root supervisor;
+`actors` returns `[{id, status, behavior_hash, cursor, inbox_len, parent}]`.
+
 ## Build inspection
 
 `GET /v1/builds/active` reports the active build stage. Compiler logs are fetched
-from `GET /v1/cas/<logs_ref>`. Both requests carry the configured bearer token.
+from `GET /v1/cas/<logs_ref>`. Both requests carry the configured bearer token. A
+compiler log is JSON lines; the lines whose object has `build_stages` map stage names
+to milliseconds (`crates/loom-build/src/stages.rs`), with `unattributed_ms` for the
+remainder.
 
 For retry-safe initial submissions, pass a caller-chosen `request_id` to `update`.
 That ID is also the session ID for `update_view`; replaying identical inputs
