@@ -44,7 +44,7 @@ out=$(L add examples/unison/greet.rs --lang rust --name greet 2>&1); rc=$?
 check $rc "cli add greet (cold build $(python3 -c "import time;print(int(time.time()-$t0))") s)" "$(echo "$out" | head -c 300)"
 ghash=$(echo "$out" | J "d['result']['def']['hash']" 2>/dev/null)
 ms=$(wait_dom "!!document.querySelector('[data-testid=board-def][data-name=\"greet\"]')" 2); check $? "greet appears in the definitions pane within 2 s (${ms} ms)" "not found"
-ms=$(wait_dom "!!document.querySelector('[data-testid=board-build][data-hash=\"$ghash\"] [data-stage]')" 5); check $? "build row for greet shows stage bars (${ms} ms)" "no stage bars"
+ms=$(wait_dom "!!document.querySelector('[data-testid=board-build][data-definition=\"$ghash\"] [data-stage]')" 5); check $? "build row for greet shows stage bars (${ms} ms)" "no stage bars"
 
 # 3 static link edge and isolated edge in the graph
 cat > "$D/shapes.rs" <<'EOF'

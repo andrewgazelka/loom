@@ -18,14 +18,16 @@
   let x = $state(24);
   let y = $state(24);
   let scale = $state(1);
-  let fitted = false;
+  // Until the reader pans or zooms, the view keeps fitting the whole graph
+  // as definitions arrive; a single node is never enlarged past natural size.
+  let userMoved = false;
   let drag: { px: number; py: number; ox: number; oy: number } | null = null;
 
   function fit() {
     if (!graph.width || !graph.height || !width || !height) return;
     const pad = 28;
     const next = Math.min(
-      2.5,
+      1,
       Math.max(
         0.1,
         Math.min(
@@ -39,12 +41,13 @@
     y = (height - graph.height * next) / 2;
   }
   $effect(() => {
-    if (!fitted && graph.nodes.length && width && height) {
-      fitted = true;
-      fit();
-    }
+    // Reads graph.nodes.length, graph.width, graph.height, width and height so a
+    // new definition or a resized pane refits until the reader takes over.
+    void [graph.nodes.length, graph.width, graph.height, width, height];
+    if (!userMoved && graph.nodes.length && width && height) fit();
   });
   function wheel(event: WheelEvent) {
+    userMoved = true;
     event.preventDefault();
     const box = (event.currentTarget as HTMLElement).getBoundingClientRect();
     const px = event.clientX - box.left;
@@ -73,6 +76,7 @@
   }
   function move(event: PointerEvent) {
     if (!drag) return;
+    userMoved = true;
     x = drag.ox + event.clientX - drag.px;
     y = drag.oy + event.clientY - drag.py;
   }
@@ -85,7 +89,10 @@
     else if (event.key === "ArrowRight") x -= step;
     else if (event.key === "ArrowUp") y += step;
     else if (event.key === "ArrowDown") y -= step;
-    else if (event.key === "0") fit();
+    else if (event.key === "0") {
+      userMoved = false;
+      fit();
+    }
     else return;
     event.preventDefault();
   }
@@ -107,7 +114,10 @@
     type="button"
     aria-label="Fit to content"
     title="Fit to content (0)"
-    onclick={fit}><Maximize2 size={13} /></button
+    onclick={() => {
+      userMoved = false;
+      fit();
+    }}><Maximize2 size={13} /></button
   >
 </div>
 <!-- svelte-ignore a11y_no_noninteractive_tabindex a11y_no_noninteractive_element_interactions -->

@@ -27,6 +27,7 @@
       data-row
       data-testid="board-build"
       data-hash={build.componentHash}
+      data-definition={def?.hash ?? ""}
     >
       <div class="head">
         <span class="name">{def?.name ?? "unnamed"}</span>
