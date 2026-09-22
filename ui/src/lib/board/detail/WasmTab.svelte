@@ -92,6 +92,11 @@
     );
   });
 
+  // A click pins a selection; hovering shows a transient one and, on leaving,
+  // returns to the pinned selection instead of clearing everything.
+  let pinned = $state<{ kind: "source"; line: number } | { kind: "wasm"; watLine: number } | null>(
+    null,
+  );
   function markSource(line: number | null) {
     if (!index) return;
     origin = "source";
@@ -103,6 +108,24 @@
     }
     hotSource = line;
     hotWat = watLinesFor(index, line);
+  }
+  function hoverSource(line: number | null) {
+    if (line !== null) {
+      markSource(line);
+      return;
+    }
+    // Pointer left the pane: fall back to whatever was pinned.
+    if (pinned?.kind === "source") markSource(pinned.line);
+    else if (pinned?.kind === "wasm") markWat(pinned.watLine);
+    else markSource(null);
+  }
+  function selectSource(line: number) {
+    pinned = { kind: "source", line };
+    markSource(line);
+  }
+  function selectWat(watLine: number) {
+    pinned = { kind: "wasm", watLine };
+    markWat(watLine);
   }
   function markWat(watLine: number) {
     if (!index) return;
@@ -156,8 +179,8 @@
             testid="wasm-source"
             hot={hotSource}
             follow={origin === "wasm"}
-            onhover={mapped ? markSource : undefined}
-            onselect={mapped ? markSource : undefined}
+            onhover={mapped ? hoverSource : undefined}
+            onselect={mapped ? selectSource : undefined}
           />{/if}
       </div>
       <div class="column wat-column">
@@ -166,7 +189,7 @@
           {exports}
           hot={hotWat}
           follow={origin === "source"}
-          onselect={mapped ? markWat : undefined}
+          onselect={mapped ? selectWat : undefined}
         />
       </div>
     </div>
