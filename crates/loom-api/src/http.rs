@@ -349,7 +349,14 @@ async fn wasm(
     let view = tokio::task::spawn_blocking(move || crate::wasm::wasm_view(&bytes))
         .await
         .map_err(anyhow::Error::from)
-        .and_then(|view| view);
+        .and_then(|view| view)
+        .map(|mut view| {
+            match crate::wasm::compiled_source_for(&service.store, &hash) {
+                Ok(text) => view.compiled_source = Some(text),
+                Err(error) => view.compiled_source_error = Some(format!("{error:#}")),
+            }
+            view
+        });
     match view {
         Ok(view) => {
             let mut response = Json(view).into_response();

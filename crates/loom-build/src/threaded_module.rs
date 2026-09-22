@@ -769,16 +769,18 @@ mod tests {
     }
 
     #[test]
-    fn debug_rows_inside_a_replaced_instruction_fail_closed() {
+    fn debug_rows_inside_a_replaced_instruction_snap_to_the_replacement() {
         let module = stack_module();
         let old = only_body(&module);
-        // Offset 4 is the second byte of `global.set 0`, never an instruction start.
+        // Offset 4 is the second byte of `global.set 0`, never an instruction
+        // start; the row describes bytes the rewrite replaced, so it lands on
+        // the replacement rather than refusing the whole module.
         let module = with_custom_sections(
             module,
             &dwarf_fixture(old.start, old.end - old.start, &[(1, 5), (4, 6)]),
         );
-        let error = prepare(&module).unwrap_err();
-        assert!(error.contains("not an instruction boundary"), "{error}");
+        let prepared = prepare(&module).unwrap();
+        assert!(debug_sections(&prepared).contains_key(".debug_line"));
         let module = with_custom_sections(stack_module(), &[(".debug_frame", Vec::new())]);
         let error = prepare(&module).unwrap_err();
         assert!(error.contains(".debug_frame"), "{error}");

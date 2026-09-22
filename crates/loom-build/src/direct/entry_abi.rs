@@ -80,6 +80,24 @@ pub(super) async fn compile(request: Request<'_>) -> Result<(), BuildError> {
     Ok(())
 }
 
+/// The text the wrapper compile actually saw: the stored source followed by the
+/// generated `loom_call_<entry>` wrappers, so a DWARF line beyond the stored
+/// file's length names a wrapper line. Deterministic for a given source,
+/// entry table and schema.
+pub fn compiled_source(
+    source: &str,
+    entries: &BTreeMap<String, String>,
+    schema: Option<String>,
+) -> Result<String, BuildError> {
+    generate(
+        source,
+        &Contract {
+            entry: entries.clone(),
+            schema,
+        },
+    )
+}
+
 fn generate(source: &str, contract: &Contract) -> Result<String, BuildError> {
     let file = syn::parse_file(source).map_err(rejected)?;
     let mut generated = source.to_owned();

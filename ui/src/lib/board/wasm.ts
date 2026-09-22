@@ -27,6 +27,13 @@ export interface WasmModule {
   wat: string;
   functions: WasmFunction[];
   lines: WasmLine[];
+  /**
+   * The text the compiler saw: the stored source followed by the generated entry
+   * wrappers, so own-file line numbers index into it. `null` with a reason in
+   * `compiledSourceError` when the server could not reconstruct it.
+   */
+  compiledSource: string | null;
+  compiledSourceError: string | null;
 }
 
 function record(value: unknown, what: string): Record<string, unknown> {
@@ -78,7 +85,15 @@ export function parseWasmModule(value: unknown): WasmModule {
       line: integer(row.line, `wasm.lines[${position}].line`),
     };
   });
-  return { debug: body.debug, wat, functions, lines };
+  const compiledSource =
+    body.compiled_source === undefined || body.compiled_source === null
+      ? null
+      : text(body.compiled_source, "wasm.compiled_source");
+  const compiledSourceError =
+    body.compiled_source_error === undefined || body.compiled_source_error === null
+      ? null
+      : text(body.compiled_source_error, "wasm.compiled_source_error");
+  return { debug: body.debug, wat, functions, lines, compiledSource, compiledSourceError };
 }
 
 export interface LineIndex {

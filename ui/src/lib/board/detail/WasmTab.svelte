@@ -8,6 +8,7 @@
   import type { CodeLanguage } from "../../highlight";
   import type { DefinitionView } from "../../workbench/schema";
   import SourceView from "../SourceView.svelte";
+  import { splitLines } from "../source";
   import WasmView from "../WasmView.svelte";
   import { displayedSource } from "../source";
   import {
@@ -46,20 +47,29 @@
   const language = $derived<CodeLanguage>(
     lang === "rust" || lang === "typescript" || lang === "javascript" ? lang : "text",
   );
+  // The line table indexes the text the compiler saw: the stored bytes plus the
+  // generated entry wrappers. Prefer the server's reconstruction of exactly
+  // that; fall back to the stored bytes (never the rustfmt rendering).
   const code = $derived(
     view === null
       ? null
-      : displayedSource(
-          {
-            lang,
-            source: view.source,
-            formatted_source: view.formatted_source,
-            format_error: view.format_error,
-          },
-          // The line table indexes the bytes the compiler saw, so this column
-          // shows the stored source, never the rustfmt rendering.
-          true,
-        ),
+      : module?.compiledSource != null
+        ? {
+            code: module.compiledSource,
+            note: `Source as compiled: stored bytes, then the generated entry wrappers from line ${
+              splitLines(view.source).length + 1
+            }.`,
+            formatted: false,
+          }
+        : displayedSource(
+            {
+              lang,
+              source: view.source,
+              formatted_source: view.formatted_source,
+              format_error: view.format_error,
+            },
+            true,
+          ),
   );
   const index = $derived(module === null ? null : indexLines(module.lines));
   const mapped = $derived(module !== null && module.debug && module.lines.length > 0);
@@ -132,6 +142,10 @@
           source line</span
         >{/if}
       {#if foreign !== null}<span class="foreign">{foreign}</span>{/if}
+      {#if code?.note}<span class="muted">{code.note}</span>{/if}
+      {#if module.compiledSourceError !== null}<span class="muted"
+          >Wrapper text unavailable: {module.compiledSourceError}</span
+        >{/if}
     </div>
     <div class="columns">
       <div class="column source-column">

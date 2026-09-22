@@ -17,6 +17,46 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use wasmparser::{ExternalKind, KnownCustom, Name, Parser, Payload, TypeRef};
 
+/// The exact text the wrapper compile saw for the definition whose build
+/// produced `component_hash`: stored `src/lib.rs` plus the generated entry
+/// wrappers from the identity document's `entry` table and `schema`.
+pub(crate) fn compiled_source_for(
+    store: &loom_store::Store,
+    component_hash: &str,
+) -> Result<String> {
+    let definition = store
+        .definitions()?
+        .into_iter()
+        .find(|def| def.component_hash.as_deref() == Some(component_hash))
+        .context("no stored definition was built into this artifact")?;
+    let stored = store
+        .source(&definition.hash)?
+        .context("definition source missing")?;
+    let source = if stored.trim_start().starts_with('{') {
+        let bundle: serde_json::Value = serde_json::from_str(&stored)?;
+        let file = &bundle["files"]["src/lib.rs"];
+        file.as_str()
+            .or_else(|| file["text"].as_str())
+            .map(str::to_owned)
+            .context("source bundle has no text src/lib.rs")?
+    } else {
+        stored
+    };
+    let identity = store
+        .build_identity(&definition.hash)?
+        .context("definition has no build identity")?;
+    let document: serde_json::Value = serde_json::from_slice(
+        &store
+            .get(&identity.item_hashes_ref)?
+            .context("item document missing from CAS")?,
+    )?;
+    let entries: BTreeMap<String, String> = serde_json::from_value(document["entry"].clone())
+        .context("item document has no entry table")?;
+    let schema = document["schema"].as_str().map(str::to_owned);
+    loom_build::compiled_source(&source, &entries, schema)
+        .map_err(|error| anyhow::anyhow!("{error}"))
+}
+
 /// Largest module the text view renders.
 pub(crate) const MAX_MODULE_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -30,6 +70,13 @@ pub(crate) struct WasmView {
     pub lines: Vec<Line>,
     /// Whether the module carries `.debug_*` sections at all.
     pub debug: bool,
+    /// The text the compiler saw for this artifact: the stored source followed
+    /// by the generated entry wrappers, so every `lines[].line` for the
+    /// definition's own file indexes into it. `None` when the artifact belongs
+    /// to no stored definition or the wrappers cannot be regenerated; the
+    /// reason is in `compiled_source_error`.
+    pub compiled_source: Option<String>,
+    pub compiled_source_error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -216,6 +263,8 @@ pub(crate) fn wasm_view(bytes: &[u8]) -> Result<WasmView> {
         functions,
         lines,
         debug: !debug.is_empty(),
+        compiled_source: None,
+        compiled_source_error: None,
     })
 }
 

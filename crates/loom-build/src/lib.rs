@@ -15,6 +15,7 @@ pub use intake::Preparation;
 mod materialize;
 use materialize::{Materialization, materialize_rust};
 mod direct;
+pub use direct::compiled_source;
 mod dwarf;
 mod handler_dependencies;
 mod manifest;
@@ -93,6 +94,33 @@ async fn prepare_compiler_dependencies(
         .lock()
         .map_err(|_| BuildError::Rejected("compiler dependency memo poisoned".into()))? = Some(key);
     Ok(())
+}
+
+/// A cached component is served only if it is the build of THIS definition: it
+/// must export the SDK allocator and one `loom_call_<entry>` wrapper per
+/// checked export. Anything else (a foreign module written under the same
+/// hash, a build interrupted between steps) is rebuilt instead of served.
+fn component_serves(component: &[u8], definition: &CheckedDef) -> Result<(), String> {
+    let mut exports = std::collections::BTreeSet::new();
+    for payload in wasmparser::Parser::new(0).parse_all(component) {
+        if let wasmparser::Payload::ExportSection(section) = payload.map_err(|e| e.to_string())? {
+            for export in section {
+                exports.insert(export.map_err(|e| e.to_string())?.name.to_owned());
+            }
+        }
+    }
+    let mut required = vec!["loom_alloc".to_owned()];
+    required.extend(
+        definition
+            .sig
+            .exports
+            .iter()
+            .map(|entry| format!("loom_call_{}", entry.name)),
+    );
+    match required.iter().find(|name| !exports.contains(*name)) {
+        None => Ok(()),
+        Some(missing) => Err(format!("cached component lacks export {missing}")),
+    }
 }
 
 pub struct Builder {
@@ -275,6 +303,7 @@ impl Builder {
         if cached_inputs.as_deref() == Some(inputs.as_str())
             && let Ok(component) = fs::read(&component_path).await
             && loom_proto::core_protocol::is_current(&component)
+            && component_serves(&component, definition).is_ok()
         {
             validate_component(&component)?;
             return Ok(BuildOutput {
