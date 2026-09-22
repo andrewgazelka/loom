@@ -353,7 +353,10 @@ async fn wasm(
     let view = match view {
         Ok(mut view) => {
             match crate::wasm::compiled_source_for(service, &hash).await {
-                Ok(text) => view.compiled_source = Some(text),
+                Ok((text, wrapper_line)) => {
+                    view.compiled_source = Some(text);
+                    view.compiled_wrapper_line = Some(wrapper_line);
+                }
                 Err(error) => view.compiled_source_error = Some(format!("{error:#}")),
             }
             Ok(view)

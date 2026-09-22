@@ -8,7 +8,6 @@
   import type { CodeLanguage } from "../../highlight";
   import type { DefinitionView } from "../../workbench/schema";
   import SourceView from "../SourceView.svelte";
-  import { splitLines } from "../source";
   import WasmView from "../WasmView.svelte";
   import { displayedSource } from "../source";
   import {
@@ -56,8 +55,8 @@
       : module?.compiledSource != null
         ? {
             code: module.compiledSource,
-            note: `Source as compiled: stored bytes, then the generated entry wrappers from line ${
-              splitLines(view.source).length + 1
+            note: `Source as compiled: the checker's normalized reprint, then the generated entry wrappers${
+              module.compiledWrapperLine === null ? "" : ` from line ${module.compiledWrapperLine}`
             }.`,
             formatted: false,
           }

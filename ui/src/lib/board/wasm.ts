@@ -34,6 +34,8 @@ export interface WasmModule {
    */
   compiledSource: string | null;
   compiledSourceError: string | null;
+  /** 1-based line of `compiledSource` where the generated entry wrappers begin. */
+  compiledWrapperLine: number | null;
 }
 
 function record(value: unknown, what: string): Record<string, unknown> {
@@ -93,7 +95,19 @@ export function parseWasmModule(value: unknown): WasmModule {
     body.compiled_source_error === undefined || body.compiled_source_error === null
       ? null
       : text(body.compiled_source_error, "wasm.compiled_source_error");
-  return { debug: body.debug, wat, functions, lines, compiledSource, compiledSourceError };
+  const compiledWrapperLine =
+    body.compiled_wrapper_line === undefined || body.compiled_wrapper_line === null
+      ? null
+      : integer(body.compiled_wrapper_line, "wasm.compiled_wrapper_line");
+  return {
+    debug: body.debug,
+    wat,
+    functions,
+    lines,
+    compiledSource,
+    compiledSourceError,
+    compiledWrapperLine,
+  };
 }
 
 export interface LineIndex {

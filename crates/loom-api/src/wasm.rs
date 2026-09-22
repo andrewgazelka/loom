@@ -25,7 +25,7 @@ use wasmparser::{ExternalKind, KnownCustom, Name, Parser, Payload, TypeRef};
 pub(crate) async fn compiled_source_for(
     service: &crate::Service,
     component_hash: &str,
-) -> Result<String> {
+) -> Result<(String, u32)> {
     let store = &service.store;
     let definition = store
         .definitions()?
@@ -73,8 +73,10 @@ pub(crate) async fn compiled_source_for(
     let entries: BTreeMap<String, String> = serde_json::from_value(document["entry"].clone())
         .context("item document has no entry table")?;
     let schema = document["schema"].as_str().map(str::to_owned);
-    loom_build::compiled_source(&source, &entries, schema)
-        .map_err(|error| anyhow::anyhow!("{error}"))
+    let wrapper_line = source.lines().count() as u32 + 1;
+    let text = loom_build::compiled_source(&source, &entries, schema)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    Ok((text, wrapper_line))
 }
 
 /// Largest module the text view renders.
@@ -97,6 +99,8 @@ pub(crate) struct WasmView {
     /// reason is in `compiled_source_error`.
     pub compiled_source: Option<String>,
     pub compiled_source_error: Option<String>,
+    /// 1-based line of `compiled_source` where the generated wrappers begin.
+    pub compiled_wrapper_line: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -285,6 +289,7 @@ pub(crate) fn wasm_view(bytes: &[u8]) -> Result<WasmView> {
         debug: !debug.is_empty(),
         compiled_source: None,
         compiled_source_error: None,
+        compiled_wrapper_line: None,
     })
 }
 
