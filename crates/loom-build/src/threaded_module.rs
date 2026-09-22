@@ -198,8 +198,7 @@ pub fn prepare(bytes: &[u8]) -> Result<Vec<u8>, String> {
     }
     let mut result = module.finish();
     if !debug.is_empty() {
-        let code_start =
-            code_start.ok_or("module carries DWARF but has no code section")?;
+        let code_start = code_start.ok_or("module carries DWARF but has no code section")?;
         let (new_start, new_bodies) = code_layout(&result)?;
         if new_bodies.len() != bodies.len() {
             return Err(format!(
@@ -579,7 +578,9 @@ mod tests {
     /// subprogram `greet` spanning `start..start + length` and one line row per
     /// `(body-relative offset, line)`; addresses are code-contents offsets.
     fn dwarf_fixture(start: u64, length: u64, rows: &[(u64, u64)]) -> Vec<(&'static str, Vec<u8>)> {
-        use gimli::write::{Address, AttributeValue, EndianVec, LineProgram, LineString, Sections, Unit};
+        use gimli::write::{
+            Address, AttributeValue, EndianVec, LineProgram, LineString, Sections, Unit,
+        };
         let encoding = gimli::Encoding {
             format: gimli::Format::Dwarf32,
             version: 4,
@@ -607,14 +608,26 @@ mod tests {
         let mut unit = Unit::new(encoding, program);
         let root = unit.root();
         let entry = unit.get_mut(root);
-        entry.set(gimli::DW_AT_name, AttributeValue::String(b"src/lib.rs".to_vec()));
-        entry.set(gimli::DW_AT_comp_dir, AttributeValue::String(b"/loom/source".to_vec()));
-        entry.set(gimli::DW_AT_low_pc, AttributeValue::Address(Address::Constant(start)));
+        entry.set(
+            gimli::DW_AT_name,
+            AttributeValue::String(b"src/lib.rs".to_vec()),
+        );
+        entry.set(
+            gimli::DW_AT_comp_dir,
+            AttributeValue::String(b"/loom/source".to_vec()),
+        );
+        entry.set(
+            gimli::DW_AT_low_pc,
+            AttributeValue::Address(Address::Constant(start)),
+        );
         entry.set(gimli::DW_AT_high_pc, AttributeValue::Udata(length));
         let function = unit.add(root, gimli::DW_TAG_subprogram);
         let entry = unit.get_mut(function);
         entry.set(gimli::DW_AT_name, AttributeValue::String(b"greet".to_vec()));
-        entry.set(gimli::DW_AT_low_pc, AttributeValue::Address(Address::Constant(start)));
+        entry.set(
+            gimli::DW_AT_low_pc,
+            AttributeValue::Address(Address::Constant(start)),
+        );
         entry.set(gimli::DW_AT_high_pc, AttributeValue::Udata(length));
         let mut dwarf = gimli::write::Dwarf::new();
         dwarf.units.add(unit);
@@ -675,7 +688,10 @@ mod tests {
         );
         let prepared = prepare(&module).unwrap();
         let new = only_body(&prepared);
-        assert!(new.end - new.start > 6, "the stack check lengthened the body");
+        assert!(
+            new.end - new.start > 6,
+            "the stack check lengthened the body"
+        );
         let sections = debug_sections(&prepared);
         for required in [".debug_abbrev", ".debug_info", ".debug_line"] {
             assert!(sections.contains_key(required), "{:?}", sections.keys());
@@ -701,11 +717,14 @@ mod tests {
             }
         }
         // local.get keeps its place; global.set starts where it did; the end moved.
-        assert_eq!(rows, BTreeMap::from([(new.start + 1, 5), (new.start + 3, 6)]));
+        assert_eq!(
+            rows,
+            BTreeMap::from([(new.start + 1, 5), (new.start + 3, 6)])
+        );
         assert_eq!(sequence_end, Some(new.end));
         let mut entries = unit.entries();
         let mut function = None;
-        while let Some((_, entry)) = entries.next_dfs().unwrap() {
+        while let Some(entry) = entries.next_dfs().unwrap() {
             if entry.tag() == gimli::DW_TAG_subprogram {
                 function = Some((
                     entry.attr_value(gimli::DW_AT_low_pc).unwrap().unwrap(),

@@ -258,13 +258,13 @@ async fn formatted_view() {
     assert!(viewed["format_error"].is_null(), "{viewed}");
     // Recorded once per source revision under CAS kind `source-formatted`.
     let hash = added["hash"].as_str().unwrap();
-    let source_hash = service
-        .store
-        .definition_source_hash(hash)
-        .unwrap()
-        .unwrap();
+    let source_hash = service.store.definition_source_hash(hash).unwrap().unwrap();
     assert_eq!(
-        service.store.formatted_source(&source_hash).unwrap().as_deref(),
+        service
+            .store
+            .formatted_source(&source_hash)
+            .unwrap()
+            .as_deref(),
         Some(formatted)
     );
     let entry = service

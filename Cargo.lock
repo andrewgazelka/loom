@@ -2697,6 +2697,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "futures-util",
+ "gimli",
  "http-body-util",
  "loom-actor",
  "loom-behavior",
@@ -2718,6 +2719,8 @@ dependencies = [
  "toml",
  "tower",
  "uuid",
+ "wasmparser 0.254.0",
+ "wasmprinter",
 ]
 
 [[package]]
@@ -2748,6 +2751,7 @@ dependencies = [
  "anyhow",
  "blake3",
  "flate2",
+ "gimli",
  "loom-check",
  "loom-proto",
  "loom-store",

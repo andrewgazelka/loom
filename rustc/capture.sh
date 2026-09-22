@@ -72,8 +72,16 @@ if [ "${CARGO_PRIMARY_PACKAGE:-}" = 1 ] && [ -n "${LOOM_ROOT_INCREMENTAL:-}" ]; 
 fi
 # Relative input paths also carry the compiler working directory in metadata.
 # Remap both owner paths so relocating the definition preserves artifact bytes.
+# The root package owns `/loom/source`; every other crate (dependencies, the
+# build-std core and alloc) gets its own prefix, so a DWARF line table can tell
+# the guest's `src/lib.rs` from a dependency's `src/lib.rs`.
 compiler_cwd=$(pwd -P)
-set -- "$@" "--remap-path-prefix=$compiler_cwd=/loom/build" "--remap-path-prefix=${CARGO_MANIFEST_DIR:?missing package source}=/loom/source"
+if [ "${CARGO_PRIMARY_PACKAGE:-}" = 1 ]; then
+  source_prefix=/loom/source
+else
+  source_prefix="/loom/deps/${CARGO_PKG_NAME:?missing package name}-${CARGO_PKG_VERSION:?missing package version}"
+fi
+set -- "$@" "--remap-path-prefix=$compiler_cwd=/loom/build" "--remap-path-prefix=${CARGO_MANIFEST_DIR:?missing package source}=$source_prefix"
 # CARGO_MANIFEST_DIR identifies package source, not the compiler's cwd.
 export LOOM_RUSTC_CWD="$compiler_cwd"
 capture=${LOOM_RUSTC_CAPTURE:?missing capture destination}

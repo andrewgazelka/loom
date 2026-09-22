@@ -93,13 +93,20 @@ async fn workflow() {
     assert_eq!(entry["exported"], true);
     let start = entry["start_line"].as_u64().unwrap() as usize;
     let end = entry["end_line"].as_u64().unwrap() as usize;
-    assert!(start >= 1 && start <= end && end <= wat_lines.len(), "{entry}");
+    assert!(
+        start >= 1 && start <= end && end <= wat_lines.len(),
+        "{entry}"
+    );
     assert!(
         wat_lines[start - 1].contains("(func $loom_call_greet"),
         "{}",
         wat_lines[start - 1]
     );
-    assert!(wat_lines[end - 1].trim_end().ends_with(')'), "{}", wat_lines[end - 1]);
+    assert!(
+        wat_lines[end - 1].trim_end().ends_with(')'),
+        "{}",
+        wat_lines[end - 1]
+    );
     for function in functions {
         assert!(function["index"].is_u64() && function["exported"].is_boolean());
         assert!(function["start_line"].as_u64().unwrap() <= function["end_line"].as_u64().unwrap());
@@ -125,8 +132,14 @@ async fn workflow() {
     let mut inside_greet = 0;
     for entry in lines {
         let wat_line = entry["wat_line"].as_u64().unwrap();
-        assert!(wat_line >= 1 && wat_line as usize <= wat_lines.len(), "{entry}");
-        assert!(entry["file"].is_string() && entry["line"].is_u64(), "{entry}");
+        assert!(
+            wat_line >= 1 && wat_line as usize <= wat_lines.len(),
+            "{entry}"
+        );
+        assert!(
+            entry["file"].is_string() && entry["line"].is_u64(),
+            "{entry}"
+        );
         let file = entry["file"].as_str().unwrap();
         let line = entry["line"].as_u64().unwrap();
         if file.ends_with("src/lib.rs") && (greet_start..=greet_end).contains(&line) {
@@ -163,10 +176,20 @@ async fn workflow() {
     }
 
     // Missing artifact: 404 in the command error envelope.
-    let (status, body) = fetch(&router, &format!("/v1/wasm/{}", "0".repeat(64)), Some("reader")).await;
+    let (status, body) = fetch(
+        &router,
+        &format!("/v1/wasm/{}", "0".repeat(64)),
+        Some("reader"),
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["ok"], false, "{body}");
-    assert!(body["result"]["error"].as_str().unwrap().contains("not found"));
+    assert!(
+        body["result"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("not found")
+    );
     // Read scope is required.
     let (status, _) = fetch(&router, &format!("/v1/wasm/{component}"), None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);

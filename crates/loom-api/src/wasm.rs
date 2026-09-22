@@ -263,9 +263,9 @@ fn line_table(sections: &BTreeMap<&str, &[u8]>) -> Result<LineTable> {
             let file = match files.get(&row.file_index()) {
                 Some(file) => file.clone(),
                 None => {
-                    let entry = header
-                        .file(row.file_index())
-                        .with_context(|| format!("DWARF row names missing file {}", row.file_index()))?;
+                    let entry = header.file(row.file_index()).with_context(|| {
+                        format!("DWARF row names missing file {}", row.file_index())
+                    })?;
                     let name = dwarf.attr_string(&unit, entry.path_name())?;
                     let directory = entry
                         .directory(header)
@@ -304,7 +304,10 @@ pub(crate) fn file_path(comp_dir: Option<&str>, directory: Option<&str>, name: &
     let path = if name.starts_with('/') {
         name.to_owned()
     } else {
-        match (directory.filter(|directory| !directory.is_empty()), comp_dir) {
+        match (
+            directory.filter(|directory| !directory.is_empty()),
+            comp_dir,
+        ) {
             (Some(directory), _) if directory.starts_with('/') => join(directory, name),
             (Some(directory), Some(root)) => join(&join(root, directory), name),
             (Some(directory), None) => join(directory, name),
@@ -357,10 +360,16 @@ mod tests {
     #[test]
     fn crate_files_are_relative_and_external_paths_stay_as_recorded() {
         let root = Some("/loom/source");
-        assert_eq!(file_path(root, Some("/loom/source"), "src/lib.rs"), "src/lib.rs");
+        assert_eq!(
+            file_path(root, Some("/loom/source"), "src/lib.rs"),
+            "src/lib.rs"
+        );
         assert_eq!(file_path(root, None, "src/lib.rs"), "src/lib.rs");
         assert_eq!(file_path(root, Some("src"), "lib.rs"), "src/lib.rs");
-        assert_eq!(file_path(root, None, "/loom/source/src/lib.rs"), "src/lib.rs");
+        assert_eq!(
+            file_path(root, None, "/loom/source/src/lib.rs"),
+            "src/lib.rs"
+        );
         assert_eq!(
             file_path(root, Some("/rustc/abc/library/core/src"), "num.rs"),
             "/rustc/abc/library/core/src/num.rs"
@@ -392,7 +401,11 @@ mod tests {
         assert_eq!(view.functions[0].name.as_deref(), Some("answer"));
         assert!(view.functions[0].exported);
         assert!(view.functions[0].start_line <= view.functions[0].end_line);
-        let printed = view.wat.lines().nth(view.functions[0].start_line as usize - 1).unwrap();
+        let printed = view
+            .wat
+            .lines()
+            .nth(view.functions[0].start_line as usize - 1)
+            .unwrap();
         assert!(printed.contains("func $answer"), "{printed}");
         // A `.debug_*` section that is not DWARF is an error, not an empty map.
         module.extend_from_slice(&[0, 15, 11]);

@@ -122,10 +122,7 @@ pub(crate) fn relocate<'a>(
     {
         let mut units = converted.convert(&dwarf).map_err(convert_error)?;
         while let Some((mut unit, root)) = units.read_unit().map_err(convert_error)? {
-            if let Some(mut program) = unit
-                .read_line_program(None, None)
-                .map_err(convert_error)?
-            {
+            if let Some(mut program) = unit.read_line_program(None, None).map_err(convert_error)? {
                 // gimli converts `DW_LNE_set_address` through `convert_address`
                 // but keeps row and end-of-sequence offsets as deltas, which is
                 // wrong once bytes are inserted inside a body: every row is
@@ -139,8 +136,7 @@ pub(crate) fn relocate<'a>(
                             program.set_address(Address::Constant(new_base));
                         }
                         ConvertLineRow::Row(mut row) => {
-                            row.address_offset =
-                                span(map, old_base, new_base, row.address_offset)?;
+                            row.address_offset = span(map, old_base, new_base, row.address_offset)?;
                             program.generate_row(row);
                         }
                         ConvertLineRow::EndSequence(length) => {
@@ -188,12 +184,14 @@ fn convert_entry<'u, 'a>(
     map: &CodeMap,
     convert_address: &dyn Fn(u64) -> Option<Address>,
 ) -> Result<(), String> {
-    let low_pc = entry.attrs.iter().find_map(|attribute| {
-        match (attribute.name(), attribute.value()) {
-            (gimli::DW_AT_low_pc, gimli::AttributeValue::Addr(address)) => Some(address),
-            _ => None,
-        }
-    });
+    let low_pc =
+        entry
+            .attrs
+            .iter()
+            .find_map(|attribute| match (attribute.name(), attribute.value()) {
+                (gimli::DW_AT_low_pc, gimli::AttributeValue::Addr(address)) => Some(address),
+                _ => None,
+            });
     for attribute in &entry.attrs {
         let value = match (attribute.name(), attribute.udata_value(), low_pc) {
             (gimli::DW_AT_high_pc, Some(length), Some(low)) => {
@@ -262,7 +260,11 @@ mod tests {
         assert_eq!(map.translate(0), Some(0), "unit anchor");
         assert_eq!(map.translate(3), Some(3), "first body start");
         assert_eq!(map.translate(4), Some(4), "before the edit");
-        assert_eq!(map.translate(6), Some(6), "the replaced instruction's start");
+        assert_eq!(
+            map.translate(6),
+            Some(6),
+            "the replaced instruction's start"
+        );
         assert_eq!(map.translate(8), Some(26), "after the edit");
         assert_eq!(map.translate(9), Some(27), "first body end");
         assert_eq!(map.translate(10), Some(29), "second body start");

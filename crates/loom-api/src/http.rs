@@ -317,10 +317,7 @@ async fn wasm(
         if entry.size > crate::wasm::MAX_MODULE_BYTES {
             return Ok(Fetched::TooLarge(entry.size));
         }
-        let bytes = service
-            .store
-            .get(&hash)?
-            .context("CAS block disappeared")?;
+        let bytes = service.store.get(&hash)?.context("CAS block disappeared")?;
         Ok(Fetched::Bytes(bytes))
     })();
     let envelope = |status: StatusCode, error: anyhow::Error| {

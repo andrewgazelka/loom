@@ -78,9 +78,7 @@ impl Service {
             if let Some(id) = request_id
                 && let Some(session) = self.store.update_session(id)?
             {
-                return self
-                    .existing_update(&session, &original_request)
-                    .await;
+                return self.existing_update(&session, &original_request).await;
             }
             let expected_names = self.store.current_names()?;
             let hash = expected_names

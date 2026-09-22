@@ -25,6 +25,7 @@ LOOM_BUILD_DIR=$D/build "$LOOMD" --db "$D/loom.sqlite" --actors-dir "$D/actors" 
 DPID=$!
 trap 'kill $DPID 2>/dev/null; agent-browser --session $SESSION close >/dev/null 2>&1; echo "state: $D"' EXIT
 for i in $(seq 1 100); do curl -s -o /dev/null "$URL/health" && break; sleep 0.1; done
+kill -0 $DPID 2>/dev/null || { echo "daemon exited at start (port $PORT busy?): $(tail -2 "$D/loomd.log")"; echo "0/1"; exit 1; }
 L() { "$LOOM" --url "$URL" "$@"; }
 J() { python3 -c "import json,sys; d=json.load(sys.stdin); print(eval(sys.argv[1]))" "$1"; }
 B() { agent-browser --session "$SESSION" "$@"; }
@@ -34,7 +35,7 @@ wait_dom() { local expr=$1 limit=${2:-2}; local t0=$(python3 -c 'import time;pri
   python3 -c "import time,sys; sys.exit(0 if time.time()-$t0 < $limit else 1)" || { echo "timeout"; return 1; }; sleep 0.1; done; }
 
 # 1 the board loads live
-B open "$URL/board#token=$LOOM_TOKEN" >/dev/null 2>&1
+B open "$URL/#token=$LOOM_TOKEN" >/dev/null 2>&1
 ms=$(wait_dom "document.querySelector('[data-testid=board-status]')?.textContent.includes('live')" 10); check $? "board loads and reports live (${ms} ms)" "status: $(B eval "document.querySelector('[data-testid=board-status]')?.textContent" 2>&1 | head -c 200)"
 frag=$(B eval "location.hash" 2>/dev/null | tr -d '"'); [ -z "$frag" ]; check $? "token fragment consumed from the URL" "hash still [$frag]"
 
@@ -88,8 +89,42 @@ L send "$aid" 1 >/dev/null 2>&1; L send "$aid" 1 >/dev/null 2>&1
 ms=$(wait_dom "document.querySelector('[data-testid=board-actor][data-id=\"$aid\"]')?.dataset.cursor === '2'" 2); check $? "actor cursor reads 2 within 2 s (${ms} ms)" "cursor: $(B eval "document.querySelector('[data-testid=board-actor][data-id=\"$aid\"]')?.dataset.cursor" 2>/dev/null)"
 ms=$(wait_dom "document.querySelectorAll('[data-testid=board-event][data-type=actor_message]').length >= 2" 2); check $? "two actor_message events in the feed (${ms} ms)" "count: $(B eval "document.querySelectorAll('[data-testid=board-event][data-type=actor_message]').length" 2>/dev/null)"
 
-# 6 no console errors, and the old routes still work
+# 6 click-through: the definition detail is source first, formatted, with dependencies as links
+B eval "document.querySelector('[data-testid=board-def][data-name=\"pick\"]').click(); 'ok'" >/dev/null 2>&1
+ms=$(wait_dom "document.querySelector('[data-testid=board-detail]')?.dataset.hash === '$phash'" 3); check $? "clicking pick opens its detail (${ms} ms)" "detail: $(B eval "document.querySelector('[data-testid=board-detail]')?.dataset.hash" 2>/dev/null)"
+ms=$(wait_dom "(document.querySelector('[data-testid=detail-source]')?.textContent ?? '').includes('largest(sides')" 3); check $? "detail shows pick's source (${ms} ms)" "source missing"
+v=$(B eval "document.querySelectorAll('[data-testid=detail-source] [data-line]').length" 2>/dev/null | tr -d '"'); [ "${v:-0}" -ge 8 ]; check $? "source is rustfmt-formatted: pick.rs was 6 lines, shown as $v (the one-line body was split)" "lines: $v"
+v=$(B eval "location.hash" 2>/dev/null | tr -d '"'); [ "$v" = "#def=$phash" ]; check $? "URL hash deep-links the selection" "hash [$v]"
+B eval "document.querySelector('[data-testid=detail-dep][data-hash=\"$shash\"]').click(); 'ok'" >/dev/null 2>&1
+ms=$(wait_dom "document.querySelector('[data-testid=board-detail]')?.dataset.hash === '$shash' && (document.querySelector('[data-testid=detail-source]')?.textContent ?? '').includes('pub fn largest')" 3); check $? "dependency link navigates to shapes' source (${ms} ms)" "not navigated"
+
+# 7 wasm tab with source mapping
+B eval "document.querySelector('[data-tab=wasm]').click(); 'ok'" >/dev/null 2>&1
+ms=$(wait_dom "document.querySelectorAll('[data-testid=detail-wasm] [data-wat-line]').length > 100" 10); check $? "wasm text renders (${ms} ms)" "lines: $(B eval "document.querySelectorAll('[data-testid=detail-wasm] [data-wat-line]').length" 2>/dev/null)"
+v=$(B eval "document.querySelectorAll('[data-testid=detail-wasm] [data-src-line][data-src-file=\"src/lib.rs\"]').length" 2>/dev/null | tr -d '"'); [ "${v:-0}" -gt 0 ]; check $? "wasm lines map to src/lib.rs lines via DWARF ($v mapped)" "mapped: $v"
+first=$(B eval "document.querySelector('[data-testid=detail-wasm] [data-src-line][data-src-file=\"src/lib.rs\"]')?.dataset.srcLine" 2>/dev/null | tr -d '"')
+B eval "document.querySelector('[data-testid=detail-source] [data-line=\"$first\"]').click(); 'ok'" >/dev/null 2>&1
+ms=$(wait_dom "document.querySelectorAll('[data-testid=detail-wasm] [data-src-line=\"$first\"].hot').length > 0" 2); check $? "clicking source line $first lights its wasm instructions (${ms} ms)" "no hot wat lines"
+B eval "document.querySelector('[data-testid=detail-back]').click(); 'ok'" >/dev/null 2>&1
+ms=$(wait_dom "!document.querySelector('[data-testid=board-detail]') && !!document.querySelector('[data-kind=static]')" 2); check $? "back returns to the overview (${ms} ms)" "detail still open"
+
+# 8 actor and run details
+B eval "document.querySelector('[data-testid=board-actor][data-id=\"$aid\"]').click(); 'ok'" >/dev/null 2>&1
+ms=$(wait_dom "document.querySelector('[data-testid=detail-actor]')?.dataset.id === '$aid' && (document.querySelector('[data-testid=detail-actor]')?.textContent ?? '').includes('counter')" 3); check $? "actor detail names its definition (${ms} ms)" "missing"
+B eval "document.querySelector('[data-testid=detail-back]').click(); 'ok'" >/dev/null 2>&1
+B eval "document.querySelector('[data-testid=board-event][data-type=call_completed]').click(); 'ok'" >/dev/null 2>&1
+ms=$(wait_dom "(document.querySelector('[data-testid=detail-run]')?.textContent ?? '').includes('pick')" 3); check $? "run detail opens from the feed (${ms} ms)" "missing"
+B eval "document.querySelector('[data-testid=detail-back]').click(); 'ok'" >/dev/null 2>&1
+
+# 9 the workspace hides its parameter dumps by default
+B open "$URL/workspace" >/dev/null 2>&1
+ms=$(wait_dom "!!document.body && document.body.textContent.length > 0" 5) >/dev/null
+v=$(B eval "document.body.textContent.includes('order_by=')" 2>/dev/null | tr -d '"'); [ "$v" = "false" ]; check $? "workspace shows no parameter dump by default" "order_by= visible"
+B open "$URL/#token=$LOOM_TOKEN" >/dev/null 2>&1; wait_dom "!!document.querySelector('[data-testid=board-status]')" 5 >/dev/null
+
+# 10 no console errors, and the old routes still work
 errs=$(B errors 2>&1 | grep -vE '^\s*$' | wc -l | tr -d ' '); [ "$errs" = 0 ]; check $? "no browser console errors" "$(B errors 2>&1 | head -c 300)"
+code=$(curl -sL -o /dev/null -w '%{http_code}' "$URL/workspace"); [ "$code" = 200 ]; check $? "/workspace serves the app (SPA fallback, redirects followed)" "http $code"
 code=$(curl -s -o /dev/null -w '%{http_code}' "$URL/view"); [ "$code" = 200 ]; check $? "/view serves the app (SPA fallback)" "http $code"
 code=$(curl -s -o /dev/null -w '%{http_code}' "$URL/missing.js"); [ "$code" = 404 ]; check $? "/missing.js stays 404" "http $code"
 B screenshot "$D/board.png" >/dev/null 2>&1; [ -s "$D/board.png" ]; check $? "screenshot saved at $D/board.png" "no file"
