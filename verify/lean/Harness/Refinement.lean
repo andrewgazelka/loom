@@ -32,7 +32,7 @@ def absH (h : core.Harness) : H := ⟨absCalls h.calls.val, h.cancelled⟩
 
 def absE : core.Event → Event
   | .ToolUse id => .toolUse id.val
-  | .Permission id a => .permission id.val a
+  | .Permission id a u => .permission id.val a u
   | .ToolDone id => .toolDone id.val
   | .Cancel => .cancel
 
@@ -298,9 +298,11 @@ theorem step_refines (h : core.Harness) (e : core.Event) (hfit : Fits h) :
         have := congrArg UScalar.val heq; simp [alloc.vec.Vec.len_val] at this; omega
       obtain ⟨-, hl⟩ := fi_get id h.calls.val hlt
       simp [hne, hl]
-  | Permission id allow =>
+  | Permission id allow u =>
     step as ⟨i, hi⟩
-    simp only [absE, step, absH]
+    cases u
+    · simp [absE, step, absH]
+    simp only [absE, step, absH, if_true]
     by_cases hlt : fi id h.calls.val < h.calls.val.length
     · obtain ⟨hid, hl⟩ := fi_get id h.calls.val hlt
       have hlt' : i < alloc.vec.Vec.len h.calls := by
@@ -384,7 +386,7 @@ theorem step_calls_length (h : H) (e : Event) :
     intro cs id p; induction cs with
     | nil => rfl
     | cons c cs ih => simp only [upd]; split <;> simp [ih]
-  cases e <;> simp only [step] <;> (try split) <;> (try split) <;> simp [hu]
+  cases e <;> simp only [step] <;> (try split) <;> (try split) <;> (try split) <;> simp [hu]
 
 theorem rustRun_refines (h : core.Harness) (es : List core.Event)
     (hfit : 2 * (h.calls.length + es.length) + 2 < Usize.max) :

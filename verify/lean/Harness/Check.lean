@@ -17,7 +17,7 @@ def u64 (n : Nat) : U64 := if n = 1 then 1#u64 else 2#u64
 
 def toRust : Event → harness.core.Event
   | .toolUse id => .ToolUse (u64 id)
-  | .permission id a => .Permission (u64 id) a
+  | .permission id a u => .Permission (u64 id) a u
   | .toolDone id => .ToolDone (u64 id)
   | .cancel => .Cancel
 
@@ -36,7 +36,10 @@ abbrev RustStep := harness.core.Harness → harness.core.Event →
 def ids : List Nat := [1, 2]
 
 def events : List Event :=
-  .cancel :: ids.flatMap fun i => [.toolUse i, .permission i true, .permission i false, .toolDone i]
+  -- `.permission i true false` is an approval forged by a non-user sender (the model).
+  .cancel :: ids.flatMap fun i =>
+    [.toolUse i, .permission i true true, .permission i false true, .permission i true false,
+     .toolDone i]
 
 /-- A node: events so far, effects so far, effects emitted since the first cancel.
 `failed` records a Rust step that did not return `ok` (a panic or overflow), which is
@@ -59,7 +62,7 @@ def violations (n : Node) : List String :=
   let seen := (ids ++ n.out.map effId).eraseDups
   -- P1 with order: the prompt comes before the run
   let p1 := n.out.all fun e => match e with
-    | .run id => n.es.contains (.permission id true) &&
+    | .run id => n.es.contains (.permission id true true) &&
         match firstIdx n.out (.ask id), firstIdx n.out (.run id) with
         | some a, some r => a < r
         | _, _ => false
@@ -108,11 +111,11 @@ where
           if acc.any (·.1 == p) then acc else (p, n.es, n.out) :: acc
       go d next found
 
--- 9 events, depth 5: 9^5 = 59049 traces through the translated Rust step functions.
+-- 11 events, depth 5: 11^5 = 161051 traces through the translated Rust step functions.
 #eval check harness.core.step_v1 5
 #eval check harness.core.step 5
 
-/-- Gate: the fixed step has no violation in any of the 59049 traces. -/
+/-- Gate: the fixed step has no violation in any of the 161051 traces. -/
 theorem step_passes_depth5 : check harness.core.step 5 = [] := by native_decide
 
 /-- Positive control: the checker still finds the first draft's bugs, with these
@@ -121,7 +124,7 @@ theorem step_v1_fails_depth3 :
     (check harness.core.step_v1 3).map (fun r => (r.1, r.2.1)) =
       [("P2 at most one result", [.toolUse 1, .cancel, .cancel]),
        ("P5 closed after cancel", [.toolUse 1, .cancel, .cancel]),
-       ("P4 quiet after cancel", [.toolUse 1, .cancel, .permission 1 true])] := by
+       ("P4 quiet after cancel", [.toolUse 1, .cancel, .permission 1 true true])] := by
   native_decide
 
 end Harness.Check

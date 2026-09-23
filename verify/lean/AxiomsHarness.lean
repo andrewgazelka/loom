@@ -34,3 +34,11 @@ import Harness
 /-- info: 'Harness.Refinement.rust_quiet_after_cancel' depends on axioms: [propext, Classical.choice, Quot.sound] -/
 #guard_msgs in
 #print axioms Harness.Refinement.rust_quiet_after_cancel
+
+/-- info: 'Harness.Codec.roundtrip' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms Harness.Codec.roundtrip
+
+/-- info: 'Harness.Codec.only_valid' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms Harness.Codec.only_valid

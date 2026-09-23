@@ -28,15 +28,23 @@ code for every input, so the theorems are about the Rust that ships.
 
 Charon translates only `crate::core` (`--start-from crate::core`) from the same source
 file you give `loom add` (Loom may store a normalized reprint of it). The shell is the
-trusted part, and its input domain is narrower than the proof's: ids must fit in i64
-(SQLite INTEGER), and an unknown or multi-key message traps, so Loom dead-letters it
-instead of acting on it.
+trusted part, and it is small: it classifies the sender, parses JSON, and moves rows.
+Its input domain is narrower than the proof's: ids must fit in i64 (SQLite INTEGER),
+and an unknown or multi-key message traps, so Loom dead-letters it instead of acting
+on it.
+
+Who may approve is decided in the proved core, not the shell. `Event::Permission`
+carries a `from_user` flag; the shell sets it when Loom's `actor.sender` effect reports
+`"external"` (a message sent through the node API or CLI with the node token), and
+`core::step` ignores approvals from anyone else, such as the model or tool actors that
+send `tool_use` and `tool_done`. The storage codec for phases is in the core too, and
+`Codec.lean` proves it round-trips and refuses unknown codes.
 
 ### Proved for every trace (`lean/Harness/Proofs.lean`, carried to Rust by `Refinement.lean`)
 
 | Property | Lean |
 |---|---|
-| P1 A tool runs only after the user was prompted for it and allowed it | `permission_first` |
+| P1 A tool runs only after the user was prompted for it and the user (not the model or a tool) allowed it | `permission_first` |
 | P2 The model never sees two results for one call | `at_most_one_result` |
 | P3 A denial is final | `deny_final` |
 | P4 After cancel nothing starts: no prompt, no tool run | `quiet_after_cancel` |
@@ -52,7 +60,8 @@ before part and an after part, and the after part has no prompt and no tool run.
 ### The checker runs the real Rust
 
 `lean/Harness/Check.lean` executes the Aeneas translation directly and enumerates every
-interleaving of 9 events (two tool calls) to depth 5: 59,049 traces. It reports the
+interleaving of 11 events (two tool calls, including an approval forged by a non-user
+sender) to depth 5: 161,051 traces. It reports the
 shortest counterexample per property. On the first draft, `core::step_v1` (kept in the
 file), it finds:
 
@@ -62,7 +71,7 @@ file), it finds:
   them to `Done`).
 
 On `core::step` it finds nothing. Both verdicts are build gates, not printouts:
-`step_passes_depth5` (all 59,049 traces clean) and `step_v1_fails_depth3` (the exact
+`step_passes_depth5` (all 161,051 traces clean) and `step_v1_fails_depth3` (the exact
 shortest counterexamples above, a positive control so a checker that went blind fails
 the build). A Rust step that panics or overflows is itself reported as a violation,
 never dropped.
@@ -102,10 +111,9 @@ this breaks it; a test would settle it.
 - `native_decide` in `Check.lean` trusts Lean's compiler (those are tests, not proofs;
   no headline theorem depends on them, and `Axioms*.lean` enforces that).
 - The shell code outside `core`, and Loom's one-message-one-transaction guarantee.
-- P1 assumes `permission` messages come from the user. The guest API does not expose the
-  sender (`crates/loom-guest-rs/src/actor.rs` has `send`, `accept`, `spawn`), so the shell
-  cannot enforce it; any actor holding a send capability could approve a tool. Enforcing
-  it needs a sender identity in the guest API or a separate capability for approvals.
+- "The user" means Loom's sender `"external"`: anyone holding the node API token. The
+  sender comes from the host (`crates/loom-behavior/src/effects.rs`, `actor.sender`);
+  the typed guest crate does not wrap it yet, so the shell calls `loom::perform`.
 - Nothing yet turns a `run_tool` row into a real process start; the proofs cover which
   effects are recorded.
 

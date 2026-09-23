@@ -20,7 +20,8 @@ inductive Outcome where
 
 inductive Event where
   | toolUse (id : Nat)
-  | permission (id : Nat) (allow : Bool)
+  /-- `user` is true when the answer came from the user (Loom sender "external"). -/
+  | permission (id : Nat) (allow : Bool) (user : Bool)
   | toolDone (id : Nat)
   | cancel
   deriving DecidableEq, Repr
@@ -60,12 +61,14 @@ def step (h : H) : Event → H × List Effect
       if h.cancelled then (⟨h.calls ++ [(id, .done)], true⟩, [.result id .cancelled])
       else (⟨h.calls ++ [(id, .asked)], false⟩, [.ask id])
     | some _ => (h, [])
-  | .permission id allow =>
-    match lookup h.calls id with
-    | some .asked =>
-      if allow then (⟨upd h.calls id .running, h.cancelled⟩, [.run id])
-      else (⟨upd h.calls id .done, h.cancelled⟩, [.result id .denied])
-    | _ => (h, [])
+  | .permission id allow user =>
+    if user then
+      match lookup h.calls id with
+      | some .asked =>
+        if allow then (⟨upd h.calls id .running, h.cancelled⟩, [.run id])
+        else (⟨upd h.calls id .done, h.cancelled⟩, [.result id .denied])
+      | _ => (h, [])
+    else (h, [])
   | .toolDone id =>
     match lookup h.calls id with
     | some .running => (⟨upd h.calls id .done, h.cancelled⟩, [.result id .ok])
@@ -90,9 +93,10 @@ def isResultFor (id : Nat) : Effect → Bool
 
 def results (out : List Effect) (id : Nat) : Nat := out.countP (isResultFor id)
 
-/-- P1: the tool never runs unless the user was prompted for it and allowed it. -/
+/-- P1: the tool never runs unless the user was prompted for it and the user (not the
+model, not a tool) allowed it. -/
 def PermissionFirst (es : List Event) (out : List Effect) : Prop :=
-  ∀ id, .run id ∈ out → .ask id ∈ out ∧ .permission id true ∈ es
+  ∀ id, .run id ∈ out → .ask id ∈ out ∧ .permission id true true ∈ es
 
 /-- P2: the model never sees two results for one call. -/
 def AtMostOneResult (out : List Effect) : Prop := ∀ id, results out id ≤ 1

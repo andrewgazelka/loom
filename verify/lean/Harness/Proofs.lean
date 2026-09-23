@@ -137,7 +137,7 @@ theorem nodup_snoc {cs : Calls} {id : Nat} {p : Phase} (hn : (cs.map (·.1)).Nod
 structure Inv (es : List Event) (h : H) (out : List Effect) : Prop where
   nodup : (h.calls.map (·.1)).Nodup
   count : ∀ id, results out id = if lookup h.calls id = some .done then 1 else 0
-  perm : ∀ id, .run id ∈ out → .permission id true ∈ es
+  perm : ∀ id, .run id ∈ out → .permission id true true ∈ es
   closed : h.cancelled = true → ∀ c ∈ h.calls, c.2 = .done
   flag : h.cancelled = true ↔ .cancel ∈ es
   known : ∀ id, (lookup h.calls id).isSome ↔ .toolUse id ∈ es
@@ -189,7 +189,7 @@ theorem inv_upd {es h out} (I : Inv es h out) (e : Event) (id : Nat) (p₀ p : P
     (hnotUse : ∀ i, e ≠ .toolUse i) (hnotCancel : e ≠ .cancel)
     (hres : results new id = if p = .done then 1 else 0)
     (hresOther : ∀ id', id' ≠ id → results new id' = 0)
-    (hrun : ∀ id', .run id' ∈ new → id' = id ∧ p₀ = .asked ∧ e = .permission id true)
+    (hrun : ∀ id', .run id' ∈ new → id' = id ∧ p₀ = .asked ∧ e = .permission id true true)
     (hdeny : ∀ id', .result id' .denied ∈ new → id' = id ∧ p₀ = .asked)
     (hpa : p ≠ .asked) (hboth : ∀ id', .run id' ∈ new → .result id' .denied ∉ new)
     (hask : ∀ id', .ask id' ∉ new) :
@@ -358,8 +358,10 @@ theorem inv_step {es h out} (I : Inv es h out) (e : Event) :
     · next p hl =>
       have hk : Event.toolUse id ∈ es := (I.known id).mp (by simp [hl])
       exact inv_noop I _ (fun _ h => by cases h; exact hk) (fun h => by cases h)
-  | permission id allow =>
-    simp only [step]
+  | permission id allow user =>
+    cases user
+    · exact inv_noop I _ (fun _ h => by cases h) (fun h => by cases h)
+    simp only [step, if_true]
     split
     · next hl =>
       split
@@ -472,11 +474,13 @@ theorem quiet_step (h : H) (hc : h.cancelled = true) (hd : ∀ c ∈ h.calls, c.
       · exact hd c hc'
       · rfl
     · exact ⟨hc, hd, by simp⟩
-  | permission id allow =>
+  | permission id allow user =>
     have := all_done_lookup hd id
     simp only [step]
     split
-    · simp_all
+    · split
+      · simp_all
+      · exact ⟨hc, hd, by simp⟩
     · exact ⟨hc, hd, by simp⟩
   | toolDone id =>
     have := all_done_lookup hd id

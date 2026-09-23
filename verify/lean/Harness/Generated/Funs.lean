@@ -18,8 +18,27 @@ set_option maxRecDepth 2048
 
 namespace harness
 
+/-- [harness::core::phase_code]:
+    Source: '../harness.rs', lines 55:4-61:5
+    Visibility: public -/
+def core.phase_code (p : core.Phase) : Result Std.U8 := do
+  match p with
+  | core.Phase.Asked => ok 0#u8
+  | core.Phase.Running => ok 1#u8
+  | core.Phase.Done => ok 2#u8
+
+/-- [harness::core::phase_of_code]:
+    Source: '../harness.rs', lines 64:4-71:5
+    Visibility: public -/
+def core.phase_of_code (code : Std.U8) : Result (Option core.Phase) := do
+  match code with
+  | 0#uscalar => ok (some core.Phase.Asked)
+  | 1#uscalar => ok (some core.Phase.Running)
+  | 2#uscalar => ok (some core.Phase.Done)
+  | _ => ok none
+
 /-- [harness::core::find]: loop body 0:
-    Source: '../harness.rs', lines 56:8-63:5
+    Source: '../harness.rs', lines 76:8-83:5
     Visibility: public -/
 @[rust_loop_body]
 def core.find_loop.body
@@ -40,7 +59,7 @@ def core.find_loop.body
        ok (done i2)
 
 /-- [harness::core::find]: loop 0:
-    Source: '../harness.rs', lines 56:8-63:5
+    Source: '../harness.rs', lines 76:8-83:5
     Visibility: public -/
 @[rust_loop]
 def core.find_loop
@@ -52,7 +71,7 @@ def core.find_loop
     i
 
 /-- [harness::core::find]:
-    Source: '../harness.rs', lines 54:4-63:5
+    Source: '../harness.rs', lines 74:4-83:5
     Visibility: public -/
 @[reducible]
 def core.find
@@ -60,7 +79,7 @@ def core.find
   core.find_loop calls id 0#usize
 
 /-- [harness::core::cancel_all]: loop body 0:
-    Source: '../harness.rs', lines 67:8-82:9
+    Source: '../harness.rs', lines 87:8-102:9
     Visibility: public -/
 @[rust_loop_body]
 def core.cancel_all_loop.body
@@ -104,7 +123,7 @@ def core.cancel_all_loop.body
   else ok (done (calls, out))
 
 /-- [harness::core::cancel_all]: loop 0:
-    Source: '../harness.rs', lines 67:8-82:9
+    Source: '../harness.rs', lines 87:8-102:9
     Visibility: public -/
 @[rust_loop]
 def core.cancel_all_loop
@@ -117,7 +136,7 @@ def core.cancel_all_loop
     (calls, out, i)
 
 /-- [harness::core::cancel_all]:
-    Source: '../harness.rs', lines 65:4-83:5
+    Source: '../harness.rs', lines 85:4-103:5
     Visibility: public -/
 @[reducible]
 def core.cancel_all
@@ -127,7 +146,7 @@ def core.cancel_all
   core.cancel_all_loop calls out 0#usize
 
 /-- [harness::core::step]:
-    Source: '../harness.rs', lines 85:4-128:5
+    Source: '../harness.rs', lines 105:4-148:5
     Visibility: public -/
 def core.step
   (h : core.Harness) (e : core.Event) :
@@ -157,37 +176,40 @@ def core.step
             (core.Effect.AskPermission id)
         ok (out, { calls := v, cancelled := false })
     else ok (alloc.vec.Vec.new core.Effect, h)
-  | core.Event.Permission id allow =>
+  | core.Event.Permission id allow from_user =>
     let i ← core.find h.calls id
-    let i1 := alloc.vec.Vec.len h.calls
-    if i < i1
+    if from_user
     then
-      let c ←
-        alloc.vec.Vec.index (core.slice.index.SliceIndexUsizeSlice core.Call)
-          h.calls i
-      match c.phase with
-      | core.Phase.Asked =>
-        if allow
-        then
-          let (c1, index_mut_back) ←
-            alloc.vec.Vec.index_mut (core.slice.index.SliceIndexUsizeSlice
-              core.Call) h.calls i
-          let out ←
-            alloc.vec.Vec.push (alloc.vec.Vec.new core.Effect)
-              (core.Effect.RunTool id)
-          let v := index_mut_back { c1 with phase := core.Phase.Running }
-          ok (out, { h with calls := v })
-        else
-          let (c1, index_mut_back) ←
-            alloc.vec.Vec.index_mut (core.slice.index.SliceIndexUsizeSlice
-              core.Call) h.calls i
-          let out ←
-            alloc.vec.Vec.push (alloc.vec.Vec.new core.Effect)
-              (core.Effect.Result id core.Outcome.Denied)
-          let v := index_mut_back { c1 with phase := core.Phase.Done }
-          ok (out, { h with calls := v })
-      | core.Phase.Running => ok (alloc.vec.Vec.new core.Effect, h)
-      | core.Phase.Done => ok (alloc.vec.Vec.new core.Effect, h)
+      let i1 := alloc.vec.Vec.len h.calls
+      if i < i1
+      then
+        let c ←
+          alloc.vec.Vec.index (core.slice.index.SliceIndexUsizeSlice core.Call)
+            h.calls i
+        match c.phase with
+        | core.Phase.Asked =>
+          if allow
+          then
+            let (c1, index_mut_back) ←
+              alloc.vec.Vec.index_mut (core.slice.index.SliceIndexUsizeSlice
+                core.Call) h.calls i
+            let out ←
+              alloc.vec.Vec.push (alloc.vec.Vec.new core.Effect)
+                (core.Effect.RunTool id)
+            let v := index_mut_back { c1 with phase := core.Phase.Running }
+            ok (out, { h with calls := v })
+          else
+            let (c1, index_mut_back) ←
+              alloc.vec.Vec.index_mut (core.slice.index.SliceIndexUsizeSlice
+                core.Call) h.calls i
+            let out ←
+              alloc.vec.Vec.push (alloc.vec.Vec.new core.Effect)
+                (core.Effect.Result id core.Outcome.Denied)
+            let v := index_mut_back { c1 with phase := core.Phase.Done }
+            ok (out, { h with calls := v })
+        | core.Phase.Running => ok (alloc.vec.Vec.new core.Effect, h)
+        | core.Phase.Done => ok (alloc.vec.Vec.new core.Effect, h)
+      else ok (alloc.vec.Vec.new core.Effect, h)
     else ok (alloc.vec.Vec.new core.Effect, h)
   | core.Event.ToolDone id =>
     let i ← core.find h.calls id
@@ -215,7 +237,7 @@ def core.step
     ok (out, { calls := v, cancelled := true })
 
 /-- [harness::core::step_v1]: loop body 0:
-    Source: '../harness.rs', lines 139:16-150:17
+    Source: '../harness.rs', lines 159:16-170:17
     Visibility: public -/
 @[rust_loop_body]
 def core.step_v1_loop.body
@@ -244,7 +266,7 @@ def core.step_v1_loop.body
   else ok (done out)
 
 /-- [harness::core::step_v1]: loop 0:
-    Source: '../harness.rs', lines 139:16-150:17
+    Source: '../harness.rs', lines 159:16-170:17
     Visibility: public -/
 @[rust_loop]
 def core.step_v1_loop
@@ -257,7 +279,7 @@ def core.step_v1_loop
     (out, i)
 
 /-- [harness::core::step_v1]:
-    Source: '../harness.rs', lines 133:4-155:5
+    Source: '../harness.rs', lines 153:4-175:5
     Visibility: public -/
 def core.step_v1
   (h : core.Harness) (e : core.Event) :
@@ -265,7 +287,7 @@ def core.step_v1
   := do
   match e with
   | core.Event.ToolUse _ => core.step h e
-  | core.Event.Permission _ _ => core.step h e
+  | core.Event.Permission _ _ _ => core.step h e
   | core.Event.ToolDone _ => core.step h e
   | core.Event.Cancel =>
     let out ←

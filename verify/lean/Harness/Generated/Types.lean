@@ -50,17 +50,17 @@ structure core.Harness where
   cancelled : Bool
 
 /-- [harness::core::Event]
-    Source: '../harness.rs', lines 34:4-43:5
+    Source: '../harness.rs', lines 34:4-44:5
     Visibility: public -/
 @[discriminant isize]
 inductive core.Event where
 | ToolUse : Std.U64 → core.Event
-| Permission : Std.U64 → Bool → core.Event
+| Permission : Std.U64 → Bool → Bool → core.Event
 | ToolDone : Std.U64 → core.Event
 | Cancel : core.Event
 
 /-- [harness::core::Effect]
-    Source: '../harness.rs', lines 45:4-51:5
+    Source: '../harness.rs', lines 46:4-52:5
     Visibility: public -/
 @[discriminant isize]
 inductive core.Effect where

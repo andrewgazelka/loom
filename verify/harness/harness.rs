@@ -34,8 +34,9 @@ pub mod core {
     pub enum Event {
         /// The model asked to run tool call `id`.
         ToolUse(u64),
-        /// The user answered the permission prompt for `id`.
-        Permission(u64, bool),
+        /// A permission answer for `id`. The last field says whether it came from the
+        /// user; answers from anyone else are ignored, and the proofs rely on that.
+        Permission(u64, bool, bool),
         /// The tool process for `id` finished.
         ToolDone(u64),
         /// The user pressed cancel.
@@ -48,6 +49,25 @@ pub mod core {
         AbortTool(u64),
         /// The tool result sent back to the model. Exactly one per call.
         Result(u64, Outcome),
+    }
+
+    /// Storage code for a phase; `phase_of_code` inverts it (proved in `lean/`).
+    pub fn phase_code(p: &Phase) -> u8 {
+        match p {
+            Phase::Asked => 0,
+            Phase::Running => 1,
+            Phase::Done => 2,
+        }
+    }
+
+    /// `None` for a code no phase produces, so corrupt rows are refused, not guessed.
+    pub fn phase_of_code(code: u8) -> Option<Phase> {
+        match code {
+            0 => Some(Phase::Asked),
+            1 => Some(Phase::Running),
+            2 => Some(Phase::Done),
+            _ => None,
+        }
     }
 
     /// Index of the first call with this id, or `calls.len()` when absent.
@@ -96,9 +116,9 @@ pub mod core {
                     }
                 }
             }
-            Event::Permission(id, allow) => {
+            Event::Permission(id, allow, from_user) => {
                 let i = find(&h.calls, id);
-                if i < h.calls.len() {
+                if from_user && i < h.calls.len() {
                     if let Phase::Asked = h.calls[i].phase {
                         if allow {
                             h.calls[i].phase = Phase::Running;
@@ -157,11 +177,12 @@ pub mod core {
 
 // ---- Loom shell: IO lives here, nothing below is proved ----
 //
-// Trusted, and narrower than the proof: ids must fit in i64 (SQLite INTEGER), and P1
-// assumes `permission` messages come only from the user. The guest API does not expose
-// the sender, so the shell cannot check that yet.
+// Trusted, and narrower than the proof: ids must fit in i64 (SQLite INTEGER). The user
+// is whoever Loom reports as sender "external": a message sent through the node API or
+// CLI with the node token. Messages from other actors (the model, tool workers) arrive
+// with their actor id and cannot approve anything; `core::step` enforces that.
 
-use core::{Call, Effect, Event, Harness, Outcome, Phase};
+use core::{Call, Effect, Event, Harness, Outcome};
 use loom::serde_json::{Value, json};
 
 pub const LOOM_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS calls (pos INTEGER PRIMARY KEY, id INTEGER NOT NULL, phase INTEGER NOT NULL);
@@ -199,12 +220,8 @@ fn load() -> Harness {
     let rows = sql("SELECT id, phase FROM calls ORDER BY pos", vec![]);
     let mut calls = Vec::new();
     for row in rows["rows"].as_array().unwrap() {
-        let phase = match cell_int(&row[1]) {
-            0 => Phase::Asked,
-            1 => Phase::Running,
-            2 => Phase::Done,
-            other => panic!("unknown stored phase {other}"),
-        };
+        let code = cell_int(&row[1]);
+        let phase = u8::try_from(code).ok().and_then(core::phase_of_code).unwrap_or_else(|| panic!("unknown stored phase {code}"));
         calls.push(Call { id: cell_int(&row[0]) as u64, phase });
     }
     let flag = sql("SELECT 1 FROM flags WHERE name = 'cancelled' AND value = 1", vec![]);
@@ -215,11 +232,7 @@ fn load() -> Harness {
 fn store(h: &Harness, effects: &[Effect]) {
     sql("DELETE FROM calls", vec![]);
     for (pos, call) in h.calls.iter().enumerate() {
-        let phase = match call.phase {
-            Phase::Asked => 0,
-            Phase::Running => 1,
-            Phase::Done => 2,
-        };
+        let phase = i64::from(core::phase_code(&call.phase));
         sql("INSERT INTO calls (pos, id, phase) VALUES (?, ?, ?)", vec![int(pos as i64), to_sql(call.id), int(phase)]);
     }
     if h.cancelled {
@@ -245,22 +258,28 @@ fn store(h: &Harness, effects: &[Effect]) {
 
 /// Exactly one of the four message shapes; anything else traps, so Loom dead-letters it
 /// instead of treating a typo as a cancel.
-fn parse(msg: &[u8]) -> Event {
+fn parse(msg: &[u8], from_user: bool) -> Event {
     let value: Value = loom::serde_json::from_slice(msg).unwrap();
     let object = value.as_object().expect("message must be a JSON object");
     assert_eq!(object.len(), 1, "message must have exactly one key: {value}");
     let (key, arg) = object.iter().next().unwrap();
     match key.as_str() {
         "tool_use" => Event::ToolUse(arg.as_u64().unwrap()),
-        "permission" => Event::Permission(arg[0].as_u64().unwrap(), arg[1].as_bool().unwrap()),
+        "permission" => Event::Permission(arg[0].as_u64().unwrap(), arg[1].as_bool().unwrap(), from_user),
         "tool_done" => Event::ToolDone(arg.as_u64().unwrap()),
         "cancel" => Event::Cancel,
         other => panic!("unknown message {other:?}"),
     }
 }
 
+/// Loom's sender for this message: "external" for the node API, an actor id otherwise.
+fn sender() -> Option<String> {
+    loom::perform("actor.sender", Value::Null).unwrap()
+}
+
 pub fn handle(msg: Vec<u8>) {
+    let from_user = sender().as_deref() == Some("external");
     let mut h = load();
-    let effects = core::step(&mut h, parse(&msg));
+    let effects = core::step(&mut h, parse(&msg, from_user));
     store(&h, &effects);
 }
