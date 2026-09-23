@@ -42,3 +42,7 @@ import Harness
 /-- info: 'Harness.Codec.only_valid' depends on axioms: [propext, Classical.choice, Quot.sound] -/
 #guard_msgs in
 #print axioms Harness.Codec.only_valid
+
+/-- info: 'Harness.Refinement.fix_agrees_without_cancel' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms Harness.Refinement.fix_agrees_without_cancel

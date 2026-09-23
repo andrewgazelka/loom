@@ -445,4 +445,33 @@ theorem rust_quiet_after_cancel (pre post : List core.Event)
   rw [hsplit, run_append]
   exact ⟨_, _, rfl, quiet_after_cancel (pre.map absE) (post.map absE)⟩
 
+/-! ## Fix agreement
+
+The fix (`step` over `step_v1`) changes behaviour only on traces that exercise the bug.
+On every trace without a cancel, the old and new Rust return the same effects and the
+same state; `Check.step_v1_fails_depth3` shows they differ once a cancel is involved. -/
+
+def rustRunWith (stepFn : core.Harness → core.Event →
+    Result (alloc.vec.Vec core.Effect × core.Harness)) (h : core.Harness) :
+    List core.Event → Result (List core.Effect × core.Harness)
+  | [] => ok ([], h)
+  | e :: es => do
+    let (out, h1) ← stepFn h e
+    let (rest, h2) ← rustRunWith stepFn h1 es
+    ok (out.val ++ rest, h2)
+
+theorem step_v1_eq (h : core.Harness) (e : core.Event) (hc : e ≠ .Cancel) :
+    core.step_v1 h e = core.step h e := by
+  cases e <;> simp_all [core.step_v1]
+
+theorem fix_agrees_without_cancel (h : core.Harness) (es : List core.Event)
+    (hc : core.Event.Cancel ∉ es) :
+    rustRunWith core.step_v1 h es = rustRunWith core.step h es := by
+  induction es generalizing h with
+  | nil => rfl
+  | cons e es ih =>
+    simp only [List.mem_cons, not_or] at hc
+    simp only [rustRunWith, step_v1_eq h e (Ne.symm hc.1)]
+    simp only [ih _ hc.2]
+
 end Harness.Refinement
