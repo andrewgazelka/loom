@@ -12,6 +12,17 @@ pub struct Cap {
     pub token: Vec<u8>,
 }
 
+/// Name the host uses for a message sent through the node API (CLI, HTTP, MCP);
+/// mirrors `loom_actor::EXTERNAL_SENDER`.
+pub const EXTERNAL: &str = "external";
+
+/// Who sent the message being handled: an actor id, [`EXTERNAL`] for an operator
+/// using the node API, or `None` for host-internal messages. Identity only; it grants
+/// no authority (see `actor.sender_cap` for a capability, which external senders lack).
+pub fn sender() -> Result<Option<String>, EffectError> {
+    perform("actor.sender", serde_json::Value::Null)
+}
+
 pub fn send(cap: &Cap, msg: &[u8]) -> Result<(), EffectError> {
     perform("actor.send", serde_json::json!({"cap":cap,"msg":msg}))
 }

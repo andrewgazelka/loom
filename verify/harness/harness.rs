@@ -178,8 +178,8 @@ pub mod core {
 // ---- Loom shell: IO lives here, nothing below is proved ----
 //
 // Trusted, and narrower than the proof: ids must fit in i64 (SQLite INTEGER). The user
-// is whoever Loom reports as sender "external": a message sent through the node API or
-// CLI with the node token. Messages from other actors (the model, tool workers) arrive
+// is whoever Loom reports as sender `loom::actor::EXTERNAL`: a message sent through the
+// node API or CLI with the node token. Messages from other actors (the model, tool workers) arrive
 // with their actor id and cannot approve anything; `core::step` enforces that.
 
 use core::{Call, Effect, Event, Harness, Outcome};
@@ -272,13 +272,8 @@ fn parse(msg: &[u8], from_user: bool) -> Event {
     }
 }
 
-/// Loom's sender for this message: "external" for the node API, an actor id otherwise.
-fn sender() -> Option<String> {
-    loom::perform("actor.sender", Value::Null).unwrap()
-}
-
 pub fn handle(msg: Vec<u8>) {
-    let from_user = sender().as_deref() == Some("external");
+    let from_user = loom::actor::sender().unwrap().as_deref() == Some(loom::actor::EXTERNAL);
     let mut h = load();
     let effects = core::step(&mut h, parse(&msg, from_user));
     store(&h, &effects);
