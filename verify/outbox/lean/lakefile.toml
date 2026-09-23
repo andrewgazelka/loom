@@ -1,0 +1,11 @@
+name = "outbox"
+defaultTargets = ["Outbox"]
+
+[[require]]
+name = "aeneas"
+git = "https://github.com/AeneasVerif/aeneas.git"
+rev = "12a018bb0fab3333be572dadc0eab5108758552b"
+subDir = "backends/lean"
+
+[[lean_lib]]
+name = "Outbox"

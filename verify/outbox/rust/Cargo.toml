@@ -1,0 +1,11 @@
+[package]
+name = "outbox-core"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+# Standalone: not a member of the loom workspace, so Charon sees only this crate.
+[workspace]
+
+[lib]
+path = "src/lib.rs"

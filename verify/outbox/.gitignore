@@ -1,0 +1,3 @@
+rust/target/
+rust/outbox_core.llbc
+lean/.lake/
