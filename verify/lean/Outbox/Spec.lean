@@ -93,8 +93,8 @@ theorem run_inv {w : World} (h : Inv w.receiver) (es : List Event) :
   | nil => exact h
   | cons e es ih => exact ih (step_inv h e)
 
-/-- The headline: from a fresh world, under ANY event sequence, no key is handled twice. -/
-theorem exactly_once (outbox : List Nat) (es : List Event) :
+/-- From a fresh world, under ANY event sequence, no key is handled twice. -/
+theorem at_most_once (outbox : List Nat) (es : List Event) :
     (run goodReset (fresh outbox) es).receiver.handled.Nodup := by
   have h := run_inv (w := fresh outbox) ⟨rfl, List.nodup_nil⟩ es
   exact h.1 ▸ h.2
@@ -108,6 +108,67 @@ theorem pump_ack_delivers (w : World) (i k : Nat)
   have hk : k ∈ (inject w.receiver k).applied := by
     unfold inject; split <;> simp_all
   simp [run, step, ho, hdi, hk, hi]
+
+/-! ## Delivered rows were handled
+
+At most once is half of exactly once; the other half is that a row marked delivered
+had its key handled. Together: every delivered row was handled exactly once. -/
+
+def Delivered (w : World) : Prop :=
+  ∀ (i k : Nat), w.outbox[i]? = some k → w.delivered[i]? = some true → k ∈ w.receiver.applied
+
+theorem inject_mono (r : Receiver) (k j : Nat) (h : j ∈ r.applied) : j ∈ (inject r k).applied := by
+  unfold inject; split <;> simp [h]
+
+theorem step_outbox (rf : Receiver → Receiver) (w : World) (e : Event) :
+    (step rf w e).outbox = w.outbox := by
+  cases e <;> simp only [step] <;> (try split) <;> (try split) <;> rfl
+
+theorem step_delivered {w : World} (h : Delivered w) (e : Event) :
+    Delivered (step goodReset w e) := by
+  cases e with
+  | pump i =>
+    simp only [step]
+    split
+    · intro j k ho hd; exact inject_mono _ _ _ (h j k ho hd)
+    · exact h
+  | ack i =>
+    simp only [step]
+    split
+    · next k hk _ =>
+      split
+      · next happ =>
+        intro j k' ho hd
+        simp only at ho hd ⊢
+        by_cases hji : j = i
+        · subst hji; rw [hk] at ho; cases ho; exact happ
+        · rw [List.getElem?_set_ne (Ne.symm hji)] at hd; exact h j k' ho hd
+      · exact h
+    · exact h
+  | reset => exact fun i k ho hd => h i k ho hd
+
+theorem run_delivered {w : World} (h : Delivered w) (es : List Event) :
+    Delivered (run goodReset w es) := by
+  induction es generalizing w with
+  | nil => exact h
+  | cons e es ih => exact ih (step_delivered h e)
+
+theorem fresh_delivered (outbox : List Nat) : Delivered (fresh outbox) := by
+  intro i k _ hd
+  simp only [fresh, List.map_const'] at hd
+  rw [List.getElem?_replicate] at hd
+  split at hd <;> simp at hd
+
+/-- The headline: no key is handled twice, and every row marked delivered was handled. -/
+theorem exactly_once (outbox : List Nat) (es : List Event) :
+    (run goodReset (fresh outbox) es).receiver.handled.Nodup ∧
+    ∀ (i k : Nat), (run goodReset (fresh outbox) es).outbox[i]? = some k →
+      (run goodReset (fresh outbox) es).delivered[i]? = some true →
+      k ∈ (run goodReset (fresh outbox) es).receiver.handled := by
+  have hinv := run_inv (w := fresh outbox) ⟨rfl, List.nodup_nil⟩ es
+  refine ⟨at_most_once outbox es, fun i k ho hd => ?_⟩
+  rw [hinv.1]
+  exact run_delivered (fresh_delivered outbox) es i k ho hd
 
 /-! ## The planted bug is caught
 

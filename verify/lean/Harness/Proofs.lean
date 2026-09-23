@@ -144,6 +144,9 @@ structure Inv (es : List Event) (h : H) (out : List Effect) : Prop where
   fresh : ∀ id, lookup h.calls id = none → .run id ∉ out
   asked : ∀ id, lookup h.calls id = some .asked → .run id ∉ out
   deny : ∀ id, .run id ∈ out → .result id .denied ∉ out
+  askOpen : ∀ id, (lookup h.calls id = some .asked ∨ lookup h.calls id = some .running) →
+    .ask id ∈ out
+  runAsk : ∀ id, .run id ∈ out → .ask id ∈ out
 
 theorem inv_init : Inv [] init [] where
   nodup := by simp [init]
@@ -155,6 +158,8 @@ theorem inv_init : Inv [] init [] where
   fresh := by simp
   asked := by simp
   deny := by simp
+  askOpen := by simp [init]
+  runAsk := by simp
 
 theorem results_zero_of_not_done {es h out} (I : Inv es h out) {id : Nat}
     (hd : lookup h.calls id ≠ some .done) : results out id = 0 := by
@@ -172,7 +177,7 @@ theorem inv_noop {es h out} (I : Inv es h out) (e : Event)
     Inv (es ++ [e]) h (out ++ []) := by
   simp only [List.append_nil]
   refine ⟨I.nodup, I.count, fun id hr => List.mem_append_left _ (I.perm id hr), I.closed,
-    ?_, ?_, I.fresh, I.asked, I.deny⟩
+    ?_, ?_, I.fresh, I.asked, I.deny, I.askOpen, I.runAsk⟩
   · rw [I.flag]; simp only [List.mem_append, List.mem_singleton]
     exact ⟨Or.inl, fun h => h.elim (fun x => x) (fun h => hc h.symm)⟩
   · intro id; rw [I.known id]; simp only [List.mem_append, List.mem_singleton]
@@ -186,7 +191,8 @@ theorem inv_upd {es h out} (I : Inv es h out) (e : Event) (id : Nat) (p₀ p : P
     (hresOther : ∀ id', id' ≠ id → results new id' = 0)
     (hrun : ∀ id', .run id' ∈ new → id' = id ∧ p₀ = .asked ∧ e = .permission id true)
     (hdeny : ∀ id', .result id' .denied ∈ new → id' = id ∧ p₀ = .asked)
-    (hpa : p ≠ .asked) (hboth : ∀ id', .run id' ∈ new → .result id' .denied ∉ new) :
+    (hpa : p ≠ .asked) (hboth : ∀ id', .run id' ∈ new → .result id' .denied ∉ new)
+    (hask : ∀ id', .ask id' ∉ new) :
     Inv (es ++ [e]) ⟨upd h.calls id p, h.cancelled⟩ (out ++ new) := by
   have hs : (lookup h.calls id).isSome := by simp [hl]
   have hz : results out id = 0 := results_zero_of_not_done I (by simp [hl, hp₀])
@@ -194,7 +200,8 @@ theorem inv_upd {es h out} (I : Inv es h out) (e : Event) (id : Nat) (p₀ p : P
     cases hcan : h.cancelled
     · rfl
     · have := all_done_lookup (I.closed hcan) id; simp_all
-  refine ⟨by simpa [keys_upd] using I.nodup, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  have hopen : Effect.ask id ∈ out := I.askOpen id (by cases p₀ <;> simp_all)
+  refine ⟨by simpa [keys_upd] using I.nodup, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
   · intro id'
     rw [results_append, lookup_upd]
     by_cases h' : id' = id
@@ -244,17 +251,29 @@ theorem inv_upd {es h out} (I : Inv es h out) (e : Event) (id : Nat) (p₀ p : P
       rcases hd with hd | hd
       · exact not_mem_of_results_zero hz hd
       · exact hboth _ hr hd
+  · intro id' ho
+    rw [lookup_upd] at ho
+    apply List.mem_append_left
+    by_cases h' : id' = id
+    · subst h'; exact hopen
+    · simp only [h', false_and, if_false] at ho; exact I.askOpen id' ho
+  · intro id' hr
+    simp only [List.mem_append] at hr
+    rcases hr with hr | hr
+    · exact List.mem_append_left _ (I.runAsk id' hr)
+    · obtain ⟨rfl, -, -⟩ := hrun id' hr; exact List.mem_append_left _ hopen
 
 /-- A `toolUse` of a new id appends `(id, p)` and emits `new`. -/
 theorem inv_use {es h out} (I : Inv es h out) (id : Nat) (hl : lookup h.calls id = none)
     (p : Phase) (c : Bool) (new : List Effect) (hc : c = h.cancelled)
     (hp : h.cancelled = true → p = .done)
     (hres : ∀ id', results new id' = if id' = id ∧ p = .done then 1 else 0)
-    (hrun : ∀ id', .run id' ∉ new) (hdeny : ∀ id', .result id' .denied ∉ new) :
+    (hrun : ∀ id', .run id' ∉ new) (hdeny : ∀ id', .result id' .denied ∉ new)
+    (hpk : p = .done ∨ .ask id ∈ new) :
     Inv (es ++ [.toolUse id]) ⟨h.calls ++ [(id, p)], c⟩ (out ++ new) := by
   subst hc
   have hz : results out id = 0 := results_zero_of_not_done I (by simp [hl])
-  refine ⟨nodup_snoc I.nodup hl, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  refine ⟨nodup_snoc I.nodup hl, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
   · intro id'
     rw [results_append, lookup_append, lookup_single, hres id']
     by_cases h' : id' = id
@@ -306,6 +325,21 @@ theorem inv_use {es h out} (I : Inv es h out) (id : Nat) (hl : lookup h.calls id
       · exact I.deny id' hr hd
       · exact hdeny id' hd
     · exact hrun id' hr
+  · intro id' ho
+    rw [lookup_append, lookup_single] at ho
+    by_cases h' : id = id'
+    · subst h'
+      simp only [hl, Option.none_or, if_true] at ho
+      rcases hpk with hpk | hpk
+      · subst hpk; simp at ho
+      · exact List.mem_append_right _ hpk
+    · simp only [h', if_false, Option.or_none] at ho
+      exact List.mem_append_left _ (I.askOpen id' ho)
+  · intro id' hr
+    simp only [List.mem_append] at hr
+    rcases hr with hr | hr
+    · exact List.mem_append_left _ (I.runAsk id' hr)
+    · exact absurd hr (hrun id')
 
 theorem inv_step {es h out} (I : Inv es h out) (e : Event) :
     Inv (es ++ [e]) (step h e).1 (out ++ (step h e).2) := by
@@ -317,10 +351,10 @@ theorem inv_step {es h out} (I : Inv es h out) (e : Event) :
       split
       · next hc =>
         exact inv_use I id hl .done true _ hc.symm (fun _ => rfl)
-          (fun id' => by by_cases h' : id = id' <;> simp [h', eq_comm]) (by simp) (by simp)
+          (fun id' => by by_cases h' : id = id' <;> simp [h', eq_comm]) (by simp) (by simp) (.inl rfl)
       · next hc =>
         exact inv_use I id hl .asked false _ (by revert hc; cases h.cancelled <;> simp) (fun h => absurd h hc)
-          (by simp) (by simp) (by simp)
+          (by simp) (by simp) (by simp) (.inr (by simp))
     · next p hl =>
       have hk : Event.toolUse id ∈ es := (I.known id).mp (by simp [hl])
       exact inv_noop I _ (fun _ h => by cases h; exact hk) (fun h => by cases h)
@@ -332,22 +366,22 @@ theorem inv_step {es h out} (I : Inv es h out) (e : Event) :
       · next ha =>
         subst ha
         exact inv_upd I _ id .asked .running [.run id] hl (by simp) (by simp) (by simp)
-          (by simp) (by simp) (by simp) (by simp) (by simp) (by simp)
+          (by simp) (by simp) (by simp) (by simp) (by simp) (by simp) (by simp)
       · next ha =>
         exact inv_upd I _ id .asked .done [.result id .denied] hl (by simp) (by simp) (by simp)
-          (by simp) (fun id' h' => by simp [Ne.symm h']) (by simp) (by simp) (by simp) (by simp)
+          (by simp) (fun id' h' => by simp [Ne.symm h']) (by simp) (by simp) (by simp) (by simp) (by simp)
     · exact inv_noop I _ (fun _ h => by cases h) (fun h => by cases h)
   | toolDone id =>
     simp only [step]
     split
     · next hl =>
       exact inv_upd I _ id .running .done [.result id .ok] hl (by simp) (by simp) (by simp)
-        (by simp) (fun id' h' => by simp [Ne.symm h']) (by simp) (by simp) (by simp) (by simp)
+        (by simp) (fun id' h' => by simp [Ne.symm h']) (by simp) (by simp) (by simp) (by simp) (by simp)
     · exact inv_noop I _ (fun _ h => by cases h) (fun h => by cases h)
   | cancel =>
     simp only [step]
     have hnr := cancel_no_run h.calls
-    refine ⟨by rw [keys_cancel]; exact I.nodup, ?_, ?_, ?_, by simp, ?_, ?_, ?_, ?_⟩
+    refine ⟨by rw [keys_cancel]; exact I.nodup, ?_, ?_, ?_, by simp, ?_, ?_, ?_, ?_, ?_, ?_⟩
     · intro id'
       rw [results_append, I.count id', results_cancel _ I.nodup, lookup_cancel]
       rcases lookup h.calls id' with _ | p
@@ -377,6 +411,14 @@ theorem inv_step {es h out} (I : Inv es h out) (e : Event) :
         · exact I.deny id' hr hd
         · exact (hnr id').2.2 hd
       · exact (hnr id').1 hr
+    · intro id' ho
+      rw [lookup_cancel] at ho
+      simp at ho
+    · intro id' hr
+      simp only [List.mem_append] at hr
+      rcases hr with hr | hr
+      · exact List.mem_append_left _ (I.runAsk id' hr)
+      · exact absurd hr (hnr id').1
 
 theorem run_snoc (h : H) (es : List Event) (e : Event) :
     run h (es ++ [e]) = ((step (run h es).1 e).1, (run h es).2 ++ (step (run h es).1 e).2) := by
@@ -398,7 +440,7 @@ theorem inv_run (es : List Event) : Inv es (run init es).1 (run init es).2 := by
 /-! ## The five properties, for every trace -/
 
 theorem permission_first (es : List Event) : PermissionFirst es (run init es).2 :=
-  (inv_run es).perm
+  fun id hr => ⟨(inv_run es).runAsk id hr, (inv_run es).perm id hr⟩
 
 theorem at_most_one_result (es : List Event) : AtMostOneResult (run init es).2 := by
   intro id; rw [(inv_run es).count id]; split <;> omega

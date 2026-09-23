@@ -1,9 +1,9 @@
 /-
-A TLC-style checker that runs the ACTUAL Rust code: `harness.core.step` here is the
-Aeneas translation of `harness.rs`, executed directly. It enumerates every
-interleaving of model, user and tool events for two tool calls and reports the
-shortest trace that breaks each property. No hand-written model is involved, so
-what it finds is a bug in the shipped code.
+A TLC-style checker that runs the Aeneas translation of `harness.rs` directly (the
+code the proofs are about, not rustc output). It enumerates every interleaving of
+model, user and tool events for two tool calls and reports the shortest trace that
+breaks each property. The system under test is not a hand-written model; the
+properties and the event/effect mappings below are hand-written.
 -/
 import Harness.Generated.Funs
 import Harness.Spec
@@ -38,19 +38,34 @@ def ids : List Nat := [1, 2]
 def events : List Event :=
   .cancel :: ids.flatMap fun i => [.toolUse i, .permission i true, .permission i false, .toolDone i]
 
-/-- A node: events so far, effects so far, effects emitted since the first cancel. -/
+/-- A node: events so far, effects so far, effects emitted since the first cancel.
+`failed` records a Rust step that did not return `ok` (a panic or overflow), which is
+itself a violation: dropping such traces would let a crashing `step` pass. -/
 structure Node where
   es : List Event
   out : List Effect
   sinceCancel : Option (List Effect)
   state : harness.core.Harness
+  failed : Bool := false
+
+def effId : Effect → Nat
+  | .ask i | .run i | .abort i | .result i _ => i
+
+/-- Position of the first occurrence, `none` when absent. -/
+def firstIdx (out : List Effect) (e : Effect) : Option Nat := out.findIdx? (· == e)
 
 def violations (n : Node) : List String :=
+  -- every id the harness touched, not only the ones the events used
+  let seen := (ids ++ n.out.map effId).eraseDups
+  -- P1 with order: the prompt comes before the run
   let p1 := n.out.all fun e => match e with
-    | .run id => n.es.contains (.permission id true)
+    | .run id => n.es.contains (.permission id true) &&
+        match firstIdx n.out (.ask id), firstIdx n.out (.run id) with
+        | some a, some r => a < r
+        | _, _ => false
     | _ => true
-  let p2 := ids.all fun id => results n.out id ≤ 1
-  let p3 := ids.all fun id => !(n.out.contains (.result id .denied) && n.out.contains (.run id))
+  let p2 := seen.all fun id => results n.out id ≤ 1
+  let p3 := seen.all fun id => !(n.out.contains (.result id .denied) && n.out.contains (.run id))
   let p4 := match n.sinceCancel with
     | none => true
     | some post => post.all fun e => match e with
@@ -58,14 +73,16 @@ def violations (n : Node) : List String :=
       | .ask _ => false
       | _ => true
   let p5 := !n.es.contains .cancel ||
-    ids.all fun id => !n.es.contains (.toolUse id) || results n.out id == 1
+    seen.all fun id => !n.es.contains (.toolUse id) || results n.out id == 1
   let checks : List (String × Bool) :=
-    [("P1 permission first", p1), ("P2 at most one result", p2), ("P3 deny final", p3),
+    [("Rust step returned ok", !n.failed),
+     ("P1 permission first", p1), ("P2 at most one result", p2), ("P3 deny final", p3),
      ("P4 quiet after cancel", p4), ("P5 closed after cancel", p5)]
   (checks.filter (fun c => !c.2)).map (·.1)
 
 def expand (stepFn : RustStep) (n : Node) : List Node :=
-  events.filterMap fun e =>
+  if n.failed then [] else
+  events.map fun e =>
     -- `Result` is an interaction tree; `.match` exposes its head.
     match (stepFn n.state (toRust e)).match with
     | .ok (effs, s) =>
@@ -74,12 +91,12 @@ def expand (stepFn : RustStep) (n : Node) : List Node :=
         | some post, _ => some (post ++ new)
         | none, .cancel => some []
         | none, _ => none
-      some ⟨n.es ++ [e], n.out ++ new, since, s⟩
-    | _ => none
+      ⟨n.es ++ [e], n.out ++ new, since, s, false⟩
+    | _ => { n with es := n.es ++ [e], failed := true }
 
 /-- Breadth-first: the first report of each property is its shortest counterexample. -/
 def check (stepFn : RustStep) (depth : Nat) : List (String × List Event × List Effect) :=
-  go depth [⟨[], [], none, ⟨alloc.vec.Vec.new _, false⟩⟩] []
+  go depth [⟨[], [], none, ⟨alloc.vec.Vec.new _, false⟩, false⟩] []
 where
   go : Nat → List Node → List (String × List Event × List Effect) →
       List (String × List Event × List Effect)
@@ -91,10 +108,20 @@ where
           if acc.any (·.1 == p) then acc else (p, n.es, n.out) :: acc
       go d next found
 
--- 9 events, depth 5: 9^5 = 59049 traces through the real Rust step functions.
+-- 9 events, depth 5: 9^5 = 59049 traces through the translated Rust step functions.
 #eval check harness.core.step_v1 5
 #eval check harness.core.step 5
 
-theorem step_passes_depth3 : check harness.core.step 3 = [] := by native_decide
+/-- Gate: the fixed step has no violation in any of the 59049 traces. -/
+theorem step_passes_depth5 : check harness.core.step 5 = [] := by native_decide
+
+/-- Positive control: the checker still finds the first draft's bugs, with these
+shortest traces. A checker that went blind fails this. -/
+theorem step_v1_fails_depth3 :
+    (check harness.core.step_v1 3).map (fun r => (r.1, r.2.1)) =
+      [("P2 at most one result", [.toolUse 1, .cancel, .cancel]),
+       ("P5 closed after cancel", [.toolUse 1, .cancel, .cancel]),
+       ("P4 quiet after cancel", [.toolUse 1, .cancel, .permission 1 true])] := by
+  native_decide
 
 end Harness.Check

@@ -90,9 +90,9 @@ def isResultFor (id : Nat) : Effect → Bool
 
 def results (out : List Effect) (id : Nat) : Nat := out.countP (isResultFor id)
 
-/-- P1: the tool never runs unless the user allowed it. -/
+/-- P1: the tool never runs unless the user was prompted for it and allowed it. -/
 def PermissionFirst (es : List Event) (out : List Effect) : Prop :=
-  ∀ id, .run id ∈ out → .permission id true ∈ es
+  ∀ id, .run id ∈ out → .ask id ∈ out ∧ .permission id true ∈ es
 
 /-- P2: the model never sees two results for one call. -/
 def AtMostOneResult (out : List Effect) : Prop := ∀ id, results out id ≤ 1

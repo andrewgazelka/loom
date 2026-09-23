@@ -6,7 +6,7 @@
 //! writes the new state plus the emitted effects back. Loom runs each message in
 //! one transaction, so a crash never leaves half a step behind.
 //!
-//! Send JSON messages: {"tool_use":7} {"permission":[7,true]} {"tool_done":7} {"cancel":0}
+//! Send JSON messages: {"tool_use":7} {"permission":[7,true]} {"tool_done":7} {"cancel":null}
 
 pub mod core {
     pub enum Phase {
@@ -156,6 +156,10 @@ pub mod core {
 }
 
 // ---- Loom shell: IO lives here, nothing below is proved ----
+//
+// Trusted, and narrower than the proof: ids must fit in i64 (SQLite INTEGER), and P1
+// assumes `permission` messages come only from the user. The guest API does not expose
+// the sender, so the shell cannot check that yet.
 
 use core::{Call, Effect, Event, Harness, Outcome, Phase};
 use loom::serde_json::{Value, json};
@@ -164,67 +168,94 @@ pub const LOOM_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS calls (pos INTEGER PRI
 CREATE TABLE IF NOT EXISTS flags (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS effects (seq INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, id INTEGER NOT NULL, outcome TEXT)";
 
-fn sql(query: &str, params: Value) -> Value {
+/// SQL parameters and result cells are tagged: {"type":"integer","value":7}.
+fn int(v: i64) -> Value {
+    json!({"type": "integer", "value": v})
+}
+
+fn text(v: &str) -> Value {
+    json!({"type": "text", "value": v})
+}
+
+fn null() -> Value {
+    json!({"type": "null"})
+}
+
+fn cell_int(cell: &Value) -> i64 {
+    assert_eq!(cell["type"], "integer", "expected an integer cell, got {cell}");
+    cell["value"].as_i64().unwrap()
+}
+
+/// Ids are u64 in `core` and i64 in SQLite; the cast is a bijection, so equality survives.
+fn to_sql(id: u64) -> Value {
+    int(id as i64)
+}
+
+fn sql(query: &str, params: Vec<Value>) -> Value {
     loom::perform("sql", json!({"sql": query, "params": params})).unwrap()
 }
 
 fn load() -> Harness {
-    let rows = sql("SELECT id, phase FROM calls ORDER BY pos", json!([]));
+    let rows = sql("SELECT id, phase FROM calls ORDER BY pos", vec![]);
     let mut calls = Vec::new();
     for row in rows["rows"].as_array().unwrap() {
-        let phase = match row[1].as_i64().unwrap() {
+        let phase = match cell_int(&row[1]) {
             0 => Phase::Asked,
             1 => Phase::Running,
-            _ => Phase::Done,
+            2 => Phase::Done,
+            other => panic!("unknown stored phase {other}"),
         };
-        calls.push(Call { id: row[0].as_u64().unwrap(), phase });
+        calls.push(Call { id: cell_int(&row[0]) as u64, phase });
     }
-    let flag = sql("SELECT value FROM flags WHERE name = 'cancelled'", json!([]));
-    let cancelled = flag["rows"].as_array().is_some_and(|rows| !rows.is_empty());
+    let flag = sql("SELECT 1 FROM flags WHERE name = 'cancelled' AND value = 1", vec![]);
+    let cancelled = !flag["rows"].as_array().unwrap().is_empty();
     Harness { calls, cancelled }
 }
 
 fn store(h: &Harness, effects: &[Effect]) {
-    sql("DELETE FROM calls", json!([]));
+    sql("DELETE FROM calls", vec![]);
     for (pos, call) in h.calls.iter().enumerate() {
         let phase = match call.phase {
             Phase::Asked => 0,
             Phase::Running => 1,
             Phase::Done => 2,
         };
-        sql("INSERT INTO calls (pos, id, phase) VALUES (?, ?, ?)", json!([pos, call.id, phase]));
+        sql("INSERT INTO calls (pos, id, phase) VALUES (?, ?, ?)", vec![int(pos as i64), to_sql(call.id), int(phase)]);
     }
     if h.cancelled {
-        sql("INSERT OR IGNORE INTO flags (name, value) VALUES ('cancelled', 1)", json!([]));
+        sql("INSERT OR IGNORE INTO flags (name, value) VALUES ('cancelled', 1)", vec![]);
     }
     for effect in effects {
         let (kind, id, outcome) = match effect {
-            Effect::AskPermission(id) => ("ask_permission", *id, Value::Null),
-            Effect::RunTool(id) => ("run_tool", *id, Value::Null),
-            Effect::AbortTool(id) => ("abort_tool", *id, Value::Null),
+            Effect::AskPermission(id) => ("ask_permission", *id, null()),
+            Effect::RunTool(id) => ("run_tool", *id, null()),
+            Effect::AbortTool(id) => ("abort_tool", *id, null()),
             Effect::Result(id, outcome) => {
                 let outcome = match outcome {
                     Outcome::Ok => "ok",
                     Outcome::Denied => "denied",
                     Outcome::Cancelled => "cancelled",
                 };
-                ("result", *id, json!(outcome))
+                ("result", *id, text(outcome))
             }
         };
-        sql("INSERT INTO effects (kind, id, outcome) VALUES (?, ?, ?)", json!([kind, id, outcome]));
+        sql("INSERT INTO effects (kind, id, outcome) VALUES (?, ?, ?)", vec![text(kind), to_sql(id), outcome]);
     }
 }
 
+/// Exactly one of the four message shapes; anything else traps, so Loom dead-letters it
+/// instead of treating a typo as a cancel.
 fn parse(msg: &[u8]) -> Event {
     let value: Value = loom::serde_json::from_slice(msg).unwrap();
-    if let Some(id) = value.get("tool_use") {
-        Event::ToolUse(id.as_u64().unwrap())
-    } else if let Some(answer) = value.get("permission") {
-        Event::Permission(answer[0].as_u64().unwrap(), answer[1].as_bool().unwrap())
-    } else if let Some(id) = value.get("tool_done") {
-        Event::ToolDone(id.as_u64().unwrap())
-    } else {
-        Event::Cancel
+    let object = value.as_object().expect("message must be a JSON object");
+    assert_eq!(object.len(), 1, "message must have exactly one key: {value}");
+    let (key, arg) = object.iter().next().unwrap();
+    match key.as_str() {
+        "tool_use" => Event::ToolUse(arg.as_u64().unwrap()),
+        "permission" => Event::Permission(arg[0].as_u64().unwrap(), arg[1].as_bool().unwrap()),
+        "tool_done" => Event::ToolDone(arg.as_u64().unwrap()),
+        "cancel" => Event::Cancel,
+        other => panic!("unknown message {other:?}"),
     }
 }
 

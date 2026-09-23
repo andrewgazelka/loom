@@ -1,4 +1,19 @@
 import Outbox
--- No `sorryAx` may appear: only Lean's standard axioms (propext, Classical.choice, Quot.sound).
+-- Build-enforced: each report must match exactly, so a new `sorry` (sorryAx) or a new
+-- axiom anywhere under these theorems fails `lake env lean` and therefore check.sh.
+
+/-- info: 'Outbox.Spec.at_most_once' depends on axioms: [propext, Quot.sound] -/
+#guard_msgs in
+#print axioms Outbox.Spec.at_most_once
+
+/-- info: 'Outbox.Spec.exactly_once' depends on axioms: [propext, Quot.sound] -/
+#guard_msgs in
 #print axioms Outbox.Spec.exactly_once
+
+/-- info: 'Outbox.Refinement.rust_step_exactly_once' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
 #print axioms Outbox.Refinement.rust_step_exactly_once
+
+/-- info: 'Outbox.Refinement.rust_exactly_once' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms Outbox.Refinement.rust_exactly_once

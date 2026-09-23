@@ -189,4 +189,70 @@ theorem rust_step_exactly_once (w : outbox_core.World) (e : outbox_core.Event)
   rw [← hw'] at hi
   exact ⟨hi.1 ▸ hi.2, hi⟩
 
+/-! ## Whole traces -/
+
+/-- Run the generated Rust over a trace. -/
+def rustRun (w : outbox_core.World) : List outbox_core.Event → Result outbox_core.World
+  | [] => ok w
+  | e :: es => do
+    let w1 ← outbox_core.step w e
+    rustRun w1 es
+
+/-- Room for `n` more steps: each step pushes at most one receipt and one handled key,
+and bumps the generation at most once. -/
+def Bound (w : outbox_core.World) (n : Nat) : Prop :=
+  w.receiver.applied.length + n < Usize.max ∧ w.receiver.handled.length + n < Usize.max ∧
+    w.receiver.generation.val + n < U64.max
+
+theorem spec_growth (w : Spec.World) (e : Spec.Event) :
+    (Spec.step Spec.goodReset w e).receiver.applied.length ≤ w.receiver.applied.length + 1 ∧
+    (Spec.step Spec.goodReset w e).receiver.handled.length ≤ w.receiver.handled.length + 1 ∧
+    (Spec.step Spec.goodReset w e).receiver.generation ≤ w.receiver.generation + 1 := by
+  have hi : ∀ r k, (Spec.inject r k).applied.length ≤ r.applied.length + 1 ∧
+      (Spec.inject r k).handled.length ≤ r.handled.length + 1 ∧
+      (Spec.inject r k).generation = r.generation := by
+    intro r k; unfold Spec.inject; split <;> simp
+  cases e with
+  | pump i =>
+    simp only [Spec.step]; split
+    · have := hi w.receiver ‹_›; simp only; omega
+    · omega
+  | ack i => simp only [Spec.step]; split <;> (try split) <;> simp
+  | reset => simp [Spec.step, Spec.goodReset]
+
+theorem rustRun_refines (w : outbox_core.World) (es : List outbox_core.Event)
+    (hb : Bound w es.length) :
+    rustRun w es ⦃ w' => absW w' = Spec.run Spec.goodReset (absW w) (es.map absE) ⦄ := by
+  induction es generalizing w with
+  | nil => simp [rustRun, Spec.run]
+  | cons e es ih =>
+    obtain ⟨ha, hh, hg⟩ := hb
+    simp only [List.length_cons, alloc.vec.Vec.length] at ha hh hg
+    have hfit : Fits w := by
+      unfold Fits Room; simp only [alloc.vec.Vec.length]
+      refine ⟨⟨?_, ?_⟩, ?_⟩ <;> omega
+    unfold rustRun
+    step with step_refines as ⟨w1, hw1⟩
+    have hg1 := spec_growth (absW w) (absE e)
+    rw [← hw1] at hg1
+    simp only [absW, absR, List.length_map] at hg1
+    have hb1 : Bound w1 es.length := by
+      unfold Bound; simp only [alloc.vec.Vec.length]
+      refine ⟨?_, ?_, ?_⟩ <;> omega
+    step with ih as ⟨w2, hw2⟩
+    rw [hw2, hw1]
+    rfl
+
+/-- The headline for the Rust: from a fresh world, for any trace short enough that no
+counter overflows, no key is handled twice and every delivered row was handled. -/
+theorem rust_exactly_once (w : outbox_core.World) (keys : List Nat)
+    (hw : absW w = Spec.fresh keys) (es : List outbox_core.Event) (hb : Bound w es.length) :
+    rustRun w es ⦃ w' => (absW w').receiver.handled.Nodup ∧
+      ∀ (i k : Nat), (absW w').outbox[i]? = some k → (absW w').delivered[i]? = some true →
+        k ∈ (absW w').receiver.handled ⦄ := by
+  apply WP.spec_mono (rustRun_refines w es hb)
+  intro w' hw'
+  rw [hw', hw]
+  exact Spec.exactly_once keys (es.map absE)
+
 end Outbox.Refinement
