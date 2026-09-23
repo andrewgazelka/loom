@@ -185,9 +185,10 @@ pub mod core {
 use core::{Call, Effect, Event, Harness, Outcome};
 use loom::serde_json::{Value, json};
 
-pub const LOOM_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS calls (pos INTEGER PRIMARY KEY, id INTEGER NOT NULL, phase INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS flags (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS effects (seq INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, id INTEGER NOT NULL, outcome TEXT)";
+pub const LOOM_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS harness_calls (pos INTEGER PRIMARY KEY, id INTEGER NOT NULL, phase INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS harness_flags (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS harness_effects (seq INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, id INTEGER NOT NULL, outcome TEXT);
+CREATE TABLE IF NOT EXISTS harness_rejected (seq INTEGER PRIMARY KEY AUTOINCREMENT, msg BLOB NOT NULL, reason TEXT NOT NULL)";
 
 /// SQL parameters and result cells are tagged: {"type":"integer","value":7}.
 fn int(v: i64) -> Value {
@@ -217,26 +218,26 @@ fn sql(query: &str, params: Vec<Value>) -> Value {
 }
 
 fn load() -> Harness {
-    let rows = sql("SELECT id, phase FROM calls ORDER BY pos", vec![]);
+    let rows = sql("SELECT id, phase FROM harness_calls ORDER BY pos", vec![]);
     let mut calls = Vec::new();
     for row in rows["rows"].as_array().unwrap() {
         let code = cell_int(&row[1]);
         let phase = u8::try_from(code).ok().and_then(core::phase_of_code).unwrap_or_else(|| panic!("unknown stored phase {code}"));
         calls.push(Call { id: cell_int(&row[0]) as u64, phase });
     }
-    let flag = sql("SELECT 1 FROM flags WHERE name = 'cancelled' AND value = 1", vec![]);
+    let flag = sql("SELECT 1 FROM harness_flags WHERE name = 'cancelled' AND value = 1", vec![]);
     let cancelled = !flag["rows"].as_array().unwrap().is_empty();
     Harness { calls, cancelled }
 }
 
 fn store(h: &Harness, effects: &[Effect]) {
-    sql("DELETE FROM calls", vec![]);
+    sql("DELETE FROM harness_calls", vec![]);
     for (pos, call) in h.calls.iter().enumerate() {
         let phase = i64::from(core::phase_code(&call.phase));
-        sql("INSERT INTO calls (pos, id, phase) VALUES (?, ?, ?)", vec![int(pos as i64), to_sql(call.id), int(phase)]);
+        sql("INSERT INTO harness_calls (pos, id, phase) VALUES (?, ?, ?)", vec![int(pos as i64), to_sql(call.id), int(phase)]);
     }
     if h.cancelled {
-        sql("INSERT OR IGNORE INTO flags (name, value) VALUES ('cancelled', 1)", vec![]);
+        sql("INSERT OR IGNORE INTO harness_flags (name, value) VALUES ('cancelled', 1)", vec![]);
     }
     for effect in effects {
         let (kind, id, outcome) = match effect {
@@ -252,29 +253,42 @@ fn store(h: &Harness, effects: &[Effect]) {
                 ("result", *id, text(outcome))
             }
         };
-        sql("INSERT INTO effects (kind, id, outcome) VALUES (?, ?, ?)", vec![text(kind), to_sql(id), outcome]);
+        sql("INSERT INTO harness_effects (kind, id, outcome) VALUES (?, ?, ?)", vec![text(kind), to_sql(id), outcome]);
     }
 }
 
-/// Exactly one of the four message shapes; anything else traps, so Loom dead-letters it
-/// instead of treating a typo as a cancel.
-fn parse(msg: &[u8], from_user: bool) -> Event {
-    let value: Value = loom::serde_json::from_slice(msg).unwrap();
-    let object = value.as_object().expect("message must be a JSON object");
-    assert_eq!(object.len(), 1, "message must have exactly one key: {value}");
-    let (key, arg) = object.iter().next().unwrap();
+/// Exactly one of the four message shapes, or the reason it is not one. A malformed
+/// message is recorded in `harness_rejected` and changes nothing: trapping would park
+/// the whole actor, and treating it as a cancel would end the session.
+fn parse(msg: &[u8], from_user: bool) -> Result<Event, String> {
+    let value: Value = loom::serde_json::from_slice(msg).map_err(|e| format!("not JSON: {e}"))?;
+    let object = value.as_object().ok_or("not a JSON object")?;
+    let [(key, arg)] = object.iter().collect::<Vec<_>>()[..] else {
+        return Err(format!("expected exactly one key, got {}", object.len()));
+    };
+    let id = |v: &Value| v.as_u64().filter(|id| i64::try_from(*id).is_ok()).ok_or("id must be an integer below 2^63");
     match key.as_str() {
-        "tool_use" => Event::ToolUse(arg.as_u64().unwrap()),
-        "permission" => Event::Permission(arg[0].as_u64().unwrap(), arg[1].as_bool().unwrap(), from_user),
-        "tool_done" => Event::ToolDone(arg.as_u64().unwrap()),
-        "cancel" => Event::Cancel,
-        other => panic!("unknown message {other:?}"),
+        "tool_use" => Ok(Event::ToolUse(id(arg)?)),
+        "permission" => {
+            let allow = arg[1].as_bool().ok_or("permission takes [id, bool]")?;
+            Ok(Event::Permission(id(&arg[0])?, allow, from_user))
+        }
+        "tool_done" => Ok(Event::ToolDone(id(arg)?)),
+        "cancel" => Ok(Event::Cancel),
+        other => Err(format!("unknown message {other:?}")),
     }
 }
 
 pub fn handle(msg: Vec<u8>) {
     let from_user = loom::actor::sender().unwrap().as_deref() == Some(loom::actor::EXTERNAL);
+    let event = match parse(&msg, from_user) {
+        Ok(event) => event,
+        Err(reason) => {
+            sql("INSERT INTO harness_rejected (msg, reason) VALUES (?, ?)", vec![json!({"type": "blob", "value": msg}), text(&reason)]);
+            return;
+        }
+    };
     let mut h = load();
-    let effects = core::step(&mut h, parse(&msg, from_user));
+    let effects = core::step(&mut h, event);
     store(&h, &effects);
 }

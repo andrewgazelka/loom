@@ -96,9 +96,25 @@ impl Behavior for Probe {
     }
 }
 
+/// A behavior whose schema reuses a runtime table name.
+struct ReservedSchema;
+#[async_trait]
+impl Behavior for ReservedSchema {
+    fn hash(&self) -> &str {
+        "reserved-schema"
+    }
+    fn schema(&self) -> &str {
+        "CREATE TABLE IF NOT EXISTS mine(x INTEGER); CREATE TABLE IF NOT EXISTS effects(kind TEXT, id INTEGER)"
+    }
+    async fn handle(&self, _cx: &mut Ctx<'_>, _msg: &[u8]) -> Result<(), Trap> {
+        Ok(())
+    }
+}
+
 async fn node(path: &std::path::Path) -> Node {
     let mut registry = Registry::new();
     registry.insert("caps-probe".into(), Arc::new(Probe));
+    registry.insert("reserved-schema".into(), Arc::new(ReservedSchema));
     Node::new(path, Arc::new(registry), Arc::new(DefaultEffects), Config::default()).await.unwrap()
 }
 async fn drain(node: &Node) {
@@ -454,4 +470,15 @@ async fn sender_distinguishes_external_actor_and_host() {
     assert_eq!(senders.len(), 3, "{senders:?}");
     assert_ne!(senders[0], loom_actor::EXTERNAL_SENDER, "init is not an operator message");
     assert_eq!(senders[1..], [loom_actor::EXTERNAL_SENDER.to_string(), peer.clone()]);
+}
+
+/// A behavior schema that names a runtime table is refused at spawn, instead of
+/// silently no-opping (`IF NOT EXISTS`) and aliasing the runtime's table.
+#[tokio::test]
+async fn schema_reusing_runtime_table_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = node(dir.path()).await;
+    let error = node.spawn_root("reserved-schema", b"{}").await.unwrap_err();
+    let text = format!("{error:#}");
+    assert!(text.contains("runtime object effects"), "{text}");
 }

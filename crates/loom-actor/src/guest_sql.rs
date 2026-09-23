@@ -40,6 +40,31 @@ pub(crate) fn check(sql: &str) -> Result<()> {
     check_functions(sql)
 }
 
+/// Admission for a behavior's `LOOM_SCHEMA`: every object it creates must carry a domain
+/// name. Without this, `CREATE TABLE IF NOT EXISTS effects(...)` is a silent no-op against
+/// the runtime table of that name, and the behavior's queries then read and write the
+/// runtime's table (found by verify/harness, whose `calls` and `effects` collided).
+pub(crate) fn check_schema(schema: &str) -> Result<()> {
+    let mut parser = Parser::new(schema.as_bytes());
+    while let Some(command) = parser.next_cmd()? {
+        let (Cmd::Stmt(statement) | Cmd::Explain(statement) | Cmd::ExplainQueryPlan(statement)) = command;
+        match statement {
+            Stmt::CreateTable { tbl_name, .. } => writable(&tbl_name)?,
+            Stmt::CreateIndex { idx_name, tbl_name, .. } => {
+                writable(&idx_name)?;
+                domain_name(&tbl_name)?;
+            }
+            Stmt::CreateView { view_name, .. } | Stmt::CreateMaterializedView { view_name, .. } => writable(&view_name)?,
+            Stmt::CreateTrigger { trigger_name, tbl_name, .. } => {
+                writable(&trigger_name)?;
+                writable(&tbl_name)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 fn forbidden_kind(statement: &Stmt) -> &'static str {
     match statement {
         Stmt::Attach { .. } => "ATTACH",

@@ -51,6 +51,34 @@ The phase storage codec is in the core too: `Codec.lean` proves it round-trips, 
 decoded code re-encodes to itself, and that codes above 2 decode to `none`, which the
 shell turns into a trap.
 
+### It runs on Loom (2026-09-23)
+
+`harness/e2e-loom.sh <launcher.log>` adds `harness.rs` to a live daemon, spawns it, and
+replays the races the checker found, then asserts the exact effect log:
+
+```
+effects:  [["ask_permission", 1, null], ["run_tool", 1, null], ["abort_tool", 1, null],
+           ["result", 1, "cancelled"], ["result", 2, "cancelled"]]
+rejected: ["unknown message \"permision\""]
+status:   running
+E2E-HARNESS-PASS
+```
+
+The late tool exit, the double cancel and the late approval emit nothing; a `tool_use`
+after cancel gets its result at once; a typo is recorded in `harness_rejected` and the
+actor keeps running (trapping would park it). Negative control on the same daemon: the
+actor wired to `step_v1` fails, emitting a second result for call 1
+(`["result", 1, "ok"]` after `["result", 1, "cancelled"]`), the P2 violation the checker
+predicted.
+
+Two Loom findings from getting here: the harness first named its tables `calls` and
+`effects`, which are runtime tables in every actor database, and `CREATE TABLE IF NOT
+EXISTS` silently no-opped, so the actor queried the runtime's tables. Loom now refuses a
+`LOOM_SCHEMA` that creates or indexes a runtime object (`guest_sql::check_schema`, test
+`schema_reusing_runtime_table_is_refused`). And the daemon build needs a fix in
+`index`'s cargo-unit renderer: `v8`'s build script unpacks `librusty_v8.a` beside
+`OUT_DIR`, which cargo-unit did not keep.
+
 ### Proved for every trace (`lean/Harness/Proofs.lean`, carried to Rust by `Refinement.lean`)
 
 | Property | Lean |

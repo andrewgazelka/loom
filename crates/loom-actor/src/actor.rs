@@ -249,6 +249,7 @@ async fn promote_with_mode(
     let previous = code(&tx).await?;
     let seen = query(&tx, "SELECT seq FROM code_changes WHERE behavior_hash=? LIMIT 1", [behavior.hash()]).await?;
     if seen.rows.is_empty() {
+        crate::guest_sql::check_schema(behavior.schema()).with_context(|| format!("behavior {}: LOOM_SCHEMA", behavior.hash()))?;
         tx.execute_batch(behavior.schema()).await?;
     }
     crate::hooks::upgrade(&tx, &meta(&tx, "id").await?, behavior, &previous.hash, effects, synthetic).await?;

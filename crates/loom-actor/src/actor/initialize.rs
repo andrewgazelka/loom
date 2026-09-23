@@ -45,6 +45,7 @@ pub(crate) async fn initialize(
     set_meta(&tx, "event_counter", "0").await?;
     set_meta(&tx, "reason", "").await?;
     set_meta(&tx, "init", &serde_json::to_string(msg)?).await?;
+    crate::guest_sql::check_schema(behavior.schema()).with_context(|| format!("behavior {}: LOOM_SCHEMA", behavior.hash()))?;
     tx.execute_batch(behavior.schema()).await?;
     tx.execute(
         "INSERT INTO code_changes(seq,behavior_hash,author,rationale,schema_sql) VALUES (0,?,'runtime','spawn',?)",
