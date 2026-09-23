@@ -1,5 +1,5 @@
-name = "outbox"
-defaultTargets = ["Outbox"]
+name = "verify"
+defaultTargets = ["Outbox", "Harness"]
 
 [[require]]
 name = "aeneas"
@@ -9,3 +9,6 @@ subDir = "backends/lean"
 
 [[lean_lib]]
 name = "Outbox"
+
+[[lean_lib]]
+name = "Harness"

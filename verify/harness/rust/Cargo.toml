@@ -1,0 +1,14 @@
+[package]
+name = "harness"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+# Standalone crate over the exact guest file Loom stores; Charon translates `crate::core` only.
+[workspace]
+
+[lib]
+path = "../harness.rs"
+
+[dependencies]
+loom = { package = "loom-guest-rs", path = "../../../crates/loom-guest-rs" }
