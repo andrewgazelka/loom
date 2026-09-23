@@ -122,14 +122,21 @@ in
     doInstallCheck = true;
     installCheckPhase = ''
       runHook preInstallCheck
-      export LOOM_IMPORT_ROOT=$TMPDIR
-      export DENO_DIR=$TMPDIR/deno-cache
-      mkdir -p "$DENO_DIR"
-      mkdir -p fixture
-      printf '%s\n' 'export const answer = 42;' > fixture/main.ts
-      $out/bin/deno bundle --no-config --no-lock --no-npm --platform=browser --format=iife --output=fixture/bundle.js fixture/main.ts
-      test -s fixture/bundle.js
-      test "$(readlink "$DENO_DIR/dl/${manifest.helper_cache}/${platform.helper}")" = '${lib.getExe esbuild}'
+      # On Darwin the launcher confines Deno with sandbox-exec, and macOS refuses a
+      # sandbox nested inside the Nix build sandbox ("Operation not permitted"). Run the
+      # check wherever sandbox-exec works; say so where it cannot.
+      if [ -x /usr/bin/sandbox-exec ] && ! /usr/bin/sandbox-exec -p '(version 1)(allow default)' /usr/bin/true 2>/dev/null; then
+        echo "loom-deno: skipping install check, nested sandbox-exec is not permitted in this build sandbox"
+      else
+        export LOOM_IMPORT_ROOT=$TMPDIR
+        export DENO_DIR=$TMPDIR/deno-cache
+        mkdir -p "$DENO_DIR"
+        mkdir -p fixture
+        printf '%s\n' 'export const answer = 42;' > fixture/main.ts
+        $out/bin/deno bundle --no-config --no-lock --no-npm --platform=browser --format=iife --output=fixture/bundle.js fixture/main.ts
+        test -s fixture/bundle.js
+        test "$(readlink "$DENO_DIR/dl/${manifest.helper_cache}/${platform.helper}")" = '${lib.getExe esbuild}'
+      fi
       runHook postInstallCheck
     '';
     passthru = {
