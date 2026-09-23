@@ -53,6 +53,9 @@ shell turns into a trap.
 
 ### It runs on Loom (2026-09-23)
 
+Run against a daemon built from this tree (`b135bee`) with the `index` fix below applied
+through `--override-input index`; the harness is the file as committed.
+
 `harness/e2e-loom.sh <launcher.log>` adds `harness.rs` to a live daemon, spawns it, and
 replays the races the checker found, then asserts the exact effect log:
 
@@ -75,7 +78,9 @@ Two Loom findings from getting here: the harness first named its tables `calls` 
 `effects`, which are runtime tables in every actor database, and `CREATE TABLE IF NOT
 EXISTS` silently no-opped, so the actor queried the runtime's tables. Loom now refuses a
 `LOOM_SCHEMA` that creates or indexes a runtime object (`guest_sql::check_schema`, test
-`schema_reusing_runtime_table_is_refused`). And the daemon build needs a fix in
+`schema_reusing_runtime_table_is_refused`; on the live daemon, spawning the harness with
+its old table names fails with `LOOM_SCHEMA: guest SQL refuses mutation of runtime
+object ...`). And the daemon build needs a fix in
 `index`'s cargo-unit renderer: `v8`'s build script unpacks `librusty_v8.a` beside
 `OUT_DIR`, which cargo-unit did not keep.
 
