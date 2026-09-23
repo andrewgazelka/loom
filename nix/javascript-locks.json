@@ -1,6 +1,6 @@
 {
   "ui": {
-    "lockHash": "45460abf9af5136198e093571aa8b85d0d0700ebdf867f225e8b8520bf49f96d",
+    "lockHash": "0ed1dc4675fafb59c7cd986e34fe6a9bccd48bb7d3aa4a72d0ddc48e993c33b5",
     "packages": [
       {
         "name": "@codemirror/autocomplete",
@@ -22,6 +22,18 @@
         "binDirectory": "node_modules/.bin",
         "url": "https://registry.npmjs.org/@codemirror/commands/-/commands-6.11.0.tgz",
         "hash": "sha512-/K4Rl5BN0OtTiPWmJCdqODu38XnDMsDxKY5rgrPnCkutPTJf2wVbkoixLfealF5Kwse/s8P8M5jAiURiwSwnFA==",
+        "os": [],
+        "cpu": [],
+        "bins": {}
+      },
+      {
+        "name": "@codemirror/lang-javascript",
+        "version": "6.2.5",
+        "path": "node_modules/@codemirror/lang-javascript",
+        "installedName": "@codemirror/lang-javascript",
+        "binDirectory": "node_modules/.bin",
+        "url": "https://registry.npmjs.org/@codemirror/lang-javascript/-/lang-javascript-6.2.5.tgz",
+        "hash": "sha512-zD4e5mS+50htS7F+TYjBPsiIFGanfVqg4HyUz6WNFikgOPf2BgKlx+TQedI1w6n/IqRBVBbBWmGFdLB/7uxO4A==",
         "os": [],
         "cpu": [],
         "bins": {}
@@ -70,6 +82,18 @@
         "binDirectory": "node_modules/.bin",
         "url": "https://registry.npmjs.org/@codemirror/language/-/language-6.12.4.tgz",
         "hash": "sha512-1q4PaT+o6PbgpkJt4Q8Fv5XJxTy4FUZ4MWETtyiDw3J0Pyr9E2vqcKL+k9wcvjNTIsauxvE7OfmWj3FRPHQ76A==",
+        "os": [],
+        "cpu": [],
+        "bins": {}
+      },
+      {
+        "name": "@codemirror/lint",
+        "version": "6.9.7",
+        "path": "node_modules/@codemirror/lint",
+        "installedName": "@codemirror/lint",
+        "binDirectory": "node_modules/.bin",
+        "url": "https://registry.npmjs.org/@codemirror/lint/-/lint-6.9.7.tgz",
+        "hash": "sha512-28/+iWLYxKxsvGYhSYL7zaCZqLz5+FFFDq9tVsvGv9kv8RY4fFAchJ5WX9M3YrrRlTIsECjsXPqeNgnSmNP2dg==",
         "os": [],
         "cpu": [],
         "bins": {}
@@ -514,6 +538,18 @@
         "binDirectory": "node_modules/.bin",
         "url": "https://registry.npmjs.org/@lezer/highlight/-/highlight-1.2.3.tgz",
         "hash": "sha512-qXdH7UqTvGfdVBINrgKhDsVTJTxactNNxLk7+UMwZhU13lMHaOBlJe9Vqp907ya56Y3+ed2tlqzys7jDkTmW0g==",
+        "os": [],
+        "cpu": [],
+        "bins": {}
+      },
+      {
+        "name": "@lezer/javascript",
+        "version": "1.5.4",
+        "path": "node_modules/@lezer/javascript",
+        "installedName": "@lezer/javascript",
+        "binDirectory": "node_modules/.bin",
+        "url": "https://registry.npmjs.org/@lezer/javascript/-/javascript-1.5.4.tgz",
+        "hash": "sha512-vvYx3MhWqeZtGPwDStM2dwgljd5smolYD2lR2UyFcHfxbBQebqx8yjmFmxtJ/E6nN6u1D9srOiVWm3Rb4tmcUA==",
         "os": [],
         "cpu": [],
         "bins": {}
@@ -1145,6 +1181,30 @@
         "bins": {}
       },
       {
+        "name": "@types/whatwg-mimetype",
+        "version": "3.0.2",
+        "path": "node_modules/@types/whatwg-mimetype",
+        "installedName": "@types/whatwg-mimetype",
+        "binDirectory": "node_modules/.bin",
+        "url": "https://registry.npmjs.org/@types/whatwg-mimetype/-/whatwg-mimetype-3.0.2.tgz",
+        "hash": "sha512-c2AKvDT8ToxLIOUlN51gTiHXflsfIFisS4pO7pDPoKouJCESkhZnEy623gwP9laCy5lnLDAw1vAzu2vM2YLOrA==",
+        "os": [],
+        "cpu": [],
+        "bins": {}
+      },
+      {
+        "name": "@types/ws",
+        "version": "8.18.1",
+        "path": "node_modules/@types/ws",
+        "installedName": "@types/ws",
+        "binDirectory": "node_modules/.bin",
+        "url": "https://registry.npmjs.org/@types/ws/-/ws-8.18.1.tgz",
+        "hash": "sha512-ThVF6DCVhA8kUGy+aazFQ4kXQ7E1Ty7A3ypFOe0IcJV8O/M511G99AW24irKrW56Wt44yG9+ij8FaqoBGkuBXg==",
+        "os": [],
+        "cpu": [],
+        "bins": {}
+      },
+      {
         "name": "@ungap/structured-clone",
         "version": "1.4.0",
         "path": "node_modules/@ungap/structured-clone",
@@ -1190,6 +1250,18 @@
         "binDirectory": "node_modules/.bin",
         "url": "https://registry.npmjs.org/axobject-query/-/axobject-query-4.1.0.tgz",
         "hash": "sha512-qIj0G9wZbMGNLjLmg1PT6v2mE9AH2zlnADJD/2tC6E00hgmhUOfEB6greHPAfLRSufHqROIUTkw6E+M3lH0PTQ==",
+        "os": [],
+        "cpu": [],
+        "bins": {}
+      },
+      {
+        "name": "buffer-image-size",
+        "version": "0.6.4",
+        "path": "node_modules/buffer-image-size",
+        "installedName": "buffer-image-size",
+        "binDirectory": "node_modules/.bin",
+        "url": "https://registry.npmjs.org/buffer-image-size/-/buffer-image-size-0.6.4.tgz",
+        "hash": "sha512-nEh+kZOPY1w+gcCMobZ6ETUp9WfibndnosbpwB1iJk/8Gt5ZF2bhS6+B6bPYz424KtwsR6Rflc3tCz1/ghX2dQ==",
         "os": [],
         "cpu": [],
         "bins": {}
@@ -1363,6 +1435,18 @@
         "bins": {}
       },
       {
+        "name": "entities",
+        "version": "7.0.1",
+        "path": "node_modules/entities",
+        "installedName": "entities",
+        "binDirectory": "node_modules/.bin",
+        "url": "https://registry.npmjs.org/entities/-/entities-7.0.1.tgz",
+        "hash": "sha512-TWrgLOFUQTH994YUyl1yT4uyavY5nNB5muff+RtWaqNVCAK408b5ZnnbNAUEWLTCpum9w6arT70i1XdQ4UeOPA==",
+        "os": [],
+        "cpu": [],
+        "bins": {}
+      },
+      {
         "name": "esbuild",
         "version": "0.25.12",
         "path": "node_modules/esbuild",
@@ -1421,6 +1505,18 @@
         "url": "https://registry.npmjs.org/fsevents/-/fsevents-2.3.3.tgz",
         "hash": "sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==",
         "os": "darwin",
+        "cpu": [],
+        "bins": {}
+      },
+      {
+        "name": "happy-dom",
+        "version": "20.14.3",
+        "path": "node_modules/happy-dom",
+        "installedName": "happy-dom",
+        "binDirectory": "node_modules/.bin",
+        "url": "https://registry.npmjs.org/happy-dom/-/happy-dom-20.14.3.tgz",
+        "hash": "sha512-0KMb/Eh8rsd+aMNkOk5h8LkAjo9Na1aksnEGmsuZf+GXl6UkAdIi0VbUHU7d59lXhNmawODgwwuCMiZpCxwwCw==",
+        "os": [],
         "cpu": [],
         "bins": {}
       },
@@ -2117,6 +2213,30 @@
         "binDirectory": "node_modules/.bin",
         "url": "https://registry.npmjs.org/w3c-keyname/-/w3c-keyname-2.2.8.tgz",
         "hash": "sha512-dpojBhNsCNN7T82Tm7k26A6G9ML3NkhDsnw9n/eoxSRlVBB4CEtIQ/KTCLI2Fwf3ataSXRhYFkQi3SlnFwPvPQ==",
+        "os": [],
+        "cpu": [],
+        "bins": {}
+      },
+      {
+        "name": "whatwg-mimetype",
+        "version": "3.0.0",
+        "path": "node_modules/whatwg-mimetype",
+        "installedName": "whatwg-mimetype",
+        "binDirectory": "node_modules/.bin",
+        "url": "https://registry.npmjs.org/whatwg-mimetype/-/whatwg-mimetype-3.0.0.tgz",
+        "hash": "sha512-nt+N2dzIutVRxARx1nghPKGv1xHikU7HKdfafKkLNLindmPU/ch3U31NOCGGA/dmPcmb1VlofO0vnKAcsm0o/Q==",
+        "os": [],
+        "cpu": [],
+        "bins": {}
+      },
+      {
+        "name": "ws",
+        "version": "8.21.3",
+        "path": "node_modules/ws",
+        "installedName": "ws",
+        "binDirectory": "node_modules/.bin",
+        "url": "https://registry.npmjs.org/ws/-/ws-8.21.3.tgz",
+        "hash": "sha512-201TZ/kPWxoPr/OKWjquZR1SWKXcvxdH+e1xrx89b3YbmzLMFCLfnaG1HFIgWzJOEWZ7MvpK++odZufgYR50Rw==",
         "os": [],
         "cpu": [],
         "bins": {}
