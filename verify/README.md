@@ -95,11 +95,16 @@ for the Rust over whole traces from a fresh world, for traces short enough that 
 counter overflows. Negative control: making the Rust `reset` clear `applied` fails
 `reset_spec`.
 
-Open question this surfaced (not a confirmed bug): `reset.rs` carries `applied:` receipts
-and six tables forward but not `inbox`, so a message the sender redelivers after the
-receiver reset (sender crashed before marking it delivered) is accepted again under the
-new generation. If reset is meant to preserve at-most-once delivery across incarnations,
-this breaks it; a test would settle it.
+What this found in Loom itself (confirmed 2026-09-22): the model's planted bug,
+`badReset`, is how Loom's real inbox behaves across a reset. `reset.rs` carries `applied:`
+receipts and six tables forward but not `inbox`, whose unique `key` is what
+deduplicates deliveries. `crates/loom-actor/tests/caps.rs`
+`delivery_key_is_forgotten_by_reset` replays the Lean counterexample `[pump 0, reset,
+pump 0]` on a real node: a repeated key is ignored within one incarnation (the test's
+control), and after `RestartVerb::Reset` the same key is applied again
+(`REDELIVERED-AFTER-RESET 1`, `cargo test -p loom-actor --test caps`, rc=0). Whether
+reset should keep at-most-once delivery across incarnations is a design decision; if
+yes, carrying the inbox keys forward is the fix, and this test flips to expect 0.
 
 ## What is trusted
 
