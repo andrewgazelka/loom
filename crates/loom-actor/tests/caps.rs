@@ -407,3 +407,25 @@ async fn capability_inspection_reads_committed_authority_during_writer_transacti
     assert_eq!(tokio::time::timeout(Duration::from_secs(2), observations.recv()).await.unwrap(), Some(2));
     node.close().await.unwrap();
 }
+
+/// Delivery dedup across a reset, a question raised by `verify/outbox`: `reset.rs` carries
+/// `applied:` receipts and cap tables into the new incarnation but not the inbox, whose
+/// unique `key` is what deduplicates deliveries. So a sender that redelivers a key after
+/// the receiver reset (it crashed before marking the row delivered) gets it applied again.
+#[tokio::test]
+async fn delivery_key_is_forgotten_by_reset() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = node(dir.path()).await;
+    let target = spawn(&node).await;
+    let before = count(&node.open(&target).await.unwrap(), "received").await;
+    command(&node, &target, "k1", json!({"op":"record"})).await;
+    command(&node, &target, "k1", json!({"op":"record"})).await;
+    assert_eq!(count(&node.open(&target).await.unwrap(), "received").await, before + 1, "same key is deduplicated within an incarnation");
+    node.restart(&target, RestartVerb::Reset).await.unwrap();
+    drain(&node).await;
+    let after_reset = count(&node.open(&target).await.unwrap(), "received").await;
+    command(&node, &target, "k1", json!({"op":"record"})).await;
+    let redelivered = count(&node.open(&target).await.unwrap(), "received").await - after_reset;
+    println!("REDELIVERED-AFTER-RESET {redelivered}");
+    assert_eq!(redelivered, 1, "the reset incarnation applies a key the previous one already applied");
+}
