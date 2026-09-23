@@ -17,11 +17,15 @@
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.rust-overlay.follows = "rust-overlay";
     };
+    # Rust -> Lean translation for `verify/` (Charon extracts MIR, Aeneas emits Lean).
+    # Pinned to the rev whose Lean library `verify/lean/lakefile.toml` requires.
+    aeneas.url = "github:AeneasVerif/aeneas/12a018bb0fab3333be572dadc0eab5108758552b";
   };
   outputs = {
     self,
     nixpkgs,
     index,
+    aeneas,
     ...
   }: let
     systems = ["aarch64-darwin" "x86_64-linux"];
@@ -35,10 +39,34 @@
         inherit (nixpkgs) lib;
         cargoUnit = index.lib.cargoUnitFor pkgs;
       });
-    apps = forSystems (system: {
+    apps = forSystems (system: let
+      pkgs = import nixpkgs {inherit system;};
+      # Run from the repository root: `nix run .#verify`. It regenerates
+      # verify/lean/*/Generated in the working tree, so it cannot run from the store.
+      verify = pkgs.writeShellApplication {
+        name = "loom-verify";
+        runtimeInputs = [
+          aeneas.packages.${system}.aeneas
+          aeneas.packages.${system}.charon
+          pkgs.elan
+          pkgs.git
+        ];
+        text = ''
+          if [ ! -x verify/check.sh ]; then
+            echo "run from the loom repository root (verify/check.sh not found)" >&2
+            exit 1
+          fi
+          exec verify/check.sh "$@"
+        '';
+      };
+    in {
       repl = {
         type = "app";
         program = "${self.packages.${system}.repl}/bin/loom-repl";
+      };
+      verify = {
+        type = "app";
+        program = "${verify}/bin/loom-verify";
       };
     });
   };
