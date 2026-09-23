@@ -125,7 +125,9 @@ in
       # On Darwin the launcher confines Deno with sandbox-exec, and macOS refuses a
       # sandbox nested inside the Nix build sandbox ("Operation not permitted"). Run the
       # check wherever sandbox-exec works; say so where it cannot.
-      if [ -x /usr/bin/sandbox-exec ] && ! /usr/bin/sandbox-exec -p '(version 1)(allow default)' /usr/bin/true 2>/dev/null; then
+      # The probe execs sandbox-exec: inside the Darwin build sandbox even `test -x` on it
+      # reports false while exec fails with EPERM, so only an exec attempt is reliable.
+      if ${lib.boolToString pkgs.stdenv.hostPlatform.isDarwin} && ! /usr/bin/sandbox-exec -p '(version 1)(allow default)' /usr/bin/true 2>/dev/null; then
         echo "loom-deno: skipping install check, nested sandbox-exec is not permitted in this build sandbox"
       else
         export LOOM_IMPORT_ROOT=$TMPDIR
