@@ -42,8 +42,9 @@ Loom stores. The shell is the trusted part.
 `Refinement.step_refines`: the generated Rust `core.step` returns `ok` and computes
 `Spec.step`, given room for the pushes (`2 * calls + 2 < Usize.max`).
 `Refinement.rust_harness_correct`: for any event list shorter than that bound, the
-effects the Rust emits satisfy P1, P2, P3 and P5 (P4 is `quiet_after_cancel` on the spec
-side, transported by the same refinement).
+effects the Rust emits satisfy P1, P2, P3 and P5. `Refinement.rust_quiet_after_cancel`
+is P4 for the Rust: for `pre ++ Cancel :: post`, the emitted effects split into a
+before part and an after part, and the after part has no prompt and no tool run.
 
 ### The checker runs the real Rust
 

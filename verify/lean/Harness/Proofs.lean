@@ -384,6 +384,12 @@ theorem run_snoc (h : H) (es : List Event) (e : Event) :
   | nil => simp [run]
   | cons e' es ih => simp [run, ih]
 
+theorem run_append (h : H) (a b : List Event) :
+    run h (a ++ b) = ((run (run h a).1 b).1, (run h a).2 ++ (run (run h a).1 b).2) := by
+  induction a generalizing h with
+  | nil => simp [run]
+  | cons e a ih => simp [run, ih]
+
 theorem inv_run (es : List Event) : Inv es (run init es).1 (run init es).2 := by
   induction es using List.reverseRecOn with
   | nil => exact inv_init

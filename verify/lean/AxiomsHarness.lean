@@ -8,4 +8,5 @@ import Harness
 #print axioms Harness.Spec.quiet_after_cancel
 #print axioms Harness.Refinement.step_refines
 #print axioms Harness.Refinement.rust_harness_correct
+#print axioms Harness.Refinement.rust_quiet_after_cancel
 #print axioms Harness.Check.step_passes_depth3

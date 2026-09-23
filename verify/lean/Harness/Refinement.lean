@@ -425,4 +425,22 @@ theorem rust_harness_correct (es : List core.Event) (hfit : 2 * es.length + 2 < 
   rw [hout, absH_init]
   exact ⟨permission_first _, at_most_one_result _, deny_final _, closed_after_cancel _⟩
 
+/-- P4 for the Rust: split the emitted effects at the cancel; the part after it
+contains no prompt and no tool run. -/
+theorem rust_quiet_after_cancel (pre post : List core.Event)
+    (hfit : 2 * (pre.length + post.length + 1) + 2 < Usize.max) :
+    rustRun rustInit (pre ++ core.Event.Cancel :: post) ⦃ out _ =>
+      ∃ before after, out.map absEff = before ++ after ∧
+        ∀ id, .run id ∉ after ∧ .ask id ∉ after ⦄ := by
+  have h := rustRun_refines rustInit (pre ++ core.Event.Cancel :: post)
+    (by simp [rustInit]; omega)
+  apply WP.spec_mono h
+  rintro ⟨out, h'⟩ ⟨hout, -⟩
+  simp only [WP.uncurry'_pair] at *
+  rw [hout, absH_init]
+  have hsplit : (pre ++ core.Event.Cancel :: post).map absE =
+      (pre.map absE ++ [.cancel]) ++ post.map absE := by simp [absE]
+  rw [hsplit, run_append]
+  exact ⟨_, _, rfl, quiet_after_cancel (pre.map absE) (post.map absE)⟩
+
 end Harness.Refinement
