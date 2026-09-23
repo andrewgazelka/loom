@@ -2,6 +2,10 @@
 //! Native behaviors must keep mutable state in SQL and use `Ctx` for effects.
 #![forbid(unsafe_code)]
 
+/// Sender recorded for messages sent through the node API (CLI, HTTP, MCP). Behaviors
+/// see it through `Ctx::sender`; it names no actor and carries no capability.
+pub const EXTERNAL_SENDER: &str = "external";
+
 mod actor;
 mod registry;
 pub use registry::CompositeRegistry;

@@ -36,10 +36,10 @@ abbrev RustStep := harness.core.Harness → harness.core.Event →
 def ids : List Nat := [1, 2]
 
 def events : List Event :=
-  -- `.permission i true false` is an approval forged by a non-user sender (the model).
+  -- `.permission i _ false` is an answer forged by a non-user sender (the model, a tool).
   .cancel :: ids.flatMap fun i =>
     [.toolUse i, .permission i true true, .permission i false true, .permission i true false,
-     .toolDone i]
+     .permission i false false, .toolDone i]
 
 /-- A node: events so far, effects so far, effects emitted since the first cancel.
 `failed` records a Rust step that did not return `ok` (a panic or overflow), which is
@@ -111,11 +111,11 @@ where
           if acc.any (·.1 == p) then acc else (p, n.es, n.out) :: acc
       go d next found
 
--- 11 events, depth 5: 11^5 = 161051 traces through the translated Rust step functions.
+-- 13 events, depth 5: 13^5 = 371293 traces through the translated Rust step functions.
 #eval check harness.core.step_v1 5
 #eval check harness.core.step 5
 
-/-- Gate: the fixed step has no violation in any of the 161051 traces. -/
+/-- Gate: the fixed step has no violation in any of the 371293 traces. -/
 theorem step_passes_depth5 : check harness.core.step 5 = [] := by native_decide
 
 /-- Positive control: the checker still finds the first draft's bugs, with these

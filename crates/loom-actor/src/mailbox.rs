@@ -75,10 +75,17 @@ pub(crate) async fn next_at(conn: &Connection, epoch: i64) -> Result<Option<acto
             Ok(actor::Message {
                 seq: row.get(0)?,
                 msg: row.get(1)?,
-                sender: if sender.starts_with("a0") || sender.starts_with("drv:") { Some(sender) } else { None },
+                sender: visible_sender(sender),
             })
         })
         .transpose()
+}
+
+/// The sender a behavior sees: an actor id (`a0…`), a driver (`drv:…`), or `"external"`
+/// for a message sent through the node API. Host-internal rows (root init, lifecycle
+/// messages) carry other markers and read as `None`.
+pub(crate) fn visible_sender(sender: String) -> Option<String> {
+    if sender.starts_with("a0") || sender.starts_with("drv:") || sender == crate::EXTERNAL_SENDER { Some(sender) } else { None }
 }
 
 pub(crate) async fn refresh_cursor(conn: &Connection) -> Result<i64> {

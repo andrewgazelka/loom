@@ -59,7 +59,7 @@ impl Node {
     pub async fn send(&self, id: &str, key: &str, msg: &[u8]) -> Result<()> {
         let _admission = self.admit().await?;
         let applied = self
-            .route_delivery(crate::DeliveryOp::Message { target: id.into(), key: key.into(), sender: "external".into(), msg: msg.into() })
+            .route_delivery(crate::DeliveryOp::Message { target: id.into(), key: key.into(), sender: crate::EXTERNAL_SENDER.into(), msg: msg.into() })
             .await
             .with_context(|| format!("actor {id} seq -1: send"))?;
         ensure!(applied, "actor {id} seq -1: send remains pending");

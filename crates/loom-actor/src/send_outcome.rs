@@ -43,7 +43,7 @@ impl Node {
         let actor = self.open_actor(id).await?;
         let mut conn = actor.conn.lock().await;
         let tx = conn.transaction().await?;
-        actor::inject(&tx, key, "external", msg).await?;
+        actor::inject(&tx, key, crate::EXTERNAL_SENDER, msg).await?;
         let rows = actor::query(&tx, "SELECT seq,state FROM inbox WHERE key=?", [key]).await?;
         let row = rows.rows.first().context("sent actor message missing from inbox")?;
         let seq: i64 = row.get(0)?;

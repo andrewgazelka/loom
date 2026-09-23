@@ -15,9 +15,11 @@ impl Behavior for Probe {
         "caps-probe"
     }
     fn schema(&self) -> &str {
-        "CREATE TABLE received(msg BLOB); CREATE TABLE saved(cap BLOB)"
+        "CREATE TABLE received(msg BLOB); CREATE TABLE saved(cap BLOB); CREATE TABLE senders(sender TEXT)"
     }
     async fn handle(&self, cx: &mut Ctx<'_>, msg: &[u8]) -> Result<(), Trap> {
+        let sender = cx.sender().unwrap_or_else(|| "<none>".into());
+        cx.sql("INSERT INTO senders VALUES (?)", [sender]).await?;
         let value: Value = serde_json::from_slice(msg).map_err(|e| Trap::new(e.to_string()))?;
         let op = value["op"].as_str().unwrap_or("record");
         if op == "record" {
@@ -410,22 +412,46 @@ async fn capability_inspection_reads_committed_authority_during_writer_transacti
 
 /// Delivery dedup across a reset, a question raised by `verify/outbox`: `reset.rs` carries
 /// `applied:` receipts and cap tables into the new incarnation but not the inbox, whose
-/// unique `key` is what deduplicates deliveries. So a sender that redelivers a key after
-/// the receiver reset (it crashed before marking the row delivered) gets it applied again.
+/// unique `key` is what deduplicates deliveries. A repeated external key models a sender
+/// that redelivers after the receiver reset (it crashed before marking the row
+/// delivered); outbox deliveries go through the same `actor::inject`.
 #[tokio::test]
 async fn delivery_key_is_forgotten_by_reset() {
     let dir = tempfile::tempdir().unwrap();
     let node = node(dir.path()).await;
     let target = spawn(&node).await;
-    let before = count(&node.open(&target).await.unwrap(), "received").await;
+    let record = serde_json::to_vec(&json!({"op":"record"})).unwrap();
+    let records = || async {
+        let actor = node.open(&target).await.unwrap();
+        actor.sql("SELECT count(*) FROM received WHERE msg = ?", [record.clone()]).await.unwrap().rows[0].get::<i64>(0).unwrap()
+    };
     command(&node, &target, "k1", json!({"op":"record"})).await;
     command(&node, &target, "k1", json!({"op":"record"})).await;
-    assert_eq!(count(&node.open(&target).await.unwrap(), "received").await, before + 1, "same key is deduplicated within an incarnation");
+    assert_eq!(records().await, 1, "same key is deduplicated within an incarnation");
     node.restart(&target, RestartVerb::Reset).await.unwrap();
     drain(&node).await;
-    let after_reset = count(&node.open(&target).await.unwrap(), "received").await;
+    assert_eq!(records().await, 0, "reset starts from empty state");
     command(&node, &target, "k1", json!({"op":"record"})).await;
-    let redelivered = count(&node.open(&target).await.unwrap(), "received").await - after_reset;
+    let redelivered = records().await;
     println!("REDELIVERED-AFTER-RESET {redelivered}");
     assert_eq!(redelivered, 1, "the reset incarnation applies a key the previous one already applied");
+}
+
+/// What `Ctx::sender` reports: `"external"` for the node API and the sending actor's id
+/// for an actor send. A root actor's init comes from the node's root actor, never from
+/// `"external"`, so a behavior can tell an operator's message from everything else.
+#[tokio::test]
+async fn sender_distinguishes_external_actor_and_host() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = node(dir.path()).await;
+    let target = spawn(&node).await;
+    let peer = spawn(&node).await;
+    command(&node, &target, "from-api", json!({"op":"record"})).await;
+    let cap = node.cap_for(&target, Rights::SEND).await.unwrap();
+    command(&node, &peer, "from-peer", json!({"op":"send","cap":cap})).await;
+    let rows = node.open(&target).await.unwrap().sql("SELECT sender FROM senders ORDER BY rowid", ()).await.unwrap();
+    let senders: Vec<String> = rows.rows.iter().map(|row| row.get(0).unwrap()).collect();
+    assert_eq!(senders.len(), 3, "{senders:?}");
+    assert_ne!(senders[0], loom_actor::EXTERNAL_SENDER, "init is not an operator message");
+    assert_eq!(senders[1..], [loom_actor::EXTERNAL_SENDER.to_string(), peer.clone()]);
 }

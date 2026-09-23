@@ -20,4 +20,9 @@ theorem only_valid (c : U8) (p : core.Phase) (h : core.phase_of_code c = ok (som
   unfold core.phase_of_code at h
   split at h <;> simp_all [core.phase_code] <;> subst h <;> rfl
 
+/-- Any code no phase produces decodes to `none`, which the shell turns into a trap. -/
+theorem refuses (c : U8) (h : 2 < c.val) : core.phase_of_code c = ok none := by
+  unfold core.phase_of_code
+  split <;> first | rfl | (exfalso; revert h; decide) | (simp at h)
+
 end Harness.Codec

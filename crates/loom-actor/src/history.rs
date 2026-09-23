@@ -111,7 +111,7 @@ impl Node {
             let message = actor::Message {
                 seq,
                 msg: row.get(0)?,
-                sender: if sender.starts_with("a0") || sender.starts_with("drv:") { Some(sender) } else { None },
+                sender: crate::mailbox::visible_sender(sender),
             };
             if !matches!(mode, ReplayMode::Candidate) {
                 let skipped = actor::query(source, "SELECT value FROM meta WHERE key=?", [format!("skipped:{}", message.seq)]).await?;

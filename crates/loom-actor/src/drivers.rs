@@ -143,6 +143,9 @@ impl Ctx<'_> {
     /// row. Ordinary actor messages should continue to carry explicit reply caps.
     pub async fn sender_cap(&mut self) -> Result<Cap, Trap> {
         let sender = self.sender.clone().ok_or_else(|| Trap::new("message has no sender"))?;
+        if sender == crate::EXTERNAL_SENDER {
+            return Err(Trap::new("an external message has no sender capability"));
+        }
         let bytes = self.cap_operation(Operation::SenderCap { sender }).await?;
         let cap: Cap = serde_json::from_slice(&bytes).map_err(|e| self.runtime(e))?;
         crate::capability::store_cap(self.conn, &cap).await.map_err(|e| self.runtime(e))?;
