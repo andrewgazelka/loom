@@ -13,6 +13,16 @@ use super::*;
 use loom_defdir::Doc;
 use std::collections::BTreeSet;
 
+/// Which name to write for a dependency hash: the first (in name order) of the names that point at it. One
+/// helper for export and import, so the two always agree.
+fn names_by_hash(current: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    let mut by_hash = BTreeMap::new();
+    for (name, hash) in current {
+        by_hash.entry(hash.clone()).or_insert_with(|| name.clone());
+    }
+    by_hash
+}
+
 impl Service {
     /// The stored input of a Rust definition as a document, or `None` for another language.
     fn stored_doc(
@@ -20,6 +30,8 @@ impl Service {
         name: &str,
         hash: &str,
         name_of_hash: &BTreeMap<String, String>,
+        all_deps: Option<&BTreeMap<String, BTreeMap<String, String>>>,
+        warnings: &mut Vec<String>,
     ) -> Result<Option<Doc>> {
         let def = self
             .store
@@ -60,13 +72,24 @@ impl Service {
         } else {
             (stored, None, None)
         };
-        // A dependency is written by name when some name currently points at that hash, else by hash.
-        let deps = self
-            .store
-            .definition_deps(hash)?
+        // A dependency is written by name when some name currently points at that hash, else by hash, which
+        // only this daemon knows: a clone of the repository elsewhere cannot resolve it, so say so.
+        let pins = match all_deps.and_then(|all| all.get(hash)) {
+            Some(pins) => pins.clone(),
+            None => self.store.definition_deps(hash)?,
+        };
+        let deps = pins
             .into_iter()
             .map(|(alias, dep)| {
-                let target = name_of_hash.get(&dep).cloned().unwrap_or(dep);
+                let target = match name_of_hash.get(&dep) {
+                    Some(named) => named.clone(),
+                    None => {
+                        warnings.push(format!(
+                            "{name:?}: dependency {alias:?} is pinned to {dep}, which no name points at now; it is exported as a hash that only this daemon can resolve (update {name:?} so it depends on a name)"
+                        ));
+                        dep
+                    }
+                };
                 (alias, target)
             })
             .collect();
@@ -74,7 +97,7 @@ impl Service {
             name: name.to_owned(),
             source,
             deps,
-            allowed_effects: def.allowed_effects.clone(),
+            allowed_effects: def.allowed_effects.clone().map(loom_defdir::normalized_labels),
             manifest,
             lock,
         }))
@@ -84,10 +107,9 @@ impl Service {
     /// hashes, and the compiler that built them.
     pub(super) async fn export_defs(&self, args: &Value) -> Result<Value> {
         let current = self.store.current_names()?;
-        let mut name_of_hash: BTreeMap<String, String> = BTreeMap::new();
-        for (name, hash) in &current {
-            name_of_hash.entry(hash.clone()).or_insert_with(|| name.clone());
-        }
+        let name_of_hash = names_by_hash(&current);
+        let all_deps = self.store.definition_deps_all()?;
+        let mut warnings: Vec<String> = Vec::new();
         let wanted: Vec<String> = match args.get("names").filter(|value| !value.is_null()) {
             Some(value) => serde_json::from_value(value.clone()).context("names must be an array of strings")?,
             None => current.keys().cloned().collect(),
@@ -99,7 +121,7 @@ impl Service {
             let hash = current
                 .get(name)
                 .with_context(|| format!("definition {name:?} not found"))?;
-            match self.stored_doc(name, hash, &name_of_hash) {
+            match self.stored_doc(name, hash, &name_of_hash, Some(&all_deps), &mut warnings) {
                 Ok(Some(doc)) => {
                     if toolchain.is_empty()
                         && let Some(identity) = self.store.build_identity(hash)?
@@ -116,10 +138,10 @@ impl Service {
                 Err(error) => skipped.push(json!({"name": name, "reason": format!("{error:#}")})),
             }
         }
-        Ok(json!({"definitions": documents, "skipped": skipped, "toolchain": toolchain}))
+        Ok(json!({"definitions": documents, "skipped": skipped, "warnings": warnings, "toolchain": toolchain}))
     }
 
-    /// `import_defs {definitions, expected?}`.
+    /// `import_defs {definitions, expected?, toolchain?}`.
     pub(super) async fn import_defs(&self, args: &Value) -> Result<Value> {
         let docs: Vec<Doc> = serde_json::from_value(
             args.get("definitions")
@@ -133,6 +155,9 @@ impl Service {
             crate::bundles::validate_name(&doc.name)?;
             ensure!(seen.insert(doc.name.as_str()), "definition {:?} appears twice", doc.name);
         }
+        // One scan for the dependency pins of everything stored now; a definition rewritten during the import
+        // (a dependent follows its dependency) is not in it and falls back to a lookup.
+        let all_deps = self.store.definition_deps_all()?;
         // Dependency order among the batch: a definition comes after every batch name it depends on.
         let ordered = order(&docs)?;
         let mut results: Vec<Value> = Vec::new();
@@ -144,7 +169,7 @@ impl Service {
                 results.push(json!({"name": doc.name, "action": "failed", "error": format!("its dependency {broken:?} failed")}));
                 continue;
             }
-            match self.import_one(doc).await {
+            match self.import_one(doc, &all_deps).await {
                 Ok((action, hash)) => results.push(json!({"name": doc.name, "action": action, "hash": hash})),
                 Err(error) => {
                     failed.insert(doc.name.clone());
@@ -152,12 +177,12 @@ impl Service {
                 }
             }
         }
-        // The lock's hashes against what the daemon now holds.
+        // The lock's hashes against what the daemon now holds, and its toolchain against the compiler that built them.
+        let current = self.store.current_names()?;
         let mut mismatches = Vec::new();
         if let Some(expected) = args.get("expected").filter(|value| !value.is_null()) {
             let expected: BTreeMap<String, String> =
                 serde_json::from_value(expected.clone()).context("expected maps names to hashes")?;
-            let current = self.store.current_names()?;
             for (name, want) in expected {
                 if failed.contains(&name) || !seen.contains(name.as_str()) {
                     continue;
@@ -168,6 +193,17 @@ impl Service {
                 }
             }
         }
+        let mut toolchain_mismatch = Value::Null;
+        if let Some(expected) = args.get("toolchain").and_then(Value::as_str).filter(|text| !text.is_empty())
+            && let Some(got) = seen
+                .iter()
+                .filter_map(|name| current.get(*name))
+                .find_map(|hash| self.store.build_identity(hash).ok().flatten())
+                .map(|identity| identity.toolchain_hash)
+            && got != expected
+        {
+            toolchain_mismatch = json!({"expected": expected, "got": got});
+        }
         let count = |action: &str| results.iter().filter(|row| row["action"] == action).count();
         Ok(json!({
             "results": results,
@@ -176,37 +212,87 @@ impl Service {
             "unchanged": count("unchanged"),
             "failed": count("failed"),
             "mismatches": mismatches,
+            "toolchain_mismatch": toolchain_mismatch,
         }))
     }
 
     /// One document against the daemon: add, update or leave.
-    async fn import_one(&self, doc: &Doc) -> Result<(&'static str, String)> {
+    async fn import_one(
+        &self,
+        doc: &Doc,
+        all_deps: &BTreeMap<String, BTreeMap<String, String>>,
+    ) -> Result<(&'static str, String)> {
         let current = self.store.current_names()?;
-        // `deps` values are names (resolved to their current hashes by `add`/`update`) or hashes.
+        // `deps` values are names or hashes; both resolve to the pin `add`/`update` would store.
+        let pins = crate::definitions::resolve_dependency_pins(&self.store, &doc.deps)
+            .with_context(|| format!("resolving the dependencies of {:?}", doc.name))?;
         let deps = serde_json::to_value(&doc.deps)?;
+        let policy = doc.allowed_effects.clone().map(loom_defdir::normalized_labels);
         let crate_args = json!({"manifest": doc.manifest, "lock": doc.lock});
         let source = crate::definitions::with_crates(&crate_args, Lang::Rust, doc.source.clone())?;
         if let Some(hash) = current.get(&doc.name) {
-            let name_of_hash: BTreeMap<String, String> =
-                current.iter().map(|(n, h)| (h.clone(), n.clone())).collect();
-            if let Some(stored) = self.stored_doc(&doc.name, hash, &name_of_hash)?
-                && loom_defdir::same(&stored, doc)
+            let mut ignored = Vec::new();
+            let stored = self
+                .stored_doc(&doc.name, hash, &BTreeMap::new(), Some(all_deps), &mut ignored)?
+                .with_context(|| {
+                    format!("{:?} exists and is not a Rust definition; it cannot be updated from a document", doc.name)
+                })?;
+            // Compared by what they resolve to, not by how they are written: a dependency named in the file and
+            // pinned by hash in the store are the same when the name points at that hash.
+            let stored_pins = all_deps
+                .get(hash)
+                .cloned()
+                .map_or_else(|| self.store.definition_deps(hash), Ok)?;
+            if stored.allowed_effects.is_some() && policy.is_none() {
+                bail!(
+                    "{:?} has an allowed-effects policy on the daemon and the document has none; a policy cannot be removed by an import",
+                    doc.name
+                );
+            }
+            if stored.source == doc.source
+                && stored.manifest == doc.manifest
+                && stored.lock == doc.lock
+                && stored.allowed_effects == policy
+                && stored_pins == pins
             {
                 return Ok(("unchanged", hash.clone()));
             }
-            // `unison` dispatches back here, so its future is boxed to break the async recursion.
-            Box::pin(self.unison(
+            // `update` answers `Ok` even when it could not rebuild: the session is parked as needs_repair and
+            // the live names are untouched. Only `complete` means the change landed.
+            let reply = Box::pin(self.unison(
                 "update",
-                &json!({"name": doc.name, "source": source, "deps": deps, "allowed_effects": doc.allowed_effects}),
+                &json!({"name": doc.name, "source": source, "deps": deps, "allowed_effects": policy}),
             ))
             .await?;
+            let update = &reply["update"];
+            if update["status"] != "complete" {
+                let detail = update["diagnostics"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .flat_map(|failure| failure["diagnostics"].as_array().into_iter().flatten())
+                    .filter_map(|diagnostic| diagnostic["message"].as_str())
+                    .take(3)
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                // Do not leave a parked session behind for every failed import.
+                if let (Some(id), Some(revision)) = (update["id"].as_str(), update["revision"].as_u64()) {
+                    let _ = Box::pin(self.unison("update_abort", &json!({"id": id, "revision": revision}))).await;
+                }
+                bail!(
+                    "the update of {:?} did not complete ({}){}",
+                    doc.name,
+                    update["status"].as_str().unwrap_or("unknown"),
+                    if detail.is_empty() { String::new() } else { format!(": {detail}") }
+                );
+            }
             let hash = self.store.current_names()?.get(&doc.name).cloned().context("updated name vanished")?;
             return Ok(("updated", hash));
         }
         Box::pin(self.unison(
             "add",
             &json!({"name": doc.name, "source": doc.source, "lang": "rust", "deps": deps,
-                    "allowed_effects": doc.allowed_effects, "manifest": doc.manifest, "lock": doc.lock}),
+                    "allowed_effects": policy, "manifest": doc.manifest, "lock": doc.lock}),
         ))
         .await?;
         let hash = self.store.current_names()?.get(&doc.name).cloned().context("added name vanished")?;

@@ -194,14 +194,18 @@ pub static VERBS: &[Verb] = &[
     ),
     // Definitions as documents for git-versioned directories (`docs/design/definitions-in-git.md`): the named
     // (default all) current Rust definitions as `{name, source, deps, allowed_effects, manifest, lock, hash}`.
-    verb!(export_defs, Definition, Read, [arg!(names, List, optional)]),
+    verb!(export_defs, Definition, Define, [arg!(names, List, optional)]),
     // Adds what is new, updates what changed and skips what is identical, in dependency order; `expected` maps
     // names to the hashes a lock file recorded, and differences are reported.
     verb!(
         import_defs,
         Definition,
         Define,
-        [arg!(definitions, Json), arg!(expected, Json, optional)]
+        [
+            arg!(definitions, Json),
+            arg!(expected, Json, optional),
+            arg!(toolchain, String, optional)
+        ]
     ),
     // Stops the running `run` or `eval` that was given this `call_id`; not an error when none is running.
     verb!(cancel, Definition, Execute, [arg!(call_id, String)]),

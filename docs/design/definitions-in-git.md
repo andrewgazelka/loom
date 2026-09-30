@@ -73,6 +73,7 @@ the reviewable source of record; a bundle can always be made from it.
   reads or writes a client's files and an MCP agent or script can use the same verbs. The directory layout is
   `crates/loom-defdir`; `loom export-dir`, `loom import-dir` and `loom status-dir` (`crates/loom-cli/src/defdir.rs`)
   connect the two.
+* `export_defs` needs the define scope (it returns each definition's manifest and lock, like `export`).
 * `import_defs` is **not atomic across the batch** (each definition is its own `add` or `update`); it orders by
   dependency, continues past a failure, and skips everything that depends on a failed definition. It reports
   `added`, `updated`, `unchanged`, `failed` and `mismatches` (definitions whose hash differs from `loom.lock`).
@@ -84,3 +85,23 @@ the reviewable source of record; a bundle can always be made from it.
   `height` made `status-dir` say `changed`, `import-dir` updated it (its dependent followed, as `update` always
   does) and reported both hashes as mismatches against the stale lock; a second import changed nothing; a
   definition that failed to build made its dependent `failed` without trying it.
+
+### Review fixes (same day)
+
+* A failed `update` is now a failed import: `update` answers `Ok` with a parked `needs_repair` session when it cannot
+  rebuild, so `import_defs` reads the session status, aborts the session, reports `failed` with the compiler's
+  message and skips the dependents. (It used to report `updated` with the old hash.)
+* Dependencies are compared by what they resolve to (a name in the file and a hash in the store are equal when the
+  name points at that hash), so a re-import converges. A dependency pinned to a hash no name points at is exported
+  as that hash with a warning: it cannot be resolved on another daemon.
+* A policy (`allowed_effects`) cannot be removed by an import (`update` keeps it); the document is refused rather
+  than silently ignored. Labels are compared sorted and without repeats. `def.toml` and `loom.lock` reject unknown keys.
+* `loom-defdir` reads and writes regular files only: symlinked `lib.rs`/`def.toml`/`Cargo.*`/`loom.lock` are refused on
+  read, directories that are symlinks are refused on write, files are written by temp-and-rename (a link already
+  there is replaced, never written through). All names are validated, and names that differ only by case are
+  refused, before the first byte is written. Exporting a subset merges into `loom.lock` instead of replacing it.
+* `import-dir` warns when `loom.lock` was written by a different compiler, and on hash mismatches; `status-dir`
+  treats `removed` as information.
+* Known limits: each changed definition is its own `update` (a chain of k edited definitions rebuilds about k²/2
+  times); a whole directory is one request under the daemon's 16 MiB body limit; an import overwrites daemon-side
+  edits (the old hash stays in `history`), because the lock records only the state after the author's edit.

@@ -396,8 +396,8 @@ impl Service {
                 })
                 .await
             }
-            "export_defs" => self.export_defs(args).await,
-            "import_defs" => self.import_defs(args).await,
+            "export_defs" => self.recorded("export_defs", self.export_defs(args)).await,
+            "import_defs" => self.recorded("import_defs", self.import_defs(args)).await,
             "run_many" => {
                 self.recorded("run_many", self.cancellable(args, self.run_many(args)))
                     .await

@@ -38,6 +38,7 @@ pub struct Doc {
 /// `loom.lock`: what the directory's definitions hashed to when it was written, and with which compiler. A
 /// different compiler can legitimately change hashes, so a mismatch is a warning that names both.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Lock {
     #[serde(default)]
     pub toolchain: String,
@@ -45,7 +46,9 @@ pub struct Lock {
     pub definitions: BTreeMap<String, String>,
 }
 
+/// `def.toml`. Unknown keys are an error: a typo such as `allowed_effect` must not silently mean "no policy".
 #[derive(Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct DefToml {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     deps: BTreeMap<String, String>,
@@ -56,6 +59,13 @@ struct DefToml {
 const LOCK_FILE: &str = "loom.lock";
 const SOURCE_FILE: &str = "lib.rs";
 const META_FILE: &str = "def.toml";
+
+/// Labels sorted and without repeats, the form the daemon stores a policy in.
+pub fn normalized_labels(mut labels: Vec<String>) -> Vec<String> {
+    labels.sort();
+    labels.dedup();
+    labels
+}
 
 /// A definition name is a relative path of plain segments.
 fn check_name(name: &str) -> Result<()> {
@@ -97,12 +107,24 @@ pub fn read_dir(root: &Path) -> Result<(Vec<Doc>, Option<Lock>)> {
         }
     }
     docs.sort_by(|a, b| a.name.cmp(&b.name));
-    let lock = match fs::read_to_string(root.join(LOCK_FILE)) {
-        Ok(text) => Some(toml::from_str::<Lock>(&text).with_context(|| format!("parse {LOCK_FILE}"))?),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error.into()),
+    let lock = match read_regular(&root.join(LOCK_FILE))? {
+        Some(text) => Some(toml::from_str::<Lock>(&text).with_context(|| format!("parse {LOCK_FILE}"))?),
+        None => None,
     };
     Ok((docs, lock))
+}
+
+/// The text of a regular file. A symlink (or anything else) is refused: a cloned repository must not be able to
+/// make `import-dir` upload `~/.ssh/id_rsa` by linking `lib.rs` to it.
+fn read_regular(path: &Path) -> Result<Option<String>> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(Some(
+            fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?,
+        )),
+        Ok(_) => bail!("{} is not a regular file (symlinks are not followed)", path.display()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
+    }
 }
 
 fn read_doc(root: &Path, directory: &Path) -> Result<Doc> {
@@ -113,62 +135,119 @@ fn read_doc(root: &Path, directory: &Path) -> Result<Doc> {
         .collect::<Vec<_>>()
         .join("/");
     check_name(&name)?;
-    let source = fs::read_to_string(directory.join(SOURCE_FILE))
-        .with_context(|| format!("read {name}/{SOURCE_FILE}"))?;
-    let meta: DefToml = match fs::read_to_string(directory.join(META_FILE)) {
-        Ok(text) => toml::from_str(&text).with_context(|| format!("parse {name}/{META_FILE}"))?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => DefToml::default(),
-        Err(error) => return Err(error.into()),
+    let source = read_regular(&directory.join(SOURCE_FILE))?
+        .with_context(|| format!("{name}/{SOURCE_FILE} is missing"))?;
+    let meta: DefToml = match read_regular(&directory.join(META_FILE))? {
+        Some(text) => toml::from_str(&text).with_context(|| format!("parse {name}/{META_FILE}"))?,
+        None => DefToml::default(),
     };
-    let optional = |file: &str| -> Result<Option<String>> {
-        match fs::read_to_string(directory.join(file)) {
-            Ok(text) => Ok(Some(text)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error).with_context(|| format!("read {name}/{file}")),
-        }
-    };
+    let optional = |file: &str| -> Result<Option<String>> { read_regular(&directory.join(file)) };
     let manifest = optional("Cargo.toml")?;
     let lock = optional("Cargo.lock")?;
     Ok(Doc {
         name,
         source,
         deps: meta.deps,
-        allowed_effects: meta.allowed_effects,
+        allowed_effects: meta.allowed_effects.map(normalized_labels),
         manifest,
         lock,
     })
 }
 
-/// Write `docs` under `root` and, if given, `lock` (sorted, one line per name). Files of a definition that the
-/// documents no longer carry (a removed `Cargo.toml`, `def.toml`) are removed so the directory is exactly what
-/// the documents say; other definitions already in the directory are left alone.
-pub fn write_dir(root: &Path, docs: &[Doc], lock: Option<&Lock>) -> Result<()> {
+/// Write `docs` under `root`. Everything is validated before the first byte is written: each name, and names
+/// that differ only by case (they would share a directory on a case-insensitive filesystem and overwrite each
+/// other). No path component under `root` may be a symlink, and each file is written to a temporary name and
+/// renamed into place, so a link that is already there is replaced, never written through. Files of a definition
+/// that the documents no longer carry (a removed `Cargo.toml` or `def.toml`) are removed; other definitions already
+/// in the directory are left alone. The lock is separate ([`write_lock`]).
+pub fn write_dir(root: &Path, docs: &[Doc]) -> Result<()> {
+    let mut lowered: BTreeMap<String, &str> = BTreeMap::new();
     for doc in docs {
         check_name(&doc.name)?;
-        let directory = root.join(&doc.name);
-        fs::create_dir_all(&directory).with_context(|| format!("create {}", directory.display()))?;
-        fs::write(directory.join(SOURCE_FILE), &doc.source)?;
+        if let Some(other) = lowered.insert(doc.name.to_lowercase(), &doc.name) {
+            ensure!(
+                other == doc.name,
+                "definitions {other:?} and {:?} differ only by case and would collide on a case-insensitive filesystem",
+                doc.name
+            );
+        }
+    }
+    for doc in docs {
+        let directory = safe_directory(root, &doc.name)?;
+        replace_file(&directory.join(SOURCE_FILE), Some(&doc.source))?;
         let meta = DefToml { deps: doc.deps.clone(), allowed_effects: doc.allowed_effects.clone() };
         let meta_text = toml::to_string(&meta)?;
-        sync(&directory.join(META_FILE), (!meta_text.is_empty()).then_some(meta_text.as_str()))?;
-        sync(&directory.join("Cargo.toml"), doc.manifest.as_deref())?;
-        sync(&directory.join("Cargo.lock"), doc.lock.as_deref())?;
-    }
-    if let Some(lock) = lock {
-        fs::write(root.join(LOCK_FILE), toml::to_string(lock)?)?;
+        replace_file(&directory.join(META_FILE), (!meta_text.is_empty()).then_some(meta_text.as_str()))?;
+        replace_file(&directory.join("Cargo.toml"), doc.manifest.as_deref())?;
+        replace_file(&directory.join("Cargo.lock"), doc.lock.as_deref())?;
     }
     Ok(())
 }
 
-fn sync(path: &Path, content: Option<&str>) -> Result<()> {
-    match content {
-        Some(text) => fs::write(path, text)?,
-        None => match fs::remove_file(path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        },
+/// Write `loom.lock`. With `merge`, names already in the file that `lock` does not mention keep their entries
+/// (exporting a subset must not drop the rest); the toolchain is the newest one written.
+pub fn write_lock(root: &Path, lock: &Lock, merge: bool) -> Result<()> {
+    let mut merged = lock.clone();
+    if merge && let Some(existing) = read_regular(&root.join(LOCK_FILE))? {
+        let old: Lock = toml::from_str(&existing).with_context(|| format!("parse {LOCK_FILE}"))?;
+        for (name, hash) in old.definitions {
+            merged.definitions.entry(name).or_insert(hash);
+        }
     }
+    if let Ok(metadata) = fs::symlink_metadata(root) {
+        ensure!(!metadata.file_type().is_symlink() || root.is_dir(), "{} is not a directory", root.display());
+    }
+    replace_file(&root.join(LOCK_FILE), Some(&toml::to_string(&merged)?))
+}
+
+/// `root/name` as a directory that exists, created segment by segment, refusing a symlink at any step.
+fn safe_directory(root: &Path, name: &str) -> Result<PathBuf> {
+    fs::create_dir_all(root).with_context(|| format!("create {}", root.display()))?;
+    let mut path = root.to_path_buf();
+    for segment in name.split('/') {
+        path.push(segment);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) => ensure!(
+                metadata.file_type().is_dir(),
+                "{} is not a plain directory (symlinks are not followed)",
+                path.display()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir(&path).with_context(|| format!("create {}", path.display()))?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(path)
+}
+
+static TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Make `path` hold `content` (or not exist, for `None`): a temporary file renamed over the target, so an
+/// existing symlink at `path` is replaced rather than written through.
+fn replace_file(path: &Path, content: Option<&str>) -> Result<()> {
+    let Some(text) = content else {
+        return match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).with_context(|| format!("remove {}", path.display())),
+        };
+    };
+    let temporary = path.with_extension(format!(
+        "loom-tmp-{}-{}",
+        std::process::id(),
+        TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .with_context(|| format!("create {}", temporary.display()))?;
+    std::io::Write::write_all(&mut file, text.as_bytes())?;
+    drop(file);
+    fs::rename(&temporary, path).inspect_err(|_| {
+        let _ = fs::remove_file(&temporary);
+    })?;
     Ok(())
 }
 
@@ -215,15 +294,6 @@ pub fn same(a: &Doc, b: &Doc) -> bool {
         && a.lock == b.lock
 }
 
-/// `path` as an absolute directory that exists, for CLI messages.
-pub fn existing(path: &Path) -> Result<PathBuf> {
-    let absolute = fs::canonicalize(path).with_context(|| format!("{} does not exist", path.display()))?;
-    if !absolute.is_dir() {
-        bail!("{} is not a directory", path.display());
-    }
-    Ok(absolute)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,29 +315,102 @@ mod tests {
             toolchain: "abc".into(),
             definitions: BTreeMap::from([("surface".into(), "11".into()), ("terrain/height".into(), "22".into())]),
         };
-        write_dir(directory.path(), &[surface.clone(), height.clone()], Some(&lock)).unwrap();
+        write_dir(directory.path(), &[surface.clone(), height.clone()]).unwrap();
+        write_lock(directory.path(), &lock, false).unwrap();
         let (read, read_lock) = read_dir(directory.path()).unwrap();
         assert_eq!(read, vec![surface.clone(), height.clone()], "sorted by name, everything back byte for byte");
         assert_eq!(read_lock, Some(lock));
         // The lock file is sorted text, so it merges.
         let text = std::fs::read_to_string(directory.path().join("loom.lock")).unwrap();
         assert!(text.find("surface").unwrap() < text.find("terrain/height").unwrap(), "{text}");
-        // Dropping the crate files and the policy removes their files, not just their contents.
+        // Dropping the crate files removes their files, not just their contents.
         let mut plain = height.clone();
         plain.manifest = None;
         plain.lock = None;
-        write_dir(directory.path(), &[plain.clone()], None).unwrap();
+        write_dir(directory.path(), &[plain.clone()]).unwrap();
         assert!(!directory.path().join("terrain/height/Cargo.toml").exists());
         assert_eq!(read_dir(directory.path()).unwrap().0.len(), 2, "the other definition was left alone");
     }
 
     #[test]
-    fn names_that_escape_the_directory_or_hide_are_refused() {
+    fn exporting_a_subset_keeps_the_lock_entries_of_the_rest_unless_asked_to_replace() {
         let directory = tempfile::tempdir().unwrap();
-        for bad in ["../x", "a/../b", "/abs", ".hidden", "a//b", "", "has space", "a/."] {
-            assert!(write_dir(directory.path(), &[doc(bad, "x")], None).is_err(), "{bad:?}");
+        let full = Lock {
+            toolchain: "t1".into(),
+            definitions: BTreeMap::from([("a".into(), "1".into()), ("b".into(), "2".into())]),
+        };
+        write_lock(directory.path(), &full, false).unwrap();
+        let subset = Lock { toolchain: "t2".into(), definitions: BTreeMap::from([("a".into(), "9".into())]) };
+        write_lock(directory.path(), &subset, true).unwrap();
+        let (_, merged) = read_dir(directory.path()).unwrap();
+        let merged = merged.unwrap();
+        assert_eq!(merged.definitions, BTreeMap::from([("a".into(), "9".into()), ("b".into(), "2".into())]));
+        assert_eq!(merged.toolchain, "t2");
+        write_lock(directory.path(), &subset, false).unwrap();
+        assert_eq!(read_dir(directory.path()).unwrap().1.unwrap().definitions.len(), 1, "a full export replaces");
+    }
+
+    #[test]
+    fn names_that_escape_hide_or_collide_are_refused_before_anything_is_written() {
+        let directory = tempfile::tempdir().unwrap();
+        for bad in ["../x", "a/../b", "/abs", ".hidden", "a//b", "", "has space", "a/.", "v1.2"] {
+            assert!(write_dir(directory.path(), &[doc(bad, "x")]).is_err(), "{bad:?}");
         }
+        // One bad name among good ones writes nothing at all.
+        assert!(write_dir(directory.path(), &[doc("good", "x"), doc("bad name", "y")]).is_err());
+        assert!(!directory.path().join("good").exists(), "validation happens before the first write");
+        // Two names that differ only by case would overwrite each other on macOS.
+        let error = write_dir(directory.path(), &[doc("Foo", "1"), doc("foo", "2")]).unwrap_err();
+        assert!(error.to_string().contains("only by case"), "{error:#}");
+        assert!(!directory.path().join("Foo").exists());
         assert!(read_dir(&directory.path().join("missing")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_are_never_followed_on_read_or_write() {
+        use std::os::unix::fs::symlink;
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secret");
+        std::fs::write(&secret, "TOP SECRET").unwrap();
+        // A repository that links lib.rs to a file outside it: reading is refused, not uploaded.
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir(directory.path().join("d")).unwrap();
+        symlink(&secret, directory.path().join("d/lib.rs")).unwrap();
+        let error = read_dir(directory.path()).unwrap_err();
+        assert!(format!("{error:#}").contains("symlink"), "{error:#}");
+        // A linked definition directory is skipped on read, and refused on write.
+        let linked = tempfile::tempdir().unwrap();
+        symlink(outside.path(), linked.path().join("escape")).unwrap();
+        assert!(read_dir(linked.path()).unwrap().0.is_empty());
+        assert!(write_dir(linked.path(), &[doc("escape", "pub fn f() {}\n")]).is_err());
+        assert!(!outside.path().join("lib.rs").exists(), "nothing was written through the link");
+        // A link where a file goes is replaced, not written through.
+        let replaced = tempfile::tempdir().unwrap();
+        std::fs::create_dir(replaced.path().join("d")).unwrap();
+        symlink(&secret, replaced.path().join("d/lib.rs")).unwrap();
+        write_dir(replaced.path(), &[doc("d", "pub fn f() {}\n")]).unwrap();
+        assert_eq!(std::fs::read_to_string(&secret).unwrap(), "TOP SECRET", "the target was not touched");
+        assert_eq!(std::fs::read_to_string(replaced.path().join("d/lib.rs")).unwrap(), "pub fn f() {}\n");
+        // And a linked loom.lock is replaced too.
+        symlink(&secret, replaced.path().join("loom.lock")).unwrap();
+        write_lock(replaced.path(), &Lock::default(), false).unwrap();
+        assert_eq!(std::fs::read_to_string(&secret).unwrap(), "TOP SECRET");
+    }
+
+    #[test]
+    fn a_misspelled_key_in_def_toml_or_the_lock_is_an_error_not_a_missing_policy() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir(directory.path().join("d")).unwrap();
+        std::fs::write(directory.path().join("d/lib.rs"), "x").unwrap();
+        std::fs::write(directory.path().join("d/def.toml"), "allowed_effect = []\n").unwrap();
+        let error = read_dir(directory.path()).unwrap_err();
+        assert!(format!("{error:#}").contains("allowed_effect"), "{error:#}");
+        std::fs::write(directory.path().join("d/def.toml"), "allowed_effects = [\"b\", \"a\", \"a\"]\n").unwrap();
+        let (docs, _) = read_dir(directory.path()).unwrap();
+        assert_eq!(docs[0].allowed_effects, Some(vec!["a".to_string(), "b".to_string()]), "sorted, without repeats");
+        std::fs::write(directory.path().join("loom.lock"), "tolchain = \"x\"\n").unwrap();
+        assert!(read_dir(directory.path()).is_err());
     }
 
     #[test]

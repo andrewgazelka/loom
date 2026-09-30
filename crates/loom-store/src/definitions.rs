@@ -242,6 +242,27 @@ impl Store {
         let event: Value = serde_json::from_slice(&bytes)?;
         Ok(serde_json::from_value(event["deps"].clone())?)
     }
+    /// [`Self::definition_deps`] for every defined hash in one scan of the events (the first `defined` event
+    /// of a hash wins, as in the single lookup), for callers that need many: a per-hash lookup decodes every
+    /// event each time.
+    pub fn definition_deps_all(&self) -> Result<BTreeMap<String, BTreeMap<String, String>>> {
+        let c = self.lock()?;
+        let mut q = c.prepare(
+            "SELECT json_extract(bytes,'$.def.hash'), json_extract(bytes,'$.deps') FROM definition_events \
+             WHERE json_extract(bytes,'$.type')='defined' ORDER BY seq",
+        )?;
+        let mut all = BTreeMap::new();
+        let rows = q.query_map([], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?)))?;
+        for row in rows {
+            let (Some(hash), deps) = row? else { continue };
+            let deps: BTreeMap<String, String> = match deps {
+                Some(text) => serde_json::from_str(&text).unwrap_or_default(),
+                None => BTreeMap::new(),
+            };
+            all.entry(hash).or_insert(deps);
+        }
+        Ok(all)
+    }
     pub fn name_history(&self, name: &str) -> Result<Vec<loom_proto::NameRevision>> {
         let c = self.lock()?;
         let mut q =

@@ -39,6 +39,10 @@ async fn ask(
         .send()
         .await?;
     let status = response.status();
+    anyhow::ensure!(
+        status != reqwest::StatusCode::PAYLOAD_TOO_LARGE,
+        "{command}: the request is larger than the daemon accepts (16 MiB); import the definitions in smaller directories"
+    );
     let bytes = response.bytes().await?;
     let reply: loom_proto::Response = serde_json::from_slice(&bytes)
         .with_context(|| format!("HTTP {status}: {}", String::from_utf8_lossy(&bytes)))?;
@@ -76,18 +80,29 @@ pub async fn run(
             let names: Option<Vec<String>> = matches
                 .get_many::<String>("names")
                 .map(|names| names.cloned().collect());
-            let reply = ask(client, base, token, session, "export_defs", json!({"names": names})).await?;
+            // `names` absent means all; the daemon takes an array or nothing, never null.
+            let args = match &names {
+                Some(names) => json!({"names": names}),
+                None => json!({}),
+            };
+            let reply = ask(client, base, token, session, "export_defs", args).await?;
             let (docs, hashes) = documents(&reply)?;
             std::fs::create_dir_all(dir)?;
             let lock = Lock {
                 toolchain: reply["toolchain"].as_str().unwrap_or_default().to_owned(),
                 definitions: hashes,
             };
-            loom_defdir::write_dir(dir, &docs, Some(&lock))?;
+            loom_defdir::write_dir(dir, &docs)?;
+            // A subset must not drop the lock entries of the definitions already in the directory.
+            loom_defdir::write_lock(dir, &lock, names.is_some())?;
+            for warning in reply["warnings"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                eprintln!("warning: {warning}");
+            }
             println!(
                 "{}",
                 serde_json::to_string_pretty(&json!({
-                    "dir": dir, "exported": docs.len(), "skipped": reply["skipped"], "toolchain": lock.toolchain,
+                    "dir": dir, "exported": docs.len(), "skipped": reply["skipped"],
+                    "warnings": reply["warnings"], "toolchain": lock.toolchain,
                 }))?
             );
             Ok(true)
@@ -100,10 +115,26 @@ pub async fn run(
                 token,
                 session,
                 "import_defs",
-                json!({"definitions": docs, "expected": lock.as_ref().map(|lock| &lock.definitions)}),
+                json!({
+                    "definitions": docs,
+                    "expected": lock.as_ref().map(|lock| &lock.definitions),
+                    "toolchain": lock.as_ref().map(|lock| &lock.toolchain),
+                }),
             )
             .await?;
             let failed = reply["failed"].as_u64().unwrap_or(0);
+            for mismatch in reply["mismatches"].as_array().into_iter().flatten() {
+                eprintln!(
+                    "warning: {} hashes to {} here, loom.lock says {}",
+                    mismatch["name"], mismatch["got"], mismatch["expected"]
+                );
+            }
+            if !reply["toolchain_mismatch"].is_null() {
+                eprintln!(
+                    "warning: built with compiler {} but loom.lock was written with {}; different hashes are expected",
+                    reply["toolchain_mismatch"]["got"], reply["toolchain_mismatch"]["expected"]
+                );
+            }
             println!("{}", serde_json::to_string_pretty(&reply)?);
             Ok(failed == 0)
         }
@@ -113,7 +144,9 @@ pub async fn run(
             let (daemon, hashes) = documents(&reply)?;
             let rows = loom_defdir::status(&docs, &daemon, lock.as_ref(), &hashes);
             println!("{}", serde_json::to_string_pretty(&rows)?);
-            Ok(rows.iter().all(|row| row.state == "same" && row.lock.is_none()))
+            // `removed` (on the daemon, not in DIR) is information: a shared daemon holds other definitions.
+            // What fails the check is a directory that differs from the daemon.
+            Ok(rows.iter().all(|row| matches!(row.state, "same" | "removed") && row.lock.is_none()))
         }
         other => anyhow::bail!("unknown command {other}"),
     }
