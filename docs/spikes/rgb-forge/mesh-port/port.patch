@@ -1,0 +1,202 @@
+--- a/geom.rs
++++ b/geom.rs
+@@ -4,7 +4,7 @@
+ use glam::{DVec2, DVec3};
+ 
+ /// Axis-aligned bounds (rgb-bvh's, so a BVH query takes them directly).
+-pub use rgb_bvh::Aabb;
++pub use crate::rgb_bvh::Aabb;
+ 
+ /// A plane `normal . p = offset`, `normal` unit length.
+ #[derive(Clone, Copy, Debug, PartialEq)]
+--- a/mesh.rs
++++ b/mesh.rs
+@@ -52,12 +52,11 @@
+ 
+ /// A face's strength for weighted normals (Blender's Set Face Strength):
+ /// around a vertex only the strongest faces pull its normal.
+-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
++#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+ pub enum Strength {
+     /// Bevel strips and fillets: they take the turn.
+     Weak,
+     /// Unmarked.
+-    #[default]
+     Medium,
+     /// Big flat faces that keep their normal.
+     Strong,
+@@ -320,3 +319,9 @@
+         (pos, tris)
+     }
+ }
++
++impl Default for Strength {
++    fn default() -> Self {
++        Strength::Medium
++    }
++}
+--- a/shapes.rs
++++ b/shapes.rs
+@@ -3,6 +3,15 @@
+ //! Every solid comes out closed, outward-facing and welded, faces tagged
+ //! [`SIDE`] or [`CAP`] unless the function says otherwise.
+ 
++use crate::eyre;
++macro_rules! ensure {
++    ($c:expr, $($a:expr),+ $(,)?) => {
++        if !$c {
++            return Err(eyre::Report(format!($($a),+)));
++        }
++    };
++}
++
+ use crate::Mesh;
+ use glam::{DVec2, DVec3};
+ 
+@@ -189,18 +198,18 @@
+ /// Fewer than 3 outer points, zero area, edges that cross (within a ring
+ /// or between rings), or a hole not inside the outer ring.
+ pub fn triangulate(poly: &Poly) -> eyre::Result<(Vec<DVec2>, Vec<[u32; 3]>)> {
+-    eyre::ensure!(
++    ensure!(
+         poly.outer.len() >= 3,
+         "a polygon needs 3 points, got {}",
+         poly.outer.len()
+     );
+-    eyre::ensure!(
++    ensure!(
+         crate::geom::signed_area(&poly.outer).abs() > 1e-18,
+         "polygon of zero area"
+     );
+     let mut pts: Vec<DVec2> = poly.outer.clone();
+     for h in &poly.holes {
+-        eyre::ensure!(h.len() >= 3, "a hole needs 3 points, got {}", h.len());
++        ensure!(h.len() >= 3, "a hole needs 3 points, got {}", h.len());
+         pts.extend_from_slice(h);
+     }
+     let loops = oriented_loops(poly);
+@@ -233,7 +242,7 @@
+             }
+             let p = pts[a as usize];
+             let q = pts[b as usize];
+-            eyre::ensure!(
++            ensure!(
+                 !segments_cross(p, q, pts[c as usize], pts[d as usize]),
+                 "edges cross near ({:.5}, {:.5})",
+                 f64::midpoint(p.x, q.x),
+@@ -242,7 +251,7 @@
+         }
+     }
+     for h in &poly.holes {
+-        eyre::ensure!(
++        ensure!(
+             point_in_polygon(h[0], &poly.outer),
+             "a hole at ({:.5}, {:.5}) lies outside the outline",
+             h[0].x,
+--- a/hull.rs
++++ b/hull.rs
+@@ -259,12 +259,14 @@
+     let idx = |i: usize| u32::try_from(i).ok();
+     let n = p.len();
+     let i0 = (0..n).min_by(|&a, &b| p[a].x.total_cmp(&p[b].x))?;
+-    let far = |f: &dyn Fn(DVec3) -> f64| (0..n).max_by(|&a, &b| f(p[a]).total_cmp(&f(p[b])));
+-    let i1 = far(&|x| x.distance_squared(p[i0]))?;
+-    let line = p[i1] - p[i0];
+-    let i2 = far(&|x| (x - p[i0]).cross(line).length_squared())?;
++    fn far(p: &[DVec3], f: impl Fn(DVec3) -> f64) -> Option<usize> {
++        (0..p.len()).max_by(|&a, &b| f(p[a]).total_cmp(&f(p[b])))
++    }
++    let i1 = far(p, |x| x.distance_squared(p[i0]))?;
++    let line = p[i1] - p[i0];
++    let i2 = far(p, |x| (x - p[i0]).cross(line).length_squared())?;
+     let normal = line.cross(p[i2] - p[i0]);
+-    let i3 = far(&|x| (x - p[i0]).dot(normal).abs())?;
++    let i3 = far(p, |x| (x - p[i0]).dot(normal).abs())?;
+     if orient(p[i0], p[i1], p[i2], p[i3]) == 0.0 {
+         return None;
+     }
+--- a/mass.rs
++++ b/mass.rs
+@@ -1,6 +1,15 @@
+ //! Mass properties from closed surfaces by signed tetrahedra (Tonon 2004's
+ //! closed form, as templekit.py:720 `solid_moments`), and principal frames.
+ 
++use crate::eyre;
++macro_rules! ensure {
++    ($c:expr, $($a:expr),+ $(,)?) => {
++        if !$c {
++            return Err(eyre::Report(format!($($a),+)));
++        }
++    };
++}
++
+ use crate::TriMesh;
+ use crate::hull::Hull;
+ use glam::{DMat3, DVec3};
+@@ -77,7 +86,7 @@
+ 
+ /// templekit.py:741 `props_from_moments`.
+ fn props(m: &Moments, origin: DVec3, density: f64, what: &str) -> eyre::Result<MassProps> {
+-    eyre::ensure!(
++    ensure!(
+         m.vol.is_finite() && m.vol > 0.0,
+         "{what}: non-positive volume {} (open or inverted mesh)",
+         m.vol
+@@ -97,12 +106,12 @@
+     }
+     let inertia = DMat3::from_cols_array_2d(&cols);
+     let com = origin + c;
+-    eyre::ensure!(
++    ensure!(
+         mass.is_finite() && com.is_finite() && cols.iter().flatten().all(|x| x.is_finite()),
+         "{what}: mass properties are not finite"
+     );
+     let low = eigen(inertia).values.min_element();
+-    eyre::ensure!(
++    ensure!(
+         low > 0.0,
+         "{what}: inertia has a moment that is not positive ({low:e})"
+     );
+@@ -131,12 +140,12 @@
+ /// # Errors
+ /// As [`of_mesh`].
+ pub fn of_envelope(hulls: &[Hull], fill: f64, density: f64) -> eyre::Result<MassProps> {
+-    eyre::ensure!(!hulls.is_empty(), "an envelope of no hulls");
++    ensure!(!hulls.is_empty(), "an envelope of no hulls");
+     let origin = hulls[0].centroid();
+     let mut total = Moments::ZERO;
+     for (k, h) in hulls.iter().enumerate() {
+         let m = solid_moments(h.soup().into_iter(), origin);
+-        eyre::ensure!(
++        ensure!(
+             m.vol.is_finite() && m.vol > 0.0,
+             "envelope hull {k} has volume {}",
+             m.vol
+--- a/subdiv.rs
++++ b/subdiv.rs
+@@ -421,13 +421,13 @@
+ 
+ /// The level applied: every per-vertex channel through the stencils.
+ fn assemble(mesh: &Mesh, lv: Level) -> (Mesh, Creases) {
+-    let through = |s: &Stencil, f: &dyn Fn(u32) -> DVec3| {
++    fn through(s: &Stencil, f: impl Fn(u32) -> DVec3) -> DVec3 {
+         s.iter().fold(DVec3::ZERO, |acc, &(v, w)| acc + f(v) * w)
+-    };
++    }
+     let positions: Vec<DVec3> = lv
+         .stencils
+         .iter()
+-        .map(|s| through(s, &|v| mesh.positions[v as usize]))
++        .map(|s| through(s, |v| mesh.positions[v as usize]))
+         .collect();
+     let skin = mesh
+         .skin
+@@ -441,7 +441,7 @@
+             deltas: lv
+                 .stencils
+                 .iter()
+-                .map(|s| through(s, &|v| m.deltas[v as usize]))
++                .map(|s| through(s, |v| m.deltas[v as usize]))
+                 .collect(),
+         })
+         .collect();
