@@ -15,6 +15,7 @@ pub use intake::Preparation;
 mod materialize;
 use materialize::{Materialization, materialize_rust};
 mod cell;
+mod cell_dirs;
 pub use cell::{CELL_HEADER, interactive_cell};
 mod direct;
 pub use direct::WRAPPER_MARKER;
@@ -188,6 +189,8 @@ pub struct Builder {
     /// Long-lived compilers the root compile runs on; shared by every builder
     /// derived from this one, since a served compile keeps no cache state.
     rustc_servers: Arc<direct::RustcServers>,
+    /// Interactive cell directories on disk; see `cell_dirs`.
+    cell_dirs: Arc<cell_dirs::CellDirs>,
 }
 #[derive(Debug)]
 pub struct BuildOutput {
@@ -225,6 +228,7 @@ impl Builder {
             prepared: Arc::default(),
             compiler_dependencies: Arc::default(),
             rustc_servers: Arc::default(),
+            cell_dirs: Arc::default(),
         }
     }
     /// Mutable build workspaces have one owner. Tenant services select their
@@ -242,6 +246,7 @@ impl Builder {
             prepared: Arc::default(),
             compiler_dependencies: self.compiler_dependencies.clone(),
             rustc_servers: self.rustc_servers.clone(),
+            cell_dirs: Arc::default(),
         }
     }
     pub fn cache_directory(&self) -> &Path {
@@ -263,6 +268,7 @@ impl Builder {
             prepared: self.prepared.clone(),
             compiler_dependencies: self.compiler_dependencies.clone(),
             rustc_servers: self.rustc_servers.clone(),
+            cell_dirs: self.cell_dirs.clone(),
         }
     }
     pub async fn preflight(&self) -> Result<(), BuildError> {
@@ -388,6 +394,9 @@ impl Builder {
             && component_serves(&component, definition).is_ok()
         {
             validate_component(&component)?;
+            if profile == BuildProfile::Interactive {
+                self.cell_dirs.touch(&self.cache, &directory);
+            }
             return Ok(BuildOutput {
                 identity: Some(driver.ingest(&self.store, &directory, definition, &component)?),
                 component,
@@ -509,6 +518,9 @@ impl Builder {
         built.logs.push('\n');
         built.logs.push_str(&stages.log_lines());
         fs::write(directory.join("build.log"), &built.logs).await?;
+        if profile == BuildProfile::Interactive {
+            self.cell_dirs.touch(&self.cache, &directory);
+        }
         Ok(BuildOutput {
             identity: Some(identity),
             component,
