@@ -590,3 +590,29 @@ async fn a_callee_that_only_calls_pure_kernels_is_cached_until_the_kernel_versio
     assert_eq!(ran(), 2, "a changed kernel set is a different key");
     Ok(())
 }
+
+#[tokio::test]
+async fn a_cached_kernel_result_is_not_served_to_a_caller_that_may_not_use_kernels() -> Result<()> {
+    let store = Store::memory()?;
+    let hash = register(&store, &kernel_module(4)?, &[("main", 0)], &["kernel"])?;
+    let runtime = Runtime::new(store)?;
+    let kernel = Arc::new(Cbor7(Default::default()));
+    runtime.register_kernel(kernel.clone())?;
+    let allowed = traced();
+    call_main(&runtime, &hash, &[0x80], 0, &allowed).await.unwrap();
+    call_main(&runtime, &hash, &[0x80], 1, &allowed).await.unwrap();
+    assert_eq!(runtime.call_result_stats().hits, 1, "the permitted caller is served from the cache");
+
+    let restricted = EffectContext {
+        allowed: Some(["call".to_owned()].into()),
+        ..traced()
+    };
+    let ran = kernel.0.load(std::sync::atomic::Ordering::Relaxed);
+    let reference = call_main(&runtime, &hash, &[0x80], 3, &allowed).await.unwrap();
+    let hits = runtime.call_result_stats().hits;
+    let outcome = call_main(&runtime, &hash, &[0x80], 2, &restricted).await;
+    assert_eq!(runtime.call_result_stats().hits, hits, "a caller without `kernel` gets no cache hit");
+    assert_eq!(kernel.0.load(std::sync::atomic::Ordering::Relaxed), ran, "and the kernel did not run for it");
+    assert!(outcome.is_err() || outcome.as_ref().is_ok_and(|bytes| *bytes != reference), "{outcome:?}");
+    Ok(())
+}
