@@ -72,6 +72,26 @@ must be measured, it is not in the spike.
 * Results: the guest encodes once into an allocation the host reads in place (native: same address
   space or shared mapping; wasm: one copy out of linear memory, as today).
 
+## Packaging: one cdylib per definition
+
+Decided with the user (2026-09-30): each definition compiles to its own `cdylib` exporting the C ABI from
+the spike (`loom_call_<entry>`, `loom_dealloc`, later `loom_init(&HostApi)`), with arguments and results
+in DAG-CBOR. `cdylib` and not `dylib`: the Rust ABI of a `dylib` is unstable and duplicates generics per
+library, which is tolerable only because the toolchain is pinned, and `rdylib` is not a crate type.
+
+* **Dependencies** stay what they are for wasm: a dependency definition is an `rlib` linked statically, so
+  calls into it are ordinary typed Rust calls. `loom::isolated::call` remains the way to cross into another
+  definition's own instance; natively that is a call through its `cdylib` and a CBOR round trip.
+* **Files**: `<artifact hash>.dylib` (`.so` on Linux) is an object in the store. `dlopen` needs a real
+  path, so it is restored like any spilled object (APFS clone or copy, never a hard link) into a run
+  directory and loaded from there. On arm64 macOS the linker ad-hoc signs it; a restored copy keeps the
+  signature.
+* **Swap**: a new hash loads beside the old one; the old handle is dropped when no call is running. Do not
+  rely on `dlclose` freeing it (macOS keeps libraries with thread-locals), so a long-lived host bounds the
+  number of loaded versions and recycles the worker process.
+* **Size**: each cdylib carries its own copy of the SDK and `serde_ipld_dagcbor`; expect megabytes per
+  definition unless the SDK becomes a shared `dylib` the cells link against (a later, measured decision).
+
 ## Open questions
 
 * Does the compilation/result cache key include the target? It must.
