@@ -60,13 +60,36 @@ impl Callbacks for HashCallbacks {
             coverage::write(tcx, &PathBuf::from(path));
         }
         if self.destination.is_some() {
+            let started = std::time::Instant::now();
             let mut document = graph::collect(tcx);
+            let collected = started.elapsed();
             document.effects = effects::collect(tcx);
+            let analyzed = started.elapsed();
             document.schema = effects::schema(tcx);
             self.document = Some(document);
+            timing(format_args!(
+                "identity graph {} ms, effects {} ms, schema {} ms",
+                collected.as_millis(),
+                (analyzed - collected).as_millis(),
+                (started.elapsed() - analyzed).as_millis()
+            ));
         }
         Compilation::Continue
     }
+}
+
+/// `LOOM_DRIVER_TIMING=1` at driver (or `--loom-serve`) start prints where a
+/// compile's time went to its standard error.
+fn timing(message: std::fmt::Arguments<'_>) {
+    if timing_enabled() {
+        eprintln!("driver-timing: {message}");
+    }
+}
+
+/// Read once, before a server replaces the process environment per request.
+pub(crate) fn timing_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("LOOM_DRIVER_TIMING").is_some())
 }
 
 fn main() -> ExitCode {
@@ -104,7 +127,10 @@ fn compile(args: Vec<String>) -> ExitCode {
             );
             return ExitCode::FAILURE;
         }
+        let started = std::time::Instant::now();
         rustc_driver::run_compiler(&args, &mut callbacks);
+        timing(format_args!("run_compiler {} ms", started.elapsed().as_millis()));
+        let started = std::time::Instant::now();
         if let Some(mut document) = callbacks.document {
             // `rustc -vV` of the compiler this driver links, captured by build.rs;
             // spawning it per compile cost a whole rustc start-up (about 45 ms).
@@ -124,6 +150,7 @@ fn compile(args: Vec<String>) -> ExitCode {
                 eprintln!("hash-rustc: cannot write {}: {error}", path.display());
                 return ExitCode::FAILURE;
             }
+            timing(format_args!("write documents {} ms", started.elapsed().as_millis()));
         }
         ExitCode::SUCCESS
     });

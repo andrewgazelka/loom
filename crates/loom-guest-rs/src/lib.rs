@@ -117,6 +117,9 @@ pub mod cas {
 /// be CBOR null). Codec passes: one decode of the arguments, one encode of the
 /// result; the host copies both payloads without decoding.
 ///
+/// DWARF lines for wrapper instructions name this file (the macro's own
+/// lines), not the guest's: rustc does not collapse them to the call site.
+///
 /// `allow_internal_unsafe` lets this macro carry the `unsafe` it needs while
 /// the guest keeps `-Funsafe-code`: guest source cannot invoke it, because the
 /// checker refuses guest macros and the host appends the call afterwards.

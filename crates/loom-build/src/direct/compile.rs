@@ -15,6 +15,7 @@ pub(crate) struct Request<'a> {
     pub identity_directory: &'a Path,
     /// Served compilers for the root compile; see `server`.
     pub servers: &'a super::RustcServers,
+    pub profile: crate::BuildProfile,
 }
 
 /// Compile the root crate of `directory`. A graph key (manifest, lock, compiler
@@ -32,6 +33,55 @@ pub(crate) struct Request<'a> {
 /// `admission_ms` (cargo metadata, source policy) → `compiler_mirror_ms` →
 /// `cargo_bootstrap_ms` → `root_rustc_ms` →
 /// `artifact_capture_ms` → `identity_publish_ms`.
+/// A stored graph recipe after `rebase_graph` and `restore_sources` for one
+/// workspace. Both walk every unit of the graph (about 75 recipes of hundreds of
+/// arguments each, 27 ms), and their result depends only on these inputs, so a
+/// repeat build of the same lineage replays it. An entry is trusted only while
+/// every unit source it names is still a directory; `forget_rebased` drops a
+/// graph whose stored recipe is being replaced.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct RebasedKey {
+    graph: String,
+    directory: PathBuf,
+    root: PathBuf,
+    cache: PathBuf,
+    sysroot: PathBuf,
+    compiler: String,
+}
+
+static REBASED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<RebasedKey, Recipe>>> =
+    std::sync::OnceLock::new();
+
+fn rebased_recipe(key: &RebasedKey) -> Option<Recipe> {
+    let recipe = REBASED
+        .get_or_init(Default::default)
+        .lock()
+        .expect("rebased recipe memo poisoned")
+        .get(key)
+        .cloned()?;
+    recipe
+        .units
+        .iter()
+        .all(|unit| unit.recipe.source.is_dir())
+        .then_some(recipe)
+}
+
+fn remember_rebased(key: RebasedKey, recipe: &Recipe) {
+    REBASED
+        .get_or_init(Default::default)
+        .lock()
+        .expect("rebased recipe memo poisoned")
+        .insert(key, recipe.clone());
+}
+
+fn forget_rebased(graph: &str) {
+    REBASED
+        .get_or_init(Default::default)
+        .lock()
+        .expect("rebased recipe memo poisoned")
+        .retain(|key, _| key.graph != graph);
+}
+
 const ROOT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(300);
 
 pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
@@ -48,6 +98,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
         driver,
         identity_directory,
         servers,
+        profile,
     } = request;
     // Cargo canonicalizes paths (notably /tmp -> /private/tmp on macOS). Use
     // that same spelling for graph ownership and relocation, not string aliases.
@@ -127,15 +178,28 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
             .is_some();
     stages.checkpoint("compiler_setup_ms");
     let graph_identity = serde_json::json!({"dependency_graph":key});
+    let replay_compiler = driver.path.to_string_lossy().into_owned();
+    let rebased_key = RebasedKey {
+        graph: key.clone(),
+        directory: directory.to_owned(),
+        root: root.to_owned(),
+        cache: cache.to_owned(),
+        sysroot: sysroot.clone(),
+        compiler: replay_compiler.clone(),
+    };
     let stored = if root_build_script {
         None
+    } else if let Some(recipe) = rebased_recipe(&rebased_key) {
+        Some((recipe, true))
     } else {
-        read_graph(store, &key)?
+        read_graph(store, &key)?.map(|recipe| (recipe, false))
     };
-    if let Some(mut recipe) = stored {
-        let replay_compiler = driver.path.to_string_lossy().into_owned();
-        recipe.rebase_graph(root, cache, directory, &sysroot, &replay_compiler)?;
-        recipe.restore_sources(store, cache, &graph)?;
+    if let Some((mut recipe, rebased)) = stored {
+        if !rebased {
+            recipe.rebase_graph(root, cache, directory, &sysroot, &replay_compiler)?;
+            recipe.restore_sources(store, cache, &graph)?;
+            remember_rebased(rebased_key, &recipe);
+        }
         stages.checkpoint("graph_load_ms");
         let mut notes = Vec::new();
         let restored = match recipe.artifacts_stamped(&graph) {
@@ -178,6 +242,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
         if complete {
             fs::create_dir_all(&root_incremental).await?;
             recipe.relocate(directory, &target.join("root-output"), &root_incremental)?;
+            recipe.apply_profile(profile);
             recipe.compiler = driver.path.to_string_lossy().into_owned();
             recipe
                 .environment
@@ -413,6 +478,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
             cache: cache.into(),
             sysroot,
         });
+        forget_rebased(&key);
         write_graph(store, &key, &recipe)?;
     }
     stages.checkpoint("artifact_capture_ms");

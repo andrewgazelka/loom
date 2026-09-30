@@ -35,14 +35,26 @@ impl Service {
         intake.store = self.store.stage_intake()?;
         intake.builder = Arc::new(self.builder.for_store(intake.store.clone()));
         intake
-            .define_staged(request, Some(&self.store), &progress)
+            .define_staged(request, Some(&self.store), &progress, true, loom_build::BuildProfile::Standard)
             .await
     }
     /// Compile one node directly into an already private staged store; update
     /// sessions and bundle imports publish the staged graph as one transaction.
     pub(super) async fn define_update_node(&self, request: DefineRequest) -> Result<Response> {
         let progress = self.build_progress.start(&request.name);
-        self.define_staged(request, None, &progress).await
+        self.define_staged(request, None, &progress, true, loom_build::BuildProfile::Standard)
+            .await
+    }
+    /// Compile one definition into the live store without binding a name to it
+    /// or staging a copy of the store: `eval`'s cells are addressed by hash.
+    pub(super) async fn define_ephemeral(
+        &self,
+        request: DefineRequest,
+        profile: loom_build::BuildProfile,
+    ) -> Result<Response> {
+        let progress = self.build_progress.start(&request.name);
+        self.define_staged(request, None, &progress, false, profile)
+            .await
     }
 
     async fn define_staged(
@@ -50,6 +62,8 @@ impl Service {
         mut request: DefineRequest,
         destination: Option<&Store>,
         progress: &build_progress::BuildGuard,
+        bind_name: bool,
+        profile: loom_build::BuildProfile,
     ) -> Result<Response> {
         progress.stage("check");
         ensure!(
@@ -92,7 +106,7 @@ impl Service {
         progress.stage("compile");
         let built = self
             .builder
-            .build_with_dependencies(&checked, &dependencies)
+            .build_with_profile(&checked, &dependencies, profile)
             .await?;
         if !built.diagnostics.is_empty() {
             return Ok(Response {
@@ -157,7 +171,7 @@ impl Service {
         } else {
             self.store.define_with_identity(
                 &def,
-                Some(&request.name),
+                bind_name.then_some(request.name.as_str()),
                 &request.source,
                 &checked.deps,
                 Some(identity),

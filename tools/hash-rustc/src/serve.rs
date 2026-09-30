@@ -134,6 +134,7 @@ fn handle(request: Request) -> Reply {
 }
 
 pub fn serve(socket: &str) -> ExitCode {
+    crate::timing_enabled();
     // The parent holds our stdin open; its exit closes it.
     std::thread::spawn(|| {
         let mut sink = [0u8; 64];

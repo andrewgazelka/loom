@@ -145,6 +145,7 @@ impl RustcServers {
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("HOME", std::env::var_os("HOME").unwrap_or_default())
+            .envs(std::env::var_os("LOOM_DRIVER_TIMING").map(|value| ("LOOM_DRIVER_TIMING", value)))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())

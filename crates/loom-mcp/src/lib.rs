@@ -230,6 +230,7 @@ pub fn router(directory: impl Into<ServiceDirectory>) -> axum::Router {
 fn command_description(name: &str) -> String {
     match name {
         "update" => "Publish revised Rust source and automatically rebuild callers. Pass expected_hash from the source you edited and a unique request_id to recover this exact session after transport failure. Inspect result.update.status: complete publishes atomically; needs_repair leaves names unchanged and returns repair sources and diagnostics.",
+        "eval" => "Compile one Rust cell and run one of its entries in a single call: the REPL verb. The cell is a root `pub fn` module like any definition; pass entry when it exports several and args as a JSON array. Nothing is named or versioned (use add or update to keep a definition); repeated evals in one session reuse a warm workspace. result.output is the entry's return value, result.timings_ms says where the time went. A compile failure is an error carrying the compiler's diagnostics.",
         "update_view" => "Read a durable update session, its latest revision, affected definitions and compiler diagnostics.",
         "update_repair" => "Apply a batch of source repairs to an update session and retry propagation. Supply the latest revision; stale submissions are rejected. Inspect result.update.status before treating this as published.",
         "update_rebase" => "Replan a conflicted update against current names while retaining repairs. Refuses to overwrite concurrently edited definitions. Supply the latest session revision.",

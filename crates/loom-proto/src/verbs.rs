@@ -173,6 +173,22 @@ pub static VERBS: &[Verb] = &[
         Execute,
         [arg!(target, String), arg!(args, Json, "[]")]
     ),
+    // Define: it compiles source. The handler also requires the execute scope,
+    // because it runs the entry it built.
+    verb!(
+        eval,
+        Definition,
+        Define,
+        [
+            arg!(source, Source),
+            arg!(entry, String, optional),
+            arg!(args, Json, optional),
+            arg!(deps, Map, optional),
+            arg!(session, String, optional),
+            arg!(optimize, Boolean, optional),
+            arg!(allowed_effects, Json, optional)
+        ]
+    ),
     verb!(find, Definition, Read, [arg!(text, String)]),
     verb!(dependents, Definition, Read, [arg!(hash, String)]),
     // Define, not Read: an export persists up to 512 MiB into the live CAS,

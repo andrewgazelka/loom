@@ -151,6 +151,28 @@ async fn lock_cache(cache: &Path) -> Result<CacheLock, BuildError> {
     Ok(CacheLock(file))
 }
 
+/// How much optimization a build asks of the guest compiler. Interactive cells
+/// (`eval`) trade run speed for compile latency: `-C opt-level=0` compiles about
+/// 14 ms sooner on a small cell, and a cell that turns out to compute for long
+/// is rebuilt with `Standard` (`eval`'s `optimize`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BuildProfile {
+    /// The recorded recipe as captured: `-C opt-level=2`.
+    #[default]
+    Standard,
+    /// `-C opt-level=0`.
+    Interactive,
+}
+
+impl BuildProfile {
+    fn tag(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Interactive => "interactive",
+        }
+    }
+}
+
 pub struct Builder {
     store: loom_store::Store,
     root: PathBuf,
@@ -315,6 +337,16 @@ impl Builder {
         definition: &CheckedDef,
         dependencies: &BTreeMap<String, CheckedDef>,
     ) -> Result<BuildOutput, BuildError> {
+        self.build_with_profile(definition, dependencies, BuildProfile::Standard)
+            .await
+    }
+    /// `build_with_dependencies` at an explicit optimization level.
+    pub async fn build_with_profile(
+        &self,
+        definition: &CheckedDef,
+        dependencies: &BTreeMap<String, CheckedDef>,
+        profile: BuildProfile,
+    ) -> Result<BuildOutput, BuildError> {
         let _guard = self.gate.lock().await;
         let _cache_lock = lock_cache(&self.cache).await?;
         let started = Instant::now();
@@ -336,10 +368,12 @@ impl Builder {
         let (toolchain, driver) = self.prepared().await?;
         stages.checkpoint("toolchain_prepare_ms");
         let inputs = format!(
-            "{}:{}",
+            "{}:{}:{}",
             build_fingerprint(&self.root)?,
-            driver.toolchain_hash
+            driver.toolchain_hash,
+            profile.tag()
         );
+        stages.checkpoint("build_fingerprint_ms");
         let cached_inputs = fs::read_to_string(directory.join("component.inputs"))
             .await
             .ok();
@@ -363,6 +397,7 @@ impl Builder {
                 rustc_invocations: 0,
             });
         }
+        stages.checkpoint("component_cache_probe_ms");
         if !is_vendored(definition) && dependencies.values().any(is_vendored) {
             return Err(BuildError::Rejected("A crate using vendored dependencies must be prepared by the isolated vendor worker".into()));
         }
@@ -396,6 +431,7 @@ impl Builder {
             isolated,
         })
         .await?;
+        stages.checkpoint("input_materialization_ms");
         sdk::reconcile(sdk::Rebuild {
             toolchain: &toolchain,
             store: &self.store,
@@ -406,7 +442,7 @@ impl Builder {
             isolated,
         })
         .await?;
-        stages.checkpoint("input_materialization_ms");
+        stages.checkpoint("sdk_reconcile_ms");
         let mut built = direct::build(direct::Request {
             root: &self.root,
             cache: &self.cache,
@@ -419,6 +455,7 @@ impl Builder {
             identity_directory: &directory,
             store: &self.store,
             servers: &self.rustc_servers,
+            profile,
         })
         .await?;
         stages.absorb(built.stages);

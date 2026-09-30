@@ -226,6 +226,25 @@ pub(crate) struct Rebuild<'a> {
     pub definition: &'a CheckedDef,
     pub isolated: bool,
 }
+/// Resolved locks by their inputs. A definition's stored lock is seeded before
+/// the SDK's current manifests exist, so every build of it sees the SDK graph
+/// as changed and used to run `cargo metadata` again (about 70 ms) to derive
+/// the same lock. The result depends only on the lock as materialized, the
+/// workspace lock and the manifest, so it is replayed for a repeat of those
+/// three; a process restart pays one `cargo metadata` per distinct input.
+static RECONCILED: std::sync::OnceLock<std::sync::Mutex<BTreeMap<[u8; 32], Vec<u8>>>> =
+    std::sync::OnceLock::new();
+
+fn reconciled_key(original: &[u8], workspace: &[u8], manifest: &str) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"loom-sdk-reconcile-v1");
+    for part in [original, workspace, manifest.as_bytes()] {
+        hasher.update(&(part.len() as u64).to_le_bytes());
+        hasher.update(part);
+    }
+    *hasher.finalize().as_bytes()
+}
+
 pub(crate) async fn reconcile(job: Rebuild<'_>) -> Result<(), BuildError> {
     let lock_path = job.directory.join("Cargo.lock");
     if !lock_path.is_file() {
@@ -233,11 +252,27 @@ pub(crate) async fn reconcile(job: Rebuild<'_>) -> Result<(), BuildError> {
     }
     let original_bytes = fs::read(&lock_path).await?;
     let original = Lock::parse(&original_bytes)?;
-    let current = Lock::parse(&fs::read(job.root.join("Cargo.lock")).await?)?;
-    let manifest: toml::Value =
-        toml::from_str(&fs::read_to_string(job.directory.join("Cargo.toml")).await?)
-            .map_err(|error| BuildError::Rejected(error.to_string()))?;
+    let workspace_bytes = fs::read(job.root.join("Cargo.lock")).await?;
+    let current = Lock::parse(&workspace_bytes)?;
+    let manifest_text = fs::read_to_string(job.directory.join("Cargo.toml")).await?;
+    let manifest: toml::Value = toml::from_str(&manifest_text)
+        .map_err(|error| BuildError::Rejected(error.to_string()))?;
     if !sdk_graph_changed(&original, &current) {
+        return Ok(());
+    }
+    let memo_key = reconciled_key(&original_bytes, &workspace_bytes, &manifest_text);
+    let memoized = if job.isolated {
+        None
+    } else {
+        RECONCILED
+            .get_or_init(Default::default)
+            .lock()
+            .expect("reconcile memo poisoned")
+            .get(&memo_key)
+            .cloned()
+    };
+    if let Some(updated) = memoized {
+        fs::write(&lock_path, updated).await?;
         return Ok(());
     }
     let overlay = job.cache.join("sdk-overlays").join(&job.definition.hash);
@@ -285,6 +320,13 @@ pub(crate) async fn reconcile(job: Rebuild<'_>) -> Result<(), BuildError> {
     if let Err(error) = validate_pins(&original, &updated, &manifest) {
         fs::write(&lock_path, &original_bytes).await?;
         return Err(error);
+    }
+    if !job.isolated {
+        RECONCILED
+            .get_or_init(Default::default)
+            .lock()
+            .expect("reconcile memo poisoned")
+            .insert(memo_key, updated_bytes.clone());
     }
     if job.isolated && updated.raw != original.raw {
         // Re-vendor into an isolated overlay, then add only package identities

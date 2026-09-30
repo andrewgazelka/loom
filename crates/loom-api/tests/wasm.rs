@@ -15,6 +15,20 @@ use serde_json::json;
 use std::{path::PathBuf, sync::Arc};
 use tower::ServiceExt;
 
+const SOURCE: &str = "fn checksum(bytes: &[u8]) -> u32 {
+    let mut total: u32 = 0;
+    for byte in bytes {
+        total = total.wrapping_mul(31).wrapping_add(u32::from(*byte));
+    }
+    total
+}
+
+pub fn greet(name: String) -> String {
+    let total = checksum(name.as_bytes());
+    format!(\"hello, {name} ({total})\")
+}
+";
+
 const TEST: &str = "wasm_text_joins_greet_instructions_to_its_source_lines";
 
 #[test]
@@ -65,7 +79,9 @@ async fn workflow() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let store = Store::memory().unwrap();
     let service = Service::new(store.clone(), root.clone(), vec![Lang::Rust]).unwrap();
-    let source = std::fs::read_to_string(root.join("examples/unison/greet.rs")).unwrap();
+    // A body the optimizer cannot delete: the loop keeps instructions that join
+    // back to lines of the definition's own file.
+    let source = SOURCE.to_owned();
     let added = service
         .command(CommandRequest {
             session: None,
@@ -161,19 +177,16 @@ async fn workflow() {
         );
         let file = entry["file"].as_str().unwrap();
         let line = entry["line"].as_u64().unwrap();
-        // greet's body is `greeting() + &name`: after inlining every instruction
-        // is either an allocation call attributed to alloc's files or wrapper
-        // code attributed to the generated `loom_call_greet` line, which lies
-        // past the stored file's end. Own-file lines must exist; a line inside
-        // greet's body is not guaranteed.
-        if file.ends_with("src/lib.rs") && line >= greet_start {
+        // After inlining, an instruction is attributed to the definition's own
+        // file, to alloc's files, or to the SDK macro that defines the wrapper.
+        if file == "src/lib.rs" && line >= 1 && line <= source.lines().count() as u64 {
             inside_greet += 1;
         }
     }
     let _ = greet_end;
     assert!(
         inside_greet > 0,
-        "no instruction maps to the definition's own file at or after greet ({greet_start}); first lines {:?}",
+        "no instruction maps to the definition's own file (greet starts at {greet_start}); first lines {:?}",
         &lines[..lines.len().min(10)]
     );
 
@@ -198,7 +211,7 @@ async fn workflow() {
     assert!(
         compiled_lines[marker..]
             .iter()
-            .any(|line| line.contains("export_name = \"loom_call_greet\"")),
+            .any(|line| line.contains("__loom_export_entry!(greet;")),
         "the wrappers follow the marker"
     );
     let wrapper_functions: Vec<(u64, u64)> = functions
@@ -216,30 +229,33 @@ async fn workflow() {
         })
         .collect();
     assert!(!wrapper_functions.is_empty());
+    // Own-file rows index into the compiled text, never into the marker line;
+    // rows from the wrapper macro name the SDK file that defines it, and can
+    // only live in the wrapper functions (a relocation shifted by a constant
+    // would move them into greet's neighbours and fail here).
     let mut wrapper_rows = 0;
     for entry in lines {
-        if !entry["file"].as_str().unwrap().ends_with("src/lib.rs") {
-            continue;
-        }
+        let file = entry["file"].as_str().unwrap();
         let line = entry["line"].as_u64().unwrap() as usize;
-        assert!(
-            (1..=compiled_lines.len()).contains(&line),
-            "own-file line {line} outside the compiled text ({} lines)",
-            compiled_lines.len()
-        );
-        assert_ne!(line, marker, "no instruction comes from the marker comment");
-        if line > marker {
+        if file == "src/lib.rs" {
+            assert!(
+                (1..=compiled_lines.len()).contains(&line),
+                "own-file line {line} outside the compiled text ({} lines)",
+                compiled_lines.len()
+            );
+            assert_ne!(line, marker, "no instruction comes from the marker comment");
+        } else if file.starts_with("/loom/deps/loom-guest-rs-") && file.ends_with("/src/lib.rs") {
             wrapper_rows += 1;
             let wat_line = entry["wat_line"].as_u64().unwrap();
             assert!(
                 wrapper_functions
                     .iter()
                     .any(|(start, end)| (*start..=*end).contains(&wat_line)),
-                "wat line {wat_line} maps to wrapper line {line} but lies outside every wrapper function {wrapper_functions:?}"
+                "wat line {wat_line} maps to SDK wrapper line {line} but lies outside every wrapper function {wrapper_functions:?}"
             );
         }
     }
-    assert!(wrapper_rows > 0, "no instruction maps to a wrapper line");
+    assert!(wrapper_rows > 0, "no instruction maps to the SDK wrapper macro");
     let cache = response_header(&router, &format!("/v1/wasm/{component}"), "cache-control").await;
     assert_eq!(cache, "private, max-age=31536000, immutable");
 

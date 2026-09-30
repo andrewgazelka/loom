@@ -179,6 +179,18 @@ impl Service {
         }
         Ok(json!({"old":old.hash,"new":new.hash,"added":added,"removed":removed,"changed":changed}))
     }
+    /// Call `entry` of `def` with `args` and report its output and effects.
+    pub(super) async fn run_entry(&self, def: &Def, entry: &str, args: Value) -> Result<Value> {
+        let call = self.runtime.call_entry_timed(&def.hash, entry, args).await?;
+        let trace = self
+            .store
+            .load_call_trace(&call.scope)?
+            .context("completed call trace missing")?;
+        let effects = trace.trace.entries.iter().map(|entry| -> Result<Value> {
+            Ok(json!({"descriptor":self.store.get_value::<Value>(&entry.descriptor_hash)?.context("effect descriptor missing")?,"outcome":entry.outcome}))
+        }).collect::<Result<Vec<_>>>()?;
+        Ok(json!({"hash":def.hash,"entry":entry,"output":call.value,"scope":call.scope,"effects":effects}))
+    }
     pub(super) async fn unison(&self, operation: &str, args: &Value) -> Result<Value> {
         match operation {
             "update" | "update_view" | "update_repair" | "update_abort" | "update_rebase" => {
@@ -266,25 +278,14 @@ impl Service {
                     Some(entry) => entry.name.as_str(),
                     None => select_entry(&def, target)?,
                 };
-                let call = self
-                    .runtime
-                    .call_entry_timed(
-                        &def.hash,
-                        entry,
-                        args.get("args").cloned().unwrap_or_else(|| json!([])),
-                    )
-                    .await?;
-                let trace = self
-                    .store
-                    .load_call_trace(&call.scope)?
-                    .context("completed call trace missing")?;
-                let effects = trace.trace.entries.iter().map(|entry| -> Result<Value> {
-                    Ok(json!({"descriptor":self.store.get_value::<Value>(&entry.descriptor_hash)?.context("effect descriptor missing")?,"outcome":entry.outcome}))
-                }).collect::<Result<Vec<_>>>()?;
-                Ok(
-                    json!({"hash":def.hash,"entry":entry,"output":call.value,"scope":call.scope,"effects":effects}),
+                self.run_entry(
+                    &def,
+                    entry,
+                    args.get("args").cloned().unwrap_or_else(|| json!([])),
                 )
+                .await
             }
+            "eval" => self.eval(args).await,
             "find" => {
                 let text = field(args, "text")?;
                 let mut matches = Vec::new();

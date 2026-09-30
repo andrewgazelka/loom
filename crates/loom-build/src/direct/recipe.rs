@@ -422,6 +422,23 @@ impl Recipe {
         Ok(())
     }
 
+    /// Set the root compile's optimization level. The recorded recipe carries
+    /// Cargo's release profile (`-C opt-level=2`); `Standard` leaves it alone.
+    pub(super) fn apply_profile(&mut self, profile: crate::BuildProfile) {
+        let level = match profile {
+            crate::BuildProfile::Standard => return,
+            crate::BuildProfile::Interactive => "opt-level=0",
+        };
+        let mut index = 0;
+        while index + 1 < self.arguments.len() {
+            if self.arguments[index] == "-C" && self.arguments[index + 1].starts_with("opt-level=")
+            {
+                self.arguments[index + 1] = level.into();
+            }
+            index += 1;
+        }
+    }
+
     pub(super) fn shell(&self) -> String {
         fn quote(value: &str) -> String {
             format!("'{}'", value.replace('\'', "'\\''"))

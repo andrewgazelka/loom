@@ -4,6 +4,7 @@ pub mod actors;
 mod bundles;
 mod commands;
 mod definitions;
+mod eval;
 mod evolution;
 mod http;
 mod javascript;
@@ -332,6 +333,7 @@ fn command_returns_direct(command: &str) -> bool {
             | "history"
             | "diff"
             | "run"
+            | "eval"
             | "find"
             | "dependents"
             | "export"

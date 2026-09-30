@@ -160,7 +160,11 @@ pub(super) fn materialize_root_workspace(
         for entry in std::fs::read_dir(source)? {
             let entry = entry?;
             let name = entry.file_name();
-            if root && (name == "component.wasm" || name == "component.inputs") {
+            // Build outputs recorded beside the sources: the compiled text is
+            // generated code (wrappers), not source the admission policy reads.
+            if root
+                && (name == "component.wasm" || name == "component.inputs" || name == "compiled.rs")
+            {
                 continue;
             }
             let output = destination.join(&name);
