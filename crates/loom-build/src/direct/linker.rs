@@ -57,27 +57,25 @@ fn find_with(
     lld.is_file().then_some(Front { link, lld })
 }
 
-/// The `host:` triple of the sysroot's compiler, from `<sysroot>/bin/rustc -vV` run once per
-/// sysroot and process (the builder's `GuestToolchain::version` holds the same text, but the
-/// recipe builder that calls `find` is not handed it).
+/// The `host:` triple of the sysroot's compiler, from `<sysroot>/bin/rustc -vV`, remembered per
+/// sysroot and process once it is known (the builder's `GuestToolchain::version` holds the same
+/// text, but the recipe builder that calls `find` is not handed it). A failure is not remembered,
+/// so a compiler that was not yet installed, or a transient spawn error, is asked again; the
+/// compiler runs outside the lock.
 fn host_triple(sysroot: &Path) -> Option<String> {
-    static HOSTS: OnceLock<Mutex<BTreeMap<PathBuf, Option<String>>>> = OnceLock::new();
-    HOSTS
-        .get_or_init(Default::default)
-        .lock()
-        .ok()?
-        .entry(sysroot.to_owned())
-        .or_insert_with(|| {
-            let output = std::process::Command::new(sysroot.join("bin/rustc"))
-                .arg("-vV")
-                .output()
-                .ok()?;
-            output
-                .status
-                .success()
-                .then(|| parse_host(&String::from_utf8_lossy(&output.stdout)))?
-        })
-        .clone()
+    static HOSTS: OnceLock<Mutex<BTreeMap<PathBuf, String>>> = OnceLock::new();
+    let hosts = HOSTS.get_or_init(Default::default);
+    if let Some(host) = hosts.lock().ok()?.get(sysroot) {
+        return Some(host.clone());
+    }
+    let output = std::process::Command::new(sysroot.join("bin/rustc"))
+        .arg("-vV")
+        .output()
+        .ok()?;
+    let host =
+        parse_host(&String::from_utf8_lossy(&output.stdout)).filter(|_| output.status.success())?;
+    hosts.lock().ok()?.insert(sysroot.to_owned(), host.clone());
+    Some(host)
 }
 
 fn parse_host(version: &str) -> Option<String> {
@@ -114,6 +112,8 @@ mod tests {
             .collect();
         std::fs::write(&rustc, format!("#!/bin/sh\n{script}")).unwrap();
         std::fs::set_permissions(&rustc, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let rustc_copy = sysroot.path().join("rustc-copy");
+        std::fs::copy(&rustc, &rustc_copy).unwrap();
         assert_eq!(
             host_triple(sysroot.path()).as_deref(),
             Some("aarch64-apple-darwin")
@@ -124,9 +124,16 @@ mod tests {
             host_triple(sysroot.path()).as_deref(),
             Some("aarch64-apple-darwin")
         );
-        // A sysroot without a compiler has no host, and so no pre-armed linker.
-        let empty = tempfile::tempdir().unwrap();
-        assert_eq!(host_triple(empty.path()), None);
+        // A sysroot without a compiler has no host, and so no pre-armed linker; the failure is not
+        // remembered, so the compiler is found once it exists.
+        let later = tempfile::tempdir().unwrap();
+        assert_eq!(host_triple(later.path()), None);
+        std::fs::create_dir_all(later.path().join("bin")).unwrap();
+        std::fs::copy(&rustc_copy, later.path().join("bin/rustc")).unwrap();
+        assert_eq!(
+            host_triple(later.path()).as_deref(),
+            Some("aarch64-apple-darwin")
+        );
     }
 
     #[test]

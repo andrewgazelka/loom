@@ -126,8 +126,11 @@ impl Builder {
                 Ok(command)
             };
             // A supplied lock that passed validation (`locked_registry`) implies `pinned` here:
-            // resolution always starts offline, so cargo cannot move a pin or add a package to
-            // the stored lock from the network without the caller's checksum.
+            // resolution always starts offline, whether or not the manifests name a registry
+            // crate, so cargo cannot move a pin or add a package to the stored lock from the
+            // network without the caller's checksum. The price: with a valid lock, a cold cargo
+            // registry cache is an error naming `LOOM_ALLOW_CARGO_FETCH`, also for a graph of
+            // only the SDK's own crates.
             let offline = supplied_lock.is_some();
             debug_assert_eq!(offline, locked_registry);
             let output = run_preparation(metadata(offline)?).await?;
@@ -385,19 +388,32 @@ const DEFAULT_MANIFEST: &str = "[package]\nname=\"loom-definition\"\nversion=\"0
 /// The most packages a caller-supplied lock may name; each one is fetched and compiled.
 const MAX_LOCK_PACKAGES: usize = 512;
 
-/// What `cargo metadata --offline` prints when the registry cache lacks an index entry or an
-/// archive the lock needs (cargo's network layer, and its resolver's offline reminder).
-/// Any other failure, including one whose text merely mentions "offline", is not retried online.
-const OFFLINE_CACHE_MISS: [&str; 3] = [
+/// The cause lines `cargo metadata --offline` prints when the registry cache lacks an index entry
+/// or an archive the lock needs: from cargo's network layer, and the resolver's offline note.
+const OFFLINE_CACHE_MISS: [&str; 2] = [
     "attempting to make an HTTP request, but --offline was specified",
-    "you're using offline mode (--offline)",
     "note: offline mode (via `--offline` flag)",
 ];
 
+/// Whether a failed offline `cargo metadata` failed only because the cache lacks something, the
+/// one failure an online retry can fix (and only if the daemon allows it). Cargo's first line
+/// must be an `error:` that is not a manifest or lock parse failure, and one of the cause lines
+/// must be a whole line of the output (after its indentation), not text inside a line: a parse
+/// error quotes the manifest's own lines, each behind a line number and a bar, so a manifest
+/// cannot talk cargo's output into retrying. The status is known to be failing by the caller.
+/// Every other failure, including one that mentions "offline", is final.
 fn is_offline_cache_miss(stderr: &str) -> bool {
-    OFFLINE_CACHE_MISS
-        .iter()
-        .any(|message| stderr.contains(message))
+    let mut lines = stderr.lines().filter(|line| !line.trim().is_empty());
+    let first = lines.next().unwrap_or_default();
+    first.starts_with("error: ")
+        && !first.starts_with("error: failed to parse")
+        && !first.starts_with("error: could not parse")
+        && stderr.lines().any(|line| {
+            let line = line.trim_start();
+            OFFLINE_CACHE_MISS
+                .iter()
+                .any(|message| line == *message || line.starts_with(&format!("{message} ")))
+        })
 }
 
 /// The one registry a caller-supplied lock may name.
@@ -735,10 +751,10 @@ mod tests {
     #[test]
     fn only_a_missing_offline_cache_entry_is_retried_online_and_a_lock_has_a_size_cap() {
         assert!(is_offline_cache_miss(
-            "error: failed to download from `https://index.crates.io/x`\n\nCaused by:\n  attempting to make an HTTP request, but --offline was specified"
+            "error: failed to download from `https://index.crates.io/x`\n\nCaused by:\n  attempting to make an HTTP request, but --offline was specified\n"
         ));
         assert!(is_offline_cache_miss(
-            "error: no matching package named `x` found\nnote: offline mode (via `--offline` flag) can sometimes cause surprising resolution failures"
+            "error: no matching package named `x` found\nlocation searched: registry `crates-io`\nnote: offline mode (via `--offline` flag) can sometimes cause surprising resolution failures\n"
         ));
         // A failure that only mentions the word, or is about something else, is final.
         assert!(!is_offline_cache_miss(
@@ -746,6 +762,18 @@ mod tests {
         ));
         assert!(!is_offline_cache_miss(
             "error: the lock file needs to be updated"
+        ));
+        assert!(!is_offline_cache_miss(""));
+        // A manifest error quotes the manifest: the same words inside a quoted line, or behind an
+        // `error:` that is a parse failure, do not count.
+        assert!(!is_offline_cache_miss(
+            "error: failed to parse manifest at `/x/Cargo.toml`\n\nCaused by:\n  TOML parse error at line 3, column 1\n  |\n3 | attempting to make an HTTP request, but --offline was specified\n  | ^\n"
+        ));
+        assert!(!is_offline_cache_miss(
+            "error: invalid character in package name\n  |\n3 | name = \"attempting to make an HTTP request, but --offline was specified\"\n"
+        ));
+        assert!(!is_offline_cache_miss(
+            "warning: x\nerror: failed to parse manifest\n  attempting to make an HTTP request, but --offline was specified\n"
         ));
         let packages = |count: usize| {
             lock(

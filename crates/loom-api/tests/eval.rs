@@ -86,7 +86,10 @@ async fn eval_names_the_entry_when_the_cell_exports_several() {
     let ambiguous = eval(&service, json!({"source":source})).await;
     assert!(!ambiguous.ok);
     let message = ambiguous.result["error"].as_str().unwrap().to_owned();
-    assert!(message.contains("one") && message.contains("two"), "{message}");
+    assert!(
+        message.contains("one") && message.contains("two"),
+        "{message}"
+    );
     let chosen = eval(&service, json!({"source":source,"entry":"two"})).await;
     assert!(chosen.ok, "{chosen:?}");
     assert_eq!(chosen.result["output"], 2);
@@ -208,12 +211,19 @@ async fn eval_runs_a_bare_block_as_a_cell() {
     assert_eq!(reply.result["entry"], "eval");
 
     // A compile error in a bare cell keeps the line the caller wrote.
-    let broken = eval(&service, json!({"source":"let x = 1;\nlet y: u8 = \"no\";\ny"})).await;
+    let broken = eval(
+        &service,
+        json!({"source":"let x = 1;\nlet y: u8 = \"no\";\ny"}),
+    )
+    .await;
     assert!(!broken.ok);
     let message = broken.result["error"].as_str().unwrap();
     assert!(message.contains("mismatched types"), "{message}");
     assert!(
-        broken.diagnostics.iter().any(|diagnostic| diagnostic.line == 2),
+        broken
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.line == 2),
         "the error is on the second line the caller wrote: {:?}",
         broken.diagnostics
     );
@@ -248,9 +258,25 @@ async fn eval_uses_glam_whose_tests_directory_and_dormant_include_are_not_compil
         "928452f9c953e142b2f0973e4bd5f34445fcaa8069556ea97a3c9d34d15a4cf8",
     );
     let cell = "use glam::DVec3;\nlet a = DVec3::new(1.0, 2.0, 3.0);\n(a.cross(DVec3::Y).length() * 1000.0) as u32";
-    let reply = eval(&service, json!({"source":cell,"manifest":manifest,"lock":lock})).await;
+    let reply = eval(
+        &service,
+        json!({"source":cell,"manifest":manifest,"lock":lock}),
+    )
+    .await;
     assert!(reply.ok, "{reply:?}");
     assert_eq!(reply.result["output"], 3162);
+}
+
+#[tokio::test]
+#[ignore = "requires Rust guest toolchain and LOOM_COMPILER_CACHE_OWNER"]
+async fn eval_accepts_cells_that_name_variables_like_the_words_admission_watches() {
+    // `path`, `link` and `env` are ordinary identifiers as macro arguments; only a macro that glues
+    // a metavariable into an attribute or a macro name is refused, where it is defined.
+    let service = service();
+    let cell = "let path = \"a/b\";\nlet link = 3usize;\nlet env = vec![1, 2];\nformat!(\"{path} {} {:?} {}\", link, env, path.len())";
+    let reply = eval(&service, json!({"source":cell})).await;
+    assert!(reply.ok, "{reply:?}");
+    assert_eq!(reply.result["output"], "a/b 3 [1, 2] 3");
 }
 
 const CRATES_IO: &str = "registry+https://github.com/rust-lang/crates.io-index";

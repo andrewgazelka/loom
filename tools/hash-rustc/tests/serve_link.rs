@@ -124,9 +124,26 @@ fn a_new_server_reaps_the_lld_and_directory_a_dead_server_left_behind() {
     std::fs::create_dir(&recycled_directory).unwrap();
     let mut unrelated = Command::new("sleep").arg("20").spawn().unwrap();
     std::fs::write(recycled_directory.join("pid"), unrelated.id().to_string()).unwrap();
-    // A live server's directory (this test process is its owner) is left alone, lld and all.
+    // A live server's directory is left alone, lld and all: its lock is held (this test process plays
+    // the server, whose pid is also in the name).
     let live_directory = temp.path().join(format!("hash-rustc-link-{}-0", std::process::id()));
     std::fs::create_dir(&live_directory).unwrap();
+    let live_lock = std::fs::File::create(live_directory.join("lock")).unwrap();
+    live_lock.try_lock().unwrap();
+    // A dead server whose pid has been recycled by a live process (here, this one): the name says
+    // the owner lives, but nothing holds the lock, so the directory is an orphan.
+    let recycled_owner = temp.path().join(format!("hash-rustc-link-{}-7", std::process::id()));
+    std::fs::create_dir(&recycled_owner).unwrap();
+    std::fs::File::create(recycled_owner.join("lock")).unwrap();
+    // A dead server's directory whose lld cannot be told from its command line (an `rust-lld` that
+    // names another directory) is kept, with its pid file, rather than forgotten.
+    let other_directory = temp.path().join(format!("hash-rustc-link-{dead_server}-2"));
+    std::fs::create_dir(&other_directory).unwrap();
+    let mut elsewhere = Command::new(&lld)
+        .args(["-flavor", "wasm", "@/nonexistent/args"])
+        .spawn()
+        .unwrap();
+    std::fs::write(other_directory.join("pid"), elsewhere.id().to_string()).unwrap();
     let mut live = Command::new(&lld)
         .args(["-flavor", "wasm"])
         .arg(format!("@{}", live_directory.join("args").display()))
@@ -136,7 +153,14 @@ fn a_new_server_reaps_the_lld_and_directory_a_dead_server_left_behind() {
 
     let _server = Server::start(temp.path());
 
-    assert!(!orphan_directory.exists() && !recycled_directory.exists());
+    assert!(!orphan_directory.exists() && !recycled_directory.exists() && !recycled_owner.exists());
+    assert!(
+        other_directory.join("pid").exists() && elsewhere.try_wait().unwrap().is_none(),
+        "an lld that is not provably this directory's is neither killed nor forgotten"
+    );
+    let _ = elsewhere.kill();
+    let _ = elsewhere.wait();
+    drop(live_lock);
     assert_eq!(
         orphan.wait().unwrap().signal(),
         Some(9),

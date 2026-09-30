@@ -5,6 +5,26 @@ use super::*;
 /// the builder's memoized resolution; `compiler_sysroot` is `Some` when the
 /// compiler's own library sources must be admitted as well (every real build;
 /// tests of the package walk pass `None`).
+/// Top-level directories of the root package that `inspect_untrusted_source` does not read: the
+/// host places vendored sources, pinned crates and cargo configuration there. Mirrored by
+/// `UNSCANNED_ROOTS` in loom-check's `safety.rs`, which refuses declared target paths and
+/// `include!` paths that land in them.
+const SKIPPED_ROOTS: [&str; 3] = ["vendor", "loom-crates", ".cargo"];
+
+/// Whether `relative` (a path below the package) starts in a skipped directory. ASCII case is
+/// ignored: on a case-insensitive file system `Vendor/` is `vendor/`.
+fn in_skipped_root(relative: &Path) -> bool {
+    relative
+        .components()
+        .next()
+        .and_then(|first| first.as_os_str().to_str())
+        .is_some_and(|first| {
+            SKIPPED_ROOTS
+                .iter()
+                .any(|root| first.eq_ignore_ascii_case(root))
+        })
+}
+
 pub(super) async fn graph_shareable(
     root: &Path,
     cache: &Path,
@@ -107,6 +127,19 @@ pub(super) async fn graph_shareable(
                 let input = Path::new(input).canonicalize()?;
                 if !input.starts_with(source.canonicalize()?) {
                     return Err(rejected("compiler source escapes admitted package"));
+                }
+                // The root package's scan skips its top-level `vendor/`, `loom-crates/` and
+                // `.cargo/`, and a tenant can ship files there: a target compiled from one would
+                // have only its entry file read, and its `mod` files and `include!`s not at all.
+                if is_root
+                    && input
+                        .strip_prefix(directory.canonicalize()?)
+                        .is_ok_and(in_skipped_root)
+                {
+                    return Err(rejected(format!(
+                        "target {} lies in a directory the source scan does not read",
+                        input.display()
+                    )));
                 }
                 let diagnostics =
                     loom_check::untrusted_source_diagnostics(&std::fs::read_to_string(&input)?);
@@ -251,11 +284,9 @@ pub(super) fn inspect_untrusted_source(
             let name = entry.file_name();
             // Host-placed trees of the root package. A tenant can also ship a `vendor/` directory
             // (materialize.rs accepts `vendor/` files), which this skips, so `include!` refuses a
-            // path whose first component is one of these names (`UNSCANNED_ROOTS` in
-            // loom-check's rust_effects/admission.rs): nothing compiled can reach an unscanned file.
-            if generated_root
-                && ["vendor", "loom-crates", ".cargo"].contains(&name.to_string_lossy().as_ref())
-            {
+            // path that lands in one of these directories, and a root target may not start there
+            // (`graph_shareable`): nothing compiled can reach an unscanned file.
+            if generated_root && SKIPPED_ROOTS.contains(&name.to_string_lossy().as_ref()) {
                 continue;
             }
             let path = entry.path();
@@ -400,5 +431,82 @@ mod tests {
             ("vendor/hidden.rs", "#[no_mangle] pub fn f() {}\n"),
         ];
         assert!(scanned(&files, true).is_err());
+    }
+
+    #[test]
+    fn a_root_target_cannot_be_compiled_from_a_directory_the_scan_skips() {
+        let scanned = |manifest_tail: &str, files: &[(&str, &str)]| {
+            let manifest = format!("{MANIFEST}{manifest_tail}");
+            let mut all = vec![("Cargo.toml", manifest.as_str())];
+            all.extend_from_slice(files);
+            let directory = package(&all);
+            let root = directory.path().canonicalize().unwrap();
+            inspect_untrusted_source(&root, true, None)
+        };
+        let lib = ("src/lib.rs", "pub fn f() {}\n");
+        // The declared path is refused whatever the case (macOS file systems ignore it), and so is an
+        // include! that lands there from any including file, at any depth of the including file.
+        for path in [
+            "vendor/main.rs",
+            "Vendor/main.rs",
+            "loom-crates/main.rs",
+            ".cargo/main.rs",
+        ] {
+            let tail = format!("[[bin]]\nname=\"tool\"\npath=\"{path}\"\n");
+            assert!(scanned(&tail, &[lib]).is_err(), "{path}");
+        }
+        for include in [
+            "vendor/y.rs",
+            "Vendor/y.rs",
+            "./vendor/y.rs",
+            "loom-crates/y.rs",
+        ] {
+            let body = format!("include!(\"{include}\");\n");
+            assert!(
+                scanned("", &[lib, ("lib2.rs", body.as_str())]).is_err(),
+                "{include}"
+            );
+        }
+        // Below `src/` the same names are ordinary directories the scan reads.
+        assert!(
+            scanned(
+                "",
+                &[
+                    lib,
+                    ("src/inner.rs", "include!(\"vendor/y.rs\");\n"),
+                    ("src/vendor/y.rs", "pub fn y() {}\n")
+                ]
+            )
+            .is_ok()
+        );
+        assert!(
+            scanned(
+                "",
+                &[
+                    lib,
+                    ("src/inner.rs", "include!(\"vendor/y.rs\");\n"),
+                    ("src/vendor/y.rs", "#[no_mangle] pub fn y() {}\n")
+                ]
+            )
+            .is_err()
+        );
+        assert!(
+            in_skipped_root(Path::new("vendor/x.rs")) && in_skipped_root(Path::new("VENDOR/x.rs"))
+        );
+        assert!(
+            !in_skipped_root(Path::new("src/vendor/x.rs"))
+                && !in_skipped_root(Path::new("vendored/x.rs"))
+        );
+    }
+
+    #[test]
+    fn a_dependency_may_keep_its_own_vendor_directory_below_its_source() {
+        let dependency = package(&[
+            ("Cargo.toml", MANIFEST),
+            ("src/lib.rs", "include!(\"vendor/table.rs\");\n"),
+            ("src/vendor/table.rs", "pub fn t() -> u32 { 1 }\n"),
+        ]);
+        let root = dependency.path().canonicalize().unwrap();
+        inspect_untrusted_source(&root, false, Some(&[root.join("src")])).unwrap();
     }
 }

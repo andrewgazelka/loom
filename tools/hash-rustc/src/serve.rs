@@ -145,12 +145,16 @@ fn exit_record(status: std::io::Result<std::process::ExitStatus>) -> (i32, Optio
 /// `args` (the fifo), and what `loom-link` reads back. It is removed by `finish`, and by `Drop` on
 /// an early return or panic. A server that dies with a request in flight (SIGKILL, a crash, being
 /// discarded after a timeout) leaves it and a blocked lld behind: the next server's `sweep_orphans`
-/// reaps both.
+/// reaps both. Whether a directory's server is alive is told by a lock, not by its pid in the
+/// name (pids are recycled, and macOS wraps at 99999): the server holds an exclusive `flock` on
+/// `<dir>/lock` while the directory exists, and the kernel drops it when the server dies.
 struct Armed {
     directory: std::path::PathBuf,
     pid: i32,
     waiter: Option<std::thread::JoinHandle<()>>,
     released: bool,
+    /// Held for as long as the directory exists; see above.
+    _lock: std::fs::File,
 }
 
 impl Armed {
@@ -164,7 +168,9 @@ impl Armed {
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::DirBuilder::new().mode(0o700).create(&directory).ok()?;
-        let launch = |directory: &std::path::Path| -> Option<(i32, std::thread::JoinHandle<()>)> {
+        let launch = |directory: &std::path::Path| -> Option<(i32, std::thread::JoinHandle<()>, std::fs::File)> {
+            let lock = std::fs::File::create(directory.join("lock")).ok()?;
+            lock.try_lock().ok()?;
             std::fs::write(directory.join("version"), LINK_PROTOCOL).ok()?;
             let pipe = directory.join("args");
             let c_pipe = std::ffi::CString::new(pipe.as_os_str().as_bytes()).ok()?;
@@ -212,14 +218,16 @@ impl Armed {
                         let _ = std::fs::rename(&temporary, &status);
                     }
                 }),
+                lock,
             ))
         };
         match launch(&directory) {
-            Some((pid, waiter)) => Some(Self {
+            Some((pid, waiter, lock)) => Some(Self {
                 directory,
                 pid,
                 waiter: Some(waiter),
                 released: false,
+                _lock: lock,
             }),
             None => {
                 let _ = std::fs::remove_dir_all(&directory);
@@ -257,8 +265,14 @@ impl Armed {
         {
             let _ = waiter.join();
         }
-        // A waiter still blocked is detached and ends with its lld; the directory goes either way.
-        let _ = std::fs::remove_dir_all(&self.directory);
+        // A waiter still blocked is detached and ends with its lld. It may create `status.tmp`
+        // while the directory is being emptied, which makes one removal fail: try again briefly.
+        for _ in 0..10 {
+            if std::fs::remove_dir_all(&self.directory).is_ok() || !self.directory.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 }
 
@@ -278,26 +292,100 @@ fn process_exists(pid: u32) -> bool {
     unsafe { kill(pid, 0) == 0 || std::io::Error::last_os_error().raw_os_error() == Some(1) }
 }
 
-/// Whether `pid` is still the `rust-lld` that waits on `directory`'s pipe: its command line, as
-/// `ps` prints it, names both. A recycled pid fails this and is left alone.
-fn is_waiting_lld(pid: i32, directory: &std::path::Path) -> bool {
+/// What `ps` says of a process.
+enum Process {
+    /// No such process, or a zombie (dead, only not yet reaped by its parent).
+    Gone,
+    /// Running, with its command line.
+    Live(String),
+    /// `ps` could not be asked.
+    Unknown,
+}
+
+fn process_state(pid: i32) -> Process {
     let Ok(output) = std::process::Command::new("ps")
-        .args(["-o", "command=", "-p"])
+        .args(["-o", "stat=", "-o", "command=", "-p"])
         .arg(pid.to_string())
         .output()
     else {
-        return false;
+        return Process::Unknown;
     };
-    let command = String::from_utf8_lossy(&output.stdout);
-    output.status.success()
-        && command.contains("rust-lld")
-        && command.contains(directory.to_string_lossy().as_ref())
+    let text = String::from_utf8_lossy(&output.stdout);
+    let text = text.trim();
+    if !output.status.success() || text.is_empty() {
+        return Process::Gone;
+    }
+    let (state, command) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
+    if state.starts_with('Z') {
+        Process::Gone
+    } else {
+        Process::Live(command.trim().to_owned())
+    }
 }
 
-/// Reap what servers that died in the middle of a request left in `root`: for every
-/// `hash-rustc-link-<pid>-<n>` directory of ours whose server `<pid>` is gone (or is this process,
-/// which has created nothing yet, so the directory is an earlier process's with the same pid), kill
-/// the lld named in its `pid` file if it is still that lld, then remove the directory.
+/// Kill the lld recorded for an orphaned `directory` and report whether the directory may go: the
+/// lld is gone (never started, already dead, or killed and seen gone), or its pid now belongs to an
+/// unrelated process. An `rust-lld` that cannot be tied to this directory's pipe (another spelling
+/// of the path), a failed kill and a missing `ps` keep the directory, so the lld is not lost
+/// track of; the next startup tries again.
+fn reap_lld(directory: &std::path::Path) -> bool {
+    let Some(pid) = std::fs::read_to_string(directory.join("pid"))
+        .ok()
+        .and_then(|text| text.trim().parse::<i32>().ok())
+        .filter(|pid| *pid > 1)
+    else {
+        return true;
+    };
+    match process_state(pid) {
+        Process::Gone => true,
+        Process::Unknown => false,
+        Process::Live(command) if !command.contains("rust-lld") => true,
+        Process::Live(command) => {
+            if !command.contains(directory.to_string_lossy().as_ref()) {
+                return false;
+            }
+            // SAFETY: the process was just seen to be that lld.
+            unsafe { kill(pid, SIGKILL) };
+            let started = std::time::Instant::now();
+            while started.elapsed() < RELEASE_PATIENCE {
+                if matches!(process_state(pid), Process::Gone) {
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            false
+        }
+    }
+}
+
+/// Whether the server that made `directory` is gone, and if so the lock to hold while it is cleaned
+/// up (`Some(None)`: nothing to hold). A held lock means a live server, whatever the pid in the name
+/// says; a lock that can be taken means a dead one. Without a lock file (a server that died before
+/// creating it, or one that is still about to) the pid in the name decides: this process's own
+/// (nothing of it exists yet at startup) or a process that does not exist is dead.
+fn orphaned(directory: &std::path::Path, owner: u32, own: u32) -> Option<Option<std::fs::File>> {
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .open(directory.join("lock"))
+        .ok();
+    let taken = match &lock {
+        Some(file) => match file.try_lock() {
+            Ok(()) => Some(true),
+            Err(std::fs::TryLockError::WouldBlock) => return None,
+            Err(_) => None,
+        },
+        None => None,
+    };
+    if taken == Some(true) || owner == own || !process_exists(owner) {
+        Some(lock)
+    } else {
+        None
+    }
+}
+
+/// Reap what servers that died in the middle of a request left in `root`: every
+/// `hash-rustc-link-<pid>-<n>` directory of ours whose server is gone (see `orphaned`) loses its
+/// lld (see `reap_lld`) and is removed.
 fn sweep_orphans(root: &std::path::Path) {
     use std::os::unix::fs::MetadataExt;
     let Ok(entries) = std::fs::read_dir(root) else {
@@ -316,9 +404,6 @@ fn sweep_orphans(root: &std::path::Path) {
         else {
             continue;
         };
-        if owner != own && process_exists(owner) {
-            continue;
-        }
         // `DirEntry::metadata` does not follow links; another user's directory is not ours to touch.
         let Ok(metadata) = entry.metadata() else {
             continue;
@@ -327,17 +412,13 @@ fn sweep_orphans(root: &std::path::Path) {
             continue;
         }
         let directory = entry.path();
-        let pid = std::fs::read_to_string(directory.join("pid"))
-            .ok()
-            .and_then(|text| text.trim().parse::<i32>().ok())
-            .filter(|pid| *pid > 1);
-        if let Some(pid) = pid
-            && is_waiting_lld(pid, &directory)
-        {
-            // SAFETY: the process was just verified to be that lld.
-            unsafe { kill(pid, SIGKILL) };
+        // Held until the directory is gone, so nothing else claims it meanwhile.
+        let Some(_guard) = orphaned(&directory, owner, own) else {
+            continue;
+        };
+        if reap_lld(&directory) {
+            let _ = std::fs::remove_dir_all(&directory);
         }
-        let _ = std::fs::remove_dir_all(&directory);
     }
 }
 
@@ -385,6 +466,10 @@ fn handle(request: Request) -> Reply {
             return failed(error);
         }
     };
+    // A directory named by the request itself is not one this server made: `loom-link` would wait
+    // on whatever it names. Only an `Armed` of this request may set it.
+    // SAFETY: as above, requests are served one at a time.
+    unsafe { std::env::remove_var("LOOM_LINK_DIR") };
     let armed = request
         .env
         .get("LOOM_LINK_ARM")
