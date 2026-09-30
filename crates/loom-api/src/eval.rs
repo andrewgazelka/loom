@@ -18,10 +18,10 @@ impl Service {
     /// On a fresh build cache the graph is 75 compiles (about 20 s); every cell
     /// after it takes under 100 ms. `loomd` runs this once after it listens.
     pub async fn prewarm_repl(&self) -> Result<()> {
-        self.eval(&json!({"source":"0"})).await.map(|_| ())
+        self.eval(&json!({"source":"0"}), None).await.map(|_| ())
     }
 
-    pub(super) async fn eval(&self, args: &Value) -> Result<Value> {
+    pub(super) async fn eval(&self, args: &Value, token: Option<call_cancel::CancelToken>) -> Result<Value> {
         let started = Instant::now();
         self.access.require(Scope::Execute)?;
         let source = field(args, "source")?;
@@ -62,9 +62,26 @@ impl Service {
         };
         request.deps = resolve_dependency_pins(&self.store, &request.deps)?;
 
+        // The build runs as its own task: if this call is cancelled while it builds, the build still
+        // finishes and is cached (dropping the future would kill the warm compiler server), and only the
+        // run after it is abandoned. A build still waiting for the gate when cancelled is skipped.
         let response = {
-            let _guard = self.definitions_gate.lock().await;
-            self.define_ephemeral(request, profile).await?
+            let service = self.clone();
+            let gate_token = token.clone();
+            let build = tokio::spawn(async move {
+                let _guard = service.definitions_gate.lock().await;
+                if gate_token.as_ref().is_some_and(call_cancel::CancelToken::is_cancelled) {
+                    anyhow::bail!("call cancelled before it started building");
+                }
+                service.define_ephemeral(request, profile).await
+            });
+            match &token {
+                Some(token) => tokio::select! {
+                    built = build => built??,
+                    () = token.cancelled() => anyhow::bail!("call cancelled"),
+                },
+                None => build.await??,
+            }
         };
         let built = started.elapsed();
         if !response.ok {
@@ -73,7 +90,12 @@ impl Service {
             // re-wrapped), so its line numbers count that text; report lines of the text the caller sent.
             let map = loom_check::rust_original_lines(&cell);
             for diagnostic in &mut response.diagnostics {
-                let own_file = matches!(diagnostic.file.as_str(), "" | "src/lib.rs" | "compiled.rs");
+                // Only rustc's diagnostics count the compiler's text. The checker's (LOOM_*, RUST_PARSE) carry a
+                // placeholder location that is not a line of anything.
+                let from_rustc =
+                    !(diagnostic.code.starts_with("LOOM_") || diagnostic.code == "RUST_PARSE");
+                let own_file = from_rustc
+                    && matches!(diagnostic.file.as_str(), "" | "src/lib.rs" | "compiled.rs");
                 if let Some(original) = map
                     .as_ref()
                     .filter(|_| own_file)

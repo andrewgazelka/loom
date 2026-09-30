@@ -54,36 +54,63 @@ impl Runtime {
         let lines = std::mem::take(&mut *sites.lock().unwrap());
         Ok((call, lines))
     }
+    /// Whether a call of `entry` of `hash` may be answered from, and stored in, the result cache: the
+    /// callee is pure (no effect but `kernel`) and, if it uses kernels, its own policy lets it.
+    fn embedder_cacheable(&self, hash: &str, entry: &str) -> bool {
+        let Some(uses_kernel) = self.callee_purity(hash, entry) else {
+            return false;
+        };
+        let allowed = self
+            .inner
+            .store
+            .executable_definition(hash)
+            .ok()
+            .flatten()
+            .and_then(|definition| definition.allowed_effects);
+        // A policy that refuses `kernel` must see the call run (and be refused), never a stored answer.
+        !uses_kernel || allowed.is_none_or(|labels| labels.iter().any(|label| label == "kernel"))
+    }
+
     /// Run one entry for an embedder, answered from the result cache when the callee is pure (no effect
     /// but `kernel`) and these exact arguments were computed before under the same kernel versions. A
-    /// miss runs the call and stores its result, so the next identical call costs a lookup. `entry` is
-    /// empty for a definition with one export.
+    /// miss runs the call and stores its result only if the run was clean (see below), so the next
+    /// identical call costs a lookup. `entry` is empty for a definition with one export.
+    ///
+    /// Clean, as on the isolated path: no effect recorded in the trace, no kernel failure and no depth
+    /// refusal during the run. The static row can undercount and a callee can turn a failure into a value,
+    /// which then depends on host state, so such a result is returned but never stored.
     pub async fn call_entry_cached(&self, hash: &str, entry: &str, args: Value) -> Result<CachedCall> {
         let (argc, payload) = positional_payload(&args)?;
         let kernels = self.kernel_fingerprint();
-        // An embedder may use kernels, so a kernel-using callee is cacheable too.
-        let cacheable = self.callee_purity(hash, entry).is_some();
+        let cacheable = self.embedder_cacheable(hash, entry);
         let started = Instant::now();
         if cacheable
             && let Some(bytes) = self.inner.call_results.get(hash, entry, argc, &payload, &kernels)
+            && let Ok(value) = loom_proto::decode_host::<Value>(&bytes)
         {
-            let value = loom_proto::decode(&bytes).map_err(anyhow::Error::msg)?;
             return Ok(CachedCall { value, cache_hit: true, run_ms: elapsed_ms(started) });
         }
         let scope = format!("call:{}", uuid::Uuid::new_v4());
+        let trace = trace::ExecutionTrace::fresh(&scope);
+        let kernel_failures = self.kernel_failures();
+        let depth_refusals = self.inner.depth_refusals.load(Ordering::Relaxed);
         let (call, bytes) = self
             .call_traced_entry_inner(
                 hash,
                 (!entry.is_empty()).then_some(entry),
                 args,
                 &scope,
-                trace::ExecutionTrace::fresh(&scope),
+                trace.clone(),
                 None,
                 None,
             )
             .await?;
         let cost = started.elapsed();
-        if cacheable {
+        let clean = cacheable
+            && self.kernel_failures() == kernel_failures
+            && self.inner.depth_refusals.load(Ordering::Relaxed) == depth_refusals
+            && !trace.has_effects_under(&scope);
+        if clean {
             self.inner
                 .call_results
                 .put(hash, entry, argc, &payload, &kernels, &bytes, cost.as_nanos() as u64);
@@ -91,8 +118,9 @@ impl Runtime {
         Ok(CachedCall { value: call.value, cache_hit: false, run_ms: cost.as_secs_f64() * 1000.0 })
     }
 
-    /// [`Self::call_entry_cached`] over a batch, `parallel` at a time. Identical calls in one batch run
-    /// once. One result per call, in order; a failure is that call's alone.
+    /// [`Self::call_entry_cached`] over a batch, `parallel` at a time. Identical calls of a pure callee
+    /// in one batch run once; every other call runs on its own, as a sequence of `run`s would. One result
+    /// per call, in order; a failure is that call's alone.
     pub async fn call_many_cached(
         &self,
         calls: Vec<(String, String, Value)>,
@@ -104,13 +132,20 @@ impl Runtime {
         let mut owner = Vec::with_capacity(calls.len());
         let mut repeats = Vec::with_capacity(calls.len());
         for (index, (hash, entry, args)) in calls.iter().enumerate() {
-            let key = (hash.clone(), entry.clone(), args.to_string());
+            let shareable = self.embedder_cacheable(hash, entry);
             let mut repeat = true;
-            let slot = *first_of.entry(key).or_insert_with(|| {
+            let slot = if shareable {
+                let key = (hash.clone(), entry.clone(), args.to_string());
+                *first_of.entry(key).or_insert_with(|| {
+                    repeat = false;
+                    unique.push(index);
+                    unique.len() - 1
+                })
+            } else {
                 repeat = false;
                 unique.push(index);
                 unique.len() - 1
-            });
+            };
             owner.push(slot);
             repeats.push(repeat);
         }

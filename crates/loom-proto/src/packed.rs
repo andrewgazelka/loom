@@ -7,8 +7,8 @@
 //! macros, so the serde impls are written by hand (like [`crate::Bytes`]).
 //!
 //! Little-endian only (wasm is, and so is every host Loom runs on); a big-endian target is a compile error.
-//! The JSON transport has no byte strings, so `deserialize` also accepts an array of numbers (as `Bytes`
-//! does), which is how a client with only JSON can send small data.
+//! The JSON transport has no byte strings, so `deserialize` also accepts an array of byte values (as `Bytes`
+//! does: `[0, 0, 128, 63]` is the one `f32` 1.0), which is how a client with only JSON can send small data.
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Visitor};
 
 #[cfg(target_endian = "big")]
@@ -108,7 +108,8 @@ impl<'de, T: Element> Deserialize<'de> for Packed<T> {
                 self.visit_bytes(&bytes)
             }
             fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-                let mut bytes = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+                // The hint comes from the wire and is not trusted: a 5-byte header can claim a gigabyte.
+                let mut bytes = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(1 << 16));
                 while let Some(byte) = seq.next_element::<u8>()? {
                     bytes.push(byte);
                 }

@@ -179,10 +179,11 @@ impl Service {
         }
         Ok(json!({"old":old.hash,"new":new.hash,"added":added,"removed":removed,"changed":changed}))
     }
-    /// Call `entry` of `def` with `args` and report its output and effects.
     /// `run_many`: each call resolved like `run`, then the whole batch through the runtime's cached path.
     async fn run_many(&self, args: &Value) -> Result<Value> {
         const MAX_CALLS: usize = 4096;
+        /// Bytes of output one `run_many` reply may carry.
+        const REPLY_BUDGET: usize = 64 * 1024 * 1024;
         let started = Instant::now();
         let calls = args
             .get("calls")
@@ -221,6 +222,7 @@ impl Service {
         }
         let mut outcomes = self.runtime.call_many_cached(resolved, parallel).await.into_iter();
         let (mut hits, mut misses, mut failures) = (0u32, 0u32, 0u32);
+        let mut spent = 0usize;
         let results: Vec<Value> = refused
             .into_iter()
             .map(|refusal| {
@@ -230,6 +232,13 @@ impl Service {
                 }
                 match outcomes.next().expect("one outcome per resolved call") {
                     Ok(call) => {
+                        // One reply holds every output: a budget keeps 4,096 large results from becoming a
+                        // reply that cannot be sent. Past it a call is reported, not silently dropped.
+                        spent += call.value.to_string().len();
+                        if spent > REPLY_BUDGET {
+                            failures += 1;
+                            return json!({"ok": false, "error": "the batch reply exceeded its size budget; run fewer calls at once or return blob references"});
+                        }
                         if call.cache_hit { hits += 1 } else { misses += 1 }
                         json!({"ok": true, "output": call.value, "cache_hit": call.cache_hit, "ms": call.run_ms})
                     }
@@ -249,6 +258,7 @@ impl Service {
         }))
     }
 
+    /// Call `entry` of `def` with `args` and report its output and effects.
     pub(super) async fn run_entry(
         &self,
         def: &Def,
@@ -381,7 +391,10 @@ impl Service {
                 .await
             }
             "run_many" => self.cancellable(args, self.run_many(args)).await,
-            "eval" => self.cancellable(args, self.eval(args)).await,
+            "eval" => {
+                self.cancellable_with(args, |token| self.eval(args, token))
+                    .await
+            }
             "cancel" => self.cancel_call(args),
             "find" => {
                 let text = field(args, "text")?;

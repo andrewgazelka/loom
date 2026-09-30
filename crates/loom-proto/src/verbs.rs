@@ -115,8 +115,7 @@ pub static VERBS: &[Verb] = &[
             arg!(deps, Map, optional),
             arg!(allowed_effects, Json, optional),
             arg!(manifest, Source, optional),
-            arg!(lock, Source, optional),
-            arg!(call_id, String, optional)
+            arg!(lock, Source, optional)
         ]
     ),
     verb!(
@@ -210,7 +209,8 @@ pub static VERBS: &[Verb] = &[
             arg!(optimize, Boolean, optional),
             arg!(allowed_effects, Json, optional),
             arg!(manifest, Source, optional),
-            arg!(lock, Source, optional)
+            arg!(lock, Source, optional),
+            arg!(call_id, String, optional)
         ]
     ),
     verb!(find, Definition, Read, [arg!(text, String)]),
@@ -553,6 +553,18 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn only_the_calls_that_can_be_cancelled_take_a_call_id() {
+        for name in ["run", "run_many", "eval"] {
+            let verb = lookup(name).unwrap();
+            assert_eq!(verb.schema()["properties"]["call_id"]["type"], json!(["string", "null"]), "{name}");
+        }
+        for name in ["add", "update", "view", "history"] {
+            assert!(lookup(name).unwrap().schema()["properties"].get("call_id").is_none(), "{name}");
+        }
+        assert!(lookup("cancel").is_some());
     }
 
     #[test]

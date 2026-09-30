@@ -1397,3 +1397,83 @@ fn call_stream_outside_a_tokio_runtime_is_an_error_not_a_panic() -> Result<()> {
     assert!(format!("{error:#}").contains("tokio runtime"), "{error:#}");
     Ok(())
 }
+
+/// A kernel whose op fails with a message that happens to be valid CBOR (`7`): `kernel_module` returns the
+/// reply bytes as its result, so the callee turns the kernel failure into the value 7.
+struct FailsAs7(std::sync::atomic::AtomicU64);
+impl crate::HostKernel for FailsAs7 {
+    fn family(&self) -> &str {
+        "test"
+    }
+    fn version(&self) -> u32 {
+        1
+    }
+    fn ops(&self) -> &[&'static str] {
+        &["cbor7"]
+    }
+    fn call(&self, _: &crate::KernelContext<'_>, _: &str, _: &[&[u8]]) -> Result<Vec<u8>, String> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Err("\u{7}".to_owned())
+    }
+}
+
+#[tokio::test]
+async fn an_embedder_call_is_cached_when_pure_and_a_hit_says_so() -> Result<()> {
+    let store = Store::memory()?;
+    let hash = register(&store, &constant_module(9)?, &[("main", 0)], &[])?;
+    let runtime = Runtime::new(store)?;
+    let first = runtime.call_entry_cached(&hash, "main", json!([])).await?;
+    assert_eq!(first.value, json!(9));
+    assert!(!first.cache_hit);
+    let second = runtime.call_entry_cached(&hash, "main", json!([])).await?;
+    assert_eq!(second.value, json!(9));
+    assert!(second.cache_hit, "the second identical call is answered from the result cache");
+    assert_eq!(runtime.call_result_stats().hits, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_embedder_result_that_hid_a_kernel_failure_is_returned_but_never_stored() -> Result<()> {
+    let store = Store::memory()?;
+    let hash = register(&store, &kernel_module(5)?, &[("main", 0)], &["kernel"])?;
+    let runtime = Runtime::new(store)?;
+    let kernel = Arc::new(FailsAs7(Default::default()));
+    runtime.register_kernel(kernel.clone())?;
+    for _ in 0..2 {
+        let call = runtime.call_entry_cached(&hash, "main", json!([])).await?;
+        assert_eq!(call.value, json!(7), "the callee turned the kernel failure into a value");
+        assert!(!call.cache_hit, "a run during which a kernel failed is not evidence for the next caller");
+    }
+    assert_eq!(
+        kernel.0.load(std::sync::atomic::Ordering::Relaxed),
+        2,
+        "the kernel ran again: nothing was stored"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_batch_runs_an_impure_callee_once_per_call_and_a_pure_one_once_per_distinct_call() -> Result<()> {
+    let store = Store::memory()?;
+    let pure = register(&store, &constant_module(3)?, &[("main", 0)], &[])?;
+    let impure = register(&store, &constant_module(4)?, &[("main", 0)], &["now"])?;
+    let runtime = Runtime::new(store)?;
+    let calls = |hash: &str| vec![(hash.to_owned(), "main".to_owned(), json!([])); 3];
+    let pure_out = runtime.call_many_cached(calls(&pure), 4).await;
+    let hits: Vec<bool> = pure_out.iter().map(|r| r.as_ref().unwrap().cache_hit).collect();
+    assert_eq!(hits, [false, true, true], "identical pure calls in one batch ran once");
+    let impure_out = runtime.call_many_cached(calls(&impure), 4).await;
+    assert!(
+        impure_out.iter().all(|r| !r.as_ref().unwrap().cache_hit),
+        "an impure callee is never collapsed or cached: each call runs"
+    );
+    // Order and errors: a missing definition fails alone.
+    let mixed = vec![
+        (pure.clone(), "main".to_owned(), json!([])),
+        ("0".repeat(64), "main".to_owned(), json!([])),
+        (pure.clone(), "main".to_owned(), json!([])),
+    ];
+    let out = runtime.call_many_cached(mixed, 2).await;
+    assert!(out[0].is_ok() && out[1].is_err() && out[2].is_ok());
+    Ok(())
+}

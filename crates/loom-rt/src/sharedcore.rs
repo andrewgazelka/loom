@@ -235,7 +235,7 @@ async fn respond(caller: &mut Caller<'_, Guest>, bytes: Vec<u8>) -> Result<i64> 
     Ok(((bytes.len() as u64) << 32 | pointer as u64) as i64)
 }
 /// Bytes a single kernel call may read from the guest, summed over its buffers.
-const KERNEL_MAX_BYTES: usize = 256 * 1024 * 1024;
+pub(crate) const KERNEL_MAX_BYTES: usize = 256 * 1024 * 1024;
 /// Write `bytes` then `tag` into one fresh guest allocation and return it packed
 /// as `length << 32 | pointer` (the length includes the tag).
 async fn respond_tagged(caller: &mut Caller<'_, Guest>, bytes: Vec<u8>, tag: u8) -> Result<i64> {

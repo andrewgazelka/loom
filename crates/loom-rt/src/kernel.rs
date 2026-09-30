@@ -250,6 +250,16 @@ impl Runtime {
         .map_err(|error| format!("kernel task failed: {error}"))?
     }
 
+    /// Store the file at `path` as a kernel blob (what `loom.put` stores) and return its handle. The file is
+    /// read in chunks, not loaded whole, so a large upload does not sit in memory.
+    pub fn put_blob_file(&self, path: &std::path::Path) -> Result<Handle> {
+        let stored = self.inner.store.put_file(BLOB_KIND, path)?;
+        unhex(&stored).context("the store returned a malformed hash")
+    }
+
+    /// The largest blob a cell can read back with `loom.get` (and so the largest the HTTP upload accepts).
+    pub const MAX_BLOB_BYTES: usize = crate::sharedcore::KERNEL_MAX_BYTES;
+
     /// The bytes a kernel handle names, as memory (see [`KernelContext::map`]). For the embedder: the
     /// engine maps a large result in place instead of copying it out of a reply.
     pub fn map_blob(&self, handle: &Handle) -> Result<Option<loom_store::MappedObject>> {

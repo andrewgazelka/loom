@@ -2,17 +2,19 @@
 //! `GET /v1/blob/{hash}` returns the bytes. A cell reads a handle with `loom::kernel::get`, and returns a
 //! large result by `loom::kernel::put`, so a mesh never travels as JSON or as DAG-CBOR numbers.
 //!
-//! Upload needs the define scope (it writes the store), download the read scope. Only objects stored as
-//! kernel blobs are readable here: a hash of a definition or a component is "not found".
+//! Upload needs the define scope (it writes the store), download the read scope. The body is streamed to a
+//! temporary file and hashed from there, so its size is bounded by `Runtime::MAX_BLOB_BYTES` (what a cell can
+//! read back), not by memory or by the router's 16 MiB default. Only kernel blobs are readable here: a hash
+//! of a definition or a component is "not found".
 use super::upload::failure;
 use super::*;
-
-const MAX_BLOB_BYTES: usize = 512 * 1024 * 1024;
+use futures_util::StreamExt;
+use tokio::io::AsyncWriteExt;
 
 pub(super) async fn upload(
     axum::Extension(tenant): axum::Extension<TenantService>,
     headers: HeaderMap,
-    body: axum::body::Bytes,
+    body: axum::body::Body,
 ) -> HttpResponse {
     let service = &tenant.service;
     if !service.access.allows(Scope::Define) {
@@ -30,22 +32,62 @@ pub(super) async fn upload(
             anyhow::anyhow!("a blob upload is application/octet-stream"),
         );
     }
-    if body.len() > MAX_BLOB_BYTES {
+    let limit = loom_rt::Runtime::MAX_BLOB_BYTES;
+    if let Some(length) = headers
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok())
+        && length > limit
+    {
         return failure(
             service,
             StatusCode::PAYLOAD_TOO_LARGE,
-            anyhow::anyhow!("a blob is at most {MAX_BLOB_BYTES} bytes"),
+            anyhow::anyhow!("a blob is at most {limit} bytes"),
         );
     }
-    match service.runtime.call_kernel("loom.put", &[&body]) {
-        Ok(handle) => Json(json!({
+    let received = async {
+        let temporary = tempfile::NamedTempFile::new().context("create blob temporary file")?;
+        let mut file = tokio::fs::File::from_std(temporary.reopen()?);
+        let mut stream = body.into_data_stream();
+        let mut count = 0usize;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.context("read blob body")?;
+            count = count.checked_add(chunk.len()).context("upload size overflow")?;
+            if count > limit {
+                return Ok::<_, anyhow::Error>(None);
+            }
+            file.write_all(&chunk).await.context("write blob upload")?;
+        }
+        file.flush().await?;
+        drop(file);
+        let runtime = service.runtime.clone();
+        let store = service.store.clone();
+        let handle = tokio::task::spawn_blocking(move || {
+            let handle = runtime.put_blob_file(temporary.path())?;
+            store.flush()?;
+            Ok::<_, anyhow::Error>(handle)
+        })
+        .await??;
+        Ok(Some((handle, count)))
+    }
+    .await;
+    match received {
+        Ok(Some((handle, len))) => Json(json!({
             "handle": handle.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
-            "len": body.len(),
+            "len": len,
         }))
         .into_response(),
-        Err(error) => failure(service, StatusCode::BAD_REQUEST, anyhow::anyhow!(error)),
+        Ok(None) => failure(
+            service,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            anyhow::anyhow!("a blob is at most {limit} bytes"),
+        ),
+        Err(error) => failure(service, StatusCode::BAD_REQUEST, error),
     }
 }
+
+/// The bytes go out in chunks read from the mapping, so a large blob is never copied whole onto the heap.
+const CHUNK: usize = 1 << 20;
 
 pub(super) async fn download(
     axum::Extension(tenant): axum::Extension<TenantService>,
@@ -68,15 +110,33 @@ pub(super) async fn download(
             anyhow::anyhow!("a blob handle is 64 hex characters"),
         );
     };
-    let mapped = match service.runtime.map_blob(&handle) {
-        Ok(Some(mapped)) => mapped,
-        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
-        Err(error) => return failure(service, StatusCode::INTERNAL_SERVER_ERROR, error),
+    let runtime = service.runtime.clone();
+    // Mapping hashes the file once per process and clones it: blocking work, off the async workers.
+    let mapped = match tokio::task::spawn_blocking(move || runtime.map_blob(&handle)).await {
+        Ok(Ok(Some(mapped))) => std::sync::Arc::new(mapped),
+        Ok(Ok(None)) => return StatusCode::NOT_FOUND.into_response(),
+        Ok(Err(error)) => return failure(service, StatusCode::INTERNAL_SERVER_ERROR, error),
+        Err(error) => return failure(service, StatusCode::INTERNAL_SERVER_ERROR, error.into()),
     };
-    let mut response = axum::body::Bytes::copy_from_slice(&mapped).into_response();
+    let length = mapped.len();
+    let stream = futures_util::stream::unfold(0usize, move |at| {
+        let mapped = mapped.clone();
+        async move {
+            (at < length).then(|| {
+                let end = (at + CHUNK).min(length);
+                let chunk = axum::body::Bytes::copy_from_slice(&mapped[at..end]);
+                (Ok::<_, std::convert::Infallible>(chunk), end)
+            })
+        }
+    });
+    let mut response = axum::body::Body::from_stream(stream).into_response();
     response.headers_mut().insert(
         axum::http::header::CONTENT_TYPE,
         axum::http::HeaderValue::from_static("application/octet-stream"),
+    );
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_LENGTH,
+        axum::http::HeaderValue::from(length),
     );
     response
 }

@@ -6,9 +6,11 @@
 //! everything it held; the caller gets an error reply. A live slider is the use: each new value cancels the
 //! job for the previous one.
 //!
-//! Limits, stated: a build already handed to the compiler finishes (its result is cached for the next call);
-//! cancelling a call that is still queued behind another build drops it before it starts; and a call is
-//! identified within its tenant (the registry belongs to the tenant's service).
+//! Limits, stated: an `eval` whose build has started lets the build finish in the background (its result is
+//! cached for the next call; killing the compiler mid-build would throw away the warm server) and abandons
+//! only the run; one still queued behind another build is skipped before it builds; and a call is identified
+//! within its tenant (the registry belongs to the tenant's service), by an id that any principal with the
+//! execute scope can cancel. Ids should be unique per call.
 use super::*;
 use std::{
     collections::HashMap,
@@ -22,9 +24,43 @@ struct CancelState {
     wake: tokio::sync::Notify,
 }
 
+/// What a running call can ask: has it been cancelled, and wake me when it is.
+#[derive(Clone)]
+pub(crate) struct CancelToken(Arc<CancelState>);
+
+impl CancelToken {
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.0.cancelled.load(Ordering::Acquire)
+    }
+    pub(crate) async fn cancelled(&self) {
+        loop {
+            // Register for the wake-up before checking the flag, so a cancel between the two is not lost.
+            let woken = self.0.wake.notified();
+            tokio::pin!(woken);
+            woken.as_mut().enable();
+            if self.is_cancelled() {
+                return;
+            }
+            woken.await;
+        }
+    }
+}
+
+#[derive(Default)]
+struct Registry {
+    running: HashMap<String, Arc<CancelState>>,
+    /// Ids cancelled before their call registered (requests can overtake each other), with when.
+    early: HashMap<String, Instant>,
+}
+
 /// The calls running under a client-chosen id.
 #[derive(Clone, Default)]
-pub(crate) struct ActiveCalls(Arc<Mutex<HashMap<String, Arc<CancelState>>>>);
+pub(crate) struct ActiveCalls(Arc<Mutex<Registry>>);
+
+/// A cancel that arrives this long before its call is still honoured. Ids should be unique per call: an id
+/// cancelled when nothing runs under it and started again within this window is cancelled at once.
+const EARLY_CANCEL_TTL: Duration = Duration::from_secs(5);
+const MAX_EARLY: usize = 1024;
 
 /// Removes the id when the call ends, however it ends (finished, failed, cancelled, dropped).
 struct Registered<'a> {
@@ -35,10 +71,10 @@ struct Registered<'a> {
 
 impl Drop for Registered<'_> {
     fn drop(&mut self) {
-        let mut calls = self.calls.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut registry = self.calls.0.lock().unwrap_or_else(|e| e.into_inner());
         // Only our own entry: an id reused after this call ended belongs to the newer call.
-        if calls.get(&self.id).is_some_and(|state| Arc::ptr_eq(state, &self.state)) {
-            calls.remove(&self.id);
+        if registry.running.get(&self.id).is_some_and(|state| Arc::ptr_eq(state, &self.state)) {
+            registry.running.remove(&self.id);
         }
     }
 }
@@ -52,8 +88,19 @@ impl Service {
         args: &Value,
         work: impl Future<Output = Result<T>>,
     ) -> Result<T> {
+        self.cancellable_with(args, |_| work).await
+    }
+
+    /// [`Self::cancellable`] for work that wants to know about cancellation itself: `make` receives the call's
+    /// token (`None` without a `call_id`). `eval` uses it to let a started build finish in the background
+    /// while the run that would follow it is abandoned.
+    pub(crate) async fn cancellable_with<T, F: Future<Output = Result<T>>>(
+        &self,
+        args: &Value,
+        make: impl FnOnce(Option<CancelToken>) -> F,
+    ) -> Result<T> {
         let Some(id) = args.get("call_id").filter(|value| !value.is_null()) else {
-            return work.await;
+            return make(None).await;
         };
         let id = id.as_str().context("call_id must be a string")?.to_owned();
         ensure!(
@@ -62,50 +109,43 @@ impl Service {
         );
         let state = Arc::new(CancelState::default());
         {
-            let mut calls = self.calls.0.lock().unwrap_or_else(|e| e.into_inner());
-            ensure!(!calls.contains_key(&id), "call_id {id:?} is already running");
-            calls.insert(id.clone(), state.clone());
+            let mut registry = self.calls.0.lock().unwrap_or_else(|e| e.into_inner());
+            ensure!(!registry.running.contains_key(&id), "call_id {id:?} is already running");
+            if let Some(noted) = registry.early.remove(&id)
+                && noted.elapsed() < EARLY_CANCEL_TTL
+            {
+                anyhow::bail!("call {id:?} cancelled before it started");
+            }
+            registry.running.insert(id.clone(), state.clone());
         }
-        let _registered = Registered {
-            calls: &self.calls,
-            id: id.clone(),
-            state: state.clone(),
-        };
+        let _registered = Registered { calls: &self.calls, id: id.clone(), state: state.clone() };
+        let token = CancelToken(state);
+        let work = make(Some(token.clone()));
         tokio::pin!(work);
-        loop {
-            // Register for the wake-up before checking the flag, so a cancel between the two is not lost.
-            let woken = state.wake.notified();
-            tokio::pin!(woken);
-            woken.as_mut().enable();
-            if state.cancelled.load(Ordering::Acquire) {
-                anyhow::bail!("call {id:?} cancelled");
-            }
-            tokio::select! {
-                result = &mut work => return result,
-                _ = &mut woken => {}
-            }
+        tokio::select! {
+            result = &mut work => result,
+            () = token.cancelled() => anyhow::bail!("call {id:?} cancelled"),
         }
     }
 
     /// `cancel {call_id}`: stop the running call with that id. `cancelled` is false when none is running
-    /// (it finished, or never started): not an error, because a client cancels speculatively.
+    /// (it finished, or has not started): not an error, because a client cancels speculatively. A cancel for
+    /// an id that has not started yet is remembered for a few seconds (`noted`), since requests can
+    /// overtake each other.
     pub(crate) fn cancel_call(&self, args: &Value) -> Result<Value> {
         let id = field(args, "call_id")?;
-        let state = self
-            .calls
-            .0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(id)
-            .cloned();
-        match state {
-            Some(state) => {
-                state.cancelled.store(true, Ordering::Release);
-                state.wake.notify_waiters();
-                Ok(json!({"call_id": id, "cancelled": true}))
-            }
-            None => Ok(json!({"call_id": id, "cancelled": false})),
+        let mut registry = self.calls.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(state) = registry.running.get(id).cloned() {
+            drop(registry);
+            state.cancelled.store(true, Ordering::Release);
+            state.wake.notify_waiters();
+            return Ok(json!({"call_id": id, "cancelled": true}));
         }
+        registry.early.retain(|_, at| at.elapsed() < EARLY_CANCEL_TTL);
+        if registry.early.len() < MAX_EARLY {
+            registry.early.insert(id.to_owned(), Instant::now());
+        }
+        Ok(json!({"call_id": id, "cancelled": false, "noted": true}))
     }
 }
 
@@ -159,10 +199,58 @@ mod tests {
         assert!(error.to_string().contains("cancelled"), "{error:#}");
         assert!(started.elapsed() < Duration::from_secs(5));
         assert!(dropped.load(Ordering::SeqCst), "the work future was dropped, which aborts a running guest");
-        // The id is free again, and cancelling it now is a no-op, not an error.
+        // The id is free again, and cancelling it now cancels nothing (it is only noted, for a call that
+        // might still be on its way). A fresh id is unaffected.
         assert_eq!(service.cancel_call(&args).unwrap()["cancelled"], false);
-        let again = service.cancellable(&args, async { Ok(7) }).await.unwrap();
+        let again = service
+            .cancellable(&json!({"call_id": "slider-8"}), async { Ok(7) })
+            .await
+            .unwrap();
         assert_eq!(again, 7);
+    }
+
+    #[tokio::test]
+    async fn a_cancel_that_arrives_before_its_call_still_cancels_it_once() {
+        let service = service();
+        let args = json!({"call_id": "early"});
+        let noted = service.cancel_call(&args).unwrap();
+        assert_eq!(noted["cancelled"], false);
+        assert_eq!(noted["noted"], true);
+        let error = service.cancellable(&args, async { Ok(1) }).await.unwrap_err();
+        assert!(error.to_string().contains("cancelled before it started"), "{error:#}");
+        // The note is used up: the next call under that id runs.
+        assert_eq!(service.cancellable(&args, async { Ok(2) }).await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn work_that_takes_the_token_sees_the_cancel() {
+        let service = service();
+        let args = json!({"call_id": "token"});
+        let canceller = {
+            let service = service.clone();
+            tokio::spawn(async move {
+                for _ in 0..200 {
+                    if service.cancel_call(&json!({"call_id": "token"})).unwrap()["cancelled"] == true {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+        };
+        let seen = Arc::new(AtomicBool::new(false));
+        let flag = seen.clone();
+        let result = service
+            .cancellable_with(&args, |token| async move {
+                let token = token.expect("a call_id gives a token");
+                token.cancelled().await;
+                flag.store(true, Ordering::SeqCst);
+                Ok(0)
+            })
+            .await;
+        canceller.await.unwrap();
+        // Either the work noticed first or the wrapper did: the call ends cancelled or with the work's value,
+        // and the token was delivered.
+        assert!(result.is_err() || seen.load(Ordering::SeqCst));
     }
 
     #[tokio::test]
