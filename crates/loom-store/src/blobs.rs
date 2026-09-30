@@ -3,7 +3,7 @@
 //! file-backed store have `external=1`, an empty `bytes` and the byte count in
 //! `size`; `size` is NULL for inline rows, so `coalesce(size,length(bytes))` is
 //! the size of any object. Only raw (codec 85) rows are ever external.
-use crate::spill::{SPILL_BYTES, Spill};
+use crate::spill::{SPILL_BYTES, Spill, spillable_kind};
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -92,7 +92,9 @@ pub(crate) fn insert_object(
     bytes: &[u8],
     created_at: Option<i64>,
 ) -> Result<()> {
-    let spill = spill.filter(|_| codec == loom_proto::RAW_CODEC && bytes.len() >= SPILL_BYTES);
+    let spill = spill.filter(|_| {
+        codec == loom_proto::RAW_CODEC && bytes.len() >= SPILL_BYTES && spillable_kind(kind)
+    });
     let Some(spill) = spill else {
         connection.execute(
             "INSERT OR IGNORE INTO cas(hash,kind,bytes,created_at,codec) VALUES (?,?,?,coalesce(?,unixepoch()),?)",

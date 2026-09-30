@@ -10,8 +10,8 @@ fn streaming_file_roundtrip_reopens_and_refuses_corruption() -> Result<()> {
     let bytes = vec![0xa5; 2 * 1024 * 1024 + 7];
     std::fs::write(&source, &bytes)?;
     let store = Store::open(&database)?;
-    let hash = store.put_file("vm-disk", &source)?;
-    assert_eq!(store.put_file("vm-disk", &source)?, hash);
+    let hash = store.put_file("uploaded_file", &source)?;
+    assert_eq!(store.put_file("uploaded_file", &source)?, hash);
     let reference = store.reference(&hash, loom_proto::RAW_CODEC)?;
     let cid = reference["$ref"].as_str().context("missing CID")?;
     drop(store);

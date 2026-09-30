@@ -155,10 +155,10 @@ fn streamed_files_spill_once_and_an_old_store_keeps_its_inline_rows() -> Result<
     let big = pattern(2 * MIB + 7);
     std::fs::write(&source, &big)?;
     let store = Store::open(directory.path().join("store.db"))?;
-    let hash = store.put_file("vm-disk", &source)?;
-    assert_eq!(store.put_file("vm-disk", &source)?, hash);
+    let hash = store.put_file("uploaded_file", &source)?;
+    assert_eq!(store.put_file("uploaded_file", &source)?, hash);
     assert_eq!(
-        store.put("vm-disk", &big)?,
+        store.put("uploaded_file", &big)?,
         hash,
         "put and put_file address alike"
     );
@@ -332,5 +332,20 @@ fn opening_sweeps_stale_temp_files_only() -> Result<()> {
     drop(Store::open(&database)?);
     assert!(!stale.exists());
     assert!(fresh.exists());
+    Ok(())
+}
+
+#[test]
+fn documents_read_inside_sql_stay_inline_whatever_their_size() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let store = Store::open(directory.path().join("s.sqlite"))?;
+    // An item document is read with json_each over `cas.bytes`: an external row's empty bytes would
+    // make every later lookup fail (found by a 142 KB definition whose item document passed 1 MiB).
+    let document = serde_json::to_vec(&json!({"entry": {"main": "x".repeat(2 * MIB)}, "exports": ["main"]}))?;
+    let hash = store.put("item-hashes", &document)?;
+    assert!(object_files(directory.path())?.is_empty(), "no file for a document kind");
+    assert_eq!(store.get(&hash)?.as_deref(), Some(document.as_slice()));
+    let opaque = store.put("component", &pattern(2 * MIB))?;
+    assert!(object_path(directory.path(), &opaque).exists(), "an opaque kind still spills");
     Ok(())
 }

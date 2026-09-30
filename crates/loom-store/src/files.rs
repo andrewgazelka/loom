@@ -43,7 +43,7 @@ impl Store {
         if let Some(spill) = self
             .spill
             .as_deref()
-            .filter(|_| length >= spill::SPILL_BYTES as u64)
+            .filter(|_| length >= spill::SPILL_BYTES as u64 && spill::spillable_kind(kind))
         {
             let existing: Option<bool> = self
                 .lock()?

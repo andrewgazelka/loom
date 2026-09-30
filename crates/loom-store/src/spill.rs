@@ -24,6 +24,14 @@ use std::{
 
 /// Values of this many bytes and up are files.
 pub(crate) const SPILL_BYTES: usize = 1 << 20;
+
+/// Kinds whose bytes are only ever handled whole, by hash: compiled modules, build artifacts,
+/// uploads and opaque blobs. Every other kind may be read inside SQL (`json_each(c.bytes)`,
+/// views over events) or parsed as a document, where an external row's empty `bytes` would fail
+/// or, worse, read as empty, so those stay inline whatever their size.
+pub(crate) fn spillable_kind(kind: &str) -> bool {
+    matches!(kind, "component" | "rust-artifact" | "blob" | "kernel-blob" | "uploaded_file")
+}
 /// Hashes whose file content was already verified in this process.
 const VERIFIED_HASHES: usize = 4096;
 /// A temp file older than this belongs to a writer that died. Younger ones may
