@@ -78,8 +78,14 @@ impl<'de, D: de::Deserializer<'de>> de::Deserializer<'de> for HostDeserializer<D
     deserialize_method!(deserialize_u32);
     deserialize_method!(deserialize_u64);
     deserialize_method!(deserialize_u128);
-    deserialize_method!(deserialize_f32);
-    deserialize_method!(deserialize_f64);
+    // A Value has no float/int distinction (whole-valued floats are stored as integers), so a typed
+    // float reads whichever number is there; the dag-cbor float methods reject an integer outright.
+    fn deserialize_f32<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        self.deserialize_any(visitor)
+    }
+    fn deserialize_f64<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        self.deserialize_any(visitor)
+    }
     deserialize_method!(deserialize_char);
     deserialize_method!(deserialize_str);
     deserialize_method!(deserialize_string);

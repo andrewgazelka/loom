@@ -129,3 +129,14 @@ fn strict_foreign_admission_remains_strict() {
     assert!(decode_host::<Value>(&deep).is_err());
     assert!(decode_host::<Value>(&[0x41, 0]).is_err());
 }
+
+#[test]
+fn a_typed_float_reads_a_whole_number_the_value_wire_stores_as_an_integer() {
+    // `encode` canonicalizes 1.0 to the integer 1 (content identity); a typed f32/f64 must still read it.
+    let wire = encode(&Value::from(vec![Value::from(1.0), Value::from(2.5), Value::from(0.0)])).unwrap();
+    assert_eq!(decode_host::<Vec<f32>>(&wire).unwrap(), vec![1.0, 2.5, 0.0]);
+    assert_eq!(decode_host::<(f64, f64, f64)>(&wire).unwrap(), (1.0, 2.5, 0.0));
+    // A float slot still refuses a string: only numbers coerce.
+    let text = encode(&Value::from("1")).unwrap();
+    assert!(decode_host::<f64>(&text).is_err());
+}
