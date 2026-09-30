@@ -3,6 +3,7 @@ name = "loom-api"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+loom-defdir = { path = "../loom-defdir" }
 tempfile = "3"
 loom-imports = { path = "../loom-imports" }
 loom-v8 = { path = "../loom-v8" }

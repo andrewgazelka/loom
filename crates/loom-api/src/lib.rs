@@ -3,6 +3,7 @@ pub use vm_images::StoreVmImages;
 pub mod actors;
 mod bundles;
 mod commands;
+mod defs_docs;
 mod definitions;
 mod eval;
 mod evolution;
@@ -362,6 +363,8 @@ fn command_returns_direct(command: &str) -> bool {
             | "diff"
             | "run"
             | "eval"
+            | "export_defs"
+            | "import_defs"
             | "run_many"
             | "cancel"
             | "find"

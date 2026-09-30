@@ -1,8 +1,7 @@
 # Definitions as files: version control and sharing through git
 
-Status: design (user request, 2026-09-30: "someone is adding a bunch of Rust definitions; they should be
-version controlled in git with a file store of their own, so they can share with others via git").
-Nothing here is built. The CARv1 `export`/`import` bundle (`docs/bundles.md`) stays the binary transport;
+Status: built 2026-09-30 (v1). User request: "someone is adding a bunch of Rust definitions; they should be
+version controlled in git with a file store of their own, so they can share with others via git". The CARv1 `export`/`import` bundle (`docs/bundles.md`) stays the binary transport;
 this is the human and git form.
 
 ## Principle
@@ -66,3 +65,22 @@ the reviewable source of record; a bundle can always be made from it.
 * Whether `loom.lock` should also pin the toolchain's rustc hash per entry or once per file (once: simpler).
 * Effect policy (`allowed_effects`) and entry-selection notes live in `def.toml`; the hash does not depend
   on them, so they are not in the lock.
+
+## Built (v1) and how it differs from the design above
+
+* The daemon speaks documents, not paths: `export_defs` and `import_defs` take and give
+  `{name, source, deps, allowed_effects, manifest, lock}` (`crates/loom-api/src/defs_docs.rs`), so the server never
+  reads or writes a client's files and an MCP agent or script can use the same verbs. The directory layout is
+  `crates/loom-defdir`; `loom export-dir`, `loom import-dir` and `loom status-dir` (`crates/loom-cli/src/defdir.rs`)
+  connect the two.
+* `import_defs` is **not atomic across the batch** (each definition is its own `add` or `update`); it orders by
+  dependency, continues past a failure, and skips everything that depends on a failed definition. It reports
+  `added`, `updated`, `unchanged`, `failed` and `mismatches` (definitions whose hash differs from `loom.lock`).
+* `loom.toml`, `watch`, dependencies on other git repositories and multi-file definitions are not built. A
+  definition with files beyond `lib.rs`, `Cargo.toml` and `Cargo.lock` is refused by `export_defs`.
+* `loom.lock` is TOML: the toolchain hash of the first exported definition and `name = hash` lines, sorted.
+* Checked live (2026-09-30, this Mac): importing two definitions (`demo/height`, `demo/surface` depending on it)
+  added both in dependency order; exporting them back gave byte-identical sources (comments kept); editing
+  `height` made `status-dir` say `changed`, `import-dir` updated it (its dependent followed, as `update` always
+  does) and reported both hashes as mismatches against the stale lock; a second import changed nothing; a
+  definition that failed to build made its dependent `failed` without trying it.

@@ -80,6 +80,9 @@ pub fn parser() -> clap::Command {
         }
         parser = parser.subcommand(command);
     }
+    for command in crate::defdir::parsers() {
+        parser = parser.subcommand(command);
+    }
     parser
 }
 
@@ -87,6 +90,10 @@ pub fn from_matches(matches: &clap::ArgMatches) -> anyhow::Result<Option<Command
     let Some((name, matches)) = matches.subcommand() else {
         return Ok(None);
     };
+    if crate::defdir::COMMANDS.contains(&name) {
+        // Handled by `main` (they read and write files around their requests).
+        return Ok(None);
+    }
     let verb = loom_proto::verbs::lookup(name).context("unknown command")?;
     let mut arguments = serde_json::Map::new();
     let mut uploads = Vec::new();

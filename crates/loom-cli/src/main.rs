@@ -1,3 +1,4 @@
+mod defdir;
 mod operation;
 
 use anyhow::Context;
@@ -40,6 +41,14 @@ async fn run() -> anyhow::Result<()> {
         .filter(|token| !token.is_empty())
         .context("provide --token or set LOOM_TOKEN")?;
     let client = reqwest::Client::new();
+    if let Some((name, sub)) = args.subcommand()
+        && defdir::COMMANDS.contains(&name)
+    {
+        if !defdir::run(name, sub, &client, url, token, session).await? {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     if let Some(operation) = operation::from_matches(&args)? {
         let accepted = execute(&client, url, token, session, operation).await?;
         if !accepted {
