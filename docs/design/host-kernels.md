@@ -135,26 +135,52 @@ wrapper to a row label `pure:tribvh_ray@1`.
   `shape_mesh(soup) -> Shape` (a hash handle) and `shape_collide(Shape, pose, other Shape) -> touches`.
 * None of the effectful ones are eligible for the result cache.
 
-## 7. Costs to measure before building anything
+## 7. Costs, measured
 
-Unknown today, and they decide whether the design pays:
-1. A host call's round trip from wasm (import, argument copy, reply copy) with a trivial op.
-2. `soup_put` of 250k triangles (9 MB): copy in, BLAKE3 (about GB/s), CAS write. It is paid once per mesh.
-3. `tribvh_build` for 250k triangles, and `tribvh_ray` at batch sizes 1, 100, 10k, 1M against the native call.
+`docs/spikes/rgb-forge/rgb-host-kernels/examples/bench.rs`, release build, this Mac (M5 Max, 18 cores) with
+other agents holding the load average at 56, so read every figure as a worst case.
 
-Acceptance: at a batch of 1000 rays the wasm-to-host path adds under 10% to the native traversal, and a build
-from a resident handle is a table lookup. If the round trip is much larger than a few microseconds, batching
-gets a minimum size and single queries stay in the guest.
+| what | measured |
+|---|---|
+| wasm to host to wasm, empty op, no buffers | **307 ns** per call |
+| the same with one 24-byte buffer | 363 ns per call |
+| a 1 MB reply written into guest memory | 33.8 us per call (about 31 GB/s) |
+| `loom.put` of a 249,200-triangle mesh (17.9 MB): hash and store | 19.4 ms, paid once per mesh |
+| `TriBvh::new` on that mesh, native | 140 ms |
+| first query on a new handle (fetch, parse, build) | 323 ms, paid once per mesh per resident-cache entry |
+| second query, resident BVH, one `contains` point | 5.1 us |
 
-## 8. First slice
+Ray batches against that mesh, native `TriBvh::ray` on one thread versus the kernel (parallel across the batch):
 
-1. `HostKernel` trait and the `loom.kernel` import, with a test kernel that has one pure op (`echo`) and one
-   effectful op, proving the row, the key and the cache rules of section 5.
-2. The measurements of section 7 with that test kernel.
-3. rgb side: `tribvh_*` over `TriBvh`, then a differential test: 10,000 rays and 10,000 nearest points over the
-   head mesh (`human_groom/head.rs`), host kernel versus native `TriBvh`, results byte-equal.
-4. Port one `worn/*` garment step that uses `ray` and `nearest` to a guest calling the kernel, and compare its
-   output bytes with the forge's.
+| rays | native | via kernel | kernel / native |
+|---|---|---|---|
+| 1 | 0.54 us | 0.67 us | 1.23x |
+| 100 | 104 us | 110 us | 1.05x |
+| 1,000 | 2.59 ms | 0.997 ms | 0.38x |
+| 10,000 | 31.1 ms | 3.10 ms | 0.10x |
+| 100,000 | 649 ms | 20.3 ms | 0.03x |
+
+The acceptance bar was "under 10% overhead at a batch of 1000 rays": the kernel is 2.6x faster there, since the
+host spreads the batch over the machine's cores and the boundary costs about a third of a microsecond a call. The
+native column is one thread, as the forge calls it today; a forge that parallelised its own loop would close some
+of that gap, not the boundary cost. Single queries cost about 20% over native, so single queries stay in the guest.
+
+The first query on a mesh (323 ms) is more than the native build (140 ms): about 180 ms is fetching 17.9 MB back
+from the store, verifying its hash, and parsing it into triangles. It is a one-time cost per mesh and not yet
+optimized (the parse copies through an intermediate `Vec<f64>`).
+
+## 8. Slices
+
+Done: (1) `HostKernel`, the import, the label and cache rules, with tests including a wat guest through the import
+and a compiled Rust guest (`put` returns the BLAKE3 hash; an unknown op reaches the guest as an error message).
+(2) The measurements of section 7. (3) `rgb-host-kernels` over rgb's `TriBvh`, differential test: every op
+bit-equal to a direct `TriBvh` call at batch sizes 1, 2, 100, 511, 512, 513 and 5000 on a 24k-triangle mesh,
+repeat calls byte-identical, bad input an error not a crash.
+
+Not done: (4) port one `worn/*` garment step that uses `ray` and `nearest` to a guest calling the kernel, and compare its
+output bytes with the forge's; a differential run on rgb's real head mesh (`human_groom/head.rs`) instead of a
+synthetic sphere; a compiled Rust guest calling `rgb-host` ops (the compiled-guest check used only `put` and an
+unknown op, since `loomd` has no kernels registered; an embedder must register `RgbHost` in its own binary).
 
 ## Open questions
 

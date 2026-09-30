@@ -1,0 +1,27 @@
+[package]
+name = "rgb-host-kernels"
+version = "0.1.0"
+edition = "2024"
+
+# A standalone workspace: this crate is the adapter rgb would adopt, written against
+# rgb's real TriBvh source (included unmodified) and Loom's HostKernel trait.
+[workspace]
+
+[dependencies]
+loom-rt = { path = "/Volumes/Projects/andrewgazelka/loom/crates/loom-rt" }
+rgb-bvh = { path = "/Volumes/Projects/andrewgazelka/rgb/crates/rgb-bvh" }
+glam = "0.33"
+rayon = "1.12"
+lru = "0.16"
+
+[dev-dependencies]
+loom-store = { path = "/Volumes/Projects/andrewgazelka/loom/crates/loom-store" }
+loom-proto = { path = "/Volumes/Projects/andrewgazelka/loom/crates/loom-proto" }
+blake3 = "1"
+wat = "1"
+tokio = { version = "1", features = ["full"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+debug = false

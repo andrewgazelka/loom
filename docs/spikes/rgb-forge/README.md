@@ -154,3 +154,17 @@ Must be true first:
 
 Where Loom would not help: solves that mutate shared state across steps, anything needing native
 code at native speed, and payloads of tens of megabytes crossing calls.
+
+## Update: the host kernels are built
+
+`docs/design/host-kernels.md` is now implemented for the pure triangle-soup queries, and
+`rgb-host-kernels/` here is the adapter over rgb's real `TriBvh` (rgb's `geom.rs` and `check/tol.rs` are
+included by path, unmodified). Results: every op bit-equal to a direct `TriBvh` call; 0.3 us per wasm-to-host
+call; a batch of 1000 rays 2.6x faster than rgb's native single-thread loop, 100,000 rays 32x; a mesh crosses
+the boundary once as a 32-byte handle. Numbers and limits in section 7 of the design doc.
+
+To use it: rgb embeds `loom-rt`, registers `rgb_host_kernels::RgbHost::default()` with
+`Runtime::register_kernel`, and a guest calls `loom::kernel::put(&[soup_bytes])` once, then
+`loom::kernel::call("rgb-host.ray", &[&handle, &rays])`. The adapter's `Cargo.toml` uses absolute paths to
+this machine's Loom and rgb checkouts; inside rgb's workspace it would depend on `rgb-mesh` and drop the
+`#[path]` includes.
