@@ -24,6 +24,8 @@ unsafe extern "C" {
     fn host_perform(pointer: u32, length: u32) -> u64;
     #[link_name = "call"]
     fn host_call(pointer: u32, length: u32) -> u64;
+    #[link_name = "yield_value"]
+    fn host_yield_value(pointer: u32, length: u32) -> i32;
     #[link_name = "call_many"]
     fn host_call_many(pointer: u32, length: u32) -> u64;
     #[link_name = "kernel"]
@@ -76,6 +78,26 @@ pub(crate) fn isolated(frame: &[u8], hash: &str) -> Result<Vec<u8>, CallError> {
             hash: hash.to_owned(),
             message: "isolated calls require wasm32".into(),
         })
+    }
+}
+
+/// Send one encoded value to the consumer of this execution's stream. `Ok(())` once the
+/// consumer has room for it.
+pub(crate) fn yield_value(bytes: &[u8]) -> Result<(), crate::stream::StreamError> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        // SAFETY: the bytes stay live across host suspension; the host copies them out.
+        match unsafe { host_yield_value(bytes.as_ptr() as u32, bytes.len() as u32) } {
+            0 => Ok(()),
+            1 => Err(crate::stream::StreamError::Cancelled),
+            2 => Err(crate::stream::StreamError::NotStreaming),
+            _ => Err(crate::stream::StreamError::Denied),
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = bytes;
+        Err(crate::stream::StreamError::NotStreaming)
     }
 }
 

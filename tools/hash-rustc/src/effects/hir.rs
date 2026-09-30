@@ -170,6 +170,13 @@ impl<'tcx> Scan<'_, 'tcx> {
                 });
                 self.node.row.labels.insert("kernel".into());
             }
+            Some("$yield") => {
+                self.node.edges.push(Edge {
+                    callee,
+                    handled: BTreeSet::new(),
+                });
+                self.node.row.labels.insert("yield".into());
+            }
             Some("$handle") if inputs.len() == 3 => {
                 self.callable(inputs[1], BTreeSet::new());
                 self.callable(inputs[2], labels(inputs[0]).unwrap_or_default());

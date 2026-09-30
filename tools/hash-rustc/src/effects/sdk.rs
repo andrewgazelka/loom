@@ -14,6 +14,9 @@ pub(super) fn effect(tcx: TyCtxt<'_>, id: DefId) -> Option<&'static str> {
         // A native kernel call reaches the host through its own import and always
         // carries the fixed label `kernel`.
         "kernel::call" => "$kernel",
+        // A generator's value reaches the consumer through its own import and always carries
+        // the fixed label `yield`.
+        "stream::emit" => "$yield",
         "handlers::handle" => "$handle",
         "handlers::handle_any" => "$handle_any",
         "handlers::handle_pinned" => "$handle_pinned",

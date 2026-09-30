@@ -549,6 +549,7 @@ mod tests {
             module,
             memory,
             effects: EffectContext::default(),
+            stream: None,
             pure: true,
             jobs: Mutex::new(HashMap::new()),
             tasks: Mutex::new(Vec::new()),

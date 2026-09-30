@@ -92,6 +92,8 @@ struct Execution {
     module: Module,
     memory: SharedMemory,
     effects: EffectContext,
+    /// Set when this execution runs as a stream; see `EffectContext::stream`.
+    stream: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
     pure: bool,
     jobs: Mutex<HashMap<u64, Arc<Job>>>,
     tasks: Mutex<Vec<ScheduledTask>>,

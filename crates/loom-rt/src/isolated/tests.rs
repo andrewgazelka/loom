@@ -693,3 +693,113 @@ async fn a_batch_runs_its_calls_at_the_same_time_and_answers_in_request_order() 
     );
     Ok(())
 }
+
+/// A guest that yields the values 0..`count` (one byte each, CBOR small uints) and calls a kernel after
+/// each accepted yield, so the kernel's counter says how far the producer got. It stops at the first
+/// nonzero yield result and returns CBOR 7 from a final kernel call.
+fn generator_module(count: u32, salt: u8) -> Result<Vec<u8>> {
+    let mut artifact = wat::parse_str(format!(
+        r#"(module
+        (import "env" "memory" (memory 1 1 shared))
+        (import "loom" "kernel" (func $kernel (param i32 i32 i32 i32) (result i64)))
+        (import "loom" "yield_value" (func $yield (param i32 i32) (result i32)))
+        (global (export "__stack_pointer") (mut i32) (i32.const 65536))
+        (global (export "__loom_stack_low") (mut i32) (i32.const 32768))
+        (global (export "__loom_stack_high") (mut i32) (i32.const 65536))
+        (global $heap (mut i32) (i32.const 8192))
+        (func $alloc (export "loom_alloc") (param $size i32) (param i32) (result i32)
+            (local $pointer i32)
+            global.get $heap local.tee $pointer
+            local.get $size i32.add global.set $heap local.get $pointer)
+        (func (export "loom_dealloc") (param i32 i32 i32))
+        (data (i32.const 1024) "test.cbor7")
+        (data (i32.const 1100) "\{salt:02x}")
+        (func (export "loom_call_main") (param i32 i32) (result i64)
+            (local $i i32) (local $packed i64) (local $src i32) (local $len i32) (local $dst i32)
+            (block $done
+              (loop $again
+                i32.const 1200 local.get $i i32.store8
+                i32.const 1200 i32.const 1 call $yield
+                br_if $done
+                i32.const 1024 i32.const 10 i32.const 1104 i32.const 0 call $kernel drop
+                local.get $i i32.const 1 i32.add local.tee $i
+                i32.const {count} i32.lt_u br_if $again))
+            i32.const 1024 i32.const 10 i32.const 1104 i32.const 0 call $kernel
+            local.set $packed
+            local.get $packed i32.wrap_i64 local.set $src
+            local.get $packed i64.const 32 i64.shr_u i32.wrap_i64 local.set $len
+            local.get $len i32.const 1 call $alloc local.set $dst
+            local.get $dst i32.const 0 i32.store8
+            local.get $dst i32.const 1 i32.add local.get $src local.get $len i32.const 1 i32.sub memory.copy
+            local.get $len i64.extend_i32_u i64.const 32 i64.shl
+            local.get $dst i64.extend_i32_u i64.or)
+    )"#
+    ))?;
+    loom_proto::core_protocol::stamp(&mut artifact);
+    Ok(artifact)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_generator_yields_in_order_then_returns_and_a_plain_call_is_told_it_is_not_streaming() -> Result<()> {
+    let store = Store::memory()?;
+    let hash = register(&store, &generator_module(3, 20)?, &[("main", 0)], &["yield", "kernel"])?;
+    let runtime = Runtime::new(store)?;
+    runtime.register_kernel(Arc::new(Cbor7(Default::default())))?;
+    let mut stream = runtime.call_stream(&hash, Some("main"), json!([]));
+    let mut seen = Vec::new();
+    while let Some(item) = stream.next().await {
+        seen.push(item?);
+    }
+    assert_eq!(seen, vec![json!(0), json!(1), json!(2)]);
+    assert_eq!(stream.finish().await?, json!(7));
+    // Not started as a stream: the yield reports 2 and the guest goes straight to its result.
+    assert_eq!(runtime.call_def(&hash, json!([])).await?, json!(7));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_slow_consumer_stalls_the_producer_and_dropping_the_stream_stops_it() -> Result<()> {
+    let store = Store::memory()?;
+    let hash = register(&store, &generator_module(20, 21)?, &[("main", 0)], &["yield", "kernel"])?;
+    let runtime = Runtime::new(store)?;
+    let kernel = Arc::new(Cbor7(Default::default()));
+    runtime.register_kernel(kernel.clone())?;
+    let produced = || kernel.0.load(std::sync::atomic::Ordering::Relaxed);
+
+    // Nobody reads: the channel holds a few values, then the guest waits inside `yield`.
+    let mut stream = runtime.call_stream(&hash, Some("main"), json!([]));
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let stalled = produced();
+    assert!((1..=6).contains(&stalled), "producer ran {stalled} steps ahead of nobody");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(produced(), stalled, "and it stays stalled");
+    // Reading lets it run on to the end.
+    let mut count = 0;
+    while stream.next().await.is_some() {
+        count += 1;
+    }
+    assert_eq!(count, 20);
+    stream.finish().await?;
+
+    // Drop after one value: the producer stops far short of 20.
+    let before = produced();
+    let mut stream = runtime.call_stream(&hash, Some("main"), json!([]));
+    assert_eq!(stream.next().await.unwrap()?, json!(0));
+    drop(stream);
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let ran = produced() - before;
+    assert!(ran < 15, "a dropped stream let the producer run {ran} more steps");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_generator_whose_row_lacks_yield_gets_no_stream() -> Result<()> {
+    let store = Store::memory()?;
+    let hash = register(&store, &generator_module(3, 22)?, &[("main", 0)], &["kernel"])?;
+    let runtime = Runtime::new(store)?;
+    runtime.register_kernel(Arc::new(Cbor7(Default::default())))?;
+    let mut stream = runtime.call_stream(&hash, Some("main"), json!([]));
+    assert!(stream.next().await.is_none(), "denied: nothing was yielded");
+    assert_eq!(stream.finish().await?, json!(7));
+    Ok(())
+}

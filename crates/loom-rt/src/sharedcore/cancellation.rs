@@ -78,6 +78,7 @@ impl Runtime {
                 trace: Some(trace.clone()),
                 ..Default::default()
             },
+            stream: None,
             pure: false,
             jobs: Mutex::new(HashMap::new()),
             tasks: Mutex::new(Vec::new()),

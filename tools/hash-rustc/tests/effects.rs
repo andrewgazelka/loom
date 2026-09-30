@@ -81,6 +81,25 @@ pub fn entry(depth: u32) { let _ = renamed::isolated::call(TARGET, depth); renam
 }
 
 #[test]
+fn a_generator_emit_contributes_the_fixed_yield_label() {
+    let directory = tempfile::tempdir().unwrap();
+    let document = compile(
+        directory.path(),
+        r#"
+pub fn entry(count: u32) {
+    for index in 0..count {
+        let _ = renamed::stream::emit(&index);
+    }
+}
+"#,
+        json!({}),
+    );
+    let row = entry_row(&document);
+    assert_eq!(row["labels"], json!(["yield"]), "{document:#}");
+    assert_eq!(row["unknown"], json!([]), "{document:#}");
+}
+
+#[test]
 fn a_batched_isolated_call_carries_the_same_call_label() {
     let directory = tempfile::tempdir().unwrap();
     let document = compile(

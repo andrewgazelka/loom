@@ -80,7 +80,6 @@ impl Runtime {
                 depth: effects.depth,
             });
         }
-        let entry = (!request.entry.is_empty()).then_some(request.entry);
         // A pure callee's answer for these arguments, when it was computed before.
         // A callee that uses kernels is served from the cache only to a caller that could have
         // run it: permissions are the intersection of caller and callee, hits included.
@@ -183,6 +182,7 @@ impl Runtime {
         let child_scope = format!("{scope}/call:{occurrence}");
         let child = EffectContext {
             depth: effects.depth + 1,
+            stream: None,
             ..effects.clone()
         };
         let started = Instant::now();

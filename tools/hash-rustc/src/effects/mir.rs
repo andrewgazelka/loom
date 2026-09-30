@@ -233,6 +233,13 @@ fn selected_call<'tcx>(
             });
             node.row.labels.insert("kernel".into());
         }
+        Some("$yield") => {
+            node.edges.push(Edge {
+                callee,
+                handled: BTreeSet::new(),
+            });
+            node.row.labels.insert("yield".into());
+        }
         Some("$handle") if args.len() == 3 => {
             // Dynamic selection discharges no statically proven label; retain
             // the callback's complete residual row.

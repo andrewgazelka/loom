@@ -11,6 +11,7 @@ pub mod preview;
 pub use handlers::{Continuation, Effect, Reply, handle, handle_any, handle_pinned};
 pub mod isolated;
 pub mod kernel;
+pub mod stream;
 pub use isolated::CallError;
 pub use glam;
 pub use serde;

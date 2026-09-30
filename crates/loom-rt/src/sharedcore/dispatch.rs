@@ -184,6 +184,7 @@ impl Runtime {
             effects: effects
                 .delegated(hash, definition.allowed_effects.as_deref())
                 .with_inferred(&definition.sig.effects.labels),
+            stream: effects.stream.clone(),
             pure,
             jobs: Mutex::new(HashMap::new()),
             tasks: Mutex::new(Vec::new()),

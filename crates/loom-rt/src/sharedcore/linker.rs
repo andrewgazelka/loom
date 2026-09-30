@@ -133,6 +133,37 @@ pub(super) fn linker(
             },
         )
         .map_err(error)?;
+    // A value from a generator (`stream.rs`). The value goes into the consumer's bounded channel;
+    // the guest resumes once it is accepted. Result: 0 accepted, 1 the consumer is gone (the guest
+    // should stop), 2 this execution is not a stream, 3 the `yield` effect is not allowed here.
+    linker
+        .func_wrap_async(
+            "loom",
+            "yield_value",
+            |mut caller: Caller<'_, Guest>, (pointer, length): (i32, i32)| {
+                Box::new(async move {
+                    let result: Result<i32> = async {
+                        let execution = caller.data().execution.clone();
+                        anyhow::ensure!(!execution.pure, "yield is forbidden in pure core execution");
+                        if !execution.effects.permits("yield") {
+                            return Ok(3);
+                        }
+                        let Some(sink) = execution.stream.clone() else {
+                            return Ok(2);
+                        };
+                        let bytes = copy_out(&execution.memory, pointer as u32, length as u32)?;
+                        // A full channel makes the guest wait; give its execution slot back meanwhile.
+                        caller.data_mut().permit.take();
+                        let sent = sink.send(bytes).await;
+                        caller.data_mut().permit = Some(execution.permit().await?);
+                        Ok(if sent.is_ok() { 0 } else { 1 })
+                    }
+                    .await;
+                    result.map_err(host_error)
+                })
+            },
+        )
+        .map_err(error)?;
     // A batch of isolated calls, run concurrently. Each keeps the semantics of `loom.call`
     // (policy, depth, arity, trace scope, result cache); occurrences are assigned up front in
     // batch order, so each child's trace scope is fixed before any of them runs, and the

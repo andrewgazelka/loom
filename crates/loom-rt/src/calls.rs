@@ -97,11 +97,25 @@ impl Runtime {
         scope: &str,
         execution: Arc<trace::ExecutionTrace>,
     ) -> Result<TimedCall> {
+        self.call_traced_entry_streaming(hash, entry, args, scope, execution, None)
+            .await
+    }
+    /// [`Self::call_traced_entry_timed`], with `stream` receiving what the entry yields.
+    pub(super) async fn call_traced_entry_streaming(
+        &self,
+        hash: &str,
+        entry: Option<&str>,
+        args: Value,
+        scope: &str,
+        execution: Arc<trace::ExecutionTrace>,
+        stream: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+    ) -> Result<TimedCall> {
         let (argc, payload) = positional_payload(&args)?;
         execution.identity(hash, &payload)?;
         let session = trace::TraceSession::new(self.inner.store.clone(), execution.clone(), entry);
         let effects = EffectContext {
             trace: Some(execution),
+            stream,
             ..EffectContext::default()
         };
         let result = self

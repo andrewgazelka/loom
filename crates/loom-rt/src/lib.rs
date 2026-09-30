@@ -3,6 +3,7 @@ mod sandbox;
 pub use sandbox::WasmSandbox;
 mod compilation_cache;
 mod kernel;
+mod stream;
 mod result_cache;
 mod shared_copy;
 pub use kernel::{Handle, HostKernel, KernelContext};
@@ -117,6 +118,10 @@ struct EffectContext {
     /// Isolated-call nesting below the root call. `isolated_call` increments
     /// it for the callee and refuses at `loom_proto::isolated::MAX_DEPTH`.
     depth: u32,
+    /// Where `loom.yield_value` sends values when this execution was started as a stream
+    /// (`Runtime::call_stream`). Only the root of a stream carries it: `delegated` clears it,
+    /// so an isolated callee never yields into its caller's stream.
+    stream: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
 }
 impl EffectContext {
     fn delegated(&self, def_hash: &str, allowed: Option<&[String]>) -> Self {
@@ -132,6 +137,7 @@ impl EffectContext {
             allowed,
             trace: self.trace.clone(),
             depth: self.depth,
+            stream: None,
         }
     }
     fn with_inferred(mut self, labels: &[String]) -> Self {
