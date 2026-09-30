@@ -214,12 +214,23 @@ impl Service {
         self
     }
     pub fn response(&self, result: Result<Value>) -> Response {
+        self.response_with(result, true)
+    }
+    /// `durable: false` replies after the recorded traces are committed but
+    /// before they are checkpointed to disk (`Store::drain`); `eval` uses it,
+    /// since its cells are addressed by hash and rebuilt on demand.
+    pub fn response_with(&self, result: Result<Value>, durable: bool) -> Response {
         let result = result.and_then(|value| {
             loom_proto::encode(&value).map_err(anyhow::Error::msg)?;
             Ok(value)
         });
         let storage_start = Instant::now();
-        let sequence = self.store.flush().and_then(|()| self.store.latest_seq());
+        let synchronized = if durable {
+            self.store.flush()
+        } else {
+            self.store.drain()
+        };
+        let sequence = synchronized.and_then(|()| self.store.latest_seq());
         self.last_reply_storage_nanos.store(
             u64::try_from(storage_start.elapsed().as_nanos()).unwrap_or(u64::MAX),
             Ordering::Relaxed,

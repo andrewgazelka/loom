@@ -13,6 +13,14 @@ use crate::definitions::resolve_dependency_pins;
 const DEFAULT_SESSION: &str = "repl";
 
 impl Service {
+    /// Build and run a trivial cell so the first `eval` a client sends finds
+    /// the dependency graph, the compiler process and the module cache warm.
+    /// On a fresh build cache the graph is 75 compiles (about 20 s); every cell
+    /// after it takes under 100 ms. `loomd` runs this once after it listens.
+    pub async fn prewarm_repl(&self) -> Result<()> {
+        self.eval(&json!({"source":"0"})).await.map(|_| ())
+    }
+
     pub(super) async fn eval(&self, args: &Value) -> Result<Value> {
         let started = Instant::now();
         self.access.require(Scope::Execute)?;
@@ -45,7 +53,7 @@ impl Service {
         let mut request = DefineRequest {
             lang: Lang::Rust,
             name: session.into(),
-            source: source.into(),
+            source: loom_build::interactive_cell(source).into_owned(),
             deps,
             allowed_effects,
         };

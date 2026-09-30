@@ -25,7 +25,9 @@ impl Service {
         {
             return self.response(Err(error));
         }
-        self.response(self.command_inner(request).await)
+        let durable = request.command != "eval";
+        let result = self.command_inner(request).await;
+        self.response_with(result, durable)
     }
     async fn command_inner(&self, request: CommandRequest) -> Result<Value> {
         let request = if request.command == "command" {

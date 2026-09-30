@@ -5,6 +5,13 @@ impl Store {
     pub fn flush(&self) -> Result<()> {
         self.recording.barrier(true)
     }
+    /// Commit what recording has queued without the durability checkpoint
+    /// `flush` waits for (`PRAGMA wal_checkpoint(FULL)`, which writes the pages
+    /// a reply produced and syncs them). Readers see the records; a crash may
+    /// lose the last ones. For replies whose records are cache-like.
+    pub fn drain(&self) -> Result<()> {
+        self.recording.barrier(false)
+    }
     pub fn recording_timings(&self) -> RecordingTimings {
         self.recording.timings()
     }

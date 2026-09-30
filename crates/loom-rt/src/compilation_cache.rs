@@ -2,7 +2,7 @@
 use anyhow::{Context, Result, ensure};
 use loom_store::Store;
 use rusqlite::{OptionalExtension, params};
-use std::{borrow::Cow, sync::Mutex};
+use std::{borrow::Cow, collections::HashMap, sync::{Arc, Mutex}};
 use wasmtime::{CacheStore, Config};
 
 /// Candidate hits count CAS reads; Cranelift can still reject a serialized value.
@@ -25,7 +25,24 @@ pub struct LoomCompilationCache {
     store: Store,
     namespace: String,
     stats: Mutex<CompilationCacheStats>,
+    verified: Mutex<Verified>,
 }
+
+/// Function bytes this process already read from the CAS and checked against
+/// their hash. A lookup that reaches the store costs two connection scopes,
+/// each a round trip to the recording writer, and a guest module has thousands
+/// of functions of which a new cell changes a handful: replaying the checked
+/// copy makes the rest of a module's compile a memory read. Only verified
+/// reads populate it (never an insert, never a failed read), so the corruption
+/// and missing-blob diagnostics still come from the store, and `clear` empties it.
+#[derive(Default)]
+struct Verified {
+    functions: HashMap<Vec<u8>, Arc<[u8]>>,
+    bytes: usize,
+}
+
+/// Verified function bytes kept in memory before the set is dropped and rebuilt.
+const VERIFIED_LIMIT_BYTES: usize = 512 * 1024 * 1024;
 
 impl std::fmt::Debug for LoomCompilationCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -112,6 +129,7 @@ impl LoomCompilationCache {
             store,
             namespace: namespace(config)?,
             stats: Mutex::new(CompilationCacheStats::default()),
+            verified: Mutex::new(Verified::default()),
         })
     }
 
@@ -122,6 +140,7 @@ impl LoomCompilationCache {
     /// Expire this backend's index entries before their CAS blobs may be collected.
     /// Concurrent compilation may publish new entries after this operation.
     pub fn clear(&self) -> Result<usize> {
+        *self.verified.lock().unwrap() = Verified::default();
         self.store
             .with_connection(|connection| {
                 Ok(connection.execute(
@@ -216,12 +235,22 @@ impl LoomCompilationCache {
 
 impl CacheStore for LoomCompilationCache {
     fn get(&self, key: &[u8]) -> Option<Cow<'_, [u8]>> {
+        if let Some(bytes) = self.verified.lock().unwrap().functions.get(key).cloned() {
+            self.stats.lock().unwrap().hits += 1;
+            return Some(Cow::Owned(bytes.to_vec()));
+        }
         match self
             .lookup(key)
             .and_then(|hash| hash.map(|hash| self.read_blob(&hash)).transpose())
         {
             Ok(Some(bytes)) => {
                 self.stats.lock().unwrap().hits += 1;
+                let mut verified = self.verified.lock().unwrap();
+                if verified.bytes + bytes.len() > VERIFIED_LIMIT_BYTES {
+                    *verified = Verified::default();
+                }
+                verified.bytes += bytes.len();
+                verified.functions.insert(key.to_vec(), Arc::from(bytes.as_slice()));
                 Some(Cow::Owned(bytes))
             }
             Ok(None) => {

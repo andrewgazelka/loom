@@ -125,6 +125,18 @@ async fn serve() -> anyhow::Result<()> {
         }
     });
     let workers = tenants::start_workers(&services);
+    if let Ok(service) = services.get(&loom_api::TenantId::default()) {
+        tokio::spawn(async move {
+            let started = std::time::Instant::now();
+            match service.prewarm_repl().await {
+                Ok(()) => eprintln!(
+                    "loomd: REPL warm in {} ms",
+                    started.elapsed().as_millis()
+                ),
+                Err(error) => eprintln!("loomd: REPL prewarm skipped: {error:#}"),
+            }
+        });
+    }
     let result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown.wait())
         .await;

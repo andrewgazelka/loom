@@ -14,6 +14,8 @@ mod intake;
 pub use intake::Preparation;
 mod materialize;
 use materialize::{Materialization, materialize_rust};
+mod cell;
+pub use cell::interactive_cell;
 mod direct;
 pub use direct::WRAPPER_MARKER;
 mod dwarf;
@@ -367,12 +369,11 @@ impl Builder {
         let compiled_path = directory.join("compiled.rs");
         let (toolchain, driver) = self.prepared().await?;
         stages.checkpoint("toolchain_prepare_ms");
-        let inputs = format!(
-            "{}:{}:{}",
-            build_fingerprint(&self.root)?,
-            driver.toolchain_hash,
-            profile.tag()
-        );
+        // What the dependency graph is keyed by: independent of the profile, so
+        // one graph serves every optimization level of the root.
+        let graph_inputs = format!("{}:{}", build_fingerprint(&self.root)?, driver.toolchain_hash);
+        // What a stored component is valid for: the same plus the profile.
+        let inputs = format!("{graph_inputs}:{}", profile.tag());
         stages.checkpoint("build_fingerprint_ms");
         let cached_inputs = fs::read_to_string(directory.join("component.inputs"))
             .await
@@ -449,7 +450,7 @@ impl Builder {
             directory: &directory,
             definition,
             dependencies,
-            sdk_fingerprint: &inputs,
+            sdk_fingerprint: &graph_inputs,
             toolchain: &toolchain,
             driver: &driver,
             identity_directory: &directory,

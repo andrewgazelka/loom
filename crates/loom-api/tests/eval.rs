@@ -106,3 +106,23 @@ async fn eval_optimize_builds_the_same_cell_at_standard_optimization() {
     // Optimization never changes what a definition is.
     assert_eq!(quick.result["hash"], optimized.result["hash"]);
 }
+
+#[tokio::test]
+#[ignore = "requires Rust guest toolchain and LOOM_COMPILER_CACHE_OWNER"]
+async fn eval_runs_a_bare_block_as_a_cell() {
+    let service = service();
+    let reply = eval(
+        &service,
+        json!({"source":"let values = vec![1, 2, 3, 4];\nvalues.iter().sum::<i32>() * 10"}),
+    )
+    .await;
+    assert!(reply.ok, "{reply:?}");
+    assert_eq!(reply.result["output"], 100);
+    assert_eq!(reply.result["entry"], "eval");
+
+    // A compile error in a bare cell keeps the line the caller wrote.
+    let broken = eval(&service, json!({"source":"let x = 1;\nlet y: u8 = \"no\";\ny"})).await;
+    assert!(!broken.ok);
+    let message = broken.result["error"].as_str().unwrap();
+    assert!(message.contains("mismatched types"), "{message}");
+}
