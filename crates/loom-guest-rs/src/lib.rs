@@ -12,6 +12,7 @@ pub use handlers::{Continuation, Effect, Reply, handle, handle_any, handle_pinne
 pub mod isolated;
 pub mod kernel;
 pub use isolated::CallError;
+pub use glam;
 pub use serde;
 use serde::{Serialize, de::DeserializeOwned};
 pub use serde_json;

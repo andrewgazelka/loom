@@ -23,6 +23,12 @@ pub mod handlers {
     }
 }
 pub use handlers::{handle, handle_any, handle_pinned};
+pub struct Axis(pub f64);
+impl Axis {
+    pub const Y: Axis = Axis(1.0);
+    pub fn length(&self) -> f64 { self.0 }
+}
+pub const UNIT: f64 = 1.0;
 pub mod kernel {
     pub fn call(_op: &str, _args: &[&[u8]]) -> Result<Vec<u8>, ()> { Ok(Vec::new()) }
     pub fn put(parts: &[&[u8]]) -> Result<[u8; 32], ()> { call("loom.put", parts).map(|_| [0; 32]) }

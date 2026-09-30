@@ -72,6 +72,18 @@ fn body<'tcx>(analysis: &Analysis<'tcx>, instance: Instance<'tcx>) -> Option<&'t
         {
             None
         }
+        // A constant is evaluated by the compiler, not run: it has no runtime body to
+        // carry an effect, and a dependency crate does not encode runtime MIR for it.
+        ty::InstanceKind::Item(id)
+            if matches!(
+                analysis.tcx.def_kind(id),
+                rustc_hir::def::DefKind::Const { .. }
+                    | rustc_hir::def::DefKind::AssocConst { .. }
+                    | rustc_hir::def::DefKind::AnonConst
+            ) =>
+        {
+            None
+        }
         ty::InstanceKind::Item(id) if analysis.tcx.is_mir_available(id) => {
             Some(analysis.tcx.instance_mir(instance.def))
         }

@@ -81,6 +81,23 @@ pub fn entry(depth: u32) { let _ = renamed::isolated::call(TARGET, depth); renam
 }
 
 #[test]
+fn a_constant_from_a_dependency_needs_no_runtime_body_and_adds_no_effect() {
+    let directory = tempfile::tempdir().unwrap();
+    let document = compile(
+        directory.path(),
+        r#"
+pub fn entry() -> f64 {
+    renamed::Axis::Y.length() + renamed::UNIT
+}
+"#,
+        json!({}),
+    );
+    let row = entry_row(&document);
+    assert_eq!(row["labels"], json!([]), "{document:#}");
+    assert_eq!(row["unknown"], json!([]), "{document:#}");
+}
+
+#[test]
 fn a_kernel_call_contributes_the_fixed_kernel_label_directly_or_through_put() {
     let directory = tempfile::tempdir().unwrap();
     let document = compile(

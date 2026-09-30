@@ -1849,6 +1849,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "glam"
+version = "0.33.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "928452f9c953e142b2f0973e4bd5f34445fcaa8069556ea97a3c9d34d15a4cf8"
+dependencies = [
+ "libm",
+]
+
+[[package]]
 name = "glob"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2865,6 +2874,7 @@ name = "loom-guest-rs"
 version = "0.1.0"
 dependencies = [
  "dlmalloc",
+ "glam",
  "loom-proto",
  "serde",
  "serde_json",
