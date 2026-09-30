@@ -262,7 +262,7 @@ impl Runtime {
         self.inner.store.map_store_ref(reference, Some(BLOB_KIND))
     }
 
-    /// Run kernel op `op` (`family.name`, or the built-in `loom.put`) on the
+    /// Run kernel op `op` (`family.name`, or the built-ins `loom.put` and `loom.get`) on the
     /// gather list `args`. This is what the `loom.kernel` import does.
     pub fn call_kernel(&self, op: &str, args: &[&[u8]]) -> Result<Vec<u8>, String> {
         let outcome = self.call_kernel_inner(op, args);
@@ -273,6 +273,22 @@ impl Runtime {
     }
 
     fn call_kernel_inner(&self, op: &str, args: &[&[u8]]) -> Result<Vec<u8>, String> {
+        if op == "loom.get" {
+            // The raw bytes a handle names (what `loom.put` stored), one copy into the caller. Pure: the
+            // answer is a function of the hash.
+            let handle: Handle = match args {
+                [single] => (*single)
+                    .try_into()
+                    .map_err(|_| "loom.get takes one 32-byte handle".to_string())?,
+                _ => return Err("loom.get takes one 32-byte handle".into()),
+            };
+            return self
+                .inner
+                .store
+                .get_of_kind(&hex(&handle), BLOB_KIND)
+                .map_err(|error| format!("reading kernel blob: {error:#}"))?
+                .ok_or_else(|| "unknown handle".to_string());
+        }
         if op == "loom.put" {
             let joined;
             let bytes: &[u8] = match args {

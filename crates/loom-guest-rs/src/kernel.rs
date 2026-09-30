@@ -63,6 +63,12 @@ pub fn call(op: &str, args: &[&[u8]]) -> Result<Vec<u8>, KernelError> {
     }
 }
 
+/// The bytes a handle names, copied into this guest's memory once. The handle must have been stored through
+/// [`put`] (by this guest or by the host for it); anything else is a [`KernelError`].
+pub fn get(handle: &Handle) -> Result<Vec<u8>, KernelError> {
+    call("loom.get", &[handle])
+}
+
 /// Store `parts`, joined, on the host and take their handle.
 pub fn put(parts: &[&[u8]]) -> Result<Handle, KernelError> {
     let reply = call("loom.put", parts)?;

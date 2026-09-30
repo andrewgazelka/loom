@@ -140,7 +140,7 @@ async fn receive(
     }
 }
 
-fn failure(service: &Service, status: StatusCode, error: anyhow::Error) -> HttpResponse {
+pub(super) fn failure(service: &Service, status: StatusCode, error: anyhow::Error) -> HttpResponse {
     let mut response = Json(service.response(Err(error))).into_response();
     *response.status_mut() = status;
     response

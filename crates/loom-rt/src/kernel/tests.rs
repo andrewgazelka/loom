@@ -136,6 +136,21 @@ fn put_returns_the_content_hash_and_a_kernel_can_read_the_bytes_back_by_it() {
 }
 
 #[test]
+fn get_returns_the_bytes_a_put_stored_and_nothing_else() {
+    let runtime = runtime();
+    let bytes: Vec<u8> = (0..70_000u32).map(|i| (i % 253) as u8).collect();
+    let handle = runtime.call_kernel("loom.put", &[&bytes]).unwrap();
+    assert_eq!(runtime.call_kernel("loom.get", &[&handle]).unwrap(), bytes);
+    assert!(runtime.call_kernel("loom.get", &[&[5u8; 32]]).unwrap_err().contains("unknown handle"));
+    assert!(runtime.call_kernel("loom.get", &[b"short"]).unwrap_err().contains("32-byte"));
+    assert!(runtime.call_kernel("loom.get", &[]).unwrap_err().contains("32-byte"));
+    // A hash of an object stored as something else is unknown, not readable.
+    let other = runtime.inner.store.put("component", b"not a kernel blob").unwrap();
+    let other: Handle = unhex(&other).unwrap();
+    assert!(runtime.call_kernel("loom.get", &[&other]).unwrap_err().contains("unknown handle"));
+}
+
+#[test]
 fn registration_refuses_reserved_malformed_and_duplicate_families_and_versions_move_the_fingerprint()
  {
     let runtime = Runtime::new(Store::memory().unwrap()).unwrap();

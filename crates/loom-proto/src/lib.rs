@@ -195,7 +195,9 @@ impl<T> Desc<T> {
 }
 
 mod bytes;
+mod packed;
 mod store_ref;
+pub use packed::{Element, Packed};
 pub use store_ref::StoreRef;
 mod codec;
 mod fs;

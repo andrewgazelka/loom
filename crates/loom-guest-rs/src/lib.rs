@@ -18,7 +18,9 @@ use serde::{Serialize, de::DeserializeOwned};
 pub use serde_json;
 
 pub type EffectError = String;
-pub use loom_proto::{Bytes, DirEntry, EntryKind, TypeSig, Value, decode, decode_host, encode};
+pub use loom_proto::{
+    Bytes, DirEntry, EntryKind, Packed, StoreRef, TypeSig, Value, decode, decode_host, encode,
+};
 
 /// Perform an effect and decode its result. The call suspends until it completes.
 pub fn perform<T: DeserializeOwned>(name: &str, args: impl Serialize) -> Result<T, EffectError> {
