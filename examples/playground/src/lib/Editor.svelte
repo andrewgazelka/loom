@@ -63,7 +63,8 @@
             "&.cm-focused": { outline: "none" },
             ".cm-scroller": {
               fontFamily: "'JetBrains Mono', ui-monospace, Menlo, monospace",
-              fontVariantLigatures: "none",
+              fontVariantLigatures: "contextual common-ligatures",
+              fontFeatureSettings: "\"calt\" 1, \"liga\" 1",
               lineHeight: "1.65",
               overflowY: "hidden",
             },
