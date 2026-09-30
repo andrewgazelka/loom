@@ -119,6 +119,29 @@ impl Store {
                 .restore(&hash, size, dest),
         }
     }
+    /// Make every spilled object of this store available under `directory/objects/` (hard links
+    /// where the filesystem allows, else verified copies), so a database copied to `directory`
+    /// opens with all its bytes. Returns how many objects were brought over. A store with no
+    /// objects directory has nothing to bring.
+    pub fn export_spilled_to(&self, directory: &Path) -> Result<u64> {
+        self.recording.barrier(false)?;
+        let Some(source) = self.spill.as_deref() else {
+            return Ok(0);
+        };
+        let rows: Vec<(String, u64)> = {
+            let c = self.lock()?;
+            let mut query = c.prepare("SELECT hash,size FROM cas WHERE external=1")?;
+            query
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        let destination = spill::Spill::open(directory)?;
+        for (hash, size) in &rows {
+            destination.adopt(source, hash, *size)?;
+        }
+        destination.sync_dirs()?;
+        Ok(rows.len() as u64)
+    }
     pub fn put_value<T: serde::Serialize>(&self, kind: &str, value: &T) -> Result<String> {
         self.recording.barrier(false)?;
         put_value(&*self.lock()?, kind, value)

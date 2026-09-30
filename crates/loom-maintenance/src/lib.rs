@@ -27,7 +27,7 @@ pub fn stats(store: &Store) -> Result<Stats> {
         let page_size = scalar("PRAGMA page_size")?;
         Ok(Stats {
             cas_objects: scalar("SELECT count(*) FROM cas")?,
-            cas_bytes: scalar("SELECT coalesce(sum(length(bytes)),0) FROM cas")?,
+            cas_bytes: scalar("SELECT coalesce(sum(coalesce(size,length(bytes))),0) FROM cas")?,
             events: scalar("SELECT count(*) FROM definition_records")?,
             latest_seq: connection.query_row(
                 "SELECT coalesce(max(seq),0) FROM definition_records",
@@ -78,6 +78,8 @@ pub fn collect_effect_index(store: &Store, limit: usize) -> Result<Collection> {
 pub struct Backup {
     pub bytes: u64,
     pub latest_seq: i64,
+    /// Objects stored as files, linked or copied into `objects/` beside the backup.
+    pub spilled_objects: u64,
 }
 
 /// SQLite creates a consistent snapshot including WAL contents. Refuse existing
@@ -91,6 +93,14 @@ pub fn backup(store: &Store, destination: &Path) -> Result<Backup> {
         connection.execute("VACUUM INTO ?", params![destination_text])?;
         Ok(())
     })?;
+    // Objects of 1 MiB and up live as files beside the database: bring them next to the copy,
+    // or the copy would open with rows whose bytes are missing.
+    let spilled = store.export_spilled_to(
+        destination
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or(Path::new(".")),
+    )?;
     let snapshot =
         Connection::open_with_flags(destination, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let integrity: String = snapshot.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
@@ -106,6 +116,7 @@ pub fn backup(store: &Store, destination: &Path) -> Result<Backup> {
     Ok(Backup {
         bytes: destination.metadata()?.len(),
         latest_seq,
+        spilled_objects: spilled,
     })
 }
 
@@ -152,6 +163,25 @@ mod tests {
         assert_eq!(restored.effect_get("a", "global", 0)?, Some(json!(11)));
         assert_eq!(restored.effect_get("b", "global", 0)?, None);
         assert!(backup(&store, &destination).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn a_backup_carries_spilled_blobs_and_opens_with_all_its_bytes() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let live = directory.path().join("live");
+        std::fs::create_dir(&live)?;
+        let store = Store::open(live.join("live.sqlite"))?;
+        let big = vec![7u8; 3 << 20];
+        let hash = store.put("blob", &big)?;
+        let backups = directory.path().join("backups");
+        std::fs::create_dir(&backups)?;
+        let destination = backups.join("one.sqlite");
+        let result = backup(&store, &destination)?;
+        assert_eq!(result.spilled_objects, 1);
+        let restored = Store::open(&destination)?;
+        assert_eq!(restored.get(&hash)?.as_deref(), Some(big.as_slice()));
+        assert!(stats(&store)?.cas_bytes >= big.len() as u64, "spilled bytes are counted");
         Ok(())
     }
 
