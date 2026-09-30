@@ -115,7 +115,8 @@ pub static VERBS: &[Verb] = &[
             arg!(deps, Map, optional),
             arg!(allowed_effects, Json, optional),
             arg!(manifest, Source, optional),
-            arg!(lock, Source, optional)
+            arg!(lock, Source, optional),
+            arg!(call_id, String, optional)
         ]
     ),
     verb!(
@@ -176,9 +177,12 @@ pub static VERBS: &[Verb] = &[
         [
             arg!(target, String),
             arg!(args, Json, "[]"),
-            arg!(sites, Boolean, optional)
+            arg!(sites, Boolean, optional),
+            arg!(call_id, String, optional)
         ]
     ),
+    // Stops the running `run` or `eval` that was given this `call_id`; not an error when none is running.
+    verb!(cancel, Definition, Execute, [arg!(call_id, String)]),
     // Define: it compiles source. The handler also requires the execute scope,
     // because it runs the entry it built.
     verb!(

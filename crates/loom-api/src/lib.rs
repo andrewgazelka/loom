@@ -21,6 +21,7 @@ pub use tenant::{ServiceDirectory, TenantId};
 mod actor_websocket;
 pub use actor_websocket::WebSocketHub;
 mod build_progress;
+mod call_cancel;
 mod cas_browser;
 mod wasm;
 use anyhow::{Context, Result, bail, ensure};
@@ -69,6 +70,7 @@ pub struct Service {
     definitions_gate: Arc<tokio::sync::Mutex<()>>,
     build_progress: build_progress::BuildProgress,
     last_reply_storage_nanos: Arc<AtomicU64>,
+    calls: call_cancel::ActiveCalls,
 }
 impl Service {
     pub fn new(store: Store, root: PathBuf, languages: Vec<Lang>) -> Result<Self> {
@@ -112,6 +114,7 @@ impl Service {
             definitions_gate: Arc::new(tokio::sync::Mutex::new(())),
             build_progress: build_progress::BuildProgress::default(),
             last_reply_storage_nanos: Arc::new(AtomicU64::new(0)),
+            calls: Default::default(),
         })
     }
 
@@ -356,6 +359,7 @@ fn command_returns_direct(command: &str) -> bool {
             | "diff"
             | "run"
             | "eval"
+            | "cancel"
             | "find"
             | "dependents"
             | "export"

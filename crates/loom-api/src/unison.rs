@@ -303,15 +303,16 @@ impl Service {
                     Some(entry) => entry.name.as_str(),
                     None => select_entry(&def, target)?,
                 };
-                self.run_entry(
+                self.cancellable(args, self.run_entry(
                     &def,
                     entry,
                     args.get("args").cloned().unwrap_or_else(|| json!([])),
                     args.get("sites").and_then(Value::as_bool).unwrap_or(false),
-                )
+                ))
                 .await
             }
-            "eval" => self.eval(args).await,
+            "eval" => self.cancellable(args, self.eval(args)).await,
+            "cancel" => self.cancel_call(args),
             "find" => {
                 let text = field(args, "text")?;
                 let mut matches = Vec::new();
