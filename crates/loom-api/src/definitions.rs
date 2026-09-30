@@ -158,7 +158,9 @@ impl Service {
                 ok: true,
                 seq: self.store.latest_seq()?,
                 diagnostics: Vec::new(),
-                result: json!({"def":def,"build":{"ms":built.ms,"component_hash":component_hash,"size":size,"rustc_invocations":built.rustc_invocations}}),
+                result: json!({"def":def,"build":{"ms":built.ms,"component_hash":component_hash,"size":size,"rustc_invocations":built.rustc_invocations,
+                    "driver_timing":built.logs.lines().filter(|line| line.contains("driver-timing")).collect::<Vec<_>>(),
+                    "stages":built.logs.lines().find_map(|line| serde_json::from_str::<serde_json::Value>(line).ok().and_then(|v| v.get("build_stages").cloned()))}}),
             });
         }
         let component_hash = self.store.put("component", &built.component)?;

@@ -107,6 +107,8 @@ impl Runtime {
         let artifact = definition
             .component_hash
             .context("definition has no built artifact")?;
+        let resolve_ms = elapsed_ms(start);
+        let compile_started = Instant::now();
         let compile_lock = self
             .inner
             .component_locks
@@ -122,6 +124,7 @@ impl Runtime {
             .lock()
             .unwrap()
             .get(&artifact);
+        let module_cached = cached.is_some();
         let module = if let Some(module) = cached {
             module
         } else {
@@ -148,6 +151,8 @@ impl Runtime {
             module
         };
         drop(compile_guard);
+        let module_ms = elapsed_ms(compile_started);
+        let memory_started = Instant::now();
         let mut memory_type = None;
         for import in module.imports() {
             if let ExternType::Memory(ty) = import.ty() {
@@ -171,6 +176,7 @@ impl Runtime {
             memory_type.context("core has no shared memory import")?,
         )
         .map_err(error)?;
+        let memory_ms = elapsed_ms(memory_started);
         let execution = Arc::new(Execution {
             handler_instances: Mutex::new(Vec::new()),
             handler_instance_reuses: AtomicU64::new(0),
@@ -198,6 +204,7 @@ impl Runtime {
         let mut cleanup = Cleanup {
             execution: Some(execution.clone()),
         };
+        let invoke_started = Instant::now();
         let invocation = entry.prepare();
         let task_execution = execution.clone();
         let task_scope = scope.to_owned();
@@ -209,12 +216,15 @@ impl Runtime {
         let result = receiver
             .await
             .unwrap_or_else(|_| Err(anyhow::anyhow!("shared root task ended without a result")));
+        let invoke_ms = elapsed_ms(invoke_started);
+        let drain_started = Instant::now();
         execution.cancel();
         execution.drain().await;
         if let Some(trace) = &execution.effects.trace {
             trace.finish_scope(scope);
         }
         cleanup.execution.take();
+        let drain_ms = elapsed_ms(drain_started);
         *self.inner.handler_round_trip_us.lock().unwrap() = HandlerMeasurements {
             scope: scope.to_owned(),
             samples: std::mem::take(&mut *execution.handler_round_trip_us.lock().unwrap()),
@@ -231,7 +241,16 @@ impl Runtime {
             timing: RuntimeTiming {
                 component_hash: artifact,
                 total_ms: elapsed_ms(start),
-                run_ms: elapsed_ms(start),
+                resolve_ms,
+                // Module lookup or compile (the function cache, then linking code memory).
+                compile_ms: module_ms,
+                // Creating the shared memory for the instance.
+                instantiate_ms: memory_ms,
+                // The guest's run, from scheduling the entry to its result.
+                run_ms: invoke_ms,
+                // Stopping the execution, draining its tasks and closing its trace scope.
+                link_ms: drain_ms,
+                cache_hit: module_cached,
                 ..Default::default()
             },
         })

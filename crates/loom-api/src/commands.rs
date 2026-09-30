@@ -151,6 +151,11 @@ impl Service {
                     .take(10)
                     .map(|(hash, callee)| json!({"callee":hash,"computed":callee.computed,"compute_ns":callee.compute_ns,"hits":callee.hits,"saved_ns":callee.saved_ns,"stored":callee.stored,"skipped_cheap":callee.skipped_cheap,"bytes":callee.bytes}))
                     .collect();
+                let compilation = self.runtime.compilation_cache_stats();
+                stats["compilation_cache"] = json!({
+                    "hits":compilation.hits,"misses":compilation.misses,"inserts":compilation.inserts,
+                    "errors":compilation.errors,"storage_errors":compilation.storage_errors,
+                });
                 stats["call_results"] = json!({
                     "hits":results.hits,"misses":results.misses,"stores":results.stores,"entries":results.entries,
                     "bytes":results.bytes,"evictions":results.evictions,"skipped_cheap":results.skipped_cheap,

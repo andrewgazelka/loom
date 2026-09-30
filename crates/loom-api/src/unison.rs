@@ -182,6 +182,7 @@ impl Service {
     /// Call `entry` of `def` with `args` and report its output and effects.
     pub(super) async fn run_entry(&self, def: &Def, entry: &str, args: Value) -> Result<Value> {
         let call = self.runtime.call_entry_timed(&def.hash, entry, args).await?;
+        let trace_started = std::time::Instant::now();
         let trace = self
             .store
             .load_call_trace(&call.scope)?
@@ -189,7 +190,8 @@ impl Service {
         let effects = trace.trace.entries.iter().map(|entry| -> Result<Value> {
             Ok(json!({"descriptor":self.store.get_value::<Value>(&entry.descriptor_hash)?.context("effect descriptor missing")?,"outcome":entry.outcome}))
         }).collect::<Result<Vec<_>>>()?;
-        Ok(json!({"hash":def.hash,"entry":entry,"output":call.value,"scope":call.scope,"effects":effects}))
+        Ok(json!({"hash":def.hash,"entry":entry,"output":call.value,"scope":call.scope,"effects":effects,
+            "runtime_ms":call.timing,"trace_read_ms":trace_started.elapsed().as_secs_f64()*1000.0}))
     }
     pub(super) async fn unison(&self, operation: &str, args: &Value) -> Result<Value> {
         match operation {
