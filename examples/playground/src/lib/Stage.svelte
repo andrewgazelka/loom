@@ -3,7 +3,7 @@
 
   // One drawing command from the handler: [kind, coordinates, colour]. Kinds: 0 line2d, 1 circle, 2 line3d, 3 triangle.
   type Cmd = [number, number[], number[]];
-  let { scene = [], drawMs = $bindable(0) }: { scene?: Cmd[]; drawMs?: number } = $props();
+  let { scene = [], limit = null, drawMs = $bindable(0) }: { scene?: Cmd[]; limit?: number | null; drawMs?: number } = $props();
 
   let canvas: HTMLCanvasElement;
   let w = 0, h = 0, dpr = 1;
@@ -105,7 +105,8 @@
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, w, h);
       const t0 = performance.now();
-      if (is3d) draw3d(ctx, scene as Cmd[]); else draw2d(ctx, scene as Cmd[]);
+      const shown = limit === null ? (scene as Cmd[]) : (scene as Cmd[]).slice(0, limit);
+      if (is3d) draw3d(ctx, shown); else draw2d(ctx, shown);
       drawMs = Math.round((drawMs * 7 + (performance.now() - t0)) / 8 * 10) / 10;
       raf = requestAnimationFrame(tick);
     };

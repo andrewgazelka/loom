@@ -23,6 +23,10 @@ pub(super) fn linker(
                             loom_proto::decode(&bytes).map_err(anyhow::Error::msg)?;
                         let occurrence = caller.data().occurrence;
                         caller.data_mut().occurrence += 1;
+                        if let Some(sites) = &execution.effects.sites {
+                            let offsets = guest_offsets(&caller);
+                            sites.lock().unwrap().push(offsets);
+                        }
                         // Core guests have exactly one route to another
                         // definition: the `loom.call` import below. A `perform`
                         // of the JavaScript-shaped descriptor is refused, not
@@ -514,4 +518,14 @@ async fn spawn(
         child_job.done.notify_waiters();
     })?;
     Ok(id as i64)
+}
+
+/// Module offsets of the guest frames that performed the current effect, innermost first. The
+/// caller turns them into source lines with the module's DWARF (`call_entry_sites`).
+fn guest_offsets(caller: &Caller<'_, Guest>) -> Vec<u64> {
+    wasmtime::WasmBacktrace::capture(caller)
+        .frames()
+        .iter()
+        .filter_map(|frame| frame.module_offset().map(|offset| offset as u64))
+        .collect()
 }

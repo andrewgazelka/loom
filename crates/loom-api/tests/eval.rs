@@ -397,3 +397,60 @@ async fn eval_of_a_crate_without_a_lock_says_to_supply_one() {
     let message = reply.result["error"].as_str().unwrap();
     assert!(message.contains("Cargo.lock"), "{message}");
 }
+
+#[tokio::test]
+#[ignore = "requires Rust guest toolchain and LOOM_COMPILER_CACHE_OWNER"]
+async fn run_with_sites_names_the_cell_line_that_performed_each_effect() {
+    // Effects handled inside the guest never reach the host handler, so the only record of where
+    // they came from is the call stack at the `loom.perform` import, read through the module's DWARF.
+    let service = service();
+    let source = "use loom::{Continuation, Effect, Reply, Value};\n\
+pub fn run(_n: u32) -> u32 {\n\
+    let mut seen = 0;\n\
+    loom::handle([\"tick\"], |_e: Effect, _k: Continuation| {\n\
+        seen += 1;\n\
+        Reply::Resume(Value::Null)\n\
+    }, || {\n\
+        let _ = loom::perform::<()>(\"tick\", 1);\n\
+        let _ = loom::perform::<()>(\"tick\", 2);\n\
+        let _ = loom::perform::<()>(\"tick\", 3);\n\
+    }).unwrap();\n\
+    seen\n\
+}\n";
+    let built = eval(&service, json!({"source":source,"args":[0]})).await;
+    assert!(built.ok, "{built:?}");
+    let hash = built.result["hash"].as_str().unwrap();
+    let reply = service
+        .command(CommandRequest {
+            session: None,
+            command: "run".into(),
+            args: json!({"target":hash,"args":[0],"sites":true}),
+        })
+        .await;
+    assert!(reply.ok, "{reply:?}");
+    let sites = reply.result["sites"].as_array().unwrap();
+    assert_eq!(sites.len(), 3, "one entry per performed effect: {sites:?}");
+    // Lines 8, 9 and 10 of the cell each issue one `perform`; the innermost cell line is listed.
+    let lines: Vec<u64> = sites
+        .iter()
+        .map(|frames| {
+            frames
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(Value::as_u64)
+                .find(|line| (8..=10).contains(line))
+                .expect("a cell line on the stack")
+        })
+        .collect();
+    assert_eq!(lines, [8, 9, 10]);
+    // Without the flag there is no `sites` key and no backtrace cost.
+    let plain = service
+        .command(CommandRequest {
+            session: None,
+            command: "run".into(),
+            args: json!({"target":hash,"args":[0]}),
+        })
+        .await;
+    assert!(plain.ok && plain.result.get("sites").is_none());
+}

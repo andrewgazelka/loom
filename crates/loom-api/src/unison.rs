@@ -180,11 +180,21 @@ impl Service {
         Ok(json!({"old":old.hash,"new":new.hash,"added":added,"removed":removed,"changed":changed}))
     }
     /// Call `entry` of `def` with `args` and report its output and effects.
-    pub(super) async fn run_entry(&self, def: &Def, entry: &str, args: Value) -> Result<Value> {
-        let call = self
-            .runtime
-            .call_entry_timed(&def.hash, entry, args)
-            .await?;
+    pub(super) async fn run_entry(
+        &self,
+        def: &Def,
+        entry: &str,
+        args: Value,
+        sites: bool,
+    ) -> Result<Value> {
+        let (call, lines) = if sites {
+            let (call, offsets) = self.runtime.call_entry_sites(&def.hash, entry, args).await?;
+            let artifact = def.component_hash.as_deref().context("definition has no built artifact")?;
+            let bytes = self.store.get(artifact)?.context("artifact missing")?;
+            (call, Some(crate::wasm::source_lines(&bytes, &offsets)?))
+        } else {
+            (self.runtime.call_entry_timed(&def.hash, entry, args).await?, None)
+        };
         let trace_started = std::time::Instant::now();
         let trace = self
             .store
@@ -193,10 +203,13 @@ impl Service {
         let effects = trace.trace.entries.iter().map(|entry| -> Result<Value> {
             Ok(json!({"descriptor":self.store.get_value::<Value>(&entry.descriptor_hash)?.context("effect descriptor missing")?,"outcome":entry.outcome}))
         }).collect::<Result<Vec<_>>>()?;
-        Ok(
-            json!({"hash":def.hash,"entry":entry,"output":call.value,"scope":call.scope,"effects":effects,
-            "runtime_ms":call.timing,"trace_read_ms":trace_started.elapsed().as_secs_f64()*1000.0}),
-        )
+        let mut result = json!({"hash":def.hash,"entry":entry,"output":call.value,"scope":call.scope,"effects":effects,
+            "runtime_ms":call.timing,"trace_read_ms":trace_started.elapsed().as_secs_f64()*1000.0});
+        if let Some(lines) = lines {
+            // One entry per performed effect, in order: the guest source lines on its stack.
+            result["sites"] = json!(lines);
+        }
+        Ok(result)
     }
     pub(super) async fn unison(&self, operation: &str, args: &Value) -> Result<Value> {
         match operation {
@@ -292,6 +305,7 @@ impl Service {
                     &def,
                     entry,
                     args.get("args").cloned().unwrap_or_else(|| json!([])),
+                    args.get("sites").and_then(Value::as_bool).unwrap_or(false),
                 )
                 .await
             }

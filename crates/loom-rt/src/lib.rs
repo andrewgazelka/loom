@@ -139,7 +139,13 @@ struct EffectContext {
     /// (`Runtime::call_stream`). Only the root of a stream carries it: `delegated` clears it,
     /// so an isolated callee never yields into its caller's stream.
     stream: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+    /// When set (`Runtime::call_entry_sites`), every `loom.perform` of the root execution appends the
+    /// module offsets of the guest frames on its stack, innermost first. Like `stream`, only the
+    /// root carries it.
+    sites: Option<SiteLog>,
 }
+/// Module offsets per effect, in the order the effects were performed.
+pub(crate) type SiteLog = Arc<std::sync::Mutex<Vec<Vec<u64>>>>;
 impl EffectContext {
     fn delegated(&self, def_hash: &str, allowed: Option<&[String]>) -> Self {
         let requested = allowed.map(|labels| labels.iter().cloned().collect::<BTreeSet<_>>());
@@ -155,6 +161,7 @@ impl EffectContext {
             trace: self.trace.clone(),
             depth: self.depth,
             stream: None,
+            sites: None,
         }
     }
     fn with_inferred(mut self, labels: &[String]) -> Self {

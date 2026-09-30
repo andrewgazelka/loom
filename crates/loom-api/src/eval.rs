@@ -113,6 +113,7 @@ impl Service {
                 &def,
                 entry,
                 args.get("args").cloned().unwrap_or_else(|| json!([])),
+                false,
             )
             .await?;
         result["build"] = response.result["build"].clone();

@@ -173,7 +173,11 @@ pub static VERBS: &[Verb] = &[
         run,
         Definition,
         Execute,
-        [arg!(target, String), arg!(args, Json, "[]")]
+        [
+            arg!(target, String),
+            arg!(args, Json, "[]"),
+            arg!(sites, Boolean, optional)
+        ]
     ),
     // Define: it compiles source. The handler also requires the execute scope,
     // because it runs the entry it built.

@@ -3,8 +3,8 @@
   import "@fontsource/jetbrains-mono/400.css";
   import "@fontsource/jetbrains-mono/500.css";
   import { closeBrackets, closeBracketsKeymap } from "@codemirror/autocomplete";
-  import { EditorState } from "@codemirror/state";
-  import { EditorView, keymap, drawSelection, highlightActiveLine, highlightActiveLineGutter, lineNumbers } from "@codemirror/view";
+  import { EditorState, StateEffect, StateField } from "@codemirror/state";
+  import { Decoration, EditorView, keymap, drawSelection, highlightActiveLine, highlightActiveLineGutter, lineNumbers } from "@codemirror/view";
   import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
   import { bracketMatching, indentOnInput, syntaxHighlighting, HighlightStyle } from "@codemirror/language";
   import { setDiagnostics, lintGutter, type Diagnostic } from "@codemirror/lint";
@@ -12,7 +12,25 @@
   import { tags as t } from "@lezer/highlight";
 
   type Problem = { line: number; col: number; message: string; snippet?: string };
-  let { value = $bindable(""), problems = [], run }: { value?: string; problems?: Problem[]; run: () => void } = $props();
+  let { value = $bindable(""), problems = [], run, running = null }: { value?: string; problems?: Problem[]; run: () => void; running?: number | null } = $props();
+
+  // The line the program is executing, taken from the module's DWARF (see `run` with `sites`).
+  const setRunning = StateEffect.define<number | null>();
+  const runningLine = StateField.define({
+    create: () => Decoration.none,
+    update(deco, tr) {
+      deco = deco.map(tr.changes);
+      for (const effect of tr.effects) {
+        if (!effect.is(setRunning)) continue;
+        const n = effect.value;
+        deco = n && n >= 1 && n <= tr.state.doc.lines
+          ? Decoration.set([Decoration.line({ class: "cm-running" }).range(tr.state.doc.line(n).from)])
+          : Decoration.none;
+      }
+      return deco;
+    },
+    provide: (field) => EditorView.decorations.from(field),
+  });
 
   let host: HTMLDivElement;
   let view: EditorView | undefined;
@@ -43,6 +61,7 @@
         doc: value,
         extensions: [
           rust(),
+          runningLine,
           lineNumbers(),
           lintGutter(),
           history(),
@@ -72,6 +91,7 @@
             ".cm-line": { padding: "0 20px 0 6px" },
             ".cm-gutters": { backgroundColor: c.bg, color: c.dim, border: "0", paddingLeft: "6px" },
             ".cm-lineNumbers .cm-gutterElement": { padding: "0 10px 0 8px", minWidth: "26px" },
+            ".cm-running": { backgroundColor: "rgba(200, 208, 240, 0.11)", boxShadow: "inset 2px 0 0 rgba(200, 208, 240, 0.35)" },
             ".cm-activeLine": { backgroundColor: "rgba(122,162,247,0.07)" },
             ".cm-activeLineGutter": { backgroundColor: "transparent", color: c.fg },
             ".cm-cursor": { borderLeftColor: c.accent, borderLeftWidth: "2px" },
@@ -91,6 +111,10 @@
     if (view && value !== view.state.doc.toString()) {
       view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: value } });
     }
+  });
+
+  $effect(() => {
+    view?.dispatch({ effects: setRunning.of(running) });
   });
 
   // rustc diagnostics become squiggles and gutter markers.

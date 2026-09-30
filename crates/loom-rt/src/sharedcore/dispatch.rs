@@ -187,9 +187,14 @@ impl Runtime {
             runtime: self.clone(),
             module,
             memory,
-            effects: effects
-                .delegated(hash, definition.allowed_effects.as_deref())
-                .with_inferred(&definition.sig.effects.labels),
+            effects: {
+                let mut delegated = effects
+                    .delegated(hash, definition.allowed_effects.as_deref())
+                    .with_inferred(&definition.sig.effects.labels);
+                // Like `stream`, the site log belongs to the call that asked for it, not to callees.
+                delegated.sites = effects.sites.clone();
+                delegated
+            },
             stream: effects.stream.clone(),
             pure,
             jobs: Mutex::new(HashMap::new()),

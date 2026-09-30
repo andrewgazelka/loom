@@ -28,6 +28,32 @@ impl Runtime {
         )
         .await
     }
+    /// [`Self::call_entry_timed`] that also returns, for every effect the entry performed, the
+    /// module offsets of the guest frames that performed it (innermost first; map them to source
+    /// lines with the module's DWARF). Captures a backtrace per effect: for inspection, not the
+    /// hot path.
+    pub async fn call_entry_sites(
+        &self,
+        hash: &str,
+        entry: &str,
+        args: Value,
+    ) -> Result<(TimedCall, Vec<Vec<u64>>)> {
+        let scope = format!("call:{}", uuid::Uuid::new_v4());
+        let sites: SiteLog = Arc::default();
+        let call = self
+            .call_traced_entry_inner(
+                hash,
+                Some(entry),
+                args,
+                &scope,
+                trace::ExecutionTrace::fresh(&scope),
+                None,
+                Some(sites.clone()),
+            )
+            .await?;
+        let lines = std::mem::take(&mut *sites.lock().unwrap());
+        Ok((call, lines))
+    }
     /// A borrowed-effects call (`call_with_effects`): the caller owns the
     /// root handler, so no trace identity is recorded here.
     pub(super) async fn call_scoped(
@@ -110,12 +136,27 @@ impl Runtime {
         execution: Arc<trace::ExecutionTrace>,
         stream: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
     ) -> Result<TimedCall> {
+        self.call_traced_entry_inner(hash, entry, args, scope, execution, stream, None)
+            .await
+    }
+    #[allow(clippy::too_many_arguments)]
+    async fn call_traced_entry_inner(
+        &self,
+        hash: &str,
+        entry: Option<&str>,
+        args: Value,
+        scope: &str,
+        execution: Arc<trace::ExecutionTrace>,
+        stream: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+        sites: Option<SiteLog>,
+    ) -> Result<TimedCall> {
         let (argc, payload) = positional_payload(&args)?;
         execution.identity(hash, &payload)?;
         let session = trace::TraceSession::new(self.inner.store.clone(), execution.clone(), entry);
         let effects = EffectContext {
             trace: Some(execution),
             stream,
+            sites,
             ..EffectContext::default()
         };
         let result = self

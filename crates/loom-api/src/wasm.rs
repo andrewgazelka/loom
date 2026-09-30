@@ -323,6 +323,38 @@ fn line_table(sections: &BTreeMap<&str, &[u8]>) -> Result<LineTable> {
     Ok(LineTable::new(rows))
 }
 
+/// For each effect's module offsets (innermost frame first), the lines of the guest's own
+/// `src/lib.rs` they fall on, innermost first. Offsets with no row, or in other files (the SDK,
+/// the standard library, dependencies), are left out. A module without DWARF gives empty lists.
+pub(crate) fn source_lines(bytes: &[u8], offsets: &[Vec<u64>]) -> Result<Vec<Vec<u32>>> {
+    let mut code: Option<Range<usize>> = None;
+    let mut debug: BTreeMap<&str, &[u8]> = BTreeMap::new();
+    for payload in Parser::new(0).parse_all(bytes) {
+        match payload? {
+            Payload::CodeSectionStart { range, .. } => code = Some(range),
+            Payload::CustomSection(section) if section.name().starts_with(".debug_") => {
+                debug.insert(section.name(), section.data());
+            }
+            _ => {}
+        }
+    }
+    let (Some(code), false) = (code, debug.is_empty()) else {
+        return Ok(vec![Vec::new(); offsets.len()]);
+    };
+    let table = line_table(&debug)?;
+    Ok(offsets
+        .iter()
+        .map(|frames| {
+            frames
+                .iter()
+                .filter_map(|&offset| table.lookup(offset.checked_sub(code.start as u64)?))
+                .filter(|row| row.file == "src/lib.rs")
+                .map(|row| row.line)
+                .collect()
+        })
+        .collect())
+}
+
 /// The path a line row names. Relative names join their directory (itself
 /// relative to the compilation directory when not absolute); a path under the
 /// compilation directory is returned relative to it, so the guest's own file

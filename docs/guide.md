@@ -107,7 +107,7 @@ The CLI, HTTP commands, and MCP tools use the same definition operations. `add` 
 | `update <name> <file> [--expected_hash hash]` | `update` | Atomic caller propagation or a durable repair session; old hashes remain runnable |
 | `history <name>` | `history` | Hash chain, timestamps, and changed items between entries |
 | `diff <old-hash> <new-hash>` | `diff` | Added, removed, and changed items, with their hashes |
-| `run <name-or-hash> [args-json]` | `run` | Output and recorded effects |
+| `run <name-or-hash> [args-json] [--sites]` | `run` | Output and recorded effects; with `sites`, also `sites`: for every effect the entry performed (including ones a guest handler answered), the lines of the cell's own `src/lib.rs` on the stack that performed it, innermost first, read from the module's DWARF line table (one backtrace per effect, so it is for inspection) |
 | `find <text>` | `find` | Matching names and item names |
 | `dependents <hash>` | `dependents` | Definitions with a dependency pinned to the hash |
 | `export <name>... --out <file>` | `export` | One CARv1 bundle holding the named definitions, their dependency closure, sources, identities and vendored crate trees ([format](bundles.md)) |

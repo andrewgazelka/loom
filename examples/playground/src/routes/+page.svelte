@@ -20,6 +20,10 @@
   type Rev = { hash: string; timestamp: number; changed: string[] };
   let lib: { revs: Rev[]; pinned: string; source: string; error: string; busy: boolean } | null = $state(null);
   let seen: string[] = $state([]); // cell hashes in this session, newest first
+  // Replay of the effects in the order they ran: how many are drawn so far, and which cell line issued the latest.
+  let lineOf: number[] = $state.raw([]);
+  let replay: number | null = $state(null);
+  const running = $derived(replay !== null && replay > 0 ? (lineOf[replay - 1] || null) : null);
   let ticket = 0;
   let timer: ReturnType<typeof setTimeout>;
 
@@ -73,7 +77,32 @@
     if (isScene) scene = body.result.output; else value = body.result.output;
     const h = body.result.hash as string;
     if (seen[0] !== h) seen = [h, ...seen].slice(0, 6);
-    if (current.animate) animate(mine, body.result.hash);
+    if (isScene) void play(mine, body.result.hash);
+    else if (current.animate) animate(mine, body.result.hash);
+  }
+
+  // Ask the runtime which source line performed each effect (DWARF, resolved on the server), then replay the
+  // scene over about a second with that line highlighted. Animated cells start moving afterwards.
+  async function play(mine: number, hash: string) {
+    const traced = await post("/api/run", { target: hash, args: [0], sites: true });
+    if (mine !== ticket) return;
+    const sites: number[][] = traced.ok ? (traced.result.sites ?? []) : [];
+    lineOf = sites.map((frames) => frames.find((l) => l <= cellLines) ?? 0);
+    const n = scene.length;
+    const start = performance.now(), duration = Math.min(1600, 500 + n * 2);
+    await new Promise<void>((done) => {
+      const step = (now: number) => {
+        if (mine !== ticket) return done();
+        const k = Math.min(n, Math.floor(((now - start) / duration) * n));
+        replay = k;
+        if (k >= n) return done();
+        requestAnimationFrame(step);
+      };
+      requestAnimationFrame(step);
+    });
+    if (mine !== ticket) return;
+    replay = null;
+    if (current.animate) animate(mine, hash);
   }
 
   // Animated cells: built once, then the page asks Rust for frame(t) in a loop.
@@ -189,7 +218,7 @@
         <kbd>⌘↵</kbd>
         <button class="run" onclick={run} disabled={busy}>{busy ? "Building" : "Run"}</button>
       </div>
-      <Editor bind:value={active.value} {run} {problems} />
+      <Editor bind:value={active.value} {run} {problems} running={tab === "cell" ? running : null} />
       {#if lib && tab === "lib"}
         <div class="publish">
           <button class="run" onclick={publish} disabled={lib.busy}>{lib.busy ? "Publishing" : "Publish new revision"}</button>
@@ -223,11 +252,13 @@
         </ul>
       {:else}
         {#if isScene}
-          <Stage {scene} bind:drawMs />
+          <Stage {scene} limit={replay} bind:drawMs />
           <p class="effects">
             {#each counts as [op, n]}<span><b>{op}</b> × {n}</span>{/each}
             {#if !counts.length}running…{/if}
-            <span class="spacer"></span><span>paint <b>{drawMs}</b> ms</span>
+            <span class="spacer"></span>
+            {#if replay !== null}<span>effect <b>{replay}</b> / {scene.length}</span>{/if}
+            <span>paint <b>{drawMs}</b> ms</span>
           </p>
         {:else}
           <pre class="value">{value === null ? "running…" : show(value)}</pre>
