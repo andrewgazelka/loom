@@ -46,14 +46,14 @@ function values(id: string): Record<string, string> {
   return values;
 }
 describe("operation contract", () => {
-  test("fourteen definition and twenty-two actor operations, all uniquely named", () => {
+  test("fifteen definition and twenty-two actor operations, all uniquely named", () => {
     expect(
       new Set(
         commands
           .filter((command) => command.group === "Definitions")
           .map((command) => command.operation),
       ).size,
-    ).toBe(14);
+    ).toBe(15);
     expect(
       new Set(
         commands
@@ -313,7 +313,7 @@ describe("Rust verb table parity", () => {
         /verb!\(\s*(\w+),\s*(Definition|Actor),\s*(\w+),\s*\[([\s\S]*?)\]\s*\)/g,
       ),
     ];
-    expect(server.length).toBe(36);
+    expect(server.length).toBe(37);
     expect(
       commands
         .filter((command) => !command.query)

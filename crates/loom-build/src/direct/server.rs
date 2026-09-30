@@ -7,6 +7,10 @@
 //! directories still run side by side. A server that fails mid-request is
 //! discarded and the caller falls back to an ordinary process, which reproduces
 //! any real failure with the compiler's own exit status.
+//!
+//! The transport is a socket pair whose far end is the server's standard input:
+//! no path on the filesystem for another user to connect to, no length limit,
+//! no stale file, and the server exits when this end closes.
 use super::*;
 use std::process::Stdio;
 use tokio::{
@@ -19,20 +23,22 @@ use tokio::{
 /// whatever a long-lived compiler process accumulates.
 const REQUESTS_PER_SERVER: u32 = 2000;
 const IDLE_SERVERS: usize = 4;
+/// Consecutive failures to start a server before compiles stop trying and use
+/// processes directly (a driver without `--loom-serve`, a broken install).
+const START_FAILURES_BEFORE_GIVING_UP: u32 = 3;
 
 #[derive(Default)]
 pub struct RustcServers {
     idle: std::sync::Mutex<Vec<Server>>,
-    counter: std::sync::atomic::AtomicU64,
+    start_failures: std::sync::atomic::AtomicU32,
 }
 
 struct Server {
     driver: PathBuf,
-    socket: PathBuf,
     requests: u32,
-    // Held for its stdin: the server exits when that pipe closes.
+    stream: BufReader<UnixStream>,
+    // Killed on drop; it also exits by itself when `stream` closes.
     _child: Child,
-    _stdin: tokio::process::ChildStdin,
 }
 
 #[derive(serde::Serialize)]
@@ -51,6 +57,11 @@ struct Reply {
 
 /// The process description a served compile needs, or `None` when `command`
 /// is not a plain invocation of `driver` (sandboxed builds run a wrapper).
+///
+/// A served request carries exactly the environment given here. The process
+/// form is the same only when the command cleared its inherited environment
+/// first, which `compiler_environment` does for every non-sandboxed caller;
+/// `Command` cannot report that, so a new caller must clear it too.
 fn describe<'a>(command: &'a Command, driver: &Path) -> Option<Request<'a>> {
     let std = command.as_std();
     if Path::new(std.get_program()) != driver {
@@ -79,12 +90,10 @@ impl RustcServers {
         driver: &Path,
         deadline: std::time::Duration,
     ) -> Result<std::process::Output, BuildError> {
-        if let Some(request) = describe(&command, driver) {
-            match self.serve(driver, &request, deadline).await {
-                Ok(Some(output)) => return Ok(output),
-                Ok(None) => {}
-                Err(error) => return Err(error),
-            }
+        if let Some(request) = describe(&command, driver)
+            && let Some(output) = self.serve(driver, &request, deadline).await?
+        {
+            return Ok(output);
         }
         super::run(command).await
     }
@@ -106,7 +115,10 @@ impl RustcServers {
         let exchange = tokio::time::timeout(deadline, server.exchange(request)).await;
         let reply = match exchange {
             Ok(Ok(reply)) => reply,
-            Ok(Err(_)) => return Ok(None),
+            Ok(Err(error)) => {
+                eprintln!("loom-build: compiler server failed ({error}); compiling in a process");
+                return Ok(None);
+            }
             Err(_) => {
                 return Err(rejected(format!(
                     "root Rust compiler exceeded {} seconds",
@@ -132,63 +144,74 @@ impl RustcServers {
     }
 
     async fn start(&self, driver: &Path) -> Option<Server> {
-        let socket = std::env::temp_dir().join(format!(
-            "loom-rustc-{}-{}.sock",
-            std::process::id(),
-            self.counter
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
+        use std::sync::atomic::Ordering;
+        if self.start_failures.load(Ordering::Relaxed) >= START_FAILURES_BEFORE_GIVING_UP {
+            return None;
+        }
+        let server = Self::spawn(driver).await;
+        match &server {
+            Ok(_) => self.start_failures.store(0, Ordering::Relaxed),
+            Err(error) => {
+                let failures = self.start_failures.fetch_add(1, Ordering::Relaxed) + 1;
+                eprintln!(
+                    "loom-build: cannot start a compiler server ({error}); compiling in a process{}",
+                    if failures >= START_FAILURES_BEFORE_GIVING_UP {
+                        " from now on"
+                    } else {
+                        ""
+                    }
+                );
+            }
+        }
+        server.ok()
+    }
+
+    async fn spawn(driver: &Path) -> std::io::Result<Server> {
+        let (parent, child_end) = UnixStream::pair()?;
+        let child_end = child_end.into_std()?;
+        child_end.set_nonblocking(false)?;
         let mut command = Command::new(driver);
         command
             .arg("--loom-serve")
-            .arg(&socket)
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("HOME", std::env::var_os("HOME").unwrap_or_default())
             .envs(std::env::var_os("LOOM_DRIVER_TIMING").map(|value| ("LOOM_DRIVER_TIMING", value)))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
+            .stdin(Stdio::from(std::os::fd::OwnedFd::from(child_end)))
+            .stdout(Stdio::null())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        let mut child = command.spawn().ok()?;
-        let stdin = child.stdin.take()?;
+        let child = command.spawn()?;
+        let mut stream = BufReader::new(parent);
         let mut ready = String::new();
-        let stdout = child.stdout.take()?;
         let read = tokio::time::timeout(
             std::time::Duration::from_secs(20),
-            BufReader::new(stdout).read_line(&mut ready),
+            stream.read_line(&mut ready),
         )
-        .await;
-        if !matches!(read, Ok(Ok(count)) if count > 0) || ready.trim() != "ready" {
-            return None;
+        .await
+        .map_err(|_| std::io::Error::other("no ready line within 20 seconds"))??;
+        if read == 0 || ready.trim() != "ready" {
+            return Err(std::io::Error::other("the server did not say ready"));
         }
-        Some(Server {
+        Ok(Server {
             driver: driver.to_owned(),
-            socket,
             requests: 0,
+            stream,
             _child: child,
-            _stdin: stdin,
         })
     }
 }
 
 impl Server {
-    async fn exchange(&self, request: &Request<'_>) -> std::io::Result<Reply> {
-        let mut stream = UnixStream::connect(&self.socket).await?;
+    async fn exchange(&mut self, request: &Request<'_>) -> std::io::Result<Reply> {
         let mut line = serde_json::to_vec(request).map_err(std::io::Error::other)?;
         line.push(b'\n');
-        stream.write_all(&line).await?;
+        self.stream.get_mut().write_all(&line).await?;
         let mut reply = String::new();
-        if BufReader::new(&mut stream).read_line(&mut reply).await? == 0 {
+        if self.stream.read_line(&mut reply).await? == 0 {
             return Err(std::io::ErrorKind::UnexpectedEof.into());
         }
         serde_json::from_str(&reply).map_err(std::io::Error::other)
-    }
-}
-
-impl Drop for Server {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.socket);
     }
 }
 

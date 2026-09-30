@@ -91,7 +91,7 @@ export class MockTransport implements Transport {
           .map((name) => ({ name, old: before[name], new: after[name] })),
       };
     }
-    if (op === V.run) return fixture.run;
+    if (op === V.run || op === V.eval) return fixture.run;
     if (op === V.view) {
       const def = fixture.definitions.find(
         (def) => def.hash === body.target || def.name === body.target,

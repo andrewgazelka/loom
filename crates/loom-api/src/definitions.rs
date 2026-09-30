@@ -45,8 +45,9 @@ impl Service {
         self.define_staged(request, None, &progress, true, loom_build::BuildProfile::Standard)
             .await
     }
-    /// Compile one definition into the live store without binding a name to it
-    /// or staging a copy of the store: `eval`'s cells are addressed by hash.
+    /// Compile one definition and keep it in memory only (`bind_name` false):
+    /// no name, no staged copy of the store, no durable rows. `eval`'s cells are
+    /// addressed by hash until they are dropped; `add` keeps one.
     pub(super) async fn define_ephemeral(
         &self,
         request: DefineRequest,
@@ -121,14 +122,6 @@ impl Service {
             "builder returned an empty component"
         );
         progress.stage("publish");
-        let component_hash = self.store.put("component", &built.component)?;
-        let compiled = built
-            .compiled_source
-            .as_deref()
-            .context("builder returned a component without its compiled text")?;
-        self.store
-            .record_compiled_source(&component_hash, compiled)?;
-        let logs_ref = self.store.put("blob", built.logs.as_bytes())?;
         let identity = built
             .identity
             .as_ref()
@@ -146,6 +139,36 @@ impl Service {
                 diagnostics: checked.diagnostics,
             });
         }
+        if !bind_name {
+            // An `eval` cell: executable from memory, nothing durable (see
+            // `loom_store::Store::install_transient`).
+            let component_hash = loom_store::content_hash(&built.component);
+            let size = built.component.len();
+            let def = Def {
+                allowed_effects: request.allowed_effects.clone(),
+                observed_effects: Vec::new(),
+                hash: identity.behavior_hash.clone(),
+                lang: checked.lang,
+                component_hash: Some(component_hash.clone()),
+                sig: checked.sig,
+            };
+            self.store
+                .install_transient(def.clone(), built.component)?;
+            return Ok(Response {
+                ok: true,
+                seq: self.store.latest_seq()?,
+                diagnostics: Vec::new(),
+                result: json!({"def":def,"build":{"ms":built.ms,"component_hash":component_hash,"size":size,"rustc_invocations":built.rustc_invocations}}),
+            });
+        }
+        let component_hash = self.store.put("component", &built.component)?;
+        let compiled = built
+            .compiled_source
+            .as_deref()
+            .context("builder returned a component without its compiled text")?;
+        self.store
+            .record_compiled_source(&component_hash, compiled)?;
+        let logs_ref = self.store.put("blob", built.logs.as_bytes())?;
         let def = Def {
             allowed_effects: request.allowed_effects.clone(),
             observed_effects: Vec::new(),
@@ -171,7 +194,7 @@ impl Service {
         } else {
             self.store.define_with_identity(
                 &def,
-                bind_name.then_some(request.name.as_str()),
+                Some(request.name.as_str()),
                 &request.source,
                 &checked.deps,
                 Some(identity),

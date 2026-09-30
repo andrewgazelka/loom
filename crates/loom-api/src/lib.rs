@@ -264,6 +264,17 @@ impl Service {
                     diagnostics: vec![],
                 }
             }
+            Err(error) if error.is::<eval::CompileFailure>() => {
+                let failure = error
+                    .downcast_ref::<eval::CompileFailure>()
+                    .expect("checked error type");
+                Response {
+                    ok: false,
+                    seq,
+                    result: json!({"error":failure.message,"code":"compile_failed"}),
+                    diagnostics: failure.diagnostics.clone(),
+                }
+            }
             Err(error) => Response {
                 ok: false,
                 seq,

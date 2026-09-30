@@ -40,8 +40,29 @@ async fn eval_runs_a_cell_and_reports_where_the_time_went() {
     let timings = &reply.result["timings_ms"];
     assert!(timings["compile"].is_u64() && timings["run"].is_u64() && timings["total"].is_u64());
 
-    // A cell is addressed by its hash: nothing was named and no revision made.
+    // A cell is addressed by its hash and lives in memory: nothing was named,
+    // no revision made, and no definition row written.
     assert!(service.store.current_names().unwrap().is_empty());
+    let hash = reply.result["hash"].as_str().unwrap();
+    assert!(service.store.resolve(hash).unwrap().is_some());
+    assert_eq!(durable_definitions(&service), 0);
+}
+
+fn durable_definitions(service: &Service) -> i64 {
+    service
+        .store
+        .with_connection(|connection| {
+            Ok(connection.query_row("SELECT count(*) FROM defs", [], |row| row.get(0))?)
+        })
+        .unwrap()
+}
+
+/// A trivial cell, so the dependency graph is warm and the next builds take the
+/// replay path that production uses after the loomd prewarm. `tag` keeps the
+/// cells of tests that share one build directory apart.
+async fn warm(service: &Service, tag: u32) {
+    let reply = eval(service, json!({"source":format!("{tag}")})).await;
+    assert!(reply.ok, "{reply:?}");
 }
 
 #[tokio::test]
@@ -86,6 +107,16 @@ async fn eval_reports_a_compile_error_with_its_location() {
     let message = reply.result["error"].as_str().unwrap();
     assert!(message.contains("compile failed"), "{message}");
     assert!(message.contains("mismatched types"), "{message}");
+    assert_eq!(reply.result["code"], "compile_failed");
+    // The same failure, structured: the offending expression is on line 2.
+    assert!(
+        reply
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.line == 2 && diagnostic.message.contains("mismatched")),
+        "{:?}",
+        reply.diagnostics
+    );
     // The failure left no definition behind, and the next cell still builds.
     assert!(service.store.current_names().unwrap().is_empty());
     let next = eval(&service, json!({"source":"pub fn fine() -> u32 { 7 }"})).await;
@@ -95,16 +126,72 @@ async fn eval_reports_a_compile_error_with_its_location() {
 
 #[tokio::test]
 #[ignore = "requires Rust guest toolchain and LOOM_COMPILER_CACHE_OWNER"]
-async fn eval_optimize_builds_the_same_cell_at_standard_optimization() {
+async fn eval_builds_one_cell_at_either_optimization_in_any_order() {
     let service = service();
+    warm(&service, 101).await;
     let source = "pub fn sum(n: u64) -> u64 { (0..n).sum() }";
-    let quick = eval(&service, json!({"source":source,"args":[1000]})).await;
-    let optimized = eval(&service, json!({"source":source,"args":[1000],"optimize":true})).await;
-    assert!(quick.ok && optimized.ok, "{quick:?} {optimized:?}");
-    assert_eq!(quick.result["output"], 499500);
-    assert_eq!(optimized.result["output"], 499500);
-    // Optimization never changes what a definition is.
-    assert_eq!(quick.result["hash"], optimized.result["hash"]);
+    let mut hashes = Vec::new();
+    for optimize in [false, true, false, true] {
+        let reply = eval(
+            &service,
+            json!({"source":source,"args":[1000],"optimize":optimize}),
+        )
+        .await;
+        assert!(reply.ok, "optimize={optimize}: {reply:?}");
+        assert_eq!(reply.result["output"], 499500);
+        hashes.push(reply.result["hash"].clone());
+    }
+    // Optimization never changes what a definition is, and a cell in memory is
+    // replaced by the next build of it, never refused as a conflicting publication.
+    assert!(hashes.windows(2).all(|pair| pair[0] == pair[1]));
+    assert_eq!(durable_definitions(&service), 0);
+}
+
+#[tokio::test]
+#[ignore = "requires Rust guest toolchain and LOOM_COMPILER_CACHE_OWNER"]
+async fn a_cell_and_a_definition_of_the_same_source_do_not_conflict() {
+    let service = service();
+    warm(&service, 102).await;
+    let source = "pub fn twice(x: i64) -> i64 { x * 2 }";
+    let add = |name: &'static str| {
+        let service = service.clone();
+        async move {
+            service
+                .command(CommandRequest {
+                    session: None,
+                    command: "add".into(),
+                    args: json!({"name":name,"source":source,"lang":"rust"}),
+                })
+                .await
+        }
+    };
+    // Cell first, then keep it; and the other way round.
+    let cell = eval(&service, json!({"source":source,"args":[4]})).await;
+    assert!(cell.ok, "{cell:?}");
+    let kept = add("kept").await;
+    assert!(kept.ok, "{kept:?}");
+    assert_eq!(kept.result["hash"], cell.result["hash"]);
+    let again = eval(&service, json!({"source":source,"args":[5]})).await;
+    assert!(again.ok, "{again:?}");
+    assert_eq!(again.result["output"], 10);
+    assert_eq!(durable_definitions(&service), 1);
+}
+
+#[tokio::test]
+#[ignore = "requires Rust guest toolchain and LOOM_COMPILER_CACHE_OWNER"]
+async fn eval_arithmetic_wraps_like_a_release_build_at_every_optimization() {
+    let service = service();
+    warm(&service, 103).await;
+    let source = "pub fn bump(x: u8) -> u8 { x + 250 }";
+    for optimize in [false, true] {
+        let reply = eval(
+            &service,
+            json!({"source":source,"args":[10],"optimize":optimize}),
+        )
+        .await;
+        assert!(reply.ok, "optimize={optimize}: {reply:?}");
+        assert_eq!(reply.result["output"], 4, "optimize={optimize}");
+    }
 }
 
 #[tokio::test]
@@ -125,4 +212,9 @@ async fn eval_runs_a_bare_block_as_a_cell() {
     assert!(!broken.ok);
     let message = broken.result["error"].as_str().unwrap();
     assert!(message.contains("mismatched types"), "{message}");
+    assert!(
+        broken.diagnostics.iter().any(|diagnostic| diagnostic.line == 2),
+        "the error is on the second line the caller wrote: {:?}",
+        broken.diagnostics
+    );
 }

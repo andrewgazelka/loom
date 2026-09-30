@@ -19,7 +19,10 @@ pub fn is_generated(tcx: TyCtxt<'_>, id: LocalDefId) -> bool {
     let mut id = id;
     loop {
         let expansion = tcx.def_span(id).ctxt().outer_expn_data();
+        // Another crate's macro: a guest's own `macro_rules!` never counts, whatever
+        // its name and whatever the guest calls its crate.
         if let Some(macro_def) = expansion.macro_def_id
+            && macro_def.krate != rustc_hir::def_id::LOCAL_CRATE
             && tcx.crate_name(macro_def.krate).as_str() == "loom_guest_rs"
             && tcx.item_name(macro_def).as_str().starts_with("__loom_export_")
         {

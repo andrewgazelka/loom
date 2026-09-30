@@ -1,25 +1,28 @@
 //! REPL cells: a bare block of statements and a final expression is a cell too.
 use std::borrow::Cow;
 
+/// The line `interactive_cell` puts before a bare block's text.
+pub const CELL_HEADER: &str = "pub fn eval() -> impl ::loom::serde::Serialize {";
+
 /// The definition source for an `eval` cell.
 ///
-/// A cell that already defines a root `pub fn` is a definition and is used as
-/// written. Otherwise, when the text is a block body (statements, then an
-/// optional final expression), it becomes the body of `pub fn eval()`, so
-/// `let v = vec![1, 2, 3]; v.iter().sum::<i32>()` is a cell. The wrapper opens
-/// on the text's first line and adds no line before it, so diagnostics keep
-/// their line numbers. Text that is neither is returned unchanged, and the
-/// compiler reports on what the caller wrote.
+/// A cell that parses as a file (items, with or without a `pub fn`) is a
+/// definition and is used as written. Otherwise, when the text is a block body
+/// (statements, then an optional final expression), it becomes the body of
+/// `pub fn eval()`, so
+/// `let v = vec![1, 2, 3]; v.iter().sum::<i32>()` is a cell. The wrapper adds
+/// exactly one line before the text (`CELL_HEADER`), which `eval` subtracts from
+/// the lines of a compile failure. Text that is neither is returned unchanged,
+/// and the compiler reports on what the caller wrote.
 pub fn interactive_cell(source: &str) -> Cow<'_, str> {
-    if let Ok(file) = syn::parse_file(source)
-        && file.items.iter().any(|item| {
-            matches!(item, syn::Item::Fn(function)
-                if matches!(function.vis, syn::Visibility::Public(_)))
-        })
-    {
+    // Text that parses as a file is a set of items and is used as written, with
+    // or without a `pub fn`: wrapping items into a block would hide them (a
+    // helper `fn add(..)` would become a private function inside `eval` and the
+    // cell would answer `null`). The compiler then says the cell has no entry.
+    if syn::parse_file(source).is_ok() {
         return Cow::Borrowed(source);
     }
-    let wrapped = format!("pub fn eval() -> impl ::loom::serde::Serialize {{ {source}\n}}");
+    let wrapped = format!("{CELL_HEADER}\n{source}\n}}");
     if syn::parse_file(&wrapped).is_ok() {
         Cow::Owned(wrapped)
     } else {
@@ -40,10 +43,12 @@ mod tests {
     }
 
     #[test]
-    fn a_block_body_becomes_the_eval_entry_without_shifting_lines() {
+    fn a_block_body_becomes_the_eval_entry_under_one_header_line() {
         let cell = interactive_cell("let v = vec![1, 2, 3];\nv.iter().sum::<i32>()");
-        assert!(cell.starts_with("pub fn eval() -> impl ::loom::serde::Serialize { let v"));
-        assert_eq!(cell.lines().count(), 3, "one closing line, none before");
+        let mut lines = cell.lines();
+        assert_eq!(lines.next(), Some(CELL_HEADER));
+        assert_eq!(lines.next(), Some("let v = vec![1, 2, 3];"));
+        assert_eq!(cell.lines().count(), 4, "header, two lines of text, closing brace");
         assert!(interactive_cell("1 + 2").contains("pub fn eval()"));
     }
 
@@ -51,9 +56,15 @@ mod tests {
     fn text_that_is_neither_is_left_for_the_compiler_to_reject() {
         let broken = "pub fn broken( {";
         assert_eq!(interactive_cell(broken), broken);
-        let items_only = "struct Point { x: i32 }";
-        // Items without a pub fn wrap into a body that still parses (items are
-        // statements), so a cell may define helpers and end in an expression.
-        assert!(interactive_cell(items_only).contains("pub fn eval()"));
+    }
+
+    #[test]
+    fn items_without_an_entry_are_not_hidden_inside_a_block() {
+        for items in ["struct Point { x: i32 }", "fn add(a: i32, b: i32) -> i32 { a + b }"] {
+            assert!(matches!(interactive_cell(items), Cow::Borrowed(_)), "{items}");
+        }
+        // Helpers followed by an expression are a block body, which keeps them.
+        let mixed = interactive_cell("fn add(a: i32, b: i32) -> i32 { a + b }\nadd(1, 2)");
+        assert!(mixed.starts_with(CELL_HEADER), "{mixed}");
     }
 }

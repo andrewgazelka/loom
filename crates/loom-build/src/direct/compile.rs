@@ -393,6 +393,10 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
     // Cargo compiled the root with `-C debuginfo=0`; the hashing replay below,
     // which overwrites its output, carries line tables.
     root_recipe.line_tables();
+    // The replay below recompiles the root and overwrites Cargo's output, so
+    // the profile applies to it exactly as on the warm path. The graph stored
+    // afterwards is parsed afresh and stays at the recorded profile.
+    root_recipe.apply_profile(profile);
     let mut hash_command = Command::new(&driver.path);
     compiler_environment(&mut hash_command);
     hash_command

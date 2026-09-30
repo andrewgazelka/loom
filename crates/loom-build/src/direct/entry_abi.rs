@@ -7,6 +7,7 @@ use super::*;
 #[derive(serde::Deserialize)]
 struct Contract {
     entry: BTreeMap<String, String>,
+    schema: Option<String>,
 }
 
 /// The comment line `generate` writes between the guest source and the
@@ -50,14 +51,20 @@ pub(super) fn generate(source: &str) -> Result<String, BuildError> {
             .join(", ");
         generated.push_str(&format!("::loom::__loom_export_entry!({name}; {arguments});\n"));
     }
-    if file.items.iter().any(|item| {
-        matches!(item, syn::Item::Const(constant)
-            if constant.ident == "LOOM_SCHEMA"
-                && matches!(constant.vis, syn::Visibility::Public(_)))
-    }) {
+    if defines_schema(&file) {
         generated.push_str("::loom::__loom_export_schema!();\n");
     }
     Ok(generated)
+}
+
+/// A root `pub const LOOM_SCHEMA` written out as an item (the driver evaluates
+/// it: `effects/schema.rs`).
+fn defines_schema(file: &syn::File) -> bool {
+    file.items.iter().any(|item| {
+        matches!(item, syn::Item::Const(constant)
+            if constant.ident == "LOOM_SCHEMA"
+                && matches!(constant.vis, syn::Visibility::Public(_)))
+    })
 }
 
 /// The workspace's `src/lib.rs` holding the generated text for the duration of
@@ -136,6 +143,14 @@ pub(super) async fn check_contract(identity: &Path, source: &str) -> Result<(), 
             "driver entries {actual:?} differ from the generated wrappers {expected:?}"
         )));
     }
+    // The driver evaluated LOOM_SCHEMA wherever it came from; the wrapper exists
+    // only when it is a plain item. A schema built by a macro would otherwise
+    // compile without its `loom_schema` export and yield no tables.
+    if contract.schema.is_some() != defines_schema(&file) {
+        return Err(rejected(
+            "LOOM_SCHEMA must be a plain `pub const LOOM_SCHEMA: &str = ...;` item at the crate root",
+        ));
+    }
     Ok(())
 }
 
@@ -169,6 +184,34 @@ mod tests {
         assert!(with.contains("::loom::__loom_export_schema!();"));
         let private = generate("const LOOM_SCHEMA: &str = \"x\";\npub fn f() {}").unwrap();
         assert!(!private.contains("__loom_export_schema"));
+    }
+
+    #[test]
+    fn a_schema_made_by_a_macro_is_refused_by_the_contract_check() {
+        let source = "macro_rules! schema { () => { pub const LOOM_SCHEMA: &str = \"x\"; } }\nschema!();\npub fn f() {}";
+        assert!(!generate(source).unwrap().contains("__loom_export_schema"));
+        let directory = std::env::temp_dir().join(format!("loom-contract-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let document = |schema: &str| {
+            std::fs::write(
+                directory.join("items.json"),
+                format!(r#"{{"entry":{{"f":"h"}},"schema":{schema}}}"#),
+            )
+            .unwrap();
+        };
+        let check = |source: &str| {
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+                .block_on(check_contract(&directory, source))
+        };
+        document(r#""x""#);
+        assert!(check(source).is_err(), "the driver saw a schema the wrappers cannot export");
+        assert!(check("pub const LOOM_SCHEMA: &str = \"x\";\npub fn f() {}").is_ok());
+        document("null");
+        assert!(check("pub fn f() {}").is_ok());
+        assert!(check("pub const LOOM_SCHEMA: &str = \"x\";\npub fn f() {}").is_err());
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

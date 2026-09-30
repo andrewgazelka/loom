@@ -12,6 +12,7 @@ const verbNames = [
   "history",
   "diff",
   "run",
+  "eval",
   "find",
   "dependents",
   "spawn",
@@ -253,6 +254,27 @@ const definitionCommands: Command[] = [
         initial: "[]",
         default: "[]",
       }),
+    ],
+  },
+  {
+    id: V.eval,
+    name: V.eval,
+    group: "Definitions",
+    operation: V.eval,
+    description:
+      "Compile a Rust cell and run its entry in one call; nothing is named or kept (add keeps a definition)",
+    read: false,
+    fields: [
+      source,
+      field("entry", "Entry name (when the cell exports several)", { optional: true }),
+      field("args", "Arguments JSON", { kind: "json", optional: true }),
+      field("deps", "Dependency names → hashes", { kind: "json", optional: true }),
+      field("session", "Session (build workspace) name", { optional: true }),
+      field("optimize", "Optimize (slower build, faster run)", {
+        kind: "boolean",
+        optional: true,
+      }),
+      field("allowed_effects", "Allowed effects JSON", { kind: "json", optional: true }),
     ],
   },
   {

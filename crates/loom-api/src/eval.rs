@@ -29,6 +29,7 @@ impl Service {
             Some(value) => value.as_str().context("session must be a string")?,
             None => DEFAULT_SESSION,
         };
+        ensure!(session.len() <= 64, "session name is longer than 64 bytes");
         crate::bundles::validate_name(session)?;
         let deps: BTreeMap<String, String> = args
             .get("deps")
@@ -50,10 +51,12 @@ impl Service {
         } else {
             loom_build::BuildProfile::Interactive
         };
+        let cell = loom_build::interactive_cell(source);
+        let wrapped = matches!(cell, std::borrow::Cow::Owned(_));
         let mut request = DefineRequest {
             lang: Lang::Rust,
             name: session.into(),
-            source: loom_build::interactive_cell(source).into_owned(),
+            source: cell.clone().into_owned(),
             deps,
             allowed_effects,
         };
@@ -65,7 +68,18 @@ impl Service {
         };
         let built = started.elapsed();
         if !response.ok {
-            bail!("{}", render_failure(&response));
+            let mut response = response;
+            if wrapped {
+                // The header line is ours; the caller's text starts on the next.
+                for diagnostic in &mut response.diagnostics {
+                    diagnostic.line = diagnostic.line.saturating_sub(1).max(1);
+                }
+            }
+            return Err(CompileFailure {
+                message: render_failure(&response),
+                diagnostics: response.diagnostics,
+            }
+            .into());
         }
         let hash = response.result["def"]["hash"]
             .as_str()
@@ -111,6 +125,22 @@ impl Service {
     }
 }
 
+/// A cell that did not compile: the text an agent reads, and the structured
+/// diagnostics that travel beside it in `Response.diagnostics`.
+#[derive(Debug)]
+pub(crate) struct CompileFailure {
+    pub message: String,
+    pub diagnostics: Vec<loom_proto::Diagnostic>,
+}
+
+impl std::fmt::Display for CompileFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for CompileFailure {}
+
 fn export_names(def: &Def) -> String {
     def.sig
         .exports
@@ -125,8 +155,14 @@ fn export_names(def: &Def) -> String {
 fn render_failure(response: &Response) -> String {
     let mut lines = vec!["compile failed".to_owned()];
     for diagnostic in &response.diagnostics {
+        // Code the host generated (the entry wrapper macros) reports a file of
+        // the SDK, whose line numbers mean nothing in the cell.
+        let file = match diagnostic.file.as_str() {
+            "" | "src/lib.rs" | "compiled.rs" => String::new(),
+            other => format!("{other}:"),
+        };
         lines.push(format!(
-            "{}:{}: {}{}",
+            "{file}{}:{}: {}{}",
             diagnostic.line,
             diagnostic.col,
             diagnostic.message,

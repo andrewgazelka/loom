@@ -127,7 +127,7 @@ export function parseResult(command: Command, value: unknown): Json {
       definitionView(value);
     else if (op === V.history) history(value);
     else if (op === V.diff) definitionDiff(value);
-    else if (op === V.run) {
+    else if (op === V.run || op === V.eval) {
       const data = object(value, op);
       json(data.output, "run.output");
       rows(data.effects, "run.effects");

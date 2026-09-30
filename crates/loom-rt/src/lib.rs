@@ -39,6 +39,36 @@ pub trait ComponentResolver: Send + Sync {
         hash: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>>;
 }
+/// Compiled modules by artifact hash, oldest dropped past `MODULE_CACHE_LIMIT`.
+/// A guest build is a module of about a megabyte of machine code, and an `eval`
+/// loop makes a new one per cell, so an unbounded map grew about a megabyte per
+/// eval. A module an execution is still using stays alive through its own
+/// reference; dropping it here only means the next call recompiles it, which
+/// the function cache makes cheap.
+#[derive(Default)]
+struct ModuleCache {
+    modules: HashMap<String, wasmtime::Module>,
+    order: std::collections::VecDeque<String>,
+}
+
+const MODULE_CACHE_LIMIT: usize = 64;
+
+impl ModuleCache {
+    fn get(&self, artifact: &str) -> Option<wasmtime::Module> {
+        self.modules.get(artifact).cloned()
+    }
+    fn insert(&mut self, artifact: String, module: wasmtime::Module) {
+        if self.modules.insert(artifact.clone(), module).is_none() {
+            self.order.push_back(artifact);
+        }
+        while self.order.len() > MODULE_CACHE_LIMIT {
+            if let Some(oldest) = self.order.pop_front() {
+                self.modules.remove(&oldest);
+            }
+        }
+    }
+}
+
 struct Inner {
     model: loom_model::Model,
     processes: loom_process::Supervisor,
@@ -49,7 +79,7 @@ struct Inner {
     javascript_programs: AsyncMutex<HashMap<String, Arc<loom_v8::V8Sandbox>>>,
     compilation_cache: Arc<LoomCompilationCache>,
     core_executor: futures::executor::ThreadPool,
-    core_modules: Mutex<HashMap<String, wasmtime::Module>>,
+    core_modules: Mutex<ModuleCache>,
     component_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     effect_locks: Mutex<HashMap<String, Weak<AsyncMutex<()>>>>,
     handler_round_trip_us: Mutex<HandlerMeasurements>,
@@ -263,7 +293,7 @@ impl Runtime {
                     .pool_size(8)
                     .name_prefix("loom-guest-")
                     .create()?,
-                core_modules: Mutex::new(HashMap::new()),
+                core_modules: Mutex::new(ModuleCache::default()),
                 component_locks: Mutex::new(HashMap::new()),
                 effect_locks: Mutex::new(HashMap::new()),
                 handler_round_trip_us: Mutex::new(HandlerMeasurements::default()),

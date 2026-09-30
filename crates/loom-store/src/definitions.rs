@@ -50,11 +50,17 @@ impl Store {
     /// Execution metadata is published synchronously. Reading it does not drain
     /// effect recordings; observed_effects is intentionally excluded.
     pub fn executable_definition(&self, hash: &str) -> Result<Option<Def>> {
-        executable_definition(&*self.lock()?, hash)
+        if let Some(def) = executable_definition(&*self.lock()?, hash)? {
+            return Ok(Some(def));
+        }
+        Ok(self.transient.definition(hash))
     }
     pub fn definition(&self, hash: &str) -> Result<Option<Def>> {
         self.recording.barrier(false)?;
-        definition(&*self.lock()?, hash)
+        if let Some(def) = definition(&*self.lock()?, hash)? {
+            return Ok(Some(def));
+        }
+        Ok(self.transient.definition(hash))
     }
     pub fn resolve(&self, name: &str) -> Result<Option<Def>> {
         if let Some(hash) = name.strip_prefix('#') {

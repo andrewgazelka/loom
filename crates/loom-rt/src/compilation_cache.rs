@@ -42,7 +42,7 @@ struct Verified {
 }
 
 /// Verified function bytes kept in memory before the set is dropped and rebuilt.
-const VERIFIED_LIMIT_BYTES: usize = 512 * 1024 * 1024;
+const VERIFIED_LIMIT_BYTES: usize = 256 * 1024 * 1024;
 
 impl std::fmt::Debug for LoomCompilationCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -235,7 +235,9 @@ impl LoomCompilationCache {
 
 impl CacheStore for LoomCompilationCache {
     fn get(&self, key: &[u8]) -> Option<Cow<'_, [u8]>> {
-        if let Some(bytes) = self.verified.lock().unwrap().functions.get(key).cloned() {
+        // Released before the copy: parallel compiles look functions up together.
+        let cached = self.verified.lock().unwrap().functions.get(key).cloned();
+        if let Some(bytes) = cached {
             self.stats.lock().unwrap().hits += 1;
             return Some(Cow::Owned(bytes.to_vec()));
         }
@@ -250,7 +252,13 @@ impl CacheStore for LoomCompilationCache {
                     *verified = Verified::default();
                 }
                 verified.bytes += bytes.len();
-                verified.functions.insert(key.to_vec(), Arc::from(bytes.as_slice()));
+                if let Some(previous) = verified
+                    .functions
+                    .insert(key.to_vec(), Arc::from(bytes.as_slice()))
+                {
+                    // Two compiles that missed together read the same function.
+                    verified.bytes -= previous.len();
+                }
                 Some(Cow::Owned(bytes))
             }
             Ok(None) => {

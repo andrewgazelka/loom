@@ -516,3 +516,35 @@ async fn compiler_deadline_waits_for_completion_and_names_timeout_phase() {
     .unwrap_err();
     assert!(error.to_string().contains("test compiler exceeded"));
 }
+
+#[test]
+fn interactive_profile_lowers_optimization_and_pins_release_semantics() {
+    fn recipe(arguments: &[&str]) -> Recipe {
+        let mut capture = String::from("LOOM_RUSTC_ARGUMENTS\0rustc\0");
+        for argument in arguments {
+            capture.push_str(argument);
+            capture.push('\0');
+        }
+        Recipe::parse(capture.as_bytes(), Path::new(".")).unwrap()
+    }
+    let recorded = ["-C", "opt-level=2", "-Ccodegen-units=16", "--crate-type", "cdylib"];
+
+    let mut standard = recipe(&recorded);
+    standard.apply_profile(crate::BuildProfile::Standard);
+    assert_eq!(standard.arguments, recorded);
+
+    for spelling in [
+        vec!["-C", "opt-level=2", "--crate-type", "cdylib"],
+        vec!["-Copt-level=2", "--crate-type", "cdylib"],
+    ] {
+        let mut interactive = recipe(&spelling);
+        interactive.apply_profile(crate::BuildProfile::Interactive);
+        let text = interactive.arguments.join(" ");
+        assert!(text.contains("opt-level=0") && !text.contains("opt-level=2"), "{text}");
+        // opt-level=0 alone would switch debug assertions and overflow checks on.
+        for pinned in ["debug-assertions=off", "overflow-checks=off", "-Zub-checks=no"] {
+            assert!(text.contains(pinned), "{pinned} missing from {text}");
+        }
+        assert!(text.contains("--crate-type cdylib"), "other arguments keep their place: {text}");
+    }
+}

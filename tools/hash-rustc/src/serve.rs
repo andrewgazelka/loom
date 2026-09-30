@@ -1,12 +1,16 @@
-//! `hash-rustc --loom-serve <socket>`: one long-lived compiler process.
+//! `hash-rustc --loom-serve`: one long-lived compiler process.
 //!
 //! Starting rustc costs about 45 ms (loading `librustc_driver`) before it reads
 //! a byte of source, and a small guest compiles in about 35 ms once it is
 //! running, so a process per compile is most of a cell's latency. This mode
-//! accepts one request at a time on a Unix socket and runs the same driver
-//! entry (`crate::compile`) in this process: `rustc_driver::run_compiler` is
-//! re-entrant (100 back-to-back compiles measured flat at 36 ms with a stable
-//! resident set).
+//! serves requests on its standard input, which the parent made one end of a
+//! socket pair, and runs the same driver entry (`crate::compile`) in this
+//! process: `rustc_driver::run_compiler` is re-entrant (100 back-to-back
+//! compiles measured flat at 36 ms with a stable resident set).
+//!
+//! There is no named socket: the only two parties are the parent and this
+//! process, so nothing on the filesystem for another user to connect to, no
+//! path length limit and no stale file to clean up.
 //!
 //! A request is one line of JSON, `{"cwd", "env", "args"}`: the working
 //! directory, the complete environment and the compiler arguments a process
@@ -15,11 +19,11 @@
 //! global state, which is sound only because requests are served one at a time
 //! and no compiler thread outlives its request.
 //!
-//! The server exits when its standard input closes, so it never outlives the
-//! process that started it.
+//! The server sends `ready` first and exits when the parent closes the socket,
+//! so it never outlives the process that started it.
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
-use std::os::fd::AsRawFd;
-use std::os::unix::net::UnixListener;
+use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::net::UnixStream;
 use std::process::ExitCode;
 
 unsafe extern "C" {
@@ -81,9 +85,12 @@ impl Capture {
 
     fn finish(mut self) -> String {
         // SAFETY: restores the descriptor `start` duplicated.
-        unsafe {
-            dup2(self.saved, self.target);
-            close(self.saved);
+        let restored = unsafe { dup2(self.saved, self.target) };
+        unsafe { close(self.saved) };
+        if restored < 0 {
+            // Every later request would write into an unlinked file. The parent
+            // sees the server vanish and runs the compile as a process.
+            std::process::exit(70);
         }
         let mut text = Vec::new();
         if self.file.seek(SeekFrom::Start(0)).is_ok() {
@@ -94,6 +101,20 @@ impl Capture {
 }
 
 fn handle(request: Request) -> Reply {
+    if let Some(name) = request
+        .env
+        .iter()
+        .find(|(name, value)| {
+            name.is_empty() || name.contains(['=', '\0']) || value.contains('\0')
+        })
+        .map(|(name, _)| name)
+    {
+        return Reply {
+            success: false,
+            stdout: String::new(),
+            stderr: format!("hash-rustc --loom-serve: invalid environment entry {name:?}\n"),
+        };
+    }
     // SAFETY: requests are served one at a time and no compiler thread is alive
     // between them; see the module comment.
     unsafe {
@@ -133,30 +154,28 @@ fn handle(request: Request) -> Reply {
     }
 }
 
-pub fn serve(socket: &str) -> ExitCode {
+pub fn serve() -> ExitCode {
     crate::timing_enabled();
-    // The parent holds our stdin open; its exit closes it.
-    std::thread::spawn(|| {
-        let mut sink = [0u8; 64];
-        let mut stdin = std::io::stdin();
-        while matches!(stdin.read(&mut sink), Ok(read) if read > 0) {}
-        std::process::exit(0);
-    });
-    let _ = std::fs::remove_file(socket);
-    let listener = match UnixListener::bind(socket) {
-        Ok(listener) => listener,
+    // SAFETY: the parent passed one end of a socket pair as our standard input;
+    // this takes ownership of that descriptor, and nothing else reads stdin.
+    let stream = unsafe { UnixStream::from_raw_fd(0) };
+    let mut writer = match stream.try_clone() {
+        Ok(writer) => writer,
         Err(error) => {
-            eprintln!("hash-rustc --loom-serve: cannot bind {socket}: {error}");
+            eprintln!("hash-rustc --loom-serve: cannot duplicate the request socket: {error}");
             return ExitCode::FAILURE;
         }
     };
-    println!("ready");
-    let _ = std::io::stdout().flush();
-    for stream in listener.incoming() {
-        let Ok(stream) = stream else { continue };
+    if writer.write_all(b"ready\n").is_err() {
+        return ExitCode::FAILURE;
+    }
+    let mut reader = BufReader::new(stream);
+    loop {
         let mut line = String::new();
-        if BufReader::new(&stream).read_line(&mut line).unwrap_or(0) == 0 {
-            continue;
+        match reader.read_line(&mut line) {
+            // The parent closed its end: it is gone.
+            Ok(0) | Err(_) => return ExitCode::SUCCESS,
+            Ok(_) => {}
         }
         let reply = match serde_json::from_str::<Request>(&line) {
             Ok(request) => handle(request),
@@ -166,9 +185,9 @@ pub fn serve(socket: &str) -> ExitCode {
                 stderr: format!("hash-rustc --loom-serve: bad request: {error}\n"),
             },
         };
-        let mut stream = stream;
-        let _ = serde_json::to_writer(&mut stream, &reply);
-        let _ = stream.write_all(b"\n");
+        if serde_json::to_writer(&mut writer, &reply).is_err() || writer.write_all(b"\n").is_err()
+        {
+            return ExitCode::SUCCESS;
+        }
     }
-    ExitCode::SUCCESS
 }

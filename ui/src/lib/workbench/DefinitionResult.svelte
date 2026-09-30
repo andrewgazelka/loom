@@ -175,7 +175,7 @@
     label="Removed items"
     rows={diff.removed.map((item) => ({ ...item }))}
   />
-{:else if operation === V.run}
+{:else if operation === V.run || operation === V.eval}
   {@const result = object(value, "execution result")}
   <div class="section-bar"><h2>Output</h2></div>
   <CodeBlock code={JSON.stringify(result.output, null, 2)} language="json" />

@@ -41,6 +41,11 @@ impl Store {
             );
             return Ok(Some(bytes));
         }
+        // A transient definition's component is held in memory, addressed by
+        // its content hash like any CAS blob.
+        if address.is_none() {
+            return Ok(self.transient.blob(hash));
+        }
         Ok(None)
     }
     pub fn put_value<T: serde::Serialize>(&self, kind: &str, value: &T) -> Result<String> {

@@ -422,21 +422,43 @@ impl Recipe {
         Ok(())
     }
 
-    /// Set the root compile's optimization level. The recorded recipe carries
-    /// Cargo's release profile (`-C opt-level=2`); `Standard` leaves it alone.
+    /// Apply a build profile to the root compile. The recorded recipe carries
+    /// Cargo's release profile: `-C opt-level=2` and no debug-assertions or
+    /// overflow-checks argument, so both are off. `Standard` leaves it alone.
+    /// `Interactive` lowers the optimization level and pins those three
+    /// settings off explicitly: `opt-level=0` alone turns `debug_assertions` and
+    /// overflow checks on, which would change what a cell computes (`x + 250`
+    /// on a `u8` would trap instead of wrapping) and the HIR the driver hashes
+    /// (`debug_assert!` expands through `cfg!(debug_assertions)`).
     pub(super) fn apply_profile(&mut self, profile: crate::BuildProfile) {
-        let level = match profile {
-            crate::BuildProfile::Standard => return,
-            crate::BuildProfile::Interactive => "opt-level=0",
-        };
+        if profile == crate::BuildProfile::Standard {
+            return;
+        }
         let mut index = 0;
-        while index + 1 < self.arguments.len() {
-            if self.arguments[index] == "-C" && self.arguments[index + 1].starts_with("opt-level=")
-            {
-                self.arguments[index + 1] = level.into();
+        while index < self.arguments.len() {
+            let joined = self.arguments[index].starts_with("-Copt-level=");
+            let split = self.arguments[index] == "-C"
+                && self
+                    .arguments
+                    .get(index + 1)
+                    .is_some_and(|option| option.starts_with("opt-level="));
+            if joined {
+                self.arguments[index] = "-Copt-level=0".into();
+            } else if split {
+                self.arguments[index + 1] = "opt-level=0".into();
             }
             index += 1;
         }
+        self.arguments.extend(
+            [
+                "-C",
+                "debug-assertions=off",
+                "-C",
+                "overflow-checks=off",
+                "-Zub-checks=no",
+            ]
+            .map(String::from),
+        );
     }
 
     pub(super) fn shell(&self) -> String {

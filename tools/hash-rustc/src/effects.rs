@@ -115,21 +115,26 @@ pub fn collect(tcx: TyCtxt<'_>) -> Document {
         handlers,
     };
     let partitions = tcx.collect_and_partition_mono_items(());
+    // Discovery starts at the guest's own instances. A dependency's instance
+    // enters the analysis as a callee of one of them; the generated entry
+    // wrappers instantiate serde plumbing that nothing else reaches, and
+    // analyzing it as a root would reject plain guests (`dyn` calls inside
+    // serde's error paths). Function-pointer targets (`indirect`) still seed
+    // from every collected instance, as before the wrappers were compiled in,
+    // except the wrappers themselves.
     let mut roots = Vec::new();
+    let mut seeds = Vec::new();
     for unit in partitions.codegen_units {
         for item in unit.items().keys() {
-            // Roots are the guest's own instances. A dependency's instance
-            // enters the analysis as a callee of one of them; the generated
-            // entry wrappers instantiate serde plumbing that nothing else
-            // reaches, and analyzing it would reject plain guests (`dyn`
-            // calls inside serde's error paths).
-            if let rustc_middle::mono::MonoItem::Fn(instance) = item
-                && instance
-                    .def_id()
-                    .as_local()
-                    .is_some_and(|local| !crate::entries::is_generated(tcx, local))
-            {
-                roots.push(*instance);
+            if let rustc_middle::mono::MonoItem::Fn(instance) = item {
+                match instance.def_id().as_local() {
+                    Some(local) if crate::entries::is_generated(tcx, local) => {}
+                    Some(_) => {
+                        roots.push(*instance);
+                        seeds.push(*instance);
+                    }
+                    None => seeds.push(*instance),
+                }
             }
         }
     }
@@ -139,10 +144,12 @@ pub fn collect(tcx: TyCtxt<'_>) -> Document {
             && tcx.def_kind(id).is_fn_like()
             && tcx.generics_of(id).count() == 0
         {
-            roots.push(Instance::mono(tcx, id.to_def_id()));
+            let entry = Instance::mono(tcx, id.to_def_id());
+            roots.push(entry);
+            seeds.push(entry);
         }
     }
-    analysis.instances = roots.clone();
+    analysis.instances = seeds;
     let has_sdk = tcx.crate_name(rustc_hir::def_id::LOCAL_CRATE).as_str() == "loom_guest_rs"
         || tcx
             .crates(())

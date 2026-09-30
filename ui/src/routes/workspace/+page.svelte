@@ -126,6 +126,7 @@
     V.history,
     V.diff,
     V.run,
+    V.eval,
     V.dependents,
     V.update,
   ];

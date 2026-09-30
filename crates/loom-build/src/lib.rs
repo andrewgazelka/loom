@@ -15,7 +15,7 @@ pub use intake::Preparation;
 mod materialize;
 use materialize::{Materialization, materialize_rust};
 mod cell;
-pub use cell::interactive_cell;
+pub use cell::{CELL_HEADER, interactive_cell};
 mod direct;
 pub use direct::WRAPPER_MARKER;
 mod dwarf;

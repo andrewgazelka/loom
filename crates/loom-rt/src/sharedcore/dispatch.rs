@@ -121,8 +121,7 @@ impl Runtime {
             .core_modules
             .lock()
             .unwrap()
-            .get(&artifact)
-            .cloned();
+            .get(&artifact);
         let module = if let Some(module) = cached {
             module
         } else {

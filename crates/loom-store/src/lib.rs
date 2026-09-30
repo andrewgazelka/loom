@@ -24,6 +24,7 @@ mod recording;
 #[cfg(test)]
 mod tests;
 mod trace;
+mod transient;
 mod update;
 use anyhow::{Context, Result, anyhow, ensure};
 pub use bundle::{Block, ImportBlock, MAX_BUNDLE_BYTES, VerifiedBundle, verify_bundle};
@@ -44,6 +45,8 @@ pub use update::UpdateSession;
 pub struct Store {
     recording: Arc<recording::Writer>,
     connection: Arc<Mutex<Connection>>,
+    /// In-memory definitions of `eval` cells; see `transient`.
+    transient: Arc<transient::Transient>,
 }
 impl Store {
     /// Tenant directories must reject both cloned owners and separate handles
@@ -117,6 +120,7 @@ impl Store {
         Ok(Self {
             recording,
             connection,
+            transient: Arc::default(),
         })
     }
     fn lock(&self) -> Result<MutexGuard<'_, Connection>> {

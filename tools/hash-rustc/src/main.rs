@@ -95,11 +95,7 @@ pub(crate) fn timing_enabled() -> bool {
 fn main() -> ExitCode {
     let mut arguments = std::env::args();
     if arguments.nth(1).as_deref() == Some("--loom-serve") {
-        let Some(socket) = arguments.next() else {
-            eprintln!("hash-rustc: --loom-serve requires a socket path");
-            return ExitCode::FAILURE;
-        };
-        return serve::serve(&socket);
+        return serve::serve();
     }
     compile(std::env::args().collect())
 }
