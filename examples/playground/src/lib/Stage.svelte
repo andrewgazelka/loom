@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
 
-  type Cmd = { op: string; args: any };
+  // One drawing command from the handler: [kind, coordinates, colour]. Kinds: 0 line2d, 1 circle, 2 line3d, 3 triangle.
+  type Cmd = [number, number[], number[]];
   let { scene = [], drawMs = $bindable(0) }: { scene?: Cmd[]; drawMs?: number } = $props();
 
   let canvas: HTMLCanvasElement;
@@ -10,7 +11,7 @@
   let yaw = 0.6, pitch = 0.45, dist = 3.6, vy = 0.004, vp = 0, dragging = false, touched = false;
   let last: [number, number] = [0, 0];
 
-  const is3d = $derived(scene.some((c) => c.op.startsWith("canvas3d")));
+  const is3d = $derived(scene.some((c) => c[0] >= 2));
   const rgb = (c: number[], a = 1) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
 
   function resize() {
@@ -26,16 +27,16 @@
     const P = (p: number[]): [number, number] => [w / 2 + p[0] * s, h / 2 - p[1] * s];
     ctx.lineWidth = 1.4;
     ctx.lineCap = "round";
-    for (const { op, args } of cmds) {
-      ctx.strokeStyle = rgb(args.color);
+    for (const [kind, c, color] of cmds) {
+      ctx.strokeStyle = rgb(color);
       ctx.beginPath();
-      if (op === "canvas2d.line") {
-        const [ax, ay] = P(args.a), [bx, by] = P(args.b);
+      if (kind === 0) {
+        const [ax, ay] = P([c[0], c[1]]), [bx, by] = P([c[2], c[3]]);
         ctx.moveTo(ax, ay);
         ctx.lineTo(bx, by);
-      } else if (op === "canvas2d.circle") {
-        const [x, y] = P(args.at);
-        ctx.arc(x, y, args.r * s, 0, Math.PI * 2);
+      } else if (kind === 1) {
+        const [x, y] = P([c[0], c[1]]);
+        ctx.arc(x, y, c[2] * s, 0, Math.PI * 2);
       }
       ctx.stroke();
     }
@@ -53,18 +54,18 @@
     const tris: { p: ReturnType<typeof V>[]; color: number[]; z: number; lit: number }[] = [];
     ctx.lineWidth = 1;
     const lines: { a: ReturnType<typeof V>; b: ReturnType<typeof V>; color: number[] }[] = [];
-    for (const { op, args } of cmds) {
-      if (op === "canvas3d.tri") {
-        const p = [V(args.a), V(args.b), V(args.c)];
+    for (const [kind, c, color] of cmds) {
+      if (kind === 3) {
+        const p = [V(c.slice(0, 3)), V(c.slice(3, 6)), V(c.slice(6, 9))];
         // flat shading from the view-space normal against a fixed light
         const [u, v] = [[p[1].nx - p[0].nx, p[1].ny - p[0].ny, p[1].z - p[0].z], [p[2].nx - p[0].nx, p[2].ny - p[0].ny, p[2].z - p[0].z]];
         let n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
         const len = Math.hypot(n[0], n[1], n[2]) || 1;
         n = n.map((c) => c / len);
         const lit = 0.38 + 0.62 * Math.abs(n[0] * -0.35 + n[1] * 0.75 + n[2] * -0.55);
-        tris.push({ p, color: args.color, z: (p[0].z + p[1].z + p[2].z) / 3, lit });
-      } else if (op === "canvas3d.line") {
-        lines.push({ a: V(args.a), b: V(args.b), color: args.color });
+        tris.push({ p, color, z: (p[0].z + p[1].z + p[2].z) / 3, lit });
+      } else if (kind === 2) {
+        lines.push({ a: V(c.slice(0, 3)), b: V(c.slice(3, 6)), color });
       }
     }
     tris.sort((a, b) => b.z - a.z); // painter's algorithm, far first

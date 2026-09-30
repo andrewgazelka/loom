@@ -29,20 +29,25 @@
   );
   // The prelude is appended after the cell (a blank line between), so the cell's line numbers are the user's own.
   const problems = $derived(
-    tab === "cell"
+    tab === "cell" || !isScene
       ? diagnostics.filter((d: any) => d.line <= cellLines)
       : diagnostics.filter((d: any) => d.line > cellLines + 1).map((d: any) => ({ ...d, line: d.line - cellLines - 1 })),
   );
   const elsewhere = $derived(diagnostics.length - problems.length);
   const timings = $derived(reply?.result?.timings_ms);
+  const KINDS = ["canvas2d.line", "canvas2d.circle", "canvas3d.line", "canvas3d.tri"];
+  const isScene = $derived(current.kind === "scene");
   const counts = $derived(
-    Object.entries(scene.reduce((m: Record<string, number>, c: any) => ((m[c.op] = (m[c.op] ?? 0) + 1), m), {})) as [string, number][],
+    Object.entries(scene.reduce((m: Record<string, number>, c: any) => ((m[KINDS[c[0]]] = (m[KINDS[c[0]]] ?? 0) + 1), m), {})) as [string, number][],
   );
+  let value: unknown = $state.raw(null); // result of a "value" cell
   const active = {
     get value() { return tab === "cell" ? cell : tab === "canvas" ? prelude : (lib?.source ?? ""); },
     set value(v: string) { if (tab === "cell") cell = v; else if (tab === "canvas") prelude = v; else if (lib) lib.source = v; },
   };
   const short = (h: string) => h.slice(0, 8);
+  // Short values on one line, long ones indented.
+  const show = (v: unknown) => { const one = JSON.stringify(v); return one.length <= 90 ? one : JSON.stringify(v, null, 2); };
   const head = $derived(lib?.revs.at(-1)?.hash);
   const cellHash = $derived(reply?.ok ? (reply.result.hash as string) : null);
 
@@ -56,9 +61,8 @@
     const mine = ++ticket;
     busy = true;
     const body = await post("/api/eval", {
-      source: `${cell}\n\n${prelude}`,
-      entry: "frame",
-      args: [0],
+      source: isScene ? `${cell}\n\n${prelude}` : cell,
+      ...(isScene ? { entry: "frame", args: [0] } : {}),
       ...(current.glam ? { manifest, lock } : {}),
       ...(current.lib && lib ? { deps: { surface: lib.pinned } } : {}),
     });
@@ -66,7 +70,7 @@
     reply = body;
     busy = false;
     if (!body.ok) return;
-    scene = body.result.output;
+    if (isScene) scene = body.result.output; else value = body.result.output;
     const h = body.result.hash as string;
     if (seen[0] !== h) seen = [h, ...seen].slice(0, 6);
     if (current.animate) animate(mine, body.result.hash);
@@ -136,6 +140,9 @@
     tab = "cell";
     lib = null;
     seen = [];
+    scene = [];
+    value = null;
+    reply = null;
     if (p.lib) await loadLib(p.lib);
     run();
   }
@@ -156,7 +163,12 @@
 <main>
   <header>
     <h1>Loom</h1>
-    <p>Rust in, pixels out. Drawing is an algebraic effect: the cell performs <code>canvas2d</code> and <code>canvas3d</code> effects, a handler collects them, the page paints.</p>
+    <p class="lede">Write Rust in the browser. Loom compiles it to WebAssembly and runs it in a sandbox in milliseconds. Every example below is a real Rust program running on a Loom server.</p>
+    <div class="ideas">
+      <div><h3>Sandboxed</h3><p>Each cell runs as WebAssembly with its own memory. It can only do what the host allows.</p></div>
+      <div><h3>Named by content</h3><p>A function is identified by the hash of what it means. Rename a variable: same hash. Change behaviour: new hash. A dependency pins a hash, so it never changes under you.</p></div>
+      <div><h3>Effects</h3><p>Code does not draw, read files or sleep directly. It asks ("performs an effect") and a handler decides what that means. Here, drawing is an effect.</p></div>
+    </div>
   </header>
 
   <nav>
@@ -170,7 +182,7 @@
     <section class="card">
       <div class="bar">
         <button class="tab" class:on={tab === "cell"} onclick={() => (tab = "cell")}>cell.rs</button>
-        <button class="tab" class:on={tab === "canvas"} onclick={() => (tab = "canvas")}>canvas.rs</button>
+        {#if isScene}<button class="tab" class:on={tab === "canvas"} onclick={() => (tab = "canvas")} title="How drawing works: the effects and the handler that collects them">how drawing works</button>{/if}
         {#if lib}<button class="tab" class:on={tab === "lib"} onclick={() => (tab = "lib")}>surface.rs</button>{/if}
         <span class="spacer"></span>
         {#if elsewhere > 0}<span class="warn">{elsewhere} more in {tab === "cell" ? "canvas.rs" : "cell.rs"}</span>{/if}
@@ -189,11 +201,18 @@
 
     <section class="card stage">
       <div class="bar">
-        <span class="file">stage</span>
+        <span class="file">{isScene ? "stage" : "result"}</span>
         <span class="spacer"></span>
         {#if reply?.ok}
           {#if cellHash}<span class="chip" title="Content hash of this cell and its pinned dependencies">cell <b>{short(cellHash)}</b></span>{/if}
-          <span class="chip"><b>{reply.wall_ms}</b> ms build + run</span>
+          {#if reply.result.build}
+            <span class="chip" title="Compiling the cell with rustc and linking it to wasm. 0 invocations means the build cache answered."><b>{reply.result.build.ms}</b> ms build{#if reply.result.build.rustc_invocations === 0}&nbsp;· cached{/if}</span>
+          {/if}
+          {#if reply.result.runtime_ms}
+            <span class="chip" title="Validating and compiling the wasm for this machine. Skipped when the module is already compiled."><b>{reply.result.runtime_ms.compile_ms.toFixed(1)}</b> ms load{#if reply.result.runtime_ms.cache_hit}&nbsp;· cached{/if}</span>
+            <span class="chip" title="Running the cell's entry function."><b>{reply.result.runtime_ms.run_ms.toFixed(2)}</b> ms run</span>
+          {/if}
+          <span class="chip" title="Whole request, browser to daemon and back"><b>{reply.wall_ms}</b> ms total</span>
           {#if current.animate && frameMs}<span class="chip"><b>{frameMs}</b> ms / frame</span>{/if}
         {/if}
       </div>
@@ -203,12 +222,16 @@
           {#if !diagnostics.length}<li>{reply.result?.error ?? JSON.stringify(reply)}</li>{/if}
         </ul>
       {:else}
-        <Stage {scene} bind:drawMs />
-        <p class="effects">
-          {#each counts as [op, n]}<span><b>{op}</b> × {n}</span>{/each}
-          {#if !counts.length}running…{/if}
-          <span class="spacer"></span><span>paint <b>{drawMs}</b> ms</span>
-        </p>
+        {#if isScene}
+          <Stage {scene} bind:drawMs />
+          <p class="effects">
+            {#each counts as [op, n]}<span><b>{op}</b> × {n}</span>{/each}
+            {#if !counts.length}running…{/if}
+            <span class="spacer"></span><span>paint <b>{drawMs}</b> ms</span>
+          </p>
+        {:else}
+          <pre class="value">{value === null ? "running…" : show(value)}</pre>
+        {/if}
       {/if}
     </section>
   </div>
@@ -240,7 +263,12 @@
   :global(body) { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.5 "Inter", system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
   main { max-width: 1280px; margin: 0 auto; padding: 48px 20px 80px; }
   h1 { margin: 0; font-size: 34px; font-weight: 700; letter-spacing: -0.03em; }
-  header p { margin: 4px 0 0; color: var(--dim); max-width: 760px; }
+  .lede { margin: 6px 0 0; color: var(--dim); max-width: 760px; }
+  .ideas { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 22px; }
+  @media (max-width: 800px) { .ideas { grid-template-columns: minmax(0, 1fr); } }
+  .ideas div { background: color-mix(in srgb, var(--ink) 5%, transparent); border-radius: 12px; padding: 14px 16px; }
+  .ideas h3 { margin: 0 0 4px; font-size: 14px; }
+  .ideas p { margin: 0; color: var(--dim); font-size: 13.5px; }
   code { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 0.9em; color: var(--ink); }
   nav { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 26px 0 14px; }
   nav button { border: 0; background: transparent; color: var(--dim); padding: 6px 12px; border-radius: 999px; cursor: pointer; font: inherit; font-size: 14px; }
@@ -250,7 +278,7 @@
   .grid { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 16px; align-items: start; }
   @media (max-width: 1000px) { .grid { grid-template-columns: minmax(0, 1fr); } .stage { order: -1; } }
   .card { background: #14151c; color: #c8d0f0; border-radius: 14px; overflow: hidden; box-shadow: 0 0 0 1px rgba(255,255,255,0.05); }
-  .bar { display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-bottom: 1px solid rgba(255,255,255,0.06); font-size: 12.5px; min-height: 30px; }
+  .bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 14px; border-bottom: 1px solid rgba(255,255,255,0.06); font-size: 12.5px; min-height: 30px; }
   .file { color: #7a86b8; font-family: "JetBrains Mono", ui-monospace, monospace; }
   .tab { border: 0; background: transparent; color: #545b7f; font: 12.5px "JetBrains Mono", ui-monospace, monospace; padding: 4px 8px; border-radius: 6px; cursor: pointer; }
   .tab.on { color: #c8d0f0; background: rgba(255,255,255,0.06); }
@@ -259,8 +287,9 @@
   kbd { color: #545b7f; font: 12px "JetBrains Mono", monospace; }
   .run { border: 0; background: #7aa2f7; color: #0d0e13; padding: 5px 16px; border-radius: 8px; font: 600 13px Inter, system-ui, sans-serif; cursor: pointer; }
   .run:disabled { opacity: .55; cursor: progress; }
-  .chip { color: #7a86b8; background: rgba(255,255,255,0.05); padding: 2px 9px; border-radius: 999px; font-variant-numeric: tabular-nums; }
+  .chip { white-space: nowrap; color: #7a86b8; background: rgba(255,255,255,0.05); padding: 2px 9px; border-radius: 999px; font-variant-numeric: tabular-nums; }
   .chip b { color: #c8d0f0; font-weight: 600; }
+  .value { margin: 0; padding: 18px 20px; min-height: 120px; font: 15px/1.6 "JetBrains Mono", ui-monospace, monospace; color: #9ece6a; white-space: pre-wrap; word-break: break-word; }
   .effects { display: flex; gap: 14px; flex-wrap: wrap; margin: 0; padding: 10px 16px 14px; color: #545b7f; font: 12px "JetBrains Mono", ui-monospace, monospace; }
   .effects b { color: #7a86b8; font-weight: 500; }
   .errors { list-style: none; margin: 0; padding: 16px; font: 13.5px/1.65 "JetBrains Mono", ui-monospace, monospace; color: #f7768e; min-height: 200px; }
