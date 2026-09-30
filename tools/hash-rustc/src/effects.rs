@@ -118,7 +118,17 @@ pub fn collect(tcx: TyCtxt<'_>) -> Document {
     let mut roots = Vec::new();
     for unit in partitions.codegen_units {
         for item in unit.items().keys() {
-            if let rustc_middle::mono::MonoItem::Fn(instance) = item {
+            // Roots are the guest's own instances. A dependency's instance
+            // enters the analysis as a callee of one of them; the generated
+            // entry wrappers instantiate serde plumbing that nothing else
+            // reaches, and analyzing it would reject plain guests (`dyn`
+            // calls inside serde's error paths).
+            if let rustc_middle::mono::MonoItem::Fn(instance) = item
+                && instance
+                    .def_id()
+                    .as_local()
+                    .is_some_and(|local| !crate::entries::is_generated(tcx, local))
+            {
                 roots.push(*instance);
             }
         }

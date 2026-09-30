@@ -32,7 +32,9 @@ struct MonoReport {
 pub fn write(tcx: TyCtxt<'_>, path: &Path) {
     let ids: Vec<_> = tcx
         .iter_local_def_id()
-        .filter(|id| crate::graph::supported(tcx.def_kind(*id)))
+        .filter(|id| {
+            crate::graph::supported(tcx.def_kind(*id)) && !crate::entries::is_generated(tcx, *id)
+        })
         .collect();
     let included: HashSet<_> = ids.iter().map(|id| id.to_def_id()).collect();
     let mut report = Report {

@@ -1,4 +1,5 @@
 //! Synchronous guest interface to the core wasm Loom host.
+#![cfg_attr(target_arch = "wasm32", feature(allow_internal_unsafe))]
 #[doc(hidden)]
 pub mod core;
 mod detached;
@@ -105,6 +106,78 @@ pub mod cas {
     pub fn put(value: impl Serialize) -> Result<Value, EffectError> {
         perform("cas.put", value)
     }
+}
+
+/// The exported `loom_call_<entry>` wrapper for one root `pub fn`, appended by
+/// the host after the checked guest source (`loom-build` `entry_abi`), so the
+/// guest compiles once. `$name` is the entry; the identifiers after `;` are
+/// one binding per parameter. The payload is one DAG-CBOR array of typed
+/// arguments decoded straight into a tuple whose element types rustc infers
+/// from the entry's own parameter types (arity 0 is `[(); 0]`, since `()` would
+/// be CBOR null). Codec passes: one decode of the arguments, one encode of the
+/// result; the host copies both payloads without decoding.
+///
+/// `allow_internal_unsafe` lets this macro carry the `unsafe` it needs while
+/// the guest keeps `-Funsafe-code`: guest source cannot invoke it, because the
+/// checker refuses guest macros and the host appends the call afterwards.
+#[doc(hidden)]
+#[macro_export]
+#[cfg_attr(target_arch = "wasm32", allow_internal_unsafe)]
+macro_rules! __loom_export_entry {
+    ($name:ident;) => {
+        const _: () = {
+            #[unsafe(export_name = concat!("loom_call_", stringify!($name)))]
+            extern "C" fn entry(
+                pointer: ::core::primitive::u32,
+                length: ::core::primitive::u32,
+            ) -> ::core::primitive::u64 {
+                let invoke = || -> ::std::result::Result<
+                    ::std::vec::Vec<::core::primitive::u8>,
+                    $crate::CallError,
+                > {
+                    let bytes = unsafe { $crate::core::input(pointer, length) };
+                    let []: [(); 0] = $crate::isolated::decode_payload(bytes)?;
+                    $crate::isolated::encode_payload(&crate::$name())
+                };
+                $crate::core::isolated_response(invoke())
+            }
+        };
+    };
+    ($name:ident; $($argument:ident),+) => {
+        const _: () = {
+            #[unsafe(export_name = concat!("loom_call_", stringify!($name)))]
+            extern "C" fn entry(
+                pointer: ::core::primitive::u32,
+                length: ::core::primitive::u32,
+            ) -> ::core::primitive::u64 {
+                let invoke = || -> ::std::result::Result<
+                    ::std::vec::Vec<::core::primitive::u8>,
+                    $crate::CallError,
+                > {
+                    let bytes = unsafe { $crate::core::input(pointer, length) };
+                    let ($($argument,)+) = $crate::isolated::decode_payload(bytes)?;
+                    $crate::isolated::encode_payload(&crate::$name($($argument),+))
+                };
+                $crate::core::isolated_response(invoke())
+            }
+        };
+    };
+}
+
+/// The exported `loom_schema` function: the guest's root `pub const
+/// LOOM_SCHEMA: &str`, which the host appends only when the guest defines it.
+#[doc(hidden)]
+#[macro_export]
+#[cfg_attr(target_arch = "wasm32", allow_internal_unsafe)]
+macro_rules! __loom_export_schema {
+    () => {
+        const _: () = {
+            #[unsafe(export_name = "loom_schema")]
+            extern "C" fn schema() -> ::core::primitive::u64 {
+                $crate::core::response(::std::result::Result::Ok(crate::LOOM_SCHEMA))
+            }
+        };
+    };
 }
 
 #[cfg(test)]

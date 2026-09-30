@@ -111,7 +111,7 @@ pub fn collect(tcx: TyCtxt<'_>) -> Document {
     let visibilities = tcx.effective_visibilities(());
     let mut definitions: Vec<Definition> = tcx
         .iter_local_def_id()
-        .filter(|id| supported(tcx.def_kind(*id)))
+        .filter(|id| supported(tcx.def_kind(*id)) && !crate::entries::is_generated(tcx, *id))
         .map(|id| Definition {
             id,
             path: item_path(tcx, id.to_def_id()),

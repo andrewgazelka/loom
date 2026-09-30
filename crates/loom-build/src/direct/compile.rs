@@ -24,11 +24,11 @@ pub(crate) struct Request<'a> {
 /// warm replay: `compiler_setup_ms` (path canonicalization, key, root
 /// workspace copy) → `graph_load_ms` (recipe read, path rebase, unit sources)
 /// → `artifact_restore_ms` (stamp check, or full CAS restore and repair) →
-/// `root_rustc_ms` → `entry_abi_rustc_ms` → `identity_publish_ms`.
+/// `root_rustc_ms` → `identity_publish_ms`.
 ///
 /// cold bootstrap: `compiler_setup_ms` → `graph_load_ms` (miss) →
 /// `admission_ms` (cargo metadata, source policy) → `compiler_mirror_ms` →
-/// `cargo_bootstrap_ms` → `root_rustc_ms` → `entry_abi_rustc_ms` →
+/// `cargo_bootstrap_ms` → `root_rustc_ms` →
 /// `artifact_capture_ms` → `identity_publish_ms`.
 pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
     let mut stages = crate::Stages::start();
@@ -57,8 +57,9 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
     let mut hasher = blake3::Hasher::new();
     // v9: the stored root recipe carries `-C debuginfo=1` (`Recipe::line_tables`);
     // graphs recorded before it would replay without line tables and are never
-    // read. v8 added `ArtifactFile::len`.
-    hasher.update(b"rustc-contract-v9-line-tables");
+    // read. v8 added `ArtifactFile::len`. v10: the root compiles the entry wrappers
+    // (`entry_abi::generate`) in the same run, so one recipe replay is the whole build.
+    hasher.update(b"rustc-contract-v10-wrappers-in-root");
     let manifest_bytes = fs::read_to_string(directory.join("Cargo.toml"))
         .await?
         .replace(root.to_string_lossy().as_ref(), "$SDK")
@@ -196,7 +197,11 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
                 command
             };
             driver.configure(&mut command, identity_directory);
-            let output = run(command).await?;
+            let mut wrapped = super::entry_abi::WrappedSource::write(directory)?;
+            let output = run(command).await;
+            wrapped.restore()?;
+            let output = output?;
+            let compiled_source = wrapped.into_text();
             let stderr = String::from_utf8_lossy(&output.stderr);
             let diagnostics = rustc_diagnostics(&stderr);
             stages.checkpoint("root_rustc_ms");
@@ -217,16 +222,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
                     stages,
                 });
             }
-            let compiled_source = super::entry_abi::compile(super::entry_abi::Request {
-                recipe: &recipe,
-                identity: identity_directory,
-                root,
-                cache,
-                target: &target,
-                isolated,
-            })
-            .await?;
-            stages.checkpoint("entry_abi_rustc_ms");
+            super::entry_abi::check_contract(identity_directory, &compiled_source).await?;
             crate::identity::publish(identity_directory, published_identity_directory)?;
             let bytes = fs::read(recipe.output()?).await?;
             stages.checkpoint("identity_publish_ms");
@@ -235,7 +231,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
                 compiled_source,
                 logs,
                 diagnostics,
-                rustc_invocations: repairs + 2,
+                rustc_invocations: repairs + 1,
                 stages,
             });
         }
@@ -291,6 +287,8 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
         .env("LOOM_COMPILER_CACHE_MIRROR", &mirror)
         .env("LOOM_ROOT_INCREMENTAL", &root_incremental)
         .env("LOOM_TRUSTED_SOURCES", graph.join("trusted-sources"));
+    // Cargo compiles the root with the entry wrappers in place, like the replay.
+    let mut wrapped = super::entry_abi::WrappedSource::write(directory)?;
     let output = bootstrap(command).await?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let logs = format!(
@@ -322,8 +320,8 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
         directory,
     )?;
     root_recipe.compiler = driver.path.to_string_lossy().into_owned();
-    // Cargo compiled the root with `-C debuginfo=0`; the hashing replay below
-    // and the entry ABI compile that overwrites its output carry line tables.
+    // Cargo compiled the root with `-C debuginfo=0`; the hashing replay below,
+    // which overwrites its output, carries line tables.
     root_recipe.line_tables();
     let mut hash_command = Command::new(&driver.path);
     compiler_environment(&mut hash_command);
@@ -359,16 +357,9 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
         )));
     }
     stages.checkpoint("root_rustc_ms");
-    let compiled_source = super::entry_abi::compile(super::entry_abi::Request {
-        recipe: &root_recipe,
-        identity: identity_directory,
-        root,
-        cache,
-        target: &target,
-        isolated,
-    })
-    .await?;
-    stages.checkpoint("entry_abi_rustc_ms");
+    wrapped.restore()?;
+    let compiled_source = wrapped.into_text();
+    super::entry_abi::check_contract(identity_directory, &compiled_source).await?;
     if !root_build_script {
         let mut recipe = Recipe::parse(
             &fs::read(target.join("root-rustc.recipe")).await?,
@@ -428,7 +419,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
         compiled_source,
         logs,
         diagnostics,
-        rustc_invocations: rustc_invocations + 2,
+        rustc_invocations: rustc_invocations + 1,
         stages,
     })
 }
