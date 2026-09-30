@@ -1,6 +1,6 @@
 # Generators: entries that yield many values
 
-Status: design, not built (2026-09-30). Asked for by Andrew for rgb's forge ("generators that yield multiple values").
+Status: host and guest half built (2026-09-30, commit 20ea501); guest-side consumer, cached finished streams and the HTTP form are not. Asked for by Andrew for rgb's forge ("generators that yield multiple values").
 
 ## Why it is cheap here
 
@@ -9,18 +9,21 @@ already suspends inside a host call and its thread is free while it waits (`perf
 that mechanism with a channel behind it: the guest calls a `loom.yield` import, the host hands the value to the consumer
 and does not return to the guest until the consumer asks for the next one. No stack switching or new wasm feature is needed.
 
-## Shape
+## Shape (as built)
 
-* Guest: an entry that returns a stream, written as an ordinary function over a yielder:
-  `pub fn panels(params: Params, out: &mut loom::Yield<Panel>) { for p in ... { out.emit(p); } }`.
-  `emit` encodes the value (DAG-CBOR, as every result is) and calls `loom.yield(ptr, len)`; `Yield` is the
-  only way to call it, so the row gains nothing new (`yield` is a fixed, pure label like `kernel`).
-* Host: `Runtime::call_stream(def, entry, args) -> impl Stream<Item = Result<Vec<u8>>>`. Backpressure is a bounded
-  channel (window of N values, default 4) so a slow consumer stalls the producer instead of buffering a whole mesh.
-  Dropping the stream cancels the execution (the existing `cancel` path).
-* Caller inside Loom: `loom::isolated::stream(hash, entry, args)` returns an iterator whose `next()` is one async
-  host call. Combined with `call_many` (design: parallel calls, single-flight), a pipeline is a graph of streams.
-* Outside: the `eval`/`run` API gains a streaming form (server-sent events over the existing HTTP transport).
+* Guest: any entry calls `loom::stream::emit(&value)` (DAG-CBOR, like every result). It returns once the consumer has
+  room; `Err(StreamError::Cancelled)` means the consumer is gone and the entry should return. The entry's return value is
+  the stream's result, delivered by `CallStream::finish`. A free function rather than a `Yield` parameter, so entries keep
+  the one ABI (arguments decoded from the entry's own parameter types).
+* Host: `Runtime::call_stream(hash, entry, args) -> CallStream` with `next()`, `next_bytes()` and `finish()`. The channel
+  holds 4 values; a full channel suspends the guest inside `loom.yield_value` (its execution slot is released meanwhile).
+  Dropping the `CallStream` closes the channel and aborts the task. Yield codes: 0 accepted, 1 consumer gone, 2 not started
+  as a stream (a plain `call_def` of the same entry works and yields nothing), 3 `yield` not allowed by the row.
+* Only the stream root yields: `EffectContext::delegated` clears the sink, so an isolated callee never yields into its caller.
+* Effect label: the fixed label `yield` (driver: `stream::emit`), so a yielding callee is never result-cached and its callers must
+  allow `yield`.
+* Not built: `loom::isolated::stream(hash, entry, args)` (a guest consuming another guest's stream), the HTTP streaming form,
+  and the cached Merkle-list result below.
 
 ## Identity and caching
 
