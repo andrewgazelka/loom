@@ -490,3 +490,24 @@ async fn a_dyn_call_is_refused_unless_the_host_admits_unresolved_calls_for_unpol
         assert!(message.contains("cannot resolve") || message.contains("cannot be resolved"), "{message}");
     }
 }
+
+#[tokio::test]
+#[ignore = "requires Rust guest toolchain and LOOM_COMPILER_CACHE_OWNER"]
+async fn one_source_has_one_hash_on_every_daemon() {
+    // A definition that names the loom SDK (or any crate with a build script) hashes that crate by its strict
+    // version hash, which moves with the path of every file it was compiled from, including build-script
+    // output under the daemon's own build directory. Definitions shared through git are checked against the
+    // hashes in `loom.lock`, so the same source must hash the same in two build directories.
+    let source = "pub fn count(bytes: Vec<u8>) -> usize { loom::Packed::<f32>::from_bytes(&bytes).map(|p| p.0.len()).unwrap_or(0) }";
+    let mut hashes = Vec::new();
+    for _ in 0..2 {
+        let build = tempfile::tempdir().unwrap();
+        // SAFETY: the only test that touches this variable; `Builder::new` reads it once per service.
+        unsafe { std::env::set_var("LOOM_BUILD_DIR", build.path()) };
+        let service = service();
+        let reply = eval(&service, json!({"source": source, "args": [[0, 0, 128, 63]]})).await;
+        assert!(reply.ok, "{reply:?}");
+        hashes.push(reply.result["hash"].as_str().unwrap().to_owned());
+    }
+    assert_eq!(hashes[0], hashes[1], "the same source hashed differently in two build directories");
+}

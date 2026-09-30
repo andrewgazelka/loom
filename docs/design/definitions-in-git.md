@@ -105,3 +105,17 @@ the reviewable source of record; a bundle can always be made from it.
 * Known limits: each changed definition is its own `update` (a chain of k edited definitions rebuilds about k²/2
   times); a whole directory is one request under the daemon's 16 MiB body limit; an import overwrites daemon-side
   edits (the old hash stays in `history`), because the lock records only the state after the author's edit.
+
+### A hash must not depend on the daemon (found 2026-09-30, real use by the engine)
+
+Exporting the skin-weld from one daemon and importing it into a fresh one reported a hash mismatch on every
+definition that named the `loom` SDK, including the one-line `pub fn p(b: Vec<u8>) -> usize { loom::Packed::<f32>::... }`
+(three daemons, three hashes; a definition with no dependencies hashed the same everywhere). Cause: a definition's hash
+contains the strict version hash (SVH) of each non-Loom crate it names, rustc computes the SVH over the paths of the
+files the crate was compiled from, and `rustc/capture.sh` remapped the crate's source and working directory but not
+`OUT_DIR`, so a build script's generated file (`serde_core`'s `private.rs`) carried the daemon's own build directory.
+Fix: `capture.sh` also remaps `OUT_DIR` to `/loom/out/<crate>-<version>`. Checked: two clean daemons now give the same
+hash for the SDK probe and for the weld, and `import-dir` of one's export into the other reports no mismatch
+(`one_source_has_one_hash_on_every_daemon` in `crates/loom-api/tests/eval.rs`, ignored like its neighbours).
+Consequence: hashes made before this change differ from the same source hashed after it; a store that holds
+definitions which name the SDK or a build-script crate keeps the old hashes until they are re-added.

@@ -82,6 +82,13 @@ else
   source_prefix="/loom/deps/${CARGO_PKG_NAME:?missing package name}-${CARGO_PKG_VERSION:?missing package version}"
 fi
 set -- "$@" "--remap-path-prefix=$compiler_cwd=/loom/build" "--remap-path-prefix=${CARGO_MANIFEST_DIR:?missing package source}=$source_prefix"
+# A build script's generated files (`include!(concat!(env!("OUT_DIR"), ...))`) live under the daemon's
+# target directory, and their paths enter the crate's strict version hash, which every dependent (and
+# every definition that names the crate) hashes. Without this, one source has a different definition
+# hash on every daemon. Last match wins in rustc, so this comes after the others.
+if [ -n "${OUT_DIR:-}" ]; then
+  set -- "$@" "--remap-path-prefix=$OUT_DIR=/loom/out/${CARGO_PKG_NAME:?missing package name}-${CARGO_PKG_VERSION:?missing package version}"
+fi
 # CARGO_MANIFEST_DIR identifies package source, not the compiler's cwd.
 export LOOM_RUSTC_CWD="$compiler_cwd"
 capture=${LOOM_RUSTC_CAPTURE:?missing capture destination}
