@@ -128,7 +128,71 @@ fn pack_weld(w: &Weld) -> Vec<u8> {
     )
 }
 
+fn read<T: Copy>(path: &std::path::Path) -> Vec<T> {
+    let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let size = std::mem::size_of::<T>();
+    assert_eq!(bytes.len() % size, 0, "{}", path.display());
+    let mut out: Vec<T> = Vec::with_capacity(bytes.len() / size);
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out.as_mut_ptr().cast::<u8>(), bytes.len());
+        out.set_len(bytes.len() / size);
+    }
+    out
+}
+
+fn dump_skin(dir: &std::path::Path, name: &str) -> Skin {
+    let f = |part: &str| dir.join(format!("{name}.{part}.bin"));
+    Skin {
+        positions: read(&f("positions")),
+        uvs: read(&f("uvs")),
+        normals: read(&f("normals")),
+        joints: read(&f("joints")),
+        weights: read(&f("weights")),
+        triangles: read(&f("triangles")),
+        targets: Vec::new(),
+    }
+}
+
+/// Real-size mode: load the engine's dump, run the in-process weld several times, write the packed containers.
+fn from_dump(dump: &std::path::Path, out: &std::path::Path) {
+    std::fs::create_dir_all(out).unwrap();
+    let (h, b) = (dump_skin(dump, "head"), dump_skin(dump, "body"));
+    let p: Vec<f64> = read(&dump.join("params.f64.bin"));
+    let params = Params {
+        uv_eps: p[0], twin_max_m: p[1], max_ring: p[2] as u32, blend_m: p[3], shape_fade_m: p[4],
+        normal_fade_m: p[5], bridge_margin_m: p[6], bridge_cut_m: p[7], bridge_clear_m: p[8],
+    };
+    let mut times = Vec::new();
+    let mut welded = None;
+    for _ in 0..7 {
+        let t = std::time::Instant::now();
+        welded = Some(weld(&h, &b, &params).expect("weld"));
+        times.push(t.elapsed().as_secs_f64() * 1e3);
+    }
+    let w = welded.unwrap();
+    times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    std::fs::write(out.join("head.skin"), pack_skin(&h)).unwrap();
+    std::fs::write(out.join("body.skin"), pack_skin(&b)).unwrap();
+    std::fs::write(out.join("expected.weld"), pack_weld(&w)).unwrap();
+    std::fs::write(out.join("params.json"), serde_list(&p)).unwrap();
+    // The engine's own output, to prove this harness reproduces it before anything is compared with Loom.
+    let (eh, eb) = (dump_skin(dump, "weld_out.head"), dump_skin(dump, "weld_out.body"));
+    let same = |a: &Skin, b: &Skin| a.positions == b.positions && a.uvs == b.uvs && a.normals == b.normals
+        && a.joints == b.joints && a.weights == b.weights && a.triangles == b.triangles;
+    println!(
+        "head {} verts {} tris, body {} verts {} tris -> welded head {} / body {}; native weld median {:.1} ms (min {:.1}); harness output equals the engine's dump: head {} body {}",
+        h.len(), h.triangles.len(), b.len(), b.triangles.len(), w.head.len(), w.body.len(), times[times.len() / 2], times[0],
+        same(&w.head, &eh), same(&w.body, &eb)
+    );
+}
+
 fn main() {
+    if let (Some(dump), Some(out)) = (std::env::args().nth(2), std::env::args().nth(3)) {
+        if std::env::args().nth(1).as_deref() == Some("--dump") {
+            from_dump(std::path::Path::new(&dump), std::path::Path::new(&out));
+            return;
+        }
+    }
     let out = PathBuf::from(std::env::args().nth(1).expect("output directory"));
     std::fs::create_dir_all(&out).unwrap();
     let params = Params { blend_m: 0.005, ..Params::default() };

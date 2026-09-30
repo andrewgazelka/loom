@@ -52,3 +52,20 @@ python3 run.py            # uploads, evals on a daemon at 127.0.0.1:8850, compar
 * **Diagnostics count the compiler's text, not yours** (comments and blank lines are dropped, statements
   re-wrapped); `eval` returns `line_map` on success, but a compile error's line numbers are in the compiler's text.
   This is how "cannot resolve this callable at line 2152" pointed at a line that did not exist in the source.
+
+## Real size: the forge's MetaHuman head and body (2026-09-30)
+
+The engine's `RGB_WELD_DUMP` of the `character_weld` job (`/Volumes/Projects/tmp/weld-dump`, packed arrays, not in
+this repo): head 17,918 vertices and 34,960 triangles, body 49,209 and 87,436, nine `Params` as f64, and the
+in-process result. `native/` has a `--dump` mode that loads it, runs the in-process `weld` seven times and writes
+the packed containers; `run.py` (pointed at that output) uploads them and runs the same guest.
+
+* **All 12 output arrays (head and body: positions, normals, uvs, joints, weights, triangles) are bit-identical to
+  the engine's own `weld_out.*` files**, and the 17 report numbers and the four index maps match the native run.
+  Same machine, morph targets not dumped. Result blob 5.8 MB from 5.2 MB of inputs.
+* Timing, at machine load 30 to 40, not repeated on a quiet machine: in-process native `weld` median 146.8 ms (min
+  111.1 ms, 7 runs, load 40); wasm at the standard profile median 111.5 ms (min 106.2 ms, 15 runs, load 30 to 37),
+  including reading 5.2 MB and writing 5.8 MB through the store; wasm at the interactive profile 598 ms. The two
+  medians were taken minutes apart under different load, so read them as "the same order of magnitude", not as wasm
+  beating native.
+* Build: 17 s cold for the crate at the standard profile.
