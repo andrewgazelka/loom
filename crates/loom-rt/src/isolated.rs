@@ -93,10 +93,10 @@ fn shareable_failure(hash: &str, error: &anyhow::Error) -> Option<CallError> {
 /// The caller that runs a single-flight call. It owns the in-flight entry: the entry is removed
 /// when the leader publishes, finishes, or is dropped mid-run (a cancelled caller or batch), and
 /// only while it is still the leader's own (a later flight under the same key stays).
-struct Leader<'a> {
-    inflight: &'a Mutex<HashMap<InflightKey, Arc<Flight>>>,
-    key: InflightKey,
-    flight: Arc<Flight>,
+pub(crate) struct Leader<'a> {
+    pub(crate) inflight: &'a Mutex<HashMap<InflightKey, Arc<Flight>>>,
+    pub(crate) key: InflightKey,
+    pub(crate) flight: Arc<Flight>,
 }
 impl Leader<'_> {
     fn remove(&self) {
@@ -113,7 +113,7 @@ impl Leader<'_> {
     }
     /// Give `outcome` to the callers already waiting. The entry goes first, so a caller that
     /// arrives from now on starts a flight of its own instead of inheriting this outcome.
-    fn publish(&self, outcome: &Result<Vec<u8>, CallError>) {
+    pub(crate) fn publish(&self, outcome: &Result<Vec<u8>, CallError>) {
         self.remove();
         // Nobody can subscribe once the entry is gone, so the count is final: no waiter, no copy.
         if self.flight.receiver_count() > 0 {

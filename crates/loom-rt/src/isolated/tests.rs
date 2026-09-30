@@ -1477,3 +1477,34 @@ async fn a_batch_runs_an_impure_callee_once_per_call_and_a_pure_one_once_per_dis
     assert!(out[0].is_ok() && out[1].is_err() && out[2].is_ok());
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn identical_embedder_calls_in_flight_at_once_run_the_callee_once() -> Result<()> {
+    let store = Store::memory()?;
+    let hash = register(&store, &kernel_module(6)?, &[("main", 0)], &["kernel"])?;
+    let runtime = Runtime::new(store)?;
+    let kernel = Arc::new(SlowCbor7(Default::default()));
+    runtime.register_kernel(kernel.clone())?;
+    let calls = (0..5).map(|_| runtime.call_entry_cached(&hash, "main", json!([])));
+    let results = futures::future::join_all(calls).await;
+    let results: Vec<CachedCall> = results.into_iter().collect::<Result<_>>()?;
+    assert!(results.iter().all(|call| call.value == json!(7)));
+    assert_eq!(
+        kernel.0.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "five identical concurrent embedder calls ran the kernel once"
+    );
+    assert_eq!(results.iter().filter(|call| !call.cache_hit).count(), 1, "one leader, four that took its answer");
+    assert!(runtime.inner.inflight.lock().unwrap().is_empty(), "the in-flight table drains");
+    // A failed leader hands nothing over: the waiters each try for themselves (here the kernel fails for all).
+    let store = Store::memory()?;
+    let failing = register(&store, &kernel_module(7)?, &[("main", 0)], &["kernel"])?;
+    let runtime = Runtime::new(store)?;
+    let fails = Arc::new(FailsAs7(Default::default()));
+    runtime.register_kernel(fails.clone())?;
+    let calls = (0..3).map(|_| runtime.call_entry_cached(&failing, "main", json!([])));
+    let outcomes = futures::future::join_all(calls).await;
+    assert!(outcomes.iter().all(|o| o.as_ref().is_ok_and(|c| !c.cache_hit)), "an unclean run is never shared");
+    assert!(runtime.inner.inflight.lock().unwrap().is_empty());
+    Ok(())
+}

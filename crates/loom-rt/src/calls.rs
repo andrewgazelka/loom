@@ -90,6 +90,75 @@ impl Runtime {
         {
             return Ok(CachedCall { value, cache_hit: true, run_ms: elapsed_ms(started) });
         }
+        // Single flight: identical pure calls in flight at once run once. The first (the leader) computes;
+        // the others wait for its clean answer and take it as a cache hit. A run that was not clean, or that
+        // failed, is not evidence for anyone else, so each waiter then runs its own attempt.
+        let leader = if cacheable {
+            let key = (
+                hash.to_owned(),
+                entry.to_owned(),
+                argc,
+                *blake3::hash(&payload).as_bytes(),
+                kernels,
+            );
+            let mut inflight = self.inner.inflight.lock().expect("inflight poisoned");
+            if let Some(flight) = inflight.get(&key) {
+                Err(flight.subscribe())
+            } else {
+                // The first receiver is dropped at once: the flight's receivers are its waiters.
+                let (flight, _) = tokio::sync::watch::channel(None);
+                let flight = Arc::new(flight);
+                inflight.insert(key.clone(), flight.clone());
+                Ok(Some(crate::isolated::Leader {
+                    inflight: &self.inner.inflight,
+                    key,
+                    flight,
+                }))
+            }
+        } else {
+            Ok(None)
+        };
+        if let Err(mut waiting) = leader {
+            // `changed` fails when the leader left without publishing; the value says which.
+            let _ = waiting.changed().await;
+            let shared = waiting.borrow().clone();
+            if let Some(Ok(bytes)) = shared
+                && let Ok(value) = loom_proto::decode_host::<Value>(&bytes)
+            {
+                return Ok(CachedCall { value, cache_hit: true, run_ms: elapsed_ms(started) });
+            }
+            return self.run_cached_uncoordinated(hash, entry, args, argc, &payload, &kernels, true).await;
+        }
+        let leader = leader.ok().flatten();
+        let (call, bytes, clean) = self
+            .run_cached_inner(hash, entry, args, cacheable, started)
+            .await?;
+        if clean {
+            self.inner.call_results.put(
+                hash,
+                entry,
+                argc,
+                &payload,
+                &kernels,
+                &bytes,
+                started.elapsed().as_nanos() as u64,
+            );
+            if let Some(leader) = &leader {
+                leader.publish(&Ok(bytes));
+            }
+        }
+        Ok(call)
+    }
+
+    /// A run for [`Self::call_entry_cached`]: the call, its result bytes, and whether it was clean.
+    async fn run_cached_inner(
+        &self,
+        hash: &str,
+        entry: &str,
+        args: Value,
+        cacheable: bool,
+        started: Instant,
+    ) -> Result<(CachedCall, Vec<u8>, bool)> {
         let scope = format!("call:{}", uuid::Uuid::new_v4());
         let trace = trace::ExecutionTrace::fresh(&scope);
         let kernel_failures = self.kernel_failures();
@@ -110,12 +179,30 @@ impl Runtime {
             && self.kernel_failures() == kernel_failures
             && self.inner.depth_refusals.load(Ordering::Relaxed) == depth_refusals
             && !trace.has_effects_under(&scope);
+        Ok((
+            CachedCall { value: call.value, cache_hit: false, run_ms: cost.as_secs_f64() * 1000.0 },
+            bytes,
+            clean,
+        ))
+    }
+
+    /// The fallback for a waiter whose leader published nothing: run on its own, store if clean.
+    async fn run_cached_uncoordinated(
+        &self,
+        hash: &str,
+        entry: &str,
+        args: Value,
+        argc: u32,
+        payload: &[u8],
+        kernels: &[u8; 32],
+        cacheable: bool,
+    ) -> Result<CachedCall> {
+        let started = Instant::now();
+        let (call, bytes, clean) = self.run_cached_inner(hash, entry, args, cacheable, started).await?;
         if clean {
-            self.inner
-                .call_results
-                .put(hash, entry, argc, &payload, &kernels, &bytes, cost.as_nanos() as u64);
+            self.inner.call_results.put(hash, entry, argc, payload, kernels, &bytes, started.elapsed().as_nanos() as u64);
         }
-        Ok(CachedCall { value: call.value, cache_hit: false, run_ms: cost.as_secs_f64() * 1000.0 })
+        Ok(call)
     }
 
     /// [`Self::call_entry_cached`] over a batch, `parallel` at a time. Identical calls of a pure callee
