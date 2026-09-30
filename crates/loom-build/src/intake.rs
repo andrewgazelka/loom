@@ -125,11 +125,15 @@ impl Builder {
                 }
                 Ok(command)
             };
+            // A supplied lock that passed validation (`locked_registry`) implies `pinned` here:
+            // resolution always starts offline, so cargo cannot move a pin or add a package to
+            // the stored lock from the network without the caller's checksum.
             let offline = supplied_lock.is_some();
+            debug_assert_eq!(offline, locked_registry);
             let output = run_preparation(metadata(offline)?).await?;
             if offline
                 && !output.status.success()
-                && String::from_utf8_lossy(&output.stderr).contains("offline")
+                && is_offline_cache_miss(&String::from_utf8_lossy(&output.stderr))
             {
                 // A crate archive or index entry is missing from the local cargo
                 // registry cache. Downloading is the daemon operator's choice.
@@ -201,8 +205,10 @@ struct PreparationInputs {
     /// The bundle's `Cargo.lock` passed `validate_registry_lock`, so plain
     /// crates.io dependencies are admitted without the isolated worker.
     locked_registry: bool,
-    /// The host resolves crates.io dependencies from the supplied lock: the
-    /// manifest has some, the lock passed, and nothing forces isolation.
+    /// The host resolves from the supplied lock, offline, and checks that cargo moved no
+    /// pin (`confirm_pins`): the lock passed and nothing forces isolation. Not conditional on
+    /// the manifests wanting a registry crate: a lock that passed is always what resolution
+    /// starts from.
     pinned: bool,
     /// The manifest has crates.io dependencies but the bundle has no lock.
     lock_hint: bool,
@@ -296,17 +302,27 @@ impl Builder {
         }
         let lock = lock_verdict(&bundle);
         let locked_registry = matches!(lock, Some(Ok(())));
-        let wants_registry = any_dependency(&manifest, &|name, value| {
-            !trusted_dependency(name, value) && registry_dependency(name, value)
+        // `locked_registry` is the root's lock, and materialization hands it to every definition
+        // dependency: a dependency's own manifest (`foo = "1"`) counts exactly as the root's.
+        let mut manifests = vec![manifest.clone()];
+        for dependency in dependencies.values() {
+            manifests.push(definition_manifest(dependency)?);
+        }
+        let wants_registry = manifests.iter().any(|manifest| {
+            any_dependency(manifest, &|name, value| {
+                !trusted_dependency(name, value) && registry_dependency(name, value)
+            })
         });
         if wants_registry && let Some(Err(error)) = &lock {
             return Err(BuildError::Rejected(format!(
                 "Cargo.lock cannot pin crates.io dependencies for the host build: {error}"
             )));
         }
-        let untrusted = any_dependency(&manifest, &|name, value| {
-            !trusted_dependency(name, value)
-                && !(locked_registry && registry_dependency(name, value))
+        let untrusted = manifests.iter().any(|manifest| {
+            any_dependency(manifest, &|name, value| {
+                !trusted_dependency(name, value)
+                    && !(locked_registry && registry_dependency(name, value))
+            })
         });
         let isolated = manifest
             .get("loom")
@@ -336,15 +352,53 @@ impl Builder {
             bundle,
             isolated,
             locked_registry,
-            pinned: wants_registry && locked_registry && !isolated,
+            pinned: locked_registry && !isolated,
             lock_hint: wants_registry && lock.is_none(),
             key,
         })
     }
 }
 
+/// The `Cargo.toml` a definition materializes from: its bundle's, or the default manifest.
+fn definition_manifest(definition: &CheckedDef) -> Result<toml::Value, BuildError> {
+    let text = if definition.source.trim_start().starts_with('{') {
+        let bundle: SourceBundle = serde_json::from_str(&definition.source)
+            .map_err(|error| BuildError::Rejected(error.to_string()))?;
+        bundle.validate().map_err(BuildError::Rejected)?;
+        match bundle.files.get("Cargo.toml") {
+            Some(file) => file
+                .as_text()
+                .ok_or_else(|| BuildError::Rejected("Cargo.toml must be UTF-8".into()))?
+                .to_owned(),
+            None => DEFAULT_MANIFEST.to_owned(),
+        }
+    } else {
+        DEFAULT_MANIFEST.to_owned()
+    };
+    text.parse::<toml::Value>()
+        .map_err(|error| BuildError::Rejected(error.to_string()))
+}
+
 /// Manifest assumed for a bare `src/lib.rs` definition; mirrors materialize.
 const DEFAULT_MANIFEST: &str = "[package]\nname=\"loom-definition\"\nversion=\"0.1.0\"\nedition=\"2024\"\n[dependencies]\nserde={version=\"1\",features=[\"derive\"]}\nserde_json=\"1\"\n";
+
+/// The most packages a caller-supplied lock may name; each one is fetched and compiled.
+const MAX_LOCK_PACKAGES: usize = 512;
+
+/// What `cargo metadata --offline` prints when the registry cache lacks an index entry or an
+/// archive the lock needs (cargo's network layer, and its resolver's offline reminder).
+/// Any other failure, including one whose text merely mentions "offline", is not retried online.
+const OFFLINE_CACHE_MISS: [&str; 3] = [
+    "attempting to make an HTTP request, but --offline was specified",
+    "you're using offline mode (--offline)",
+    "note: offline mode (via `--offline` flag)",
+];
+
+fn is_offline_cache_miss(stderr: &str) -> bool {
+    OFFLINE_CACHE_MISS
+        .iter()
+        .any(|message| stderr.contains(message))
+}
 
 /// The one registry a caller-supplied lock may name.
 const CRATES_IO: &str = "registry+https://github.com/rust-lang/crates.io-index";
@@ -356,6 +410,12 @@ const CRATES_IO: &str = "registry+https://github.com/rust-lang/crates.io-index";
 /// alternative registries never qualify.
 pub(super) fn validate_registry_lock(bytes: &[u8]) -> Result<(), BuildError> {
     let lock = sdk::Lock::parse(bytes)?;
+    if lock.packages.len() > MAX_LOCK_PACKAGES {
+        return Err(BuildError::Rejected(format!(
+            "Cargo.lock names {} packages; at most {MAX_LOCK_PACKAGES} are admitted",
+            lock.packages.len()
+        )));
+    }
     if lock
         .raw
         .get("patch")
@@ -570,6 +630,135 @@ mod tests {
             .preparation_inputs(&definition(DEFAULT_MANIFEST, None), &none)
             .unwrap();
         assert!(!trusted.isolated && !trusted.pinned && !trusted.lock_hint);
+    }
+
+    fn bundle_definition(
+        hash: char,
+        manifest: &str,
+        lock: Option<String>,
+        deps: &[(&str, &str)],
+    ) -> CheckedDef {
+        let mut files = BTreeMap::from([
+            (
+                "src/lib.rs".to_owned(),
+                SourceFile::Text("pub fn main() -> i64 { 1 }".into()),
+            ),
+            ("Cargo.toml".to_owned(), SourceFile::Text(manifest.into())),
+        ]);
+        if let Some(lock) = lock {
+            files.insert("Cargo.lock".into(), SourceFile::Text(lock));
+        }
+        CheckedDef {
+            hash: hash.to_string().repeat(64),
+            lang: Lang::Rust,
+            name: "cell".into(),
+            source: serde_json::to_string(&SourceBundle { files }).unwrap(),
+            deps: deps
+                .iter()
+                .map(|(name, hash)| (name.to_string(), hash.to_string()))
+                .collect(),
+            sig: Default::default(),
+            diagnostics: vec![],
+        }
+    }
+
+    #[test]
+    fn a_dependency_definitions_registry_crate_is_pinned_like_the_roots_never_resolved_online() {
+        let builder = Builder::new(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
+            loom_store::Store::memory().unwrap(),
+        );
+        let root_manifest = "[package]\nname='cell'\nversion='0.1.0'\nedition='2024'\n";
+        let dependency_manifest =
+            "[package]\nname='dep'\nversion='0.1.0'\nedition='2024'\n[dependencies]\nrobust='1'\n";
+        let dependency_hash = "b".repeat(64);
+        let dependency = bundle_definition('b', dependency_manifest, None, &[]);
+        let dependencies = BTreeMap::from([(dependency_hash.clone(), dependency)]);
+        let root = |lock: Option<String>| {
+            bundle_definition(
+                'a',
+                root_manifest,
+                lock,
+                &[("dep", dependency_hash.as_str())],
+            )
+        };
+
+        // The root has a valid lock and no registry crate of its own. The dependency's `robust`
+        // must still take the pinned path (offline resolution, pins confirmed afterwards).
+        let inputs = builder
+            .preparation_inputs(&root(Some(robust_lock())), &dependencies)
+            .unwrap();
+        assert!(
+            inputs.locked_registry && inputs.pinned && !inputs.isolated,
+            "the dependency's registry crate is resolved offline from the lock"
+        );
+        // Without a lock the same graph needs the isolated worker, with a hint to supply one.
+        let unlocked = builder
+            .preparation_inputs(&root(None), &dependencies)
+            .unwrap();
+        assert!(unlocked.isolated && !unlocked.pinned && unlocked.lock_hint);
+        // A lock that fails validation is an early error, not an online resolve.
+        let bad = lock(
+            "[[package]]\nname = \"robust\"\nversion = \"1.2.0\"\nsource = \"git+https://example.com/r#a\"\n",
+        );
+        let error = builder
+            .preparation_inputs(&root(Some(bad)), &dependencies)
+            .err()
+            .expect("git lock is refused")
+            .to_string();
+        assert!(error.contains("Cargo.lock cannot pin"), "{error}");
+        // A path dependency in the dependency's manifest is never admitted.
+        let path = bundle_definition(
+            'b',
+            "[package]\nname='dep'\nversion='0.1.0'\n[dependencies]\nrobust={path='../robust'}\n",
+            None,
+            &[],
+        );
+        let inputs = builder
+            .preparation_inputs(
+                &root(Some(robust_lock())),
+                &BTreeMap::from([(dependency_hash.clone(), path)]),
+            )
+            .unwrap();
+        assert!(inputs.isolated && !inputs.pinned);
+        // Nothing but the SDK's own crates anywhere, and a lock that passed: still resolved from the lock.
+        let trusted = bundle_definition('b', DEFAULT_MANIFEST, None, &[]);
+        let inputs = builder
+            .preparation_inputs(
+                &root(Some(robust_lock())),
+                &BTreeMap::from([(dependency_hash, trusted)]),
+            )
+            .unwrap();
+        assert!(inputs.locked_registry && inputs.pinned && !inputs.isolated);
+    }
+
+    #[test]
+    fn only_a_missing_offline_cache_entry_is_retried_online_and_a_lock_has_a_size_cap() {
+        assert!(is_offline_cache_miss(
+            "error: failed to download from `https://index.crates.io/x`\n\nCaused by:\n  attempting to make an HTTP request, but --offline was specified"
+        ));
+        assert!(is_offline_cache_miss(
+            "error: no matching package named `x` found\nnote: offline mode (via `--offline` flag) can sometimes cause surprising resolution failures"
+        ));
+        // A failure that only mentions the word, or is about something else, is final.
+        assert!(!is_offline_cache_miss(
+            "error: failed to parse manifest: offline = 3"
+        ));
+        assert!(!is_offline_cache_miss(
+            "error: the lock file needs to be updated"
+        ));
+        let packages = |count: usize| {
+            lock(
+                &(0..count)
+                    .map(|index| format!("[[package]]\nname = \"p{index}\"\nversion = \"0.1.0\"\n"))
+                    .collect::<String>(),
+            )
+        };
+        validate_registry_lock(packages(MAX_LOCK_PACKAGES).as_bytes()).unwrap();
+        let error = validate_registry_lock(packages(MAX_LOCK_PACKAGES + 1).as_bytes())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("512"), "{error}");
     }
 
     #[test]

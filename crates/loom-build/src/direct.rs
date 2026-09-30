@@ -12,8 +12,8 @@ use tokio::{fs, process::Command};
 pub(crate) mod artifacts;
 pub(crate) mod compiler_cache;
 pub(crate) mod definition_rlibs;
-mod trusted_sources;
 mod server;
+mod trusted_sources;
 pub use server::RustcServers;
 
 pub(crate) struct Built {
@@ -64,8 +64,8 @@ fn rejected(error: impl std::fmt::Display) -> BuildError {
 }
 
 mod compile;
-mod linker;
 mod entry_abi;
+mod linker;
 pub use entry_abi::WRAPPER_MARKER;
 mod recipe;
 pub(crate) use compile::{Request, build};

@@ -48,7 +48,11 @@ mod tests {
         let mut lines = cell.lines();
         assert_eq!(lines.next(), Some(CELL_HEADER));
         assert_eq!(lines.next(), Some("let v = vec![1, 2, 3];"));
-        assert_eq!(cell.lines().count(), 4, "header, two lines of text, closing brace");
+        assert_eq!(
+            cell.lines().count(),
+            4,
+            "header, two lines of text, closing brace"
+        );
         assert!(interactive_cell("1 + 2").contains("pub fn eval()"));
     }
 
@@ -60,8 +64,14 @@ mod tests {
 
     #[test]
     fn items_without_an_entry_are_not_hidden_inside_a_block() {
-        for items in ["struct Point { x: i32 }", "fn add(a: i32, b: i32) -> i32 { a + b }"] {
-            assert!(matches!(interactive_cell(items), Cow::Borrowed(_)), "{items}");
+        for items in [
+            "struct Point { x: i32 }",
+            "fn add(a: i32, b: i32) -> i32 { a + b }",
+        ] {
+            assert!(
+                matches!(interactive_cell(items), Cow::Borrowed(_)),
+                "{items}"
+            );
         }
         // Helpers followed by an expression are a block body, which keeps them.
         let mixed = interactive_cell("fn add(a: i32, b: i32) -> i32 { a + b }\nadd(1, 2)");

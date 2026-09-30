@@ -16,3 +16,13 @@ code was unchanged. With the line, identical recompiles miss 0 and warm module c
 
 Better fix upstream: clear `exception_tables` in `DataFlowGraph::clear`. Drop this patch (and the `[patch.crates-io]` entry in the
 root `Cargo.toml`) once a wasmtime release carries that.
+
+## Version guard
+
+Cargo uses a `[patch.crates-io]` path entry only for the version it declares; after a wasmtime bump away from `=48.0.1` it
+ignores the patch with a warning and builds the unpatched registry crate. `the_vendored_cranelift_backend_is_the_one_the_locked_wasmtime_uses`
+(`crates/loom-build/src/artifact.rs`) fails when the workspace `Cargo.lock` holds a `wasmtime` other than the version this crate
+declares, or a `wasmtime-internal-cranelift` that does not come from this directory. On a bump: vendor the matching release,
+re-apply the one line above, update the `=` pin in `crates/loom-rt/Cargo.toml` and `WASMTIME_VERSION` in
+`crates/loom-rt/src/host_identity.rs`, or drop the patch. This directory is not part of the guest build fingerprint
+(`build_fingerprint`): it compiles into the host runtime only.

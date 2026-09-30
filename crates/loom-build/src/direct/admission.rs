@@ -87,8 +87,16 @@ pub(super) async fn graph_shareable(
                     .unwrap_or_default();
                 let compiled = is_root
                     || kinds.iter().any(|kind| {
-                        ["lib", "rlib", "cdylib", "dylib", "staticlib", "proc-macro", "custom-build"]
-                            .contains(kind)
+                        [
+                            "lib",
+                            "rlib",
+                            "cdylib",
+                            "dylib",
+                            "staticlib",
+                            "proc-macro",
+                            "custom-build",
+                        ]
+                        .contains(kind)
                     });
                 if !compiled {
                     continue;
@@ -241,6 +249,10 @@ pub(super) fn inspect_untrusted_source(
         for entry in std::fs::read_dir(directory)? {
             let entry = entry?;
             let name = entry.file_name();
+            // Host-placed trees of the root package. A tenant can also ship a `vendor/` directory
+            // (materialize.rs accepts `vendor/` files), which this skips, so `include!` refuses a
+            // path whose first component is one of these names (`UNSCANNED_ROOTS` in
+            // loom-check's rust_effects/admission.rs): nothing compiled can reach an unscanned file.
             if generated_root
                 && ["vendor", "loom-crates", ".cargo"].contains(&name.to_string_lossy().as_ref())
             {
@@ -320,7 +332,10 @@ mod tests {
         let dependency = package(&[
             ("Cargo.toml", MANIFEST),
             ("src/lib.rs", "pub fn f() -> u32 { 1 }\n"),
-            ("tests/support.rs", "#[path = \"../src/lib.rs\"]\nmod lib;\n"),
+            (
+                "tests/support.rs",
+                "#[path = \"../src/lib.rs\"]\nmod lib;\n",
+            ),
         ]);
         let root = dependency.path().canonicalize().unwrap();
         let compiled = vec![root.join("src")];
@@ -348,5 +363,42 @@ mod tests {
             inspect_untrusted_source(&root, false, Some(&[root.join("src")])).is_err(),
             "a build script outside the compiled directory is refused anyway"
         );
+    }
+
+    #[test]
+    fn include_reaches_only_rust_files_the_scan_reads() {
+        let scanned = |files: &[(&str, &str)], generated_root: bool| {
+            let directory = package(files);
+            let root = directory.path().canonicalize().unwrap();
+            inspect_untrusted_source(
+                &root,
+                generated_root,
+                (!generated_root).then(|| vec![root.join("src")]).as_deref(),
+            )
+        };
+        let lib = |body: &'static str| [("Cargo.toml", MANIFEST), ("src/lib.rs", body)];
+        // A `.rs` file under the compiled directory is scanned, so including it is admitted and its content is checked.
+        let mut files = lib("include!(\"more.rs\");").to_vec();
+        files.push(("src/more.rs", "pub fn f() {}\n"));
+        assert!(scanned(&files, false).is_ok());
+        files[2] = ("src/more.rs", "#[no_mangle] pub fn f() {}\n");
+        assert!(scanned(&files, false).is_err());
+        // A payload with any other extension is never read by the scan, so `include!` of it is refused.
+        let mut files = lib("include!(\"payload.txt\");").to_vec();
+        files.push(("src/payload.txt", "#[no_mangle] pub fn f() {}\n"));
+        assert!(scanned(&files, false).is_err());
+        // Data stays includable in any extension.
+        let mut files = lib("pub const S: &str = include_str!(\"payload.txt\");").to_vec();
+        files.push(("src/payload.txt", "anything"));
+        assert!(scanned(&files, false).is_ok());
+        // The root package skips its top-level `vendor/`; a root target outside `src/` must not reach it.
+        let root_manifest = format!("{MANIFEST}[[bin]]\nname=\"tool\"\npath=\"main.rs\"\n");
+        let files = [
+            ("Cargo.toml", root_manifest.as_str()),
+            ("src/lib.rs", "pub fn f() {}\n"),
+            ("main.rs", "include!(\"vendor/hidden.rs\");\nfn main() {}\n"),
+            ("vendor/hidden.rs", "#[no_mangle] pub fn f() {}\n"),
+        ];
+        assert!(scanned(&files, true).is_err());
     }
 }

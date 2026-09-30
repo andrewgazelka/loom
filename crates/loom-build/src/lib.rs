@@ -377,7 +377,11 @@ impl Builder {
         stages.checkpoint("toolchain_prepare_ms");
         // What the dependency graph is keyed by: independent of the profile, so
         // one graph serves every optimization level of the root.
-        let graph_inputs = format!("{}:{}", build_fingerprint(&self.root)?, driver.toolchain_hash);
+        let graph_inputs = format!(
+            "{}:{}",
+            build_fingerprint(&self.root)?,
+            driver.toolchain_hash
+        );
         // What a stored component is valid for: the same plus the profile.
         let inputs = format!("{graph_inputs}:{}", profile.tag());
         stages.checkpoint("build_fingerprint_ms");

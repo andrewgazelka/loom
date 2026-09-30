@@ -308,8 +308,8 @@ pub(crate) async fn reconcile(job: Rebuild<'_>) -> Result<(), BuildError> {
     let workspace_bytes = fs::read(job.root.join("Cargo.lock")).await?;
     let current = Lock::parse(&workspace_bytes)?;
     let manifest_text = fs::read_to_string(job.directory.join("Cargo.toml")).await?;
-    let manifest: toml::Value = toml::from_str(&manifest_text)
-        .map_err(|error| BuildError::Rejected(error.to_string()))?;
+    let manifest: toml::Value =
+        toml::from_str(&manifest_text).map_err(|error| BuildError::Rejected(error.to_string()))?;
     if !sdk_graph_changed(&original, &current) {
         return Ok(());
     }

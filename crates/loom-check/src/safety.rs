@@ -240,14 +240,64 @@ mod tests {
                 .is_empty()
         );
         assert!(
-            !untrusted_source_diagnostics("macro_rules! leak {()=>{include_str!(\"/etc/passwd\")}}")
-                .is_empty()
+            !untrusted_source_diagnostics(
+                "macro_rules! leak {()=>{include_str!(\"/etc/passwd\")}}"
+            )
+            .is_empty()
         );
         assert!(
             untrusted_source_diagnostics(
                 "macro_rules! safe {()=>{1+2}} pub fn main()->i32 {safe!()}"
             )
             .is_empty()
+        );
+    }
+    #[test]
+    fn include_compiles_only_rust_files_the_scan_reads_and_data_macros_take_any_extension() {
+        for (source, admitted) in [
+            ("include!(\"x.rs\");", true),
+            ("include!(\"sub/x.rs\");", true),
+            ("include!(\"x.txt\");", false),
+            ("include!(\"/abs/x.rs\");", false),
+            ("include!(\"../x.rs\");", false),
+            ("include!(\"vendor/x.rs\");", false),
+            ("const S: &str = include_str!(\"x.txt\");", true),
+            ("const B: &[u8] = include_bytes!(\"x.bin\");", true),
+            ("const S: &str = include_str!(\"/etc/passwd\");", false),
+            ("const S: &str = include_str!(\"../x.txt\");", false),
+            ("const S: &str = r#include_str!(\"/etc/passwd\");", false),
+            ("const S: &str = concat!(\"a\", \"b\");", true),
+            ("const S: &str = concat!(env!(\"HOME\"), \"\");", false),
+        ] {
+            assert_eq!(
+                untrusted_source_diagnostics(source).is_empty(),
+                admitted,
+                "{source}"
+            );
+        }
+        // The same verdict through a package: a `.txt` payload is never read by the scan, so
+        // `include!` of it is refused and the payload cannot hide `#[no_mangle]` or `env!`.
+        let mut bundle = package("[package]\nbuild=false", None);
+        bundle.files.insert(
+            "src/lib.rs".into(),
+            SourceFile::Text("include!(\"payload.txt\");".into()),
+        );
+        bundle.files.insert(
+            "src/payload.txt".into(),
+            SourceFile::Text("#[no_mangle] fn exported() {}".into()),
+        );
+        assert!(!untrusted_package_diagnostics(&bundle).is_empty());
+        bundle.files.insert(
+            "src/lib.rs".into(),
+            SourceFile::Text("include!(\"payload.rs\");".into()),
+        );
+        bundle.files.insert(
+            "src/payload.rs".into(),
+            SourceFile::Text("#[no_mangle] fn exported() {}".into()),
+        );
+        assert!(
+            !untrusted_package_diagnostics(&bundle).is_empty(),
+            "an included .rs file is scanned like any other"
         );
     }
 }

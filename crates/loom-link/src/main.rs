@@ -6,11 +6,19 @@
 //! response file, so the 20 ms overlaps the compile. When rustc reaches the link it runs this
 //! program with the real arguments. With `LOOM_LINK_DIR` naming such a directory, this writes the
 //! arguments into the pipe, waits for the server to record lld's exit (`status`), replays lld's
-//! output and exits with its code. Without it, or once the pipe is used up, it runs `rust-lld`
-//! directly, exactly as rustc would have.
+//! output and exits with its code. Without it, or whenever the waiting lld cannot be used, it runs
+//! `rust-lld` directly, exactly as rustc would have.
 //!
-//! Directory layout, owned by the server: `args` (fifo, removed here once used), `status` (lld's
-//! exit code, written by the server after lld exits), `stdout` and `stderr` (lld's output).
+//! Directory layout, owned by the server: `version` (the protocol this program speaks, `1`; any
+//! other content means the server is not one this program understands), `pid` (the waiting lld),
+//! `args` (fifo, removed here once used), `status` (lld's exit code, written by the server after
+//! lld exits), `stdout` and `stderr` (lld's output, `stderr` ending in a line naming the signal
+//! when lld was killed).
+//!
+//! The direct path is taken when nothing has been handed to the waiting lld: no directory, no
+//! pipe, another protocol version, an empty argument (see [`quote`]), lld dead before it read its
+//! arguments, or a pipe that broke while writing them. Once lld has been handed the arguments there
+//! is no retry, and a vanished server or directory is an error, not a wait.
 use std::{
     ffi::{OsStr, OsString},
     fs::{self, OpenOptions},
@@ -25,6 +33,8 @@ use std::{
 /// Longest a link may take before this gives up, as the server's own deadline is longer.
 const PATIENCE: Duration = Duration::from_secs(300);
 const POLL: Duration = Duration::from_micros(250);
+/// The protocol the server writes into `version`.
+const PROTOCOL: &str = "1";
 
 /// rustc runs its linker as `<linker> -flavor wasm <arguments>` even when told the flavor, and
 /// lld takes `-flavor` only as its first argument: the running lld already has it, and the direct
@@ -39,9 +49,19 @@ fn without_flavor(mut arguments: Vec<OsString>) -> Vec<OsString> {
 fn main() -> ExitCode {
     let arguments = without_flavor(std::env::args_os().skip(1).collect());
     match std::env::var_os("LOOM_LINK_DIR").map(PathBuf::from) {
-        Some(directory) if directory.join("args").exists() => armed(&directory, &arguments),
+        Some(directory) if armed_for(&directory, &arguments) => armed(&directory, &arguments),
         _ => direct(&arguments),
     }
+}
+
+/// Whether the waiting lld in `directory` can be handed `arguments`.
+fn armed_for(directory: &Path, arguments: &[OsString]) -> bool {
+    directory.join("args").exists()
+        && fs::read_to_string(directory.join("version")).is_ok_and(|text| text.trim() == PROTOCOL)
+        // LLVM's response-file tokenizer (`cl::TokenizeGNUCommandLine`) pushes a token only when
+        // it is non-empty, so `""` in the file would vanish instead of reaching lld as an empty
+        // argument. The command line keeps it: link directly.
+        && !arguments.iter().any(|argument| argument.is_empty())
 }
 
 /// `rust-lld -flavor wasm <arguments>`, replacing this process.
@@ -52,11 +72,15 @@ fn direct(arguments: &[OsString]) -> ExitCode {
         .arg("wasm")
         .args(arguments)
         .exec();
-    eprintln!("loom-link: cannot run {}: {error}", Path::new(&lld).display());
+    eprintln!(
+        "loom-link: cannot run {}: {error}",
+        Path::new(&lld).display()
+    );
     ExitCode::from(127)
 }
 
 /// One argument in the posix quoting LLVM's response files read: double quotes, backslash escapes.
+/// An empty argument quotes to `""`, which LLVM's tokenizer drops: `armed_for` never lets one in.
 pub fn quote(argument: &OsStr) -> Vec<u8> {
     let mut out = vec![b'"'];
     for &byte in argument.as_bytes() {
@@ -69,12 +93,78 @@ pub fn quote(argument: &OsStr) -> Vec<u8> {
     out
 }
 
+/// Why waiting stopped without lld's answer.
+enum Lost {
+    /// The process that ran this one (the compiler server) is gone; nobody wants the link.
+    Parent,
+    /// The server removed its directory: it gave up on this request.
+    Directory,
+    Patience,
+}
+
+/// The conditions under which waiting on the server is pointless.
+struct Watch<'a> {
+    directory: &'a Path,
+    parent: libc::pid_t,
+    started: Instant,
+}
+
+impl<'a> Watch<'a> {
+    fn new(directory: &'a Path) -> Self {
+        Self {
+            directory,
+            // SAFETY: getppid has no preconditions.
+            parent: unsafe { libc::getppid() },
+            started: Instant::now(),
+        }
+    }
+
+    /// An orphaned process is reparented (to pid 1 or a subreaper), so a changed parent is gone.
+    fn lost(&self) -> Option<Lost> {
+        // SAFETY: getppid has no preconditions.
+        if unsafe { libc::getppid() } != self.parent {
+            Some(Lost::Parent)
+        } else if !self.directory.exists() {
+            Some(Lost::Directory)
+        } else if self.started.elapsed() > PATIENCE {
+            Some(Lost::Patience)
+        } else {
+            None
+        }
+    }
+
+    /// Wait for the server to record lld's exit.
+    fn status(&self) -> Result<(), Lost> {
+        let status = self.directory.join("status");
+        while !status.exists() {
+            if let Some(lost) = self.lost() {
+                return Err(lost);
+            }
+            thread::sleep(POLL);
+        }
+        Ok(())
+    }
+}
+
+fn gone(lost: Lost) -> ExitCode {
+    eprintln!(
+        "loom-link: {}",
+        match lost {
+            Lost::Parent => "the compiler server that started this link is gone",
+            Lost::Directory => "the server removed the linker directory before the linker finished",
+            Lost::Patience => "the linker did not finish",
+        }
+    );
+    ExitCode::from(1)
+}
+
 fn armed(directory: &Path, arguments: &[OsString]) -> ExitCode {
-    let started = Instant::now();
+    let watch = Watch::new(directory);
     let pipe = directory.join("args");
     let status = directory.join("status");
     // Opening a fifo for writing succeeds once lld has it open for reading. Without a reader yet,
-    // a non-blocking open fails with ENXIO: wait for one, unless lld has already died.
+    // a non-blocking open fails with ENXIO: wait for one, unless lld has already died. Nothing has
+    // been handed over while this loops, so every way out but a dead parent links directly.
     let mut writer = loop {
         match OpenOptions::new()
             .write(true)
@@ -83,18 +173,17 @@ fn armed(directory: &Path, arguments: &[OsString]) -> ExitCode {
         {
             Ok(file) => break file,
             Err(error) if error.raw_os_error() == Some(libc::ENXIO) => {}
-            Err(error) => {
-                eprintln!("loom-link: cannot open {}: {error}", pipe.display());
-                return ExitCode::from(1);
-            }
+            // The pipe is gone (used, or the directory was removed).
+            Err(_) => return direct(arguments),
         }
+        // lld exited without ever reading its arguments (a flag it does not know, a missing library).
         if status.exists() {
-            return finish(directory, &pipe);
+            return direct(arguments);
         }
-        if started.elapsed() > PATIENCE {
-            eprintln!("loom-link: the waiting linker never read its arguments");
-            let _ = fs::remove_file(&pipe);
-            return ExitCode::from(1);
+        match watch.lost() {
+            Some(Lost::Parent) => return gone(Lost::Parent),
+            Some(_) => return direct(arguments),
+            None => {}
         }
         thread::sleep(POLL);
     };
@@ -109,21 +198,26 @@ fn armed(directory: &Path, arguments: &[OsString]) -> ExitCode {
         text.extend(quote(argument));
         text.push(b'\n');
     }
-    if let Err(error) = writer.write_all(&text) {
-        eprintln!("loom-link: cannot hand the arguments to the waiting linker: {error}");
-        let _ = fs::remove_file(&pipe);
-        return ExitCode::from(1);
-    }
+    let written = writer.write_all(&text);
     drop(writer);
-    while !status.exists() {
-        if started.elapsed() > PATIENCE {
-            eprintln!("loom-link: the linker did not finish");
-            let _ = fs::remove_file(&pipe);
-            return ExitCode::from(1);
-        }
-        thread::sleep(POLL);
+    if written.is_err() {
+        // lld closed its end before it had read everything: it died. Once its status says so no
+        // second linker can collide with it on the output file, and the arguments link directly.
+        return match watch.status() {
+            Ok(()) => {
+                let _ = fs::remove_file(&pipe);
+                direct(arguments)
+            }
+            Err(lost) => gone(lost),
+        };
     }
-    finish(directory, &pipe)
+    match watch.status() {
+        Ok(()) => finish(directory, &pipe),
+        Err(lost) => {
+            let _ = fs::remove_file(&pipe);
+            gone(lost)
+        }
+    }
 }
 
 /// Replay lld's output and return its exit code; the pipe is used up either way.
@@ -154,8 +248,14 @@ mod tests {
                 .map(|item| item.into_string().unwrap())
                 .collect()
         };
-        assert_eq!(strip(&["-flavor", "wasm", "--no-entry", "a.o"]), ["--no-entry", "a.o"]);
-        assert_eq!(strip(&["--no-entry", "-flavor", "wasm"]), ["--no-entry", "-flavor", "wasm"]);
+        assert_eq!(
+            strip(&["-flavor", "wasm", "--no-entry", "a.o"]),
+            ["--no-entry", "a.o"]
+        );
+        assert_eq!(
+            strip(&["--no-entry", "-flavor", "wasm"]),
+            ["--no-entry", "-flavor", "wasm"]
+        );
         assert_eq!(strip(&["-flavor"]), ["-flavor"]);
         assert!(strip(&[]).is_empty());
     }
@@ -167,5 +267,24 @@ mod tests {
         assert_eq!(quote(OsStr::new("say \"hi\"")), b"\"say \\\"hi\\\"\"");
         assert_eq!(quote(OsStr::new("back\\slash")), b"\"back\\\\slash\"");
         assert_eq!(quote(OsStr::new("")), b"\"\"");
+    }
+
+    #[test]
+    fn an_empty_argument_or_another_protocol_is_never_handed_to_the_waiting_linker() {
+        let directory =
+            std::env::temp_dir().join(format!("loom-link-armed-for-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("args"), b"").unwrap();
+        let arguments = |items: &[&str]| items.iter().map(OsString::from).collect::<Vec<_>>();
+        assert!(
+            !armed_for(&directory, &arguments(&["a"])),
+            "no version file"
+        );
+        fs::write(directory.join("version"), "1\n").unwrap();
+        assert!(armed_for(&directory, &arguments(&["a", "b"])));
+        assert!(!armed_for(&directory, &arguments(&["a", "", "b"])));
+        fs::write(directory.join("version"), "2\n").unwrap();
+        assert!(!armed_for(&directory, &arguments(&["a"])));
+        fs::remove_dir_all(&directory).unwrap();
     }
 }

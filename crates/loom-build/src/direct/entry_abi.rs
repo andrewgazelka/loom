@@ -49,7 +49,9 @@ pub(super) fn generate(source: &str) -> Result<String, BuildError> {
             .map(|index| format!("argument_{index}"))
             .collect::<Vec<_>>()
             .join(", ");
-        generated.push_str(&format!("::loom::__loom_export_entry!({name}; {arguments});\n"));
+        generated.push_str(&format!(
+            "::loom::__loom_export_entry!({name}; {arguments});\n"
+        ));
     }
     if defines_schema(&file) {
         generated.push_str("::loom::__loom_export_schema!();\n");
@@ -173,8 +175,7 @@ mod tests {
 
     #[test]
     fn arity_becomes_one_binding_per_parameter() {
-        let generated =
-            generate("pub fn two(x: i32, y: String) -> i32 { x }").unwrap();
+        let generated = generate("pub fn two(x: i32, y: String) -> i32 { x }").unwrap();
         assert!(generated.contains("__loom_export_entry!(two; argument_0, argument_1);"));
     }
 
@@ -206,7 +207,10 @@ mod tests {
                 .block_on(check_contract(&directory, source))
         };
         document(r#""x""#);
-        assert!(check(source).is_err(), "the driver saw a schema the wrappers cannot export");
+        assert!(
+            check(source).is_err(),
+            "the driver saw a schema the wrappers cannot export"
+        );
         assert!(check("pub const LOOM_SCHEMA: &str = \"x\";\npub fn f() {}").is_ok());
         document("null");
         assert!(check("pub fn f() {}").is_ok());

@@ -102,7 +102,10 @@ mod tests {
         for directory in &dirs[6..] {
             assert!(directory.exists());
         }
-        assert!(durable.exists(), "a durable definition's directory is never pruned");
+        assert!(
+            durable.exists(),
+            "a durable definition's directory is never pruned"
+        );
 
         // Reusing an old cell makes it the newest, so it outlives the next pruning.
         cells.touch(cache.path(), &dirs[6]);
@@ -125,7 +128,11 @@ mod tests {
             .collect();
         CellDirs::default().touch(cache.path(), &cache.path().join("f".repeat(64)));
         let alive = left.iter().filter(|directory| directory.exists()).count();
-        assert_eq!(alive, KEEP - 1, "the newest are kept, room left for the current cell");
+        assert_eq!(
+            alive,
+            KEEP - 1,
+            "the newest are kept, room left for the current cell"
+        );
         assert!(!left[0].exists() && left[left.len() - 1].exists());
     }
 }

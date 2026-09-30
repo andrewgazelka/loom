@@ -28,6 +28,8 @@ use std::process::ExitCode;
 
 unsafe extern "C" {
     fn mkfifo(path: *const std::ffi::c_char, mode: u32) -> i32;
+    fn kill(pid: i32, signal: i32) -> i32;
+    fn geteuid() -> u32;
     fn dup(fd: i32) -> i32;
     fn dup2(from: i32, to: i32) -> i32;
     fn close(fd: i32) -> i32;
@@ -101,65 +103,123 @@ impl Capture {
     }
 }
 
+/// The protocol of the directory an `Armed` lld is described by, written to `<dir>/version`.
+/// `loom-link` links directly when it reads anything else.
+const LINK_PROTOCOL: &str = "1";
+const LINK_PREFIX: &str = "hash-rustc-link-";
+const SIGKILL: i32 = 9;
+/// How long `release` waits for a killed lld's exit to be recorded.
+const RELEASE_PATIENCE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Where link directories live. Fixed when the server starts: a request replaces the process
+/// environment, and a different `TMPDIR` per request would hide directories from the startup sweep.
+fn link_root() -> &'static std::path::Path {
+    static ROOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    ROOT.get_or_init(std::env::temp_dir)
+}
+
+/// What the server records of an lld that has exited: its exit code and, when it did not exit
+/// on its own, a line for `stderr` (a killed lld otherwise looks like a silent failure).
+fn exit_record(status: std::io::Result<std::process::ExitStatus>) -> (i32, Option<String>) {
+    use std::os::unix::process::ExitStatusExt;
+    match status {
+        Ok(status) => match (status.code(), status.signal()) {
+            (Some(code), _) => (code, None),
+            (None, Some(signal)) => (1, Some(format!("rust-lld terminated by signal {signal}\n"))),
+            (None, None) => (1, Some("rust-lld ended without an exit code\n".to_owned())),
+        },
+        Err(error) => (1, Some(format!("cannot wait for rust-lld: {error}\n"))),
+    }
+}
+
 /// An lld started at the beginning of a request, so its startup (about 20 ms, mostly mapping
 /// `libLLVM.dylib`) overlaps the compile instead of following it. Its response file is a fifo, so it
 /// starts and then waits for its arguments; `loom-link`, which rustc runs as its linker
 /// (`-C linker=loom-link`, set by loom-build), writes the real arguments there and reads the result
 /// from `status`, `stdout` and `stderr` in `directory`. A request that never links (a compile error)
-/// releases the waiting lld with an empty response. Started only when the request's environment
-/// names an lld in `LOOM_LINK_ARM`; anything that goes wrong here means no arming, and `loom-link`
-/// then runs the real linker itself.
-/// `O_NONBLOCK`; the two platforms this runs on disagree on its value.
-#[cfg(target_os = "macos")]
-const O_NONBLOCK: i32 = 0x4;
-#[cfg(not(target_os = "macos"))]
-const O_NONBLOCK: i32 = 0x800;
-
+/// kills the waiting lld. Started only when the request's environment names an lld in
+/// `LOOM_LINK_ARM`; anything that goes wrong here means no arming, and `loom-link` then runs the
+/// real linker itself.
+///
+/// The directory is `hash-rustc-link-<server pid>-<n>` and holds `version`, `pid` (the lld),
+/// `args` (the fifo), and what `loom-link` reads back. It is removed by `finish`, and by `Drop` on
+/// an early return or panic. A server that dies with a request in flight (SIGKILL, a crash, being
+/// discarded after a timeout) leaves it and a blocked lld behind: the next server's `sweep_orphans`
+/// reaps both.
 struct Armed {
     directory: std::path::PathBuf,
+    pid: i32,
     waiter: Option<std::thread::JoinHandle<()>>,
+    released: bool,
 }
 
 impl Armed {
-    fn start(lld: &str) -> Option<Self> {
+    fn start(lld: &str, request_env: &std::collections::BTreeMap<String, String>) -> Option<Self> {
         use std::os::unix::{ffi::OsStrExt, fs::DirBuilderExt};
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let directory = std::env::temp_dir().join(format!(
-            "hash-rustc-link-{}-{}",
+        let directory = link_root().join(format!(
+            "{LINK_PREFIX}{}-{}",
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::DirBuilder::new().mode(0o700).create(&directory).ok()?;
-        let armed = |directory: &std::path::Path| -> Option<std::thread::JoinHandle<()>> {
+        let launch = |directory: &std::path::Path| -> Option<(i32, std::thread::JoinHandle<()>)> {
+            std::fs::write(directory.join("version"), LINK_PROTOCOL).ok()?;
             let pipe = directory.join("args");
             let c_pipe = std::ffi::CString::new(pipe.as_os_str().as_bytes()).ok()?;
             // SAFETY: a valid NUL-terminated path.
             if unsafe { mkfifo(c_pipe.as_ptr(), 0o600) } != 0 {
                 return None;
             }
-            let mut child = std::process::Command::new(lld)
+            let mut command = std::process::Command::new(lld);
+            command
                 .args(["-flavor", "wasm"])
                 .arg(format!("@{}", pipe.display()))
-                .env_clear()
+                .env_clear();
+            // What the dynamic loader needs to start this lld, as the same request would give it
+            // without the front (an lld that finds its libraries by rpath needs neither).
+            for name in ["DYLD_LIBRARY_PATH", "LD_LIBRARY_PATH"] {
+                if let Some(value) = request_env.get(name) {
+                    command.env(name, value);
+                }
+            }
+            let mut child = command
                 .stdin(std::process::Stdio::null())
                 .stdout(std::fs::File::create(directory.join("stdout")).ok()?)
                 .stderr(std::fs::File::create(directory.join("stderr")).ok()?)
                 .spawn()
                 .ok()?;
+            let pid = i32::try_from(child.id()).ok()?;
+            if std::fs::write(directory.join("pid"), pid.to_string()).is_err() {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
             let status = directory.join("status");
-            Some(std::thread::spawn(move || {
-                let code = child.wait().ok().and_then(|status| status.code()).unwrap_or(-1);
-                let temporary = status.with_extension("tmp");
-                if std::fs::write(&temporary, format!("{code}\n")).is_ok() {
-                    let _ = std::fs::rename(&temporary, &status);
-                }
-            }))
+            let stderr = directory.join("stderr");
+            Some((
+                pid,
+                std::thread::spawn(move || {
+                    let (code, note) = exit_record(child.wait());
+                    if let Some(note) = note
+                        && let Ok(mut file) = std::fs::OpenOptions::new().append(true).open(&stderr)
+                    {
+                        let _ = file.write_all(note.as_bytes());
+                    }
+                    let temporary = status.with_extension("tmp");
+                    if std::fs::write(&temporary, format!("{code}\n")).is_ok() {
+                        let _ = std::fs::rename(&temporary, &status);
+                    }
+                }),
+            ))
         };
-        match armed(&directory) {
-            Some(waiter) => Some(Self {
+        match launch(&directory) {
+            Some((pid, waiter)) => Some(Self {
                 directory,
+                pid,
                 waiter: Some(waiter),
+                released: false,
             }),
             None => {
                 let _ = std::fs::remove_dir_all(&directory);
@@ -168,31 +228,116 @@ impl Armed {
         }
     }
 
-    /// Release an lld that was never used and remove the directory.
+    /// Release the lld and remove the directory (also what `Drop` does).
     fn finish(mut self) {
-        use std::os::unix::fs::OpenOptionsExt;
+        self.release();
+    }
+
+    /// An lld whose exit is not recorded yet has not been used, or not finished: it is still
+    /// blocked on the pipe or still starting. It is killed at once, where coaxing it out with an
+    /// empty response file waited for it to start (up to 250 ms on a compile that never links).
+    /// The pid is this lld's: the waiter thread reaps the process and only then writes `status`,
+    /// so while `status` is absent the process is unreaped. The one gap is the instant between the
+    /// reap and the file, where a pid could have been recycled only by a full wrap of the pid space.
+    fn release(&mut self) {
+        if std::mem::replace(&mut self.released, true) {
+            return;
+        }
         let status = self.directory.join("status");
-        let pipe = self.directory.join("args");
-        let started = std::time::Instant::now();
-        while !status.exists() && started.elapsed() < std::time::Duration::from_millis(250) {
-            // Opening the fifo for writing and closing it again is an empty response file: lld
-            // reports that it has no input and exits. It fails while no reader has the pipe yet
-            // (lld still starting) and once the pipe was used (`loom-link` removes it).
-            if pipe.exists() {
-                let _ = std::fs::OpenOptions::new()
-                    .write(true)
-                    .custom_flags(O_NONBLOCK)
-                    .open(&pipe);
-            }
-            std::thread::sleep(std::time::Duration::from_millis(2));
-        }
-        if status.exists() {
-            if let Some(waiter) = self.waiter.take() {
-                let _ = waiter.join();
+        if !status.exists() {
+            // SAFETY: a signal to the child this struct started and has not seen exit.
+            unsafe { kill(self.pid, SIGKILL) };
+            let started = std::time::Instant::now();
+            while !status.exists() && started.elapsed() < RELEASE_PATIENCE {
+                std::thread::sleep(std::time::Duration::from_millis(1));
             }
         }
-        // A waiter still blocked is left to end with its lld; the directory goes either way.
+        if status.exists()
+            && let Some(waiter) = self.waiter.take()
+        {
+            let _ = waiter.join();
+        }
+        // A waiter still blocked is detached and ends with its lld; the directory goes either way.
         let _ = std::fs::remove_dir_all(&self.directory);
+    }
+}
+
+impl Drop for Armed {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+/// Whether process `pid` exists (kill with signal 0). Unusable ids count as existing, so they are
+/// never acted on.
+fn process_exists(pid: u32) -> bool {
+    let Some(pid) = i32::try_from(pid).ok().filter(|pid| *pid > 1) else {
+        return true;
+    };
+    // SAFETY: signal 0 only checks that the process can be signalled.
+    unsafe { kill(pid, 0) == 0 || std::io::Error::last_os_error().raw_os_error() == Some(1) }
+}
+
+/// Whether `pid` is still the `rust-lld` that waits on `directory`'s pipe: its command line, as
+/// `ps` prints it, names both. A recycled pid fails this and is left alone.
+fn is_waiting_lld(pid: i32, directory: &std::path::Path) -> bool {
+    let Ok(output) = std::process::Command::new("ps")
+        .args(["-o", "command=", "-p"])
+        .arg(pid.to_string())
+        .output()
+    else {
+        return false;
+    };
+    let command = String::from_utf8_lossy(&output.stdout);
+    output.status.success()
+        && command.contains("rust-lld")
+        && command.contains(directory.to_string_lossy().as_ref())
+}
+
+/// Reap what servers that died in the middle of a request left in `root`: for every
+/// `hash-rustc-link-<pid>-<n>` directory of ours whose server `<pid>` is gone (or is this process,
+/// which has created nothing yet, so the directory is an earlier process's with the same pid), kill
+/// the lld named in its `pid` file if it is still that lld, then remove the directory.
+fn sweep_orphans(root: &std::path::Path) {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    let own = std::process::id();
+    // SAFETY: no preconditions.
+    let euid = unsafe { geteuid() };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(owner) = file_name
+            .to_str()
+            .and_then(|name| name.strip_prefix(LINK_PREFIX))
+            .and_then(|rest| rest.split('-').next())
+            .and_then(|pid| pid.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if owner != own && process_exists(owner) {
+            continue;
+        }
+        // `DirEntry::metadata` does not follow links; another user's directory is not ours to touch.
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !metadata.is_dir() || metadata.uid() != euid {
+            continue;
+        }
+        let directory = entry.path();
+        let pid = std::fs::read_to_string(directory.join("pid"))
+            .ok()
+            .and_then(|text| text.trim().parse::<i32>().ok())
+            .filter(|pid| *pid > 1);
+        if let Some(pid) = pid
+            && is_waiting_lld(pid, &directory)
+        {
+            // SAFETY: the process was just verified to be that lld.
+            unsafe { kill(pid, SIGKILL) };
+        }
+        let _ = std::fs::remove_dir_all(&directory);
     }
 }
 
@@ -243,7 +388,7 @@ fn handle(request: Request) -> Reply {
     let armed = request
         .env
         .get("LOOM_LINK_ARM")
-        .and_then(|lld| Armed::start(lld));
+        .and_then(|lld| Armed::start(lld, &request.env));
     if let Some(armed) = &armed {
         // SAFETY: as above, requests are served one at a time.
         unsafe { std::env::set_var("LOOM_LINK_DIR", &armed.directory) };
@@ -263,6 +408,9 @@ fn handle(request: Request) -> Reply {
 
 pub fn serve() -> ExitCode {
     crate::timing_enabled();
+    // Before the first request replaces the environment, and before `ready`: a parent that sees
+    // `ready` sees the directories of dead servers already gone.
+    sweep_orphans(link_root());
     // SAFETY: the parent passed one end of a socket pair as our standard input;
     // this takes ownership of that descriptor, and nothing else reads stdin.
     let stream = unsafe { UnixStream::from_raw_fd(0) };
@@ -296,5 +444,22 @@ pub fn serve() -> ExitCode {
         {
             return ExitCode::SUCCESS;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::process::ExitStatusExt;
+
+    #[test]
+    fn an_lld_that_was_killed_is_recorded_with_its_signal_not_as_a_silent_failure() {
+        assert_eq!(
+            exit_record(Ok(std::process::ExitStatus::from_raw(3 << 8))),
+            (3, None)
+        );
+        let (code, note) = exit_record(Ok(std::process::ExitStatus::from_raw(9)));
+        assert_eq!(code, 1);
+        assert_eq!(note.as_deref(), Some("rust-lld terminated by signal 9\n"));
     }
 }

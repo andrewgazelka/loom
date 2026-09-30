@@ -49,8 +49,9 @@ struct RebasedKey {
     compiler: String,
 }
 
-static REBASED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<RebasedKey, Recipe>>> =
-    std::sync::OnceLock::new();
+static REBASED: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<RebasedKey, Recipe>>,
+> = std::sync::OnceLock::new();
 
 fn rebased_recipe(key: &RebasedKey) -> Option<Recipe> {
     let recipe = REBASED
@@ -425,7 +426,9 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
     } else {
         hash_command
     };
-    let hash_output = servers.run(hash_command, &driver.path, ROOT_DEADLINE).await?;
+    let hash_output = servers
+        .run(hash_command, &driver.path, ROOT_DEADLINE)
+        .await?;
     if !hash_output.status.success() {
         return Err(rejected(format!(
             "hash-rustc driver {}: {}",

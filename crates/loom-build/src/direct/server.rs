@@ -120,6 +120,9 @@ impl RustcServers {
                 return Ok(None);
             }
             Err(_) => {
+                // `server` is dropped here and killed. It dies without cleaning up, so an lld it
+                // had armed (`linker.rs`) and its `hash-rustc-link-<pid>-<n>` directory are left
+                // for the next server's startup sweep (`tools/hash-rustc/src/serve.rs`).
                 return Err(rejected(format!(
                     "root Rust compiler exceeded {} seconds",
                     deadline.as_secs()

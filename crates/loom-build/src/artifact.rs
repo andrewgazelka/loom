@@ -44,6 +44,10 @@ pub(super) fn is_vendored(definition: &CheckedDef) -> bool {
 
 pub(super) const VENDOR_CONFIG: &str = include_str!("../../../rustc/vendor-config.toml");
 
+/// What a stored component or preparation depends on: the guest SDK, the compiler wrapper scripts,
+/// the lock and the source of this crate's own admission and build logic. `vendor/` is left out on
+/// purpose: its only crate (a patched `wasmtime-internal-cranelift`, see `vendor/README.md`)
+/// compiles into the host runtime and never into a guest, so a change there cannot change a build.
 pub(super) fn build_fingerprint(root: &Path) -> Result<String, BuildError> {
     fn collect(directory: &Path, files: &mut Vec<PathBuf>) -> Result<(), std::io::Error> {
         for entry in std::fs::read_dir(directory)? {
@@ -212,4 +216,59 @@ pub fn cargo_diagnostics(output: &str) -> Vec<Diagnostic> {
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    fn workspace() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    /// `[patch.crates-io]` in the root `Cargo.toml` replaces wasmtime's cranelift backend with
+    /// `vendor/wasmtime-internal-cranelift`. Cargo uses a path patch only for the version it
+    /// declares; after a wasmtime bump it drops the patch with a warning and the registry crate
+    /// (without the fix to the incremental-cache keys) is built instead, silently.
+    #[test]
+    fn the_vendored_cranelift_backend_is_the_one_the_locked_wasmtime_uses() {
+        let read = |path: &str| -> toml::Value {
+            std::fs::read_to_string(workspace().join(path))
+                .unwrap_or_else(|error| panic!("{path}: {error}"))
+                .parse()
+                .unwrap_or_else(|error| panic!("{path}: {error}"))
+        };
+        let vendored = read("vendor/wasmtime-internal-cranelift/Cargo.toml")["package"]["version"]
+            .as_str()
+            .expect("the vendored crate declares a version")
+            .to_owned();
+        let lock = read("Cargo.lock");
+        let packages = lock["package"].as_array().expect("Cargo.lock has packages");
+        let versions = |name: &str| -> Vec<&toml::Value> {
+            packages
+                .iter()
+                .filter(|package| package["name"].as_str() == Some(name))
+                .collect()
+        };
+        let wasmtime = versions("wasmtime");
+        assert!(!wasmtime.is_empty(), "Cargo.lock has no wasmtime");
+        for package in wasmtime {
+            assert_eq!(
+                package["version"].as_str(),
+                Some(vendored.as_str()),
+                "wasmtime in Cargo.lock is not the version vendor/wasmtime-internal-cranelift declares ({vendored}): cargo ignores the path patch for any other version. Re-vendor the matching release and re-apply the patch, or drop the patch; see vendor/README.md"
+            );
+        }
+        let backend = versions("wasmtime-internal-cranelift");
+        assert_eq!(
+            backend.len(),
+            1,
+            "one wasmtime-internal-cranelift in Cargo.lock"
+        );
+        assert!(
+            backend[0].get("source").is_none(),
+            "wasmtime-internal-cranelift in Cargo.lock comes from a registry, not from vendor/: the [patch.crates-io] entry in the root Cargo.toml is not in use; see vendor/README.md"
+        );
+        assert_eq!(backend[0]["version"].as_str(), Some(vendored.as_str()));
+    }
 }
