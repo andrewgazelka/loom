@@ -27,7 +27,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "928452f9c953e142b2f0973e4bd5f34445fcaa8069556ea97a3c9d34d15a4cf8"
 `;
 
-// The drawing effects and their handler. Appended to every "scene" cell; the canvas.rs tab shows it.
+// The drawing effects and their handler. Appended to every "scene" cell; the "how drawing works" tab shows it.
 export const prelude = `// Drawing is an effect. canvas2d and canvas3d only *perform* labelled effects
 // with typed payloads (tuples and arrays, no JSON); \`collect\` is the handler
 // that decides what they mean: here, append to a scene and resume.
@@ -70,66 +70,6 @@ mod canvas3d {
 fn collect(body: impl FnOnce()) -> Scene {
     let mut scene = Scene::new();
     let _ = NO_INLINED_WRAPPERS;
-    loom::handle(KINDS, |e: Effect, _k: Continuation| {
-        let kind = KINDS.iter().position(|k| *k == e.name).unwrap_or(0) as u8;
-        let (coords, color) = match kind {
-            0 => { let (a, b, c): ([f32; 2], [f32; 2], Rgb) = e.arg().unwrap(); ([a[0], a[1], b[0], b[1]].to_vec(), c) }
-            1 => { let (at, r, c): ([f32; 2], f32, Rgb) = e.arg().unwrap(); ([at[0], at[1], r].to_vec(), c) }
-            2 => { let (a, b, c): ([f32; 3], [f32; 3], Rgb) = e.arg().unwrap(); ([a, b].concat(), c) }
-            _ => { let (a, b, c, k): ([f32; 3], [f32; 3], [f32; 3], Rgb) = e.arg().unwrap(); ([a, b, c].concat(), k) }
-        };
-        scene.push((kind, coords, color));
-        Reply::Resume(Value::Null)
-    }, body).expect("handler failed");
-    scene
-}
-
-/// The entry the page calls: run the cell's \`scene\` under the handler.
-pub fn frame(ms: u32) -> Scene {
-    collect(|| scene(ms))
-}`; every canvas effect it performs lands here.
-fn collect(body: impl FnOnce()) -> Scene {
-    let mut scene = Scene::new();
-    loom::handle(KINDS, |e: Effect, _k: Continuation| {
-        let kind = KINDS.iter().position(|k| *k == e.name).unwrap_or(0) as u8;
-        let (coords, color) = match kind {
-            0 => { let (a, b, c): ([f32; 2], [f32; 2], Rgb) = e.arg().unwrap(); ([a[0], a[1], b[0], b[1]].to_vec(), c) }
-            1 => { let (at, r, c): ([f32; 2], f32, Rgb) = e.arg().unwrap(); ([at[0], at[1], r].to_vec(), c) }
-            2 => { let (a, b, c): ([f32; 3], [f32; 3], Rgb) = e.arg().unwrap(); ([a, b].concat(), c) }
-            _ => { let (a, b, c, k): ([f32; 3], [f32; 3], [f32; 3], Rgb) = e.arg().unwrap(); ([a, b, c].concat(), k) }
-        };
-        scene.push((kind, coords, color));
-        Reply::Resume(Value::Null)
-    }, body).expect("handler failed");
-    scene
-}
-
-/// The entry the page calls: run the cell's \`scene\` under the handler.
-pub fn frame(ms: u32) -> Scene {
-    collect(|| scene(ms))
-}`; every canvas effect it performs lands here.
-fn collect(body: impl FnOnce()) -> Scene {
-    let mut scene = Scene::new();
-    loom::handle(KINDS, |e: Effect, _k: Continuation| {
-        let kind = KINDS.iter().position(|k| *k == e.name).unwrap_or(0) as u8;
-        let (coords, color) = match kind {
-            0 => { let (a, b, c): ([f32; 2], [f32; 2], Rgb) = e.arg().unwrap(); ([a[0], a[1], b[0], b[1]].to_vec(), c) }
-            1 => { let (at, r, c): ([f32; 2], f32, Rgb) = e.arg().unwrap(); ([at[0], at[1], r].to_vec(), c) }
-            2 => { let (a, b, c): ([f32; 3], [f32; 3], Rgb) = e.arg().unwrap(); ([a, b].concat(), c) }
-            _ => { let (a, b, c, k): ([f32; 3], [f32; 3], [f32; 3], Rgb) = e.arg().unwrap(); ([a, b, c].concat(), k) }
-        };
-        scene.push((kind, coords, color));
-        Reply::Resume(Value::Null)
-    }, body).expect("handler failed");
-    scene
-}
-
-/// The entry the page calls: run the cell's \`scene\` under the handler.
-pub fn frame(ms: u32) -> Scene {
-    collect(|| scene(ms))
-}`; every canvas effect it performs lands here.
-fn collect(body: impl FnOnce()) -> Scene {
-    let mut scene = Scene::new();
     loom::handle(KINDS, |e: Effect, _k: Continuation| {
         let kind = KINDS.iter().position(|k| *k == e.name).unwrap_or(0) as u8;
         let (coords, color) = match kind {
