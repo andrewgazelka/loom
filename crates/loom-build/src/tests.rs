@@ -49,6 +49,7 @@ async fn crate_pins_materialize_but_caller_paths_and_overlays_are_rejected() {
         dependencies: &BTreeMap::new(),
         dependency: false,
         isolated: true,
+        locked_registry: false,
     })
     .await
     .unwrap();
@@ -87,6 +88,7 @@ async fn crate_pins_materialize_but_caller_paths_and_overlays_are_rejected() {
             dependencies: &BTreeMap::new(),
             dependency: false,
             isolated: true,
+            locked_registry: false,
         })
         .await
         .unwrap_err()
@@ -108,6 +110,7 @@ async fn crate_pins_materialize_but_caller_paths_and_overlays_are_rejected() {
             dependencies: &BTreeMap::new(),
             dependency: false,
             isolated: true,
+            locked_registry: false,
         })
         .await
         .unwrap_err()
@@ -126,6 +129,7 @@ async fn crate_pins_materialize_but_caller_paths_and_overlays_are_rejected() {
             dependencies: &BTreeMap::new(),
             dependency: false,
             isolated: true,
+            locked_registry: false,
         })
         .await
         .unwrap_err()
@@ -263,4 +267,77 @@ async fn staged_builders_share_the_compiler_workspace_lock() {
     assert!(staged.gate.try_lock().is_err());
     drop(guard);
     assert!(staged.gate.try_lock().is_ok());
+}
+
+#[test]
+fn registry_dependency_accepts_only_what_crates_io_can_express() {
+    let dependency =
+        |text: &str| -> toml::Value { toml::from_str(&format!("d = {text}")).unwrap() };
+    for accepted in [
+        "\"1.2\"",
+        "\"=1.2.0\"",
+        "{version=\"=1.2.0\"}",
+        "{version=\"1\",features=[\"a\",\"b\"],default-features=false}",
+        "{version=\"1\",package=\"real-name\",optional=true}",
+    ] {
+        assert!(
+            registry_dependency("alias", &dependency(accepted)["d"]),
+            "{accepted}"
+        );
+    }
+    for refused in [
+        "{path=\"../x\"}",
+        "{version=\"1\",path=\"../x\"}",
+        "{git=\"https://example.com/x\"}",
+        "{version=\"1\",git=\"https://example.com/x\"}",
+        "{version=\"1\",registry=\"other\"}",
+        "{version=\"1\",registry-index=\"https://example.com\"}",
+        "{version=\"1\",workspace=true}",
+        "{workspace=true}",
+        "{features=[\"a\"]}",
+        "{version=\"1\",features=[1]}",
+        "{version=\"1\",default_features=false}",
+        "{version=1}",
+        "{version=\"1\",unknown=true}",
+        "{}",
+        "true",
+        "42",
+    ] {
+        assert!(
+            !registry_dependency("alias", &dependency(refused)["d"]),
+            "{refused}"
+        );
+    }
+    // `loom` is the SDK's own alias.
+    assert!(!registry_dependency("loom", &dependency("\"1\"")["d"]));
+}
+
+#[test]
+fn manifest_admits_registry_dependencies_only_beside_a_passing_lock() {
+    let manifest: toml::Value = toml::from_str(
+        "[package]\nname='cell'\n[dependencies]\nrobust='=1.2.0'\nserde='1'\n[target.'cfg(unix)'.dependencies]\nsmallvec={version='1'}\n",
+    )
+    .unwrap();
+    // On the host without a lock: refused with the way out.
+    let error = manifest::validate_manifest(&manifest, false, false)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("Cargo.lock"), "{error}");
+    manifest::validate_manifest(&manifest, false, true).unwrap();
+    // The isolated worker needs neither.
+    manifest::validate_manifest(&manifest, true, false).unwrap();
+    // A lock never admits path, git or another registry, nor overrides.
+    for refused in [
+        "[dependencies]\nrobust={path='../robust'}\n",
+        "[dependencies]\nrobust={git='https://example.com/robust'}\n",
+        "[dependencies]\nrobust={version='1',registry='other'}\n",
+        "[dependencies]\nrobust='1'\n[patch.crates-io]\nrobust={path='../robust'}\n",
+        "[dependencies]\nrobust='1'\n[replace]\n",
+    ] {
+        let manifest: toml::Value = toml::from_str(refused).unwrap();
+        assert!(
+            manifest::validate_manifest(&manifest, false, true).is_err(),
+            "{refused}"
+        );
+    }
 }

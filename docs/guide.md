@@ -102,7 +102,7 @@ The CLI, HTTP commands, and MCP tools use the same definition operations. `add` 
 
 | CLI | MCP tool | Result |
 | --- | --- | --- |
-| `add <file> [--lang language] [--name n] [--dep alias=name-or-hash]...` | `add` | Name, definition hash, entries, and backend metadata; each `--dep` pins `use alias::...` to a definition |
+| `add <file> [--lang language] [--name n] [--dep alias=name-or-hash]... [--manifest Cargo.toml --lock Cargo.lock]` | `add` | Name, definition hash, entries, and backend metadata; each `--dep` pins `use alias::...` to a definition |
 | `view <name-or-hash>` | `view` | Stored source (byte for byte), its rustfmt rendering, and item table |
 | `update <name> <file> [--expected_hash hash]` | `update` | Atomic caller propagation or a durable repair session; old hashes remain runnable |
 | `history <name>` | `history` | Hash chain, timestamps, and changed items between entries |
@@ -145,6 +145,41 @@ For a Rust definition `view` also returns `result.formatted_source`, the stored 
 `GET /v1/wasm/{component_hash}` (bearer token with read scope; `component_hash` is `def.component_hash` from `view`) returns a definition's compiled module as text next to the source lines it came from: `{ "wat", "functions", "lines", "debug" }`. `wat` is the whole module in WebAssembly text, one instruction per line. `functions` lists every defined function in code-section order as `{index, name, exported, start_line, end_line}`: `name` from the module's `name` section (`null` when absent), `exported` from the export table, and the 1-based `wat` lines of its `(func` and closing parenthesis. `lines` has one `{wat_line, file, line}` per `wat` line whose instruction the module's DWARF attributes to a source line; `file` is the path rustc recorded, made relative to the crate root when it lies under it (the guest's own file reads `src/lib.rs`) and left as recorded otherwise (standard-library and registry paths) so a client can classify it. Guest builds compile the root crate with `-C debuginfo=1`, so their modules carry `.debug_line`, `.debug_info` and `.debug_abbrev` (line tables and the unit and function entries they need, no type information) beside `name`, `producers` and `target_features`; `debug` reports whether the module has any `.debug_*` section, and a module without them returns `"debug": false` and an empty `lines`. Debug information is not part of the behavior hash; it is part of the Wasm hash. An unknown hash is 404 and a module over 64 MiB is 413, both in the command error envelope; bytes that are not a core module, or DWARF that does not parse, are 422 rather than an empty map.
 
 Item hashes describe compiler-resolved definitions. Renaming a local variable or reformatting source leaves them unchanged. A changed helper can change its callers' hashes too. The definition hash is a BLAKE3 Merkle root over the sorted export path/hash pairs from the driver, where an export is any definition reachable through `pub` visibility from the crate root: root entries, nested public functions, public traits and types with their impls. Every export contributes, so changing a nested public function that no entry calls still changes the definition hash, while unchanged items retain their own resolved-HIR hashes. A reference into another definition carries that item's stored hash, so a dependent's hash follows the content it uses, not the dependency's crate build. Alpha-renaming a local leaves both the definition hash and history unchanged; changing a constant changes the hash. Source revisions have their own BLAKE3 hashes. A published definition pins its executable and schema; a conflicting publication is rejected. The Wasm and toolchain hashes identify its executable build. Builds require the `hash-rustc` driver and reject missing identity outputs. Stores without `defs.behavior_hash` are rejected by column name.
+
+### Using a crates.io crate
+
+`eval` and `add` take an optional `manifest` (a `Cargo.toml`) and `lock` (its `Cargo.lock`); the server builds the bundle `{"files": {"src/lib.rs": <cell>, "Cargo.toml": <manifest>, "Cargo.lock": <lock>}}`, so a block-body cell works with crates too. Any crates.io crate with no build script and no procedural macro can be used this way, on the host toolchain and without the Linux sandbox. glam is already part of the SDK; smallvec and robust are not, so they need this. The supplied lock is what admits them: every package in it that has a source must be `registry+https://github.com/rust-lang/crates.io-index` with a 64-hex SHA-256 `checksum` (Cargo refuses an archive whose hash differs), and git sources and `[[patch.unused]]` are refused. After Cargo resolves the manifest it must not have moved a pin or added a crates.io package that only your manifest reaches; the error names the crate. Without a lock, a non-SDK dependency needs the Linux sandbox worker, and the error says to supply one. Path, git, `registry =` and workspace dependencies are never admitted.
+
+The crate's archive must already be in this host's cargo registry cache (`cargo fetch` it once), or the daemon must run with `LOOM_ALLOW_CARGO_FETCH=1` so the first `eval` may download it; the archive is still checked against the lock. Crate source is scanned like guest source, so `unsafe` is fine, `#![cfg_attr(.., feature(..))]` gates are dormant, and a build script, a procedural macro, or a `macro_rules!` that names `no_mangle`, `export_name`, `link_section` or `link_name` is refused. Guest-source macro rules still apply to your own cell: `smallvec![..]` is refused, `SmallVec::new()` and `SmallVec::from_slice(..)` are not.
+
+```sh
+cat > Cargo.toml <<'EOF'
+[package]
+name = "cell"
+version = "0.1.0"
+edition = "2024"
+[dependencies]
+robust = "=1.2.0"
+EOF
+cat > Cargo.lock <<'EOF'
+version = 4
+
+[[package]]
+name = "robust"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e27ee8bb91ca0adcf0ecb116293afa12d393f9c2b9b9cd54d33e8078fe19839"
+EOF
+cat > cell.rs <<'EOF'
+let a = robust::Coord { x: 0.0, y: 0.0 };
+let b = robust::Coord { x: 1.0, y: 0.0 };
+let c = robust::Coord { x: 0.0, y: 1.0 };
+robust::orient2d(a, b, c) > 0.0
+EOF
+loom --token "$LOOM_TOKEN" eval cell.rs --manifest Cargo.toml --lock Cargo.lock   # result.output is true
+```
+
+Over HTTP the arguments are `source`, `manifest` and `lock` as strings. `cargo generate-lockfile` next to your manifest writes a lock in this form (its own `cell` entry is ignored and rewritten).
 
 ### Compiler resolution
 

@@ -242,6 +242,43 @@ impl Service {
     }
 }
 
+/// The definition source `eval` and `add` submit. With a `manifest` argument the
+/// Rust `source` becomes `src/lib.rs` of a source bundle beside that
+/// `Cargo.toml` and, when given, the `lock` as `Cargo.lock`; a plain crates.io
+/// dependency is admitted on the host when the lock pins it (see
+/// `loom_build`'s intake). Without `manifest` the source is used as written.
+pub(super) fn with_crates(args: &Value, lang: Lang, source: String) -> Result<String> {
+    fn text<'a>(args: &'a Value, name: &str) -> Result<Option<&'a str>> {
+        args.get(name)
+            .filter(|value| !value.is_null())
+            .map(|value| {
+                value
+                    .as_str()
+                    .with_context(|| format!("{name} must be a string"))
+            })
+            .transpose()
+    }
+    let (manifest, lock) = (text(args, "manifest")?, text(args, "lock")?);
+    let Some(manifest) = manifest else {
+        ensure!(
+            lock.is_none(),
+            "lock needs manifest: a Cargo.lock pins the dependencies a Cargo.toml names"
+        );
+        return Ok(source);
+    };
+    ensure!(
+        lang == Lang::Rust,
+        "manifest and lock apply to Rust definitions only"
+    );
+    let mut files = serde_json::Map::new();
+    files.insert("src/lib.rs".into(), Value::String(source));
+    files.insert("Cargo.toml".into(), Value::String(manifest.into()));
+    if let Some(lock) = lock {
+        files.insert("Cargo.lock".into(), Value::String(lock.into()));
+    }
+    Ok(json!({ "files": files }).to_string())
+}
+
 /// Where an admitted definition is published.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Destination {
@@ -278,6 +315,64 @@ pub(super) fn resolve_dependency_pins(
         resolved.insert(alias.clone(), hash);
     }
     Ok(resolved)
+}
+
+#[cfg(test)]
+mod crate_tests {
+    use super::*;
+
+    #[test]
+    fn a_manifest_makes_the_source_a_bundle_and_a_lock_needs_a_manifest() -> Result<()> {
+        let source = "pub fn f() -> i64 { 1 }".to_owned();
+        // No manifest: the source is used as written, null counting as absent.
+        for args in [json!({}), json!({"manifest":null,"lock":null})] {
+            assert_eq!(with_crates(&args, Lang::Rust, source.clone())?, source);
+        }
+        let bundle = with_crates(
+            &json!({"manifest":"[package]\nname='c'","lock":"version = 4\n"}),
+            Lang::Rust,
+            source.clone(),
+        )?;
+        let bundle: Value = serde_json::from_str(&bundle)?;
+        assert_eq!(
+            bundle,
+            json!({"files":{
+                "src/lib.rs": source,
+                "Cargo.toml": "[package]\nname='c'",
+                "Cargo.lock": "version = 4\n",
+            }})
+        );
+        // A manifest alone carries no Cargo.lock entry.
+        let unlocked = with_crates(
+            &json!({"manifest":"[package]\nname='c'"}),
+            Lang::Rust,
+            source.clone(),
+        )?;
+        assert!(serde_json::from_str::<Value>(&unlocked)?["files"]["Cargo.lock"].is_null());
+        for (args, lang, expect) in [
+            (
+                json!({"lock":"version = 4\n"}),
+                Lang::Rust,
+                "lock needs manifest",
+            ),
+            (
+                json!({"manifest":"[package]"}),
+                Lang::TypeScript,
+                "Rust definitions only",
+            ),
+            (
+                json!({"manifest":7}),
+                Lang::Rust,
+                "manifest must be a string",
+            ),
+        ] {
+            let error = with_crates(&args, lang, source.clone())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expect), "{expect}: {error}");
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

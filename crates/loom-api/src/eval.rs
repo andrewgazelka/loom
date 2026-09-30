@@ -56,7 +56,7 @@ impl Service {
         let mut request = DefineRequest {
             lang: Lang::Rust,
             name: session.into(),
-            source: cell.clone().into_owned(),
+            source: crate::definitions::with_crates(args, Lang::Rust, cell.clone().into_owned())?,
             deps,
             allowed_effects,
         };

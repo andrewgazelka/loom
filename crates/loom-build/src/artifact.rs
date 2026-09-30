@@ -11,6 +11,28 @@ pub(super) fn trusted_dependency(name: &str, value: &toml::Value) -> bool {
         && value.get("path").is_none()
 }
 
+/// A plain crates.io dependency: a version requirement, or a table naming only
+/// what crates.io can express. No path, git, registry, workspace or patch
+/// source, so the package is whatever the caller's `Cargo.lock` pins and its
+/// content is checked against the lock's checksum. The alias `loom` is the
+/// host's SDK dependency and cannot name a registry crate.
+pub(super) fn registry_dependency(name: &str, value: &toml::Value) -> bool {
+    if name == "loom" {
+        return false;
+    }
+    let Some(table) = value.as_table() else {
+        return value.is_str();
+    };
+    table.iter().all(|(key, value)| match key.as_str() {
+        "version" | "package" => value.is_str(),
+        "features" => value
+            .as_array()
+            .is_some_and(|features| features.iter().all(toml::Value::is_str)),
+        "default-features" | "optional" => value.is_bool(),
+        _ => false,
+    }) && table.get("version").is_some_and(toml::Value::is_str)
+}
+
 pub(super) fn is_vendored(definition: &CheckedDef) -> bool {
     serde_json::from_str::<SourceBundle>(&definition.source).is_ok_and(|bundle| {
         bundle
@@ -53,6 +75,8 @@ pub(super) fn build_fingerprint(root: &Path) -> Result<String, BuildError> {
     hash.update(b"loom-core-build-v3-dag-cbor");
     hash.update(include_bytes!("materialize.rs"));
     hash.update(include_bytes!("intake.rs"));
+    hash.update(include_bytes!("artifact.rs"));
+    hash.update(include_bytes!("sdk.rs"));
     hash.update(loom_check::safety_policy_bytes());
     hash.update(include_bytes!("identity.rs"));
     hash.update(include_bytes!("direct.rs"));

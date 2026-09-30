@@ -1,6 +1,12 @@
 use super::*;
 
-pub(super) fn validate_manifest(value: &toml::Value, isolated: bool) -> Result<(), BuildError> {
+/// `locked_registry`: the bundle's `Cargo.lock` passed `intake::validate_registry_lock`,
+/// so plain crates.io dependencies build on the host without the isolated worker.
+pub(super) fn validate_manifest(
+    value: &toml::Value,
+    isolated: bool,
+    locked_registry: bool,
+) -> Result<(), BuildError> {
     if let Some(table) = value.as_table() {
         for (name, value) in table {
             if ["patch", "replace"].contains(&name.as_str()) {
@@ -19,15 +25,18 @@ pub(super) fn validate_manifest(value: &toml::Value, isolated: bool) -> Result<(
                                 "{name}: use locked crates.io or loom.deps, not path/git"
                             )));
                         }
-                        if !isolated && !trusted_dependency(name, dependency) {
+                        if !isolated
+                            && !trusted_dependency(name, dependency)
+                            && !(locked_registry && registry_dependency(name, dependency))
+                        {
                             return Err(BuildError::Rejected(format!(
-                                "{name} requires the isolated vendored build worker"
+                                "{name} needs a Cargo.lock that pins it from crates.io (pass `lock`), or the isolated vendored build worker"
                             )));
                         }
                     }
                 }
             } else {
-                validate_manifest(value, isolated)?;
+                validate_manifest(value, isolated, locked_registry)?;
             }
         }
     }

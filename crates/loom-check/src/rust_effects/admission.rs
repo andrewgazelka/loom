@@ -4,13 +4,20 @@ use super::*;
 /// module, outside the runtime's per-tenant boundary.
 const HOST_READING_MACROS: [&str; 5] = ["include", "include_str", "include_bytes", "env", "option_env"];
 
+/// Attributes that name a symbol, section or import of the module. They must not
+/// appear in source, nor in any macro's tokens, where a `macro_rules!` body or a
+/// macro argument could expand to one.
+const ABI_ATTRIBUTES: [&str; 4] = ["no_mangle", "export_name", "link_section", "link_name"];
+
 /// What definition source may not do. `unsafe` code is allowed: a guest runs in its own
 /// wasm linear memory in a per-tenant runtime, so memory unsafety reaches only itself, and
 /// the host checks every import against the call's declared effects and records what runs.
 /// What stays refused is what reaches the HOST or the COMPILER, outside that boundary:
 /// source inclusion and `#[path]` (compile-time host file reads), foreign `extern` blocks
 /// and symbol or section attributes (forged imports and exports), compiler-internal
-/// attributes and feature gates. Build scripts, proc macros and symlinks are refused by
+/// attributes and unconditional feature gates (a gate inside `cfg_attr` is dormant, or a
+/// compile error under `-Zallow-features=`), and macro tokens that name a symbol, section
+/// or import attribute. Build scripts, proc macros and symlinks are refused by
 /// `safety::untrusted_package_diagnostics`.
 pub(crate) fn unsafe_source_diagnostics(file: &syn::File) -> Vec<loom_proto::Diagnostic> {
     struct UnsafeSource {
@@ -43,6 +50,21 @@ pub(crate) fn unsafe_source_diagnostics(file: &syn::File) -> Vec<loom_proto::Dia
             if contains_include(node.tokens.clone()) {
                 self.reject("source inclusion in macro input or definition");
             }
+            fn names_abi_attribute(tokens: proc_macro2::TokenStream) -> bool {
+                use syn::ext::IdentExt;
+                tokens.into_iter().any(|token| match token {
+                    proc_macro2::TokenTree::Ident(name) => {
+                        ABI_ATTRIBUTES.contains(&name.unraw().to_string().as_str())
+                    }
+                    proc_macro2::TokenTree::Group(group) => names_abi_attribute(group.stream()),
+                    _ => false,
+                })
+            }
+            if names_abi_attribute(node.tokens.clone()) {
+                self.reject(
+                    "symbol, section or import attribute (no_mangle, export_name, link_section, link_name) in macro tokens",
+                );
+            }
             visit::visit_macro(self, node);
         }
         fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
@@ -65,16 +87,22 @@ pub(crate) fn unsafe_source_diagnostics(file: &syn::File) -> Vec<loom_proto::Dia
             visit::visit_item_foreign_mod(self, item);
         }
         fn visit_attribute(&mut self, attribute: &'ast syn::Attribute) {
-            fn inspect(meta: &syn::Meta, checker: &mut UnsafeSource) {
+            // `conditional`: nested inside `cfg_attr`. A feature gate there is
+            // dormant until its condition holds, and an active one is a compile
+            // error because dependency and guest units build with
+            // `-Zallow-features=` (`rustc/capture.sh`); registry crates carry
+            // `#![cfg_attr(feature = "specialization", feature(specialization))]`.
+            fn inspect(meta: &syn::Meta, checker: &mut UnsafeSource, conditional: bool) {
+                use syn::ext::IdentExt;
                 let path = meta.path();
                 let name = path
                     .segments
                     .last()
-                    .map(|segment| segment.ident.to_string())
+                    .map(|segment| segment.ident.unraw().to_string())
                     .unwrap_or_default();
                 if name.starts_with("rustc_")
+                    || (name == "feature" && !conditional)
                     || [
-                        "feature",
                         "allow_internal_unsafe",
                         "allow_internal_unstable",
                         "no_core",
@@ -102,18 +130,18 @@ pub(crate) fn unsafe_source_diagnostics(file: &syn::File) -> Vec<loom_proto::Dia
                     if name == "unsafe" {
                         use syn::parse::Parser;
                         if let Ok(nested)=syn::punctuated::Punctuated::<syn::Meta,syn::Token![,]>::parse_terminated.parse2(list.tokens.clone()) {
-                            for attribute in nested.iter() {inspect(attribute,checker);}
+                            for attribute in nested.iter() {inspect(attribute,checker,conditional);}
                         } else {checker.reject("unparseable unsafe attribute");}
                     }
                     if name == "cfg_attr" {
                         use syn::parse::Parser;
                         if let Ok(nested)=syn::punctuated::Punctuated::<syn::Meta,syn::Token![,]>::parse_terminated.parse2(list.tokens.clone()) {
-                            for attribute in nested.iter().skip(1) {inspect(attribute,checker);}
+                            for attribute in nested.iter().skip(1) {inspect(attribute,checker,true);}
                         } else {checker.reject("unparseable conditional attribute");}
                     }
                 }
             }
-            inspect(&attribute.meta, self);
+            inspect(&attribute.meta, self, false);
             visit::visit_attribute(self, attribute);
         }
     }
@@ -140,8 +168,15 @@ mod unsafe_tests {
             "#[unsafe(export_name = \"loom_call_main\")] fn exported() {}",
             "extern \"C\" { fn legacy_foreign(); }",
             "#![feature(core_intrinsics)] fn main() {}",
-            "#![cfg_attr(any(), feature(core_intrinsics))] fn main() {}",
             "#![cfg_attr(all(), cfg_attr(all(), no_mangle))] fn main() {}",
+            "#[cfg_attr(all(), no_mangle)] fn exported() {}",
+            "#[cfg_attr(docsrs, unsafe(export_name = \"loom_call_main\"))] fn exported() {}",
+            "#[cfg_attr(docsrs, link_section = \".init\")] static S: u8 = 0;",
+            "#[r#no_mangle] fn exported() {}",
+            "macro_rules! bad { () => { #[unsafe(no_mangle)] pub fn exported() {} } }",
+            "macro_rules! bad { ($item:item) => { $item } } bad! { #[no_mangle] fn exported() {} }",
+            "macro_rules! bad { ($attribute:meta) => { #[$attribute] fn exported() {} } } bad!(export_name = \"x\");",
+            "macro_rules! bad { () => { extern \"C\" { #[link_name = \"secret\"] fn hidden(); } } }",
             "#[allow_internal_unsafe] macro_rules! bad {()=>{0}}",
             "#[rustc_allow_const_fn_unstable(foo)] fn main() {}",
             "#[path=\"../outside.rs\"] mod outside;",
@@ -168,6 +203,15 @@ mod unsafe_tests {
             "struct User; impl User { unsafe fn operation() {} }",
             "#![allow(unsafe_code)] fn main() { unsafe { operation(); } }",
             "macro_rules! hidden { () => { unsafe { operation(); } } }",
+            // Registry crates gate nightly features behind `cfg_attr`; the
+            // compiler refuses an active gate (`-Zallow-features=`).
+            "#![cfg_attr(any(), feature(core_intrinsics))] fn main() {}",
+            "#![cfg_attr(docsrs, feature(doc_cfg))] pub fn main() {}",
+            "#![cfg_attr(feature = \"specialization\", feature(specialization))] pub fn main() {}",
+            "#![cfg_attr(feature = \"specialization\", allow(incomplete_features))] pub fn main() {}",
+            "#![cfg_attr(all(), cfg_attr(all(), feature(core_intrinsics)))] pub fn main() {}",
+            "#[cfg_attr(docsrs, doc(cfg(feature = \"const_new\")))] pub fn new() {}",
+            "macro_rules! smallvec { ($($x:expr),*) => { { let mut v = Vec::new(); $(v.push($x);)* v } } }",
         ] {
             let file = syn::parse_file(source).unwrap();
             assert!(

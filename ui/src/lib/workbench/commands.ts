@@ -79,6 +79,11 @@ const behavior = field("hash", "Behavior hash");
 const author = field("author", "Author");
 const rationale = field("rationale", "Rationale");
 const source = field("source", "Source", { kind: "source" });
+// A Cargo.toml and its Cargo.lock: crates.io dependencies the lock pins.
+const crateFields = [
+  field("manifest", "Cargo.toml (crates.io dependencies)", { kind: "source", optional: true }),
+  field("lock", "Cargo.lock (pins the dependencies)", { kind: "source", optional: true }),
+];
 const definitionCommands: Command[] = [
   {
     id: V.find,
@@ -123,6 +128,7 @@ const definitionCommands: Command[] = [
         kind: "json",
         optional: true,
       }),
+      ...crateFields,
     ],
   },
   {
@@ -275,6 +281,7 @@ const definitionCommands: Command[] = [
         optional: true,
       }),
       field("allowed_effects", "Allowed effects JSON", { kind: "json", optional: true }),
+      ...crateFields,
     ],
   },
   {

@@ -218,3 +218,122 @@ async fn eval_runs_a_bare_block_as_a_cell() {
         broken.diagnostics
     );
 }
+
+const CRATES_IO: &str = "registry+https://github.com/rust-lang/crates.io-index";
+
+fn crate_manifest(dependency: &str) -> String {
+    format!(
+        "[package]\nname = \"cell\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[dependencies]\n{dependency}\n"
+    )
+}
+
+fn registry_lock(name: &str, version: &str, checksum: &str) -> String {
+    format!(
+        "version = 4\n\n[[package]]\nname = \"{name}\"\nversion = \"{version}\"\nsource = \"{CRATES_IO}\"\nchecksum = \"{checksum}\"\n"
+    )
+}
+
+/// A crates.io crate through a supplied `Cargo.lock`, on the host toolchain:
+/// no build script, no proc macro, no Linux sandbox. The archive is in the
+/// host's cargo registry cache (`cargo fetch` it, or run with
+/// `LOOM_ALLOW_CARGO_FETCH=1`).
+#[tokio::test]
+#[ignore = "requires Rust guest toolchain, LOOM_COMPILER_CACHE_OWNER and robust 1.2.0 in ~/.cargo/registry"]
+async fn eval_uses_a_locked_crates_io_crate() {
+    let service = service();
+    let manifest = crate_manifest("robust = \"=1.2.0\"");
+    let lock = registry_lock(
+        "robust",
+        "1.2.0",
+        "4e27ee8bb91ca0adcf0ecb116293afa12d393f9c2b9b9cd54d33e8078fe19839",
+    );
+    let cell = "let a = robust::Coord { x: 0.0, y: 0.0 };\nlet b = robust::Coord { x: 1.0, y: 0.0 };\nlet c = robust::Coord { x: 0.0, y: 1.0 };\nrobust::orient2d(a, b, c) > 0.0";
+    let reply = eval(
+        &service,
+        json!({"source":cell,"manifest":manifest,"lock":lock}),
+    )
+    .await;
+    assert!(reply.ok, "{reply:?}");
+    assert_eq!(reply.result["output"], true);
+    assert_eq!(reply.result["entry"], "eval");
+
+    // The same cell again reuses the build; nothing was named or kept.
+    let again = eval(
+        &service,
+        json!({"source":cell,"manifest":manifest,"lock":lock}),
+    )
+    .await;
+    assert!(again.ok, "{again:?}");
+    assert_eq!(again.result["hash"], reply.result["hash"]);
+    assert!(service.store.current_names().unwrap().is_empty());
+
+    // A lock naming a different checksum is refused before anything compiles:
+    // Cargo rejects the archive, or the pin check does.
+    let forged = registry_lock("robust", "1.2.0", &"0".repeat(64));
+    let refused = eval(
+        &service,
+        json!({"source":cell,"manifest":manifest,"lock":forged}),
+    )
+    .await;
+    assert!(!refused.ok, "{refused:?}");
+
+    // A git source in the lock never reaches the host toolchain.
+    let git = "version = 4\n\n[[package]]\nname = \"robust\"\nversion = \"1.2.0\"\nsource = \"git+https://example.com/robust#abc\"\n";
+    let refused = eval(
+        &service,
+        json!({"source":cell,"manifest":manifest,"lock":git}),
+    )
+    .await;
+    assert!(!refused.ok, "{refused:?}");
+    let message = refused.result["error"].as_str().unwrap();
+    assert!(message.contains("only crates.io"), "{message}");
+}
+
+#[tokio::test]
+#[ignore = "requires Rust guest toolchain, LOOM_COMPILER_CACHE_OWNER and smallvec 1.16.2 in ~/.cargo/registry"]
+async fn eval_uses_smallvec_through_its_cfg_attr_feature_gates() {
+    let service = service();
+    // smallvec's crate root carries `#![cfg_attr(feature = "specialization",
+    // feature(specialization))]`; the gate is dormant, so the crate is admitted.
+    let manifest = crate_manifest("smallvec = \"=1.16.2\"");
+    let lock = registry_lock(
+        "smallvec",
+        "1.16.2",
+        "f9395f0f0eee849a9b707b2f06bb92a6a422090e2123bb2ef8e87a0e61892a8e",
+    );
+    let cell = "let mut values: smallvec::SmallVec<[i64; 4]> = smallvec::SmallVec::new();\nfor value in 0..6 {\n    values.push(value);\n}\n(values.len(), values.spilled(), values.iter().sum::<i64>())";
+    let reply = eval(
+        &service,
+        json!({"source":cell,"manifest":manifest,"lock":lock}),
+    )
+    .await;
+    assert!(reply.ok, "{reply:?}");
+    assert_eq!(reply.result["output"], json!([6, true, 15]));
+
+    // The macro stays refused in guest source; the constructor functions do not.
+    let refused = eval(
+        &service,
+        json!({"source":"let values: smallvec::SmallVec<[i64; 2]> = smallvec::smallvec![1, 2];\nvalues.len()","manifest":manifest,"lock":lock}),
+    )
+    .await;
+    assert!(!refused.ok, "{refused:?}");
+}
+
+/// Without a lock a non-SDK dependency still needs the Linux sandbox worker;
+/// on a host without it the error says to supply a `Cargo.lock`.
+#[tokio::test]
+#[ignore = "requires Rust guest toolchain and LOOM_COMPILER_CACHE_OWNER; asserts the macOS message"]
+async fn eval_of_a_crate_without_a_lock_says_to_supply_one() {
+    if cfg!(target_os = "linux") {
+        return;
+    }
+    let service = service();
+    let reply = eval(
+        &service,
+        json!({"source":"1","manifest":crate_manifest("robust = \"=1.2.0\"")}),
+    )
+    .await;
+    assert!(!reply.ok, "{reply:?}");
+    let message = reply.result["error"].as_str().unwrap();
+    assert!(message.contains("Cargo.lock"), "{message}");
+}

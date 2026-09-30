@@ -9,23 +9,23 @@ use std::{
 use tokio::{fs, process::Command};
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct PackageKey {
-    name: String,
-    version: String,
-    source: Option<String>,
+pub(crate) struct PackageKey {
+    pub(crate) name: String,
+    pub(crate) version: String,
+    pub(crate) source: Option<String>,
 }
 #[derive(Clone)]
-struct Package {
-    key: PackageKey,
+pub(crate) struct Package {
+    pub(crate) key: PackageKey,
     dependencies: Vec<String>,
-    raw: toml::Value,
+    pub(crate) raw: toml::Value,
 }
-struct Lock {
-    raw: toml::Value,
-    packages: Vec<Package>,
+pub(crate) struct Lock {
+    pub(crate) raw: toml::Value,
+    pub(crate) packages: Vec<Package>,
 }
 impl Lock {
-    fn parse(bytes: &[u8]) -> Result<Self, BuildError> {
+    pub(crate) fn parse(bytes: &[u8]) -> Result<Self, BuildError> {
         let text =
             std::str::from_utf8(bytes).map_err(|error| BuildError::Rejected(error.to_string()))?;
         let raw: toml::Value =
@@ -156,7 +156,10 @@ fn user_roots(manifest: &toml::Value) -> BTreeSet<String> {
     walk(manifest, &mut roots);
     roots
 }
-fn validate_pins(
+/// Cargo resolved the manifest against `original`: no registry package it named
+/// may have moved or lost its checksum. Used for the SDK rebuild and for a
+/// caller-supplied lock.
+pub(crate) fn validate_pins(
     original: &Lock,
     updated: &Lock,
     manifest: &toml::Value,
@@ -178,7 +181,7 @@ fn validate_pins(
             && Some(checksum) != new.raw.get("checksum")
         {
             return Err(BuildError::Rejected(format!(
-                "SDK rebuild changed checksum for {} {}",
+                "Cargo changed the checksum of {} {}",
                 old.key.name, old.key.version
             )));
         }
@@ -194,7 +197,57 @@ fn validate_pins(
             && (user.contains(&package.key) || !sdk.contains(&package.key))
         {
             return Err(BuildError::Rejected(format!(
-                "SDK rebuild would change user registry pin {} {}. Define an explicit source/lock migration instead.",
+                "Cargo would change the registry pin {} {}. Supply a Cargo.lock that already matches the manifest, or define an explicit source/lock migration.",
+                package.key.name, package.key.version
+            )));
+        }
+    }
+    Ok(())
+}
+/// A caller's lock names the caller's crates, not the SDK's own graph. Cargo would
+/// resolve that graph afresh, to versions other than the workspace lock's, which
+/// `trusted_sources::approved` would then not recognize (serde's build script
+/// would be refused). Seed it with every package the SDK reaches in the workspace
+/// lock that the caller's lock lacks; the caller's entries are kept as they are.
+pub(crate) fn seed_sdk_graph(supplied: &[u8], workspace: &[u8]) -> Result<Vec<u8>, BuildError> {
+    let supplied = Lock::parse(supplied)?;
+    let workspace = Lock::parse(workspace)?;
+    let known: BTreeSet<&PackageKey> = supplied
+        .packages
+        .iter()
+        .map(|package| &package.key)
+        .collect();
+    let sdk = workspace.reachable(&sdk_roots(&workspace), false);
+    let mut seeded = supplied.raw.clone();
+    let packages = seeded
+        .get_mut("package")
+        .and_then(toml::Value::as_array_mut)
+        .ok_or_else(|| BuildError::Rejected("Cargo.lock has no package array".into()))?;
+    for package in &workspace.packages {
+        if sdk.contains(&package.key) && !known.contains(&package.key) {
+            packages.push(package.raw.clone());
+        }
+    }
+    toml::to_string(&seeded)
+        .map(String::into_bytes)
+        .map_err(|error| BuildError::Rejected(error.to_string()))
+}
+/// Cargo may add path packages and packages the SDK itself needs; a registry
+/// package only the caller's manifest reaches must already be in the lock.
+pub(crate) fn validate_additions(original: &Lock, updated: &Lock) -> Result<(), BuildError> {
+    let known: BTreeSet<&PackageKey> = original
+        .packages
+        .iter()
+        .map(|package| &package.key)
+        .collect();
+    let sdk = updated.reachable(&sdk_roots(updated), false);
+    for package in &updated.packages {
+        if package.key.source.is_some()
+            && !known.contains(&package.key)
+            && !sdk.contains(&package.key)
+        {
+            return Err(BuildError::Rejected(format!(
+                "Cargo.lock does not pin {} {}; generate the lock from this manifest (cargo generate-lockfile) and supply all of it",
                 package.key.name, package.key.version
             )));
         }
@@ -545,6 +598,35 @@ mod tests {
             bytes
         );
         std::fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn a_callers_lock_is_seeded_with_the_sdk_graph_it_lacks() {
+        let registry = "registry+https://github.com/rust-lang/crates.io-index";
+        let supplied = format!(
+            "version=4\n[[package]]\nname='robust'\nversion='1.2.0'\nsource='{registry}'\nchecksum='{}'\n",
+            "a".repeat(64)
+        );
+        let workspace = format!(
+            "version=4\n[[package]]\nname='loom-guest-rs'\nversion='0.1.0'\ndependencies=['serde']\n[[package]]\nname='serde'\nversion='1.0.229'\nsource='{registry}'\nchecksum='{}'\n[[package]]\nname='unrelated'\nversion='2.0.0'\nsource='{registry}'\nchecksum='{}'\n",
+            "b".repeat(64),
+            "c".repeat(64)
+        );
+        let seeded = seed_sdk_graph(supplied.as_bytes(), workspace.as_bytes()).unwrap();
+        let seeded = Lock::parse(&seeded).unwrap();
+        let names: BTreeSet<&str> = seeded
+            .packages
+            .iter()
+            .map(|package| package.key.name.as_str())
+            .collect();
+        // The caller's pin stays; the SDK and what it reaches arrive; nothing else does.
+        assert_eq!(names, BTreeSet::from(["robust", "loom-guest-rs", "serde"]));
+        // Seeding twice adds nothing.
+        let again = seed_sdk_graph(
+            toml::to_string(&seeded.raw).unwrap().as_bytes(),
+            workspace.as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(Lock::parse(&again).unwrap().packages.len(), 3);
     }
     #[test]
     fn filling_missing_checksum_preserves_existing_pins() {

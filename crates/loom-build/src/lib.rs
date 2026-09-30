@@ -2,8 +2,8 @@
 mod artifact;
 pub use artifact::cargo_diagnostics;
 use artifact::{
-    VENDOR_CONFIG, build_fingerprint, cargo_artifact, is_vendored, trusted_dependency,
-    validate_component,
+    VENDOR_CONFIG, build_fingerprint, cargo_artifact, is_vendored, registry_dependency,
+    trusted_dependency, validate_component,
 };
 mod toolchain;
 pub use toolchain::{GuestToolchain, resolve_guest_toolchain, resolve_guest_toolchain_with_driver};
@@ -411,6 +411,10 @@ impl Builder {
         if !is_vendored(definition) && dependencies.values().any(is_vendored) {
             return Err(BuildError::Rejected("A crate using vendored dependencies must be prepared by the isolated vendor worker".into()));
         }
+        // Recomputed from the prepared bundle, as preparation decided it, so a
+        // replay never needs the isolated worker for crates.io dependencies a
+        // supplied lock pins.
+        let locked_registry = intake::locked_registry(&definition.source);
         for dependency in dependencies.values() {
             if dependency.hash.len() != 64
                 || !dependency.hash.bytes().all(|byte| byte.is_ascii_hexdigit())
@@ -426,6 +430,7 @@ impl Builder {
                 dependencies,
                 dependency: true,
                 isolated: is_vendored(dependency),
+                locked_registry,
             })
             .await?;
         }
@@ -439,6 +444,7 @@ impl Builder {
             dependencies,
             dependency: false,
             isolated,
+            locked_registry,
         })
         .await?;
         stages.checkpoint("input_materialization_ms");

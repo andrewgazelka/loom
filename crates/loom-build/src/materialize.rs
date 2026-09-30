@@ -9,6 +9,8 @@ pub(super) struct Materialization<'a> {
     pub dependencies: &'a BTreeMap<String, CheckedDef>,
     pub dependency: bool,
     pub isolated: bool,
+    /// See `manifest::validate_manifest`.
+    pub locked_registry: bool,
 }
 
 pub(super) async fn materialize_rust(request: Materialization<'_>) -> Result<(), BuildError> {
@@ -21,6 +23,7 @@ pub(super) async fn materialize_rust(request: Materialization<'_>) -> Result<(),
         dependencies,
         dependency,
         isolated,
+        locked_registry,
     } = request;
     handler_dependencies::validate(definition, dependencies)?;
     let mut files = if definition.source.trim_start().starts_with('{') {
@@ -51,7 +54,11 @@ pub(super) async fn materialize_rust(request: Materialization<'_>) -> Result<(),
     let table = manifest
         .as_table_mut()
         .ok_or_else(|| BuildError::Rejected("Cargo.toml must be a table".into()))?;
-    super::manifest::validate_manifest(&toml::Value::Table(table.clone()), isolated)?;
+    super::manifest::validate_manifest(
+        &toml::Value::Table(table.clone()),
+        isolated,
+        locked_registry,
+    )?;
     let crates = loom_check::crate_dependencies(
         &toml::to_string(&toml::Value::Table(table.clone()))
             .map_err(|error| BuildError::Rejected(error.to_string()))?,
@@ -244,9 +251,12 @@ pub(super) async fn materialize_rust(request: Materialization<'_>) -> Result<(),
                 "dependency {name}: use loom.deps hashes or locked crates.io sources"
             )));
         }
-        if !isolated && !trusted_dependency(name, value) {
+        if !isolated
+            && !trusted_dependency(name, value)
+            && !(locked_registry && registry_dependency(name, value))
+        {
             return Err(BuildError::Rejected(format!(
-                "dependency {name} requires the isolated vendored build worker, which is not configured"
+                "dependency {name} needs a Cargo.lock that pins it from crates.io (pass `lock`), or the isolated vendored build worker, which is not configured"
             )));
         }
     }

@@ -113,7 +113,9 @@ pub static VERBS: &[Verb] = &[
                 default: Some("\"typescript\"")
             },
             arg!(deps, Map, optional),
-            arg!(allowed_effects, Json, optional)
+            arg!(allowed_effects, Json, optional),
+            arg!(manifest, Source, optional),
+            arg!(lock, Source, optional)
         ]
     ),
     verb!(
@@ -186,7 +188,9 @@ pub static VERBS: &[Verb] = &[
             arg!(deps, Map, optional),
             arg!(session, String, optional),
             arg!(optimize, Boolean, optional),
-            arg!(allowed_effects, Json, optional)
+            arg!(allowed_effects, Json, optional),
+            arg!(manifest, Source, optional),
+            arg!(lock, Source, optional)
         ]
     ),
     verb!(find, Definition, Read, [arg!(text, String)]),
@@ -528,6 +532,24 @@ mod tests {
                     args["deps"]
                 );
             }
+        }
+    }
+
+    #[test]
+    fn eval_and_add_take_an_optional_manifest_and_lock() {
+        for name in ["eval", "add"] {
+            let verb = lookup(name).unwrap();
+            for argument in ["manifest", "lock"] {
+                assert_eq!(
+                    verb.schema()["properties"][argument]["type"],
+                    json!(["string", "null"]),
+                    "{name} {argument}"
+                );
+            }
+            let mut args = json!({"source":"pub fn f() {}","manifest":"[package]","lock":null});
+            verb.normalize(&mut args).unwrap();
+            args["manifest"] = json!(7);
+            assert!(verb.normalize(&mut args).is_err(), "{name}");
         }
     }
 

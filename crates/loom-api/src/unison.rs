@@ -218,16 +218,19 @@ impl Service {
                     .map(|value| serde_json::from_value(value.clone()))
                     .transpose()?
                     .flatten();
+                let lang: Lang = serde_json::from_value(
+                    args.get("lang")
+                        .cloned()
+                        .unwrap_or_else(|| json!("typescript")),
+                )?;
+                let source =
+                    crate::definitions::with_crates(args, lang, field(args, "source")?.into())?;
                 let response = self
                     .admit(
                         DefineRequest {
-                            lang: serde_json::from_value(
-                                args.get("lang")
-                                    .cloned()
-                                    .unwrap_or_else(|| json!("typescript")),
-                            )?,
+                            lang,
                             name: name.into(),
-                            source: field(args, "source")?.into(),
+                            source,
                             deps,
                             allowed_effects,
                         },
