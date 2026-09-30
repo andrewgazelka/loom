@@ -298,6 +298,49 @@ pub fn decode_payload<T: DeserializeOwned>(payload: &[u8]) -> Result<T, CallErro
     Ok(value)
 }
 
+/// Most calls in one `call_many` batch.
+pub const MAX_BATCH: usize = 4096;
+
+/// `[count u32 LE]` then each frame as `[len u32 LE][bytes]`. The same shape carries a batch
+/// of request frames to the host and the batch of response frames back.
+pub fn batch_frame(frames: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4 + frames.iter().map(|frame| 4 + frame.len()).sum::<usize>());
+    out.extend_from_slice(&(frames.len() as u32).to_le_bytes());
+    for frame in frames {
+        out.extend_from_slice(&(frame.len() as u32).to_le_bytes());
+        out.extend_from_slice(frame);
+    }
+    out
+}
+
+/// The frames of a [`batch_frame`], borrowed from `bytes`.
+pub fn parse_batch(bytes: &[u8]) -> Result<Vec<&[u8]>, String> {
+    let count = bytes
+        .get(..4)
+        .map(|word| u32::from_le_bytes(word.try_into().expect("four bytes")) as usize)
+        .ok_or("batch frame shorter than its count")?;
+    if count > MAX_BATCH {
+        return Err(format!("batch of {count} calls exceeds {MAX_BATCH}"));
+    }
+    let mut frames = Vec::with_capacity(count);
+    let mut rest = &bytes[4..];
+    for index in 0..count {
+        let length = rest
+            .get(..4)
+            .map(|word| u32::from_le_bytes(word.try_into().expect("four bytes")) as usize)
+            .ok_or_else(|| format!("batch frame {index} has no length"))?;
+        let body = rest
+            .get(4..4 + length)
+            .ok_or_else(|| format!("batch frame {index} is truncated"))?;
+        frames.push(body);
+        rest = &rest[4 + length..];
+    }
+    if !rest.is_empty() {
+        return Err("batch frame has trailing bytes".into());
+    }
+    Ok(frames)
+}
+
 /// Build the response frame around an already encoded result or an error.
 pub fn response_frame(result: Result<&[u8], &CallError>) -> Vec<u8> {
     match result {
@@ -521,5 +564,27 @@ mod tests {
         assert!(Response::parse(&[]).is_err());
         assert!(Response::parse(&[7]).is_err());
         assert!(Response::parse(&[TAG_ERROR, 0x80]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use super::*;
+
+    #[test]
+    fn a_batch_round_trips_and_malformed_batches_are_refused() {
+        let frames = vec![vec![1u8, 2, 3], vec![], vec![9u8; 300]];
+        let batch = batch_frame(&frames);
+        let parsed = parse_batch(&batch).unwrap();
+        assert_eq!(parsed, frames.iter().map(Vec::as_slice).collect::<Vec<_>>());
+        assert!(parse_batch(&[]).is_err());
+        assert!(parse_batch(&batch[..batch.len() - 1]).is_err(), "truncated");
+        let mut trailing = batch.clone();
+        trailing.push(0);
+        assert!(parse_batch(&trailing).is_err());
+        let mut huge = (MAX_BATCH as u32 + 1).to_le_bytes().to_vec();
+        huge.extend_from_slice(&[0; 8]);
+        assert!(parse_batch(&huge).is_err());
+        assert_eq!(parse_batch(&batch_frame(&[])).unwrap(), Vec::<&[u8]>::new());
     }
 }

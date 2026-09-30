@@ -176,6 +176,57 @@ pub fn call<F: Invocation>(def: Def<F>, args: F::Args) -> Result<F::Output, Call
     }
 }
 
+/// Run `def` once per element of `args`, all at the same time, and return the results in order.
+///
+/// The host runs the calls concurrently (about one per core at a time), each in its own
+/// instance with the same semantics as [`call`]: policy, depth and arity are checked per call,
+/// and a pure callee is answered from the result cache. Identical calls, in this batch or in
+/// flight elsewhere, run once. A failed call is that element's `Err`; it does not stop the others.
+/// Worth it when one call costs at least about a millisecond: each is a fresh instantiation.
+pub fn call_map<F: Invocation>(
+    def: Def<F>,
+    args: impl IntoIterator<Item = F::Args>,
+) -> Result<Vec<Result<F::Output, CallError>>, CallError> {
+    let mut frames = Vec::new();
+    let mut failures = Vec::new();
+    for (index, args) in args.into_iter().enumerate() {
+        match F::encode_args(args) {
+            Ok(payload) => frames.push(
+                Request {
+                    target: def.target,
+                    entry: def.entry,
+                    argc: F::ARITY,
+                    payload: &payload,
+                }
+                .encode(),
+            ),
+            Err(error) => failures.push((index, error)),
+        }
+    }
+    if let Some((_, error)) = failures.into_iter().next() {
+        return Err(error);
+    }
+    let response = crate::core::isolated_batch(&loom_proto::isolated::batch_frame(&frames), &def.hash())?;
+    let responses = loom_proto::isolated::parse_batch(&response).map_err(|message| CallError::Decode {
+        message: format!("malformed isolated batch response: {message}"),
+    })?;
+    if responses.len() != frames.len() {
+        return Err(CallError::Decode {
+            message: format!("batch of {} calls answered with {}", frames.len(), responses.len()),
+        });
+    }
+    Ok(responses
+        .into_iter()
+        .map(|frame| match Response::parse(frame) {
+            Ok(Ok(result)) => decode_payload(result),
+            Ok(Err(error)) => Err(error),
+            Err(message) => Err(CallError::Decode {
+                message: format!("malformed isolated response frame: {message}"),
+            }),
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

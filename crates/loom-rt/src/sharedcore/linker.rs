@@ -133,6 +133,59 @@ pub(super) fn linker(
             },
         )
         .map_err(error)?;
+    // A batch of isolated calls, run concurrently. Each keeps the semantics of `loom.call`
+    // (policy, depth, arity, trace scope, result cache); occurrences are assigned up front in
+    // batch order, so each child's trace scope is fixed before any of them runs, and the
+    // responses come back in request order whatever order the callees finish in.
+    linker
+        .func_wrap_async(
+            "loom",
+            "call_many",
+            |mut caller: Caller<'_, Guest>, (pointer, length): (i32, i32)| {
+                Box::new(async move {
+                    let result: Result<i64> = async {
+                        let execution = caller.data().execution.clone();
+                        let bytes = copy_out(&execution.memory, pointer as u32, length as u32)?;
+                        anyhow::ensure!(
+                            !execution.pure,
+                            "isolated calls forbidden in pure core execution"
+                        );
+                        let frames = loom_proto::isolated::parse_batch(&bytes)
+                            .map_err(anyhow::Error::msg)?;
+                        let base = caller.data().occurrence;
+                        caller.data_mut().occurrence += frames.len() as i64;
+                        let scope = caller.data().scope.clone();
+                        let effects = execution.effects.clone();
+                        caller.data_mut().permit.take();
+                        let outcomes = execution
+                            .runtime
+                            .isolated_batch(&frames, &scope, base, &effects)
+                            .await;
+                        caller.data_mut().permit.take();
+                        caller.data_mut().permit = Some(execution.permit().await?);
+                        let responses: Vec<Vec<u8>> = outcomes
+                            .iter()
+                            .map(|outcome| {
+                                loom_proto::isolated::response_frame(match outcome {
+                                    Ok(result) => Ok(result.as_slice()),
+                                    Err(error) => Err(error),
+                                })
+                            })
+                            .collect();
+                        let batch = loom_proto::isolated::batch_frame(&responses);
+                        execution
+                            .runtime
+                            .inner
+                            .effect_wire_bytes
+                            .fetch_add(batch.len() as u64, Ordering::Relaxed);
+                        respond(&mut caller, batch).await
+                    }
+                    .await;
+                    result.map_err(host_error)
+                })
+            },
+        )
+        .map_err(error)?;
     // Native kernels (`kernel.rs`). The guest passes an op name and a gather list
     // of buffers (`iov`: `count` pairs of u32 pointer and length); the host reads
     // each once, runs the op, and writes the reply straight into one guest

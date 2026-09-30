@@ -139,6 +139,33 @@ impl Runtime {
         result
     }
 
+    /// Run a batch of request frames concurrently (about one per core at a time) as siblings of
+    /// one execution: call `i` takes occurrence `base + i`, so each child's trace scope is fixed
+    /// before any runs, and outcomes are returned in request order.
+    pub(crate) async fn isolated_batch(
+        &self,
+        frames: &[&[u8]],
+        scope: &str,
+        base: i64,
+        effects: &EffectContext,
+    ) -> Vec<Result<Vec<u8>, CallError>> {
+        use futures::StreamExt;
+        let width = std::thread::available_parallelism().map_or(4, |n| n.get());
+        futures::stream::iter(0..frames.len())
+            .map(|index| async move {
+                match Request::parse(frames[index]) {
+                    Ok(request) => {
+                        self.isolated_call(request, scope, base + index as i64, effects)
+                            .await
+                    }
+                    Err(error) => Err(error),
+                }
+            })
+            .buffered(width)
+            .collect()
+            .await
+    }
+
     /// Instantiate the callee and run it; store the result when `cacheable` and the call
     /// did nothing but compute.
     #[allow(clippy::too_many_arguments)]

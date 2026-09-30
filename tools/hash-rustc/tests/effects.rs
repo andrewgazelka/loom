@@ -81,6 +81,23 @@ pub fn entry(depth: u32) { let _ = renamed::isolated::call(TARGET, depth); renam
 }
 
 #[test]
+fn a_batched_isolated_call_carries_the_same_call_label() {
+    let directory = tempfile::tempdir().unwrap();
+    let document = compile(
+        directory.path(),
+        r#"
+const TARGET: renamed::isolated::Def<fn(u32) -> u32> =
+    renamed::isolated::Def("$self", core::marker::PhantomData);
+pub fn entry(depth: u32) { let _ = renamed::isolated::call_map(TARGET, [depth, depth + 1]); }
+"#,
+        json!({}),
+    );
+    let row = entry_row(&document);
+    assert_eq!(row["labels"], json!(["call"]), "{document:#}");
+    assert_eq!(row["unknown"], json!([]), "{document:#}");
+}
+
+#[test]
 fn a_constant_from_a_dependency_needs_no_runtime_body_and_adds_no_effect() {
     let directory = tempfile::tempdir().unwrap();
     let document = compile(

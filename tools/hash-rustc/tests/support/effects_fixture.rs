@@ -12,6 +12,7 @@ pub fn perform(_label: &str, _payload: ()) {}
 pub mod isolated {
     pub struct Def<F>(pub &'static str, pub core::marker::PhantomData<F>);
     pub fn call<F, A>(_def: Def<F>, _args: A) -> Result<(), ()> { Ok(()) }
+    pub fn call_map<F, A>(_def: Def<F>, _args: impl IntoIterator<Item = A>) -> Result<Vec<()>, ()> { Ok(Vec::new()) }
 }
 pub mod handlers {
     pub fn handle<H: Fn(), B: Fn()>(_labels: &[&str], handler: H, body: B) {

@@ -654,3 +654,42 @@ async fn identical_pure_calls_in_flight_at_once_run_the_callee_once() -> Result<
     assert!(runtime.inner.inflight.lock().unwrap().is_empty(), "the in-flight table drains");
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_batch_runs_its_calls_at_the_same_time_and_answers_in_request_order() -> Result<()> {
+    let store = Store::memory()?;
+    let hashes: Vec<String> = (10u8..14)
+        .map(|salt| register(&store, &kernel_module(salt)?, &[("main", 0)], &["kernel"]))
+        .collect::<Result<_>>()?;
+    let runtime = Runtime::new(store)?;
+    let kernel = Arc::new(SlowCbor7(Default::default()));
+    runtime.register_kernel(kernel.clone())?;
+    let mut frames: Vec<Vec<u8>> = hashes
+        .iter()
+        .map(|hash| {
+            Request {
+                target: Target::Hash(loom_proto::isolated::parse_digest(hash).unwrap()),
+                entry: "main",
+                argc: 0,
+                payload: &[0x80],
+            }
+            .encode()
+        })
+        .collect();
+    frames.insert(2, vec![0xff, 0xff]);
+    let slices: Vec<&[u8]> = frames.iter().map(Vec::as_slice).collect();
+    let started = Instant::now();
+    let outcomes = runtime.isolated_batch(&slices, "root", 0, &traced()).await;
+    let elapsed = started.elapsed();
+    assert_eq!(outcomes.len(), 5);
+    assert!(outcomes[2].is_err(), "a malformed frame fails alone: {:?}", outcomes[2]);
+    for index in [0, 1, 3, 4] {
+        assert!(outcomes[index].is_ok(), "call {index}: {:?}", outcomes[index]);
+    }
+    assert_eq!(kernel.0.load(std::sync::atomic::Ordering::Relaxed), 4);
+    assert!(
+        elapsed < Duration::from_millis(1400),
+        "four 400 ms callees took {elapsed:?}: they ran one after another"
+    );
+    Ok(())
+}

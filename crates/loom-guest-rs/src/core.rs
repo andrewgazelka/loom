@@ -24,6 +24,8 @@ unsafe extern "C" {
     fn host_perform(pointer: u32, length: u32) -> u64;
     #[link_name = "call"]
     fn host_call(pointer: u32, length: u32) -> u64;
+    #[link_name = "call_many"]
+    fn host_call_many(pointer: u32, length: u32) -> u64;
     #[link_name = "kernel"]
     pub(crate) fn host_kernel(op_ptr: u32, op_len: u32, iov_ptr: u32, count: u32) -> u64;
     #[link_name = "spawn"]
@@ -70,6 +72,29 @@ pub(crate) fn isolated(frame: &[u8], hash: &str) -> Result<Vec<u8>, CallError> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let _ = frame;
+        Err(CallError::Trapped {
+            hash: hash.to_owned(),
+            message: "isolated calls require wasm32".into(),
+        })
+    }
+}
+
+/// Hand a batch of isolated-call request frames to the host; take ownership of the batch of
+/// response frames it allocated. Parsed by `crate::isolated::call_map`.
+pub(crate) fn isolated_batch(batch: &[u8], hash: &str) -> Result<Vec<u8>, CallError> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = hash;
+        // SAFETY: as `isolated`: the batch stays live across suspension and the reply is an
+        // allocation made through loom_alloc(length, 1).
+        let packed = unsafe { host_call_many(batch.as_ptr() as u32, batch.len() as u32) };
+        let pointer = packed as u32 as *mut u8;
+        let length = (packed >> 32) as usize;
+        Ok(unsafe { Vec::from_raw_parts(pointer, length, length) })
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = batch;
         Err(CallError::Trapped {
             hash: hash.to_owned(),
             message: "isolated calls require wasm32".into(),
