@@ -22,6 +22,8 @@
   let seen: string[] = $state([]); // cell hashes in this session, newest first
   // Replay of the effects in the order they ran: how many are drawn so far, and which cell line issued the latest.
   let lineOf: number[] = $state.raw([]);
+  // From the eval result: line n of the compiler's text started on line lineMap[n - 1] of the cell you typed.
+  let lineMap: number[] = [];
   let replay: number | null = $state(null);
   // Heat per cell line: 1 when an effect on that line has just run, fading as later effects run.
   let heat: Map<number, number> | null = $state.raw(null);
@@ -76,6 +78,7 @@
     busy = false;
     if (!body.ok) return;
     if (isScene) scene = body.result.output; else value = body.result.output;
+    lineMap = body.result.line_map ?? [];
     const h = body.result.hash as string;
     if (seen[0] !== h) seen = [h, ...seen].slice(0, 6);
     if (isScene) void play(mine, body.result.hash);
@@ -88,7 +91,14 @@
     const traced = await post("/api/run", { target: hash, args: [0], sites: true });
     if (mine !== ticket) return;
     const sites: number[][] = traced.ok ? (traced.result.sites ?? []) : [];
-    lineOf = sites.map((frames) => frames.find((l) => l <= cellLines) ?? 0);
+    // Innermost frame first: the first frame that lands in the cell itself (not the drawing wrappers after it).
+    lineOf = sites.map((frames) => {
+      for (const l of frames) {
+        const line = lineMap[l - 1];
+        if (line && line <= cellLines) return line;
+      }
+      return 0;
+    });
     const n = scene.length;
     const start = performance.now(), duration = Math.min(1600, 500 + n * 2);
     const hot = new Map<number, number>();

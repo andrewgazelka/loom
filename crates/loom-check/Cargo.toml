@@ -13,4 +13,4 @@ syn = { version = "2", features = ["full", "visit", "visit-mut"] }
 prettyplease = "0.2"
 toml = "0.8"
 base64 = "0.22"
-proc-macro2 = "1"
+proc-macro2 = { version = "1", features = ["span-locations"] }

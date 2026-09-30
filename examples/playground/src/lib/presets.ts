@@ -33,6 +33,9 @@ export const prelude = `// Drawing is an effect. canvas2d and canvas3d only *per
 // that decides what they mean: here, append to a scene and resume.
 use loom::{Continuation, Effect, Reply, Value};
 
+// The wrappers are \`#[inline(never)]\` so a backtrace still shows the cell line that called them.
+// (Inlining is not part of a definition's identity, so this constant is what makes it a new definition.)
+const NO_INLINED_WRAPPERS: u32 = 1;
 type Rgb = [u8; 3];
 /// One drawing command: (kind, coordinates, colour). Kinds: see \`KINDS\`.
 type Scene = Vec<(u8, Vec<f32>, Rgb)>;
@@ -41,9 +44,11 @@ const KINDS: [&str; 4] = ["canvas2d.line", "canvas2d.circle", "canvas3d.line", "
 
 mod canvas2d {
     use super::*;
+    #[inline(never)]
     pub fn line(a: [f32; 2], b: [f32; 2], color: Rgb) {
         let _ = loom::perform::<()>("canvas2d.line", (a, b, color));
     }
+    #[inline(never)]
     pub fn circle(at: [f32; 2], radius: f32, color: Rgb) {
         let _ = loom::perform::<()>("canvas2d.circle", (at, radius, color));
     }
@@ -51,15 +56,78 @@ mod canvas2d {
 
 mod canvas3d {
     use super::*;
+    #[inline(never)]
     pub fn line(a: [f32; 3], b: [f32; 3], color: Rgb) {
         let _ = loom::perform::<()>("canvas3d.line", (a, b, color));
     }
+    #[inline(never)]
     pub fn tri(a: [f32; 3], b: [f32; 3], c: [f32; 3], color: Rgb) {
         let _ = loom::perform::<()>("canvas3d.tri", (a, b, c, color));
     }
 }
 
 /// The handler. Runs \`body\`; every canvas effect it performs lands here.
+fn collect(body: impl FnOnce()) -> Scene {
+    let mut scene = Scene::new();
+    let _ = NO_INLINED_WRAPPERS;
+    loom::handle(KINDS, |e: Effect, _k: Continuation| {
+        let kind = KINDS.iter().position(|k| *k == e.name).unwrap_or(0) as u8;
+        let (coords, color) = match kind {
+            0 => { let (a, b, c): ([f32; 2], [f32; 2], Rgb) = e.arg().unwrap(); ([a[0], a[1], b[0], b[1]].to_vec(), c) }
+            1 => { let (at, r, c): ([f32; 2], f32, Rgb) = e.arg().unwrap(); ([at[0], at[1], r].to_vec(), c) }
+            2 => { let (a, b, c): ([f32; 3], [f32; 3], Rgb) = e.arg().unwrap(); ([a, b].concat(), c) }
+            _ => { let (a, b, c, k): ([f32; 3], [f32; 3], [f32; 3], Rgb) = e.arg().unwrap(); ([a, b, c].concat(), k) }
+        };
+        scene.push((kind, coords, color));
+        Reply::Resume(Value::Null)
+    }, body).expect("handler failed");
+    scene
+}
+
+/// The entry the page calls: run the cell's \`scene\` under the handler.
+pub fn frame(ms: u32) -> Scene {
+    collect(|| scene(ms))
+}`; every canvas effect it performs lands here.
+fn collect(body: impl FnOnce()) -> Scene {
+    let mut scene = Scene::new();
+    loom::handle(KINDS, |e: Effect, _k: Continuation| {
+        let kind = KINDS.iter().position(|k| *k == e.name).unwrap_or(0) as u8;
+        let (coords, color) = match kind {
+            0 => { let (a, b, c): ([f32; 2], [f32; 2], Rgb) = e.arg().unwrap(); ([a[0], a[1], b[0], b[1]].to_vec(), c) }
+            1 => { let (at, r, c): ([f32; 2], f32, Rgb) = e.arg().unwrap(); ([at[0], at[1], r].to_vec(), c) }
+            2 => { let (a, b, c): ([f32; 3], [f32; 3], Rgb) = e.arg().unwrap(); ([a, b].concat(), c) }
+            _ => { let (a, b, c, k): ([f32; 3], [f32; 3], [f32; 3], Rgb) = e.arg().unwrap(); ([a, b, c].concat(), k) }
+        };
+        scene.push((kind, coords, color));
+        Reply::Resume(Value::Null)
+    }, body).expect("handler failed");
+    scene
+}
+
+/// The entry the page calls: run the cell's \`scene\` under the handler.
+pub fn frame(ms: u32) -> Scene {
+    collect(|| scene(ms))
+}`; every canvas effect it performs lands here.
+fn collect(body: impl FnOnce()) -> Scene {
+    let mut scene = Scene::new();
+    loom::handle(KINDS, |e: Effect, _k: Continuation| {
+        let kind = KINDS.iter().position(|k| *k == e.name).unwrap_or(0) as u8;
+        let (coords, color) = match kind {
+            0 => { let (a, b, c): ([f32; 2], [f32; 2], Rgb) = e.arg().unwrap(); ([a[0], a[1], b[0], b[1]].to_vec(), c) }
+            1 => { let (at, r, c): ([f32; 2], f32, Rgb) = e.arg().unwrap(); ([at[0], at[1], r].to_vec(), c) }
+            2 => { let (a, b, c): ([f32; 3], [f32; 3], Rgb) = e.arg().unwrap(); ([a, b].concat(), c) }
+            _ => { let (a, b, c, k): ([f32; 3], [f32; 3], [f32; 3], Rgb) = e.arg().unwrap(); ([a, b, c].concat(), k) }
+        };
+        scene.push((kind, coords, color));
+        Reply::Resume(Value::Null)
+    }, body).expect("handler failed");
+    scene
+}
+
+/// The entry the page calls: run the cell's \`scene\` under the handler.
+pub fn frame(ms: u32) -> Scene {
+    collect(|| scene(ms))
+}`; every canvas effect it performs lands here.
 fn collect(body: impl FnOnce()) -> Scene {
     let mut scene = Scene::new();
     loom::handle(KINDS, |e: Effect, _k: Continuation| {

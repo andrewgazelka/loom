@@ -1,5 +1,7 @@
 //! Language checking before definitions become executable identities.
 mod rust_file;
+mod line_map;
+pub use line_map::{normalized as normalized_rust, original_lines as rust_original_lines};
 use rust_file::check_rust_file;
 mod crates;
 pub use crates::{CrateDependency, crate_dependencies};

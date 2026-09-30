@@ -117,6 +117,17 @@ impl Service {
             )
             .await?;
         result["build"] = response.result["build"].clone();
+        // The compiler sees the cell unparsed (no comments, statements re-wrapped), so the lines in
+        // `run`'s `sites` count that text. `line_map[n - 1]` is the line of the cell you sent where
+        // line `n` of the compiler's text starts.
+        if let Some(map) = loom_check::rust_original_lines(&cell) {
+            let header = u32::from(wrapped);
+            result["line_map"] = json!(
+                map.iter()
+                    .map(|line| line.saturating_sub(header).max(1))
+                    .collect::<Vec<_>>()
+            );
+        }
         result["timings_ms"] = json!({
             "compile": u64::try_from(built.as_millis()).unwrap_or(u64::MAX),
             "run": u64::try_from(run_started.elapsed().as_millis()).unwrap_or(u64::MAX),
