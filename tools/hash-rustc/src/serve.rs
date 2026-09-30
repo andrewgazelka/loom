@@ -27,6 +27,7 @@ use std::os::unix::net::UnixStream;
 use std::process::ExitCode;
 
 unsafe extern "C" {
+    fn mkfifo(path: *const std::ffi::c_char, mode: u32) -> i32;
     fn dup(fd: i32) -> i32;
     fn dup2(from: i32, to: i32) -> i32;
     fn close(fd: i32) -> i32;
@@ -100,6 +101,101 @@ impl Capture {
     }
 }
 
+/// An lld started at the beginning of a request, so its startup (about 20 ms, mostly mapping
+/// `libLLVM.dylib`) overlaps the compile instead of following it. Its response file is a fifo, so it
+/// starts and then waits for its arguments; `loom-link`, which rustc runs as its linker
+/// (`-C linker=loom-link`, set by loom-build), writes the real arguments there and reads the result
+/// from `status`, `stdout` and `stderr` in `directory`. A request that never links (a compile error)
+/// releases the waiting lld with an empty response. Started only when the request's environment
+/// names an lld in `LOOM_LINK_ARM`; anything that goes wrong here means no arming, and `loom-link`
+/// then runs the real linker itself.
+/// `O_NONBLOCK`; the two platforms this runs on disagree on its value.
+#[cfg(target_os = "macos")]
+const O_NONBLOCK: i32 = 0x4;
+#[cfg(not(target_os = "macos"))]
+const O_NONBLOCK: i32 = 0x800;
+
+struct Armed {
+    directory: std::path::PathBuf,
+    waiter: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Armed {
+    fn start(lld: &str) -> Option<Self> {
+        use std::os::unix::{ffi::OsStrExt, fs::DirBuilderExt};
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let directory = std::env::temp_dir().join(format!(
+            "hash-rustc-link-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::DirBuilder::new().mode(0o700).create(&directory).ok()?;
+        let armed = |directory: &std::path::Path| -> Option<std::thread::JoinHandle<()>> {
+            let pipe = directory.join("args");
+            let c_pipe = std::ffi::CString::new(pipe.as_os_str().as_bytes()).ok()?;
+            // SAFETY: a valid NUL-terminated path.
+            if unsafe { mkfifo(c_pipe.as_ptr(), 0o600) } != 0 {
+                return None;
+            }
+            let mut child = std::process::Command::new(lld)
+                .args(["-flavor", "wasm"])
+                .arg(format!("@{}", pipe.display()))
+                .env_clear()
+                .stdin(std::process::Stdio::null())
+                .stdout(std::fs::File::create(directory.join("stdout")).ok()?)
+                .stderr(std::fs::File::create(directory.join("stderr")).ok()?)
+                .spawn()
+                .ok()?;
+            let status = directory.join("status");
+            Some(std::thread::spawn(move || {
+                let code = child.wait().ok().and_then(|status| status.code()).unwrap_or(-1);
+                let temporary = status.with_extension("tmp");
+                if std::fs::write(&temporary, format!("{code}\n")).is_ok() {
+                    let _ = std::fs::rename(&temporary, &status);
+                }
+            }))
+        };
+        match armed(&directory) {
+            Some(waiter) => Some(Self {
+                directory,
+                waiter: Some(waiter),
+            }),
+            None => {
+                let _ = std::fs::remove_dir_all(&directory);
+                None
+            }
+        }
+    }
+
+    /// Release an lld that was never used and remove the directory.
+    fn finish(mut self) {
+        use std::os::unix::fs::OpenOptionsExt;
+        let status = self.directory.join("status");
+        let pipe = self.directory.join("args");
+        let started = std::time::Instant::now();
+        while !status.exists() && started.elapsed() < std::time::Duration::from_millis(250) {
+            // Opening the fifo for writing and closing it again is an empty response file: lld
+            // reports that it has no input and exits. It fails while no reader has the pipe yet
+            // (lld still starting) and once the pipe was used (`loom-link` removes it).
+            if pipe.exists() {
+                let _ = std::fs::OpenOptions::new()
+                    .write(true)
+                    .custom_flags(O_NONBLOCK)
+                    .open(&pipe);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        if status.exists() {
+            if let Some(waiter) = self.waiter.take() {
+                let _ = waiter.join();
+            }
+        }
+        // A waiter still blocked is left to end with its lld; the directory goes either way.
+        let _ = std::fs::remove_dir_all(&self.directory);
+    }
+}
+
 fn handle(request: Request) -> Reply {
     if let Some(name) = request
         .env
@@ -144,7 +240,18 @@ fn handle(request: Request) -> Reply {
             return failed(error);
         }
     };
+    let armed = request
+        .env
+        .get("LOOM_LINK_ARM")
+        .and_then(|lld| Armed::start(lld));
+    if let Some(armed) = &armed {
+        // SAFETY: as above, requests are served one at a time.
+        unsafe { std::env::set_var("LOOM_LINK_DIR", &armed.directory) };
+    }
     let code = crate::compile(request.args);
+    if let Some(armed) = armed {
+        armed.finish();
+    }
     let stderr = err.finish();
     let stdout = out.finish();
     Reply {

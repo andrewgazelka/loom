@@ -475,6 +475,20 @@ impl Recipe {
         );
     }
 
+    /// Link through `loom-link` and let the compiler server keep an lld waiting (`linker.rs`).
+    /// The flavor is named because rustc no longer finds the linker's family from its own path.
+    pub(super) fn use_linker_front(&mut self, front: &super::linker::Front) {
+        self.arguments.extend([
+            "-C".to_owned(),
+            format!("linker={}", front.link.display()),
+            "-C".to_owned(),
+            "linker-flavor=wasm-ld".to_owned(),
+        ]);
+        let lld = front.lld.to_string_lossy().into_owned();
+        self.environment.insert("LOOM_LINK_ARM".into(), lld.clone());
+        self.environment.insert("LOOM_RUST_LLD".into(), lld);
+    }
+
     pub(super) fn shell(&self) -> String {
         fn quote(value: &str) -> String {
             format!("'{}'", value.replace('\'', "'\\''"))

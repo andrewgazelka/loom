@@ -64,6 +64,7 @@ fn rejected(error: impl std::fmt::Display) -> BuildError {
 }
 
 mod compile;
+mod linker;
 mod entry_abi;
 pub use entry_abi::WRAPPER_MARKER;
 mod recipe;

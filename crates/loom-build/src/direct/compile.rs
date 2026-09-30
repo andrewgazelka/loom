@@ -243,6 +243,9 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
             fs::create_dir_all(&root_incremental).await?;
             recipe.relocate(directory, &target.join("root-output"), &root_incremental)?;
             recipe.apply_profile(profile);
+            if !isolated && let Some(front) = super::linker::find(&toolchain.sysroot) {
+                recipe.use_linker_front(&front);
+            }
             recipe.compiler = driver.path.to_string_lossy().into_owned();
             recipe
                 .environment
