@@ -87,6 +87,8 @@ struct Inner {
     core_modules: Mutex<ModuleCache>,
     /// Results of isolated calls to pure callees; see `result_cache`.
     call_results: result_cache::ResultCache,
+    /// Identical pure isolated calls in flight, so they run once; see `isolated.rs`.
+    inflight: Mutex<HashMap<InflightKey, Arc<tokio::sync::OnceCell<Vec<u8>>>>>,
     /// Native ops guests may call; see `kernel`.
     kernels: kernel::Kernels,
     component_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
@@ -104,6 +106,8 @@ struct HandlerMeasurements {
     scope: String,
     samples: Vec<f64>,
 }
+/// Callee hash, entry, argument count, payload digest, kernel fingerprint.
+type InflightKey = (String, String, u32, [u8; 32], [u8; 32]);
 #[derive(Clone, Default)]
 struct EffectContext {
     root: Option<tokio::sync::mpsc::Sender<call::Request>>,
@@ -317,6 +321,7 @@ impl Runtime {
                     .create()?,
                 core_modules: Mutex::new(ModuleCache::default()),
                 call_results: result_cache::ResultCache::default(),
+                inflight: Mutex::new(HashMap::new()),
                 kernels: kernel::Kernels::default(),
                 component_locks: Mutex::new(HashMap::new()),
                 effect_locks: Mutex::new(HashMap::new()),

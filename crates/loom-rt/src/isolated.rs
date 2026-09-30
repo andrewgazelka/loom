@@ -100,6 +100,59 @@ impl Runtime {
         {
             return Ok(bytes);
         }
+        if !cacheable {
+            return self
+                .run_isolated(&hash, &request, scope, occurrence, effects, false, &kernels)
+                .await;
+        }
+        // Single flight: identical pure calls in flight at once run once. The first computes; the
+        // others wait on the same cell and take its bytes exactly as a cache hit would (no child
+        // trace of their own). A failed first run leaves the cell empty and the next waiter runs
+        // its own attempt.
+        let key = (
+            hash.clone(),
+            request.entry.to_owned(),
+            request.argc,
+            *blake3::hash(request.payload).as_bytes(),
+            kernels,
+        );
+        let cell = self
+            .inner
+            .inflight
+            .lock()
+            .expect("inflight poisoned")
+            .entry(key.clone())
+            .or_default()
+            .clone();
+        let result = cell
+            .get_or_try_init(|| {
+                self.run_isolated(&hash, &request, scope, occurrence, effects, true, &kernels)
+            })
+            .await
+            .cloned();
+        {
+            let mut inflight = self.inner.inflight.lock().expect("inflight poisoned");
+            if inflight.get(&key).is_some_and(|kept| Arc::ptr_eq(kept, &cell)) {
+                inflight.remove(&key);
+            }
+        }
+        result
+    }
+
+    /// Instantiate the callee and run it; store the result when `cacheable` and the call
+    /// did nothing but compute.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_isolated(
+        &self,
+        hash: &str,
+        request: &Request<'_>,
+        scope: &str,
+        occurrence: i64,
+        effects: &EffectContext,
+        cacheable: bool,
+        kernels: &[u8; 32],
+    ) -> Result<Vec<u8>, CallError> {
+        let entry = (!request.entry.is_empty()).then_some(request.entry);
         let child_scope = format!("{scope}/call:{occurrence}");
         let child = EffectContext {
             depth: effects.depth + 1,
@@ -109,7 +162,7 @@ impl Runtime {
         let kernel_failures = self.kernel_failures();
         let outcome = self
             .core_call_entry(
-                &hash,
+                hash,
                 entry,
                 request.argc,
                 request.payload,
@@ -126,7 +179,7 @@ impl Runtime {
         }
         let result = outcome
             .map(|call| call.output.bytes)
-            .map_err(|error| host_failure(&hash, error))?;
+            .map_err(|error| host_failure(hash, error))?;
         // Stored only when the call really did nothing but compute: the static row
         // can undercount, the trace cannot.
         // A kernel failure (denied, missing blob, I/O) is recorded nowhere else and depends on
@@ -140,11 +193,11 @@ impl Runtime {
                 .is_some_and(|trace| !trace.has_effects_under(&child_scope))
         {
             self.inner.call_results.put(
-                &hash,
+                hash,
                 request.entry,
                 request.argc,
                 request.payload,
-                &kernels,
+                kernels,
                 &result,
                 u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
             );

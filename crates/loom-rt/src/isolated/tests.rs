@@ -616,3 +616,41 @@ async fn a_cached_kernel_result_is_not_served_to_a_caller_that_may_not_use_kerne
     assert!(outcome.is_err() || outcome.as_ref().is_ok_and(|bytes| *bytes != reference), "{outcome:?}");
     Ok(())
 }
+
+struct SlowCbor7(std::sync::atomic::AtomicU64);
+impl crate::HostKernel for SlowCbor7 {
+    fn family(&self) -> &str {
+        "test"
+    }
+    fn version(&self) -> u32 {
+        1
+    }
+    fn ops(&self) -> &[&'static str] {
+        &["cbor7"]
+    }
+    fn call(&self, _: &crate::KernelContext<'_>, _: &str, _: &[&[u8]]) -> Result<Vec<u8>, String> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::thread::sleep(Duration::from_millis(400));
+        Ok(vec![0x07])
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn identical_pure_calls_in_flight_at_once_run_the_callee_once() -> Result<()> {
+    let store = Store::memory()?;
+    let hash = register(&store, &kernel_module(5)?, &[("main", 0)], &["kernel"])?;
+    let runtime = Runtime::new(store)?;
+    let kernel = Arc::new(SlowCbor7(Default::default()));
+    runtime.register_kernel(kernel.clone())?;
+    let effects = traced();
+    let calls = (0..5).map(|i| call_main(&runtime, &hash, &[0x80], i, &effects));
+    let results = futures::future::join_all(calls).await;
+    assert!(results.iter().all(|result| result.as_ref().is_ok_and(|bytes| bytes == results[0].as_ref().unwrap())), "{results:?}");
+    assert_eq!(
+        kernel.0.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "five identical concurrent calls ran the kernel once"
+    );
+    assert!(runtime.inner.inflight.lock().unwrap().is_empty(), "the in-flight table drains");
+    Ok(())
+}
