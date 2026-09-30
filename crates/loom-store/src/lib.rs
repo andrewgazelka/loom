@@ -3,6 +3,7 @@ mod blobs;
 mod files;
 mod guest_cas;
 pub use guest_cas::CAS_GUEST_MAX_BYTES;
+mod actions;
 mod bundle;
 mod cas_browser;
 mod compiled;

@@ -33,3 +33,4 @@ CREATE TABLE IF NOT EXISTS update_sessions(id TEXT PRIMARY KEY,revision INTEGER 
 
 CREATE TABLE IF NOT EXISTS formatted_sources(source_hash TEXT PRIMARY KEY REFERENCES cas(hash),formatted_hash TEXT NOT NULL REFERENCES cas(hash));
 CREATE TABLE IF NOT EXISTS compiled_sources(component_hash TEXT PRIMARY KEY REFERENCES cas(hash),compiled_hash TEXT NOT NULL REFERENCES cas(hash));
+CREATE TABLE IF NOT EXISTS action_results(action_key TEXT PRIMARY KEY,result_hash TEXT NOT NULL REFERENCES cas(hash),created_at INTEGER NOT NULL);

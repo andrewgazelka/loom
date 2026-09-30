@@ -14,6 +14,11 @@ pub struct ProcessSandbox {
     pub readonly: Vec<PathBuf>,
     #[serde(default)]
     pub network: bool,
+    /// Darwin only: allow reading sysctl values (hardware and kernel facts). Runtimes such as
+    /// Rust's std need it at start-up. Off for actors; hermetic actions turn it on, which makes a
+    /// tool able to see this machine's facts, so their keys carry the platform.
+    #[serde(default)]
+    pub sysctl_read: bool,
 }
 
 struct Validated {
@@ -160,6 +165,9 @@ impl ProcessSandbox {
             );
             if self.network {
                 profile.push_str("(allow network*)\n");
+            }
+            if self.sysctl_read {
+                profile.push_str("(allow sysctl-read)\n");
             }
             let mut parameters = vec!["-D".to_owned(), format!("ROOT={}", utf8(&validated.root)?)];
             for (index, path) in validated.readonly.iter().enumerate() {
@@ -340,6 +348,7 @@ mod tests {
         let policy = ProcessSandbox {
             readonly: vec![runtime],
             network: false,
+            sysctl_read: false,
         };
         let supervisor = Supervisor::new(Store::memory()?)?;
         let mut session = supervisor.start_sandboxed_session(spec, &policy).await?;

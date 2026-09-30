@@ -49,7 +49,7 @@ impl Fixture {
                 }
             }
         }
-        let sandbox = ProcessSandbox { readonly, network: false };
+        let sandbox = ProcessSandbox { readonly, network: false, sysctl_read: false };
         let spec = ProcessSpec {
             machine: "test".into(),
             program: program.to_str().unwrap().into(),
