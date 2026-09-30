@@ -15,10 +15,13 @@
 //!   writer keeps it and retries it ahead of the next batch, because a result that
 //!   was cleared on purpose must not come back after a restart.
 //! * **Rows belong to one host build.** Each row carries the host identity of the
-//!   runtime that wrote it and a BLAKE3 checksum of its value. Load deletes the
-//!   rows of any other identity before ranking (they could never be hit, and must
-//!   not crowd out fresh ones) and the rows whose value does not match its
-//!   checksum.
+//!   runtime that wrote it and a BLAKE3 checksum of its value. Load reads only the
+//!   rows of this identity (the key holds the identity, so a row of another build is
+//!   never hit) and deletes those whose value does not match its checksum. Rows of
+//!   another identity are left alone, because another process (a CLI or a second
+//!   daemon of another build) may share this directory and still use them; they are
+//!   trimmed, lowest priority first, only when the file as a whole would exceed the
+//!   byte cap.
 //! * **Batched hits.** Hit bumps are summed in the writer and written in one
 //!   transaction per 1000 bumps or 5 seconds, whichever comes first. Stores and
 //!   deletes share the transaction of the batch they arrive in.
@@ -31,10 +34,10 @@
 //!   128 MiB and keeps `get` free of disk reads; a lazy `OnDisk` entry would save
 //!   start-up time at the price of a second entry state on the hit path.
 //! * **Never fatal.** A file that is corrupt (SQLite says corrupt or not a
-//!   database) or of another format version is deleted and replaced by an empty
-//!   one, with one warning on stderr. Any other failure (locked, permissions, disk
-//!   full, I/O) leaves the file alone, since another runtime may have it open, and
-//!   the cache runs without persistence.
+//!   database) or of an older format version is deleted and replaced by an empty
+//!   one, with one warning on stderr. A file of a newer format version is another
+//!   build's, in use or about to be: it is left alone, like any other failure
+//!   (locked, permissions, disk full, I/O), and the cache runs without persistence.
 use anyhow::{Context, Result};
 use rusqlite::{Connection, Transaction, params};
 use std::{
@@ -43,7 +46,7 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, AtomicUsize, Ordering},
-        mpsc::{self, RecvTimeoutError, SyncSender},
+        mpsc::{self, RecvTimeoutError, SyncSender, TrySendError},
     },
     thread,
     time::{Duration, Instant},
@@ -55,8 +58,8 @@ pub(super) type Digest = [u8; 32];
 pub(super) const MAX_VALUE_BYTES: usize = 1 << 20;
 
 const FILE: &str = "cache.db";
-/// Stored in `PRAGMA user_version`. A different value means an older or newer
-/// layout, and the file is replaced.
+/// Stored in `PRAGMA user_version`. An older value means an older layout, and the file is
+/// replaced; a newer one belongs to a newer build, and the file is left alone.
 const FORMAT_VERSION: i64 = 2;
 /// Messages waiting for the writer before new ones are dropped.
 const QUEUE: usize = 4096;
@@ -198,7 +201,12 @@ pub(super) fn open(
             return None;
         }
     };
-    let entries = Arc::new(AtomicU64::new(loaded.len() as u64));
+    let rows = connection
+        .query_row("SELECT count(*) FROM results", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map_or(loaded.len() as u64, |count| count.max(0) as u64);
+    let entries = Arc::new(AtomicU64::new(rows));
     let budget = Arc::new(ByteBudget::new(MAX_QUEUED_BYTES));
     let (tx, rx) = mpsc::sync_channel(QUEUE);
     let (done_tx, done_rx) = mpsc::channel();
@@ -256,12 +264,15 @@ impl std::fmt::Display for FormatMismatch {
 
 impl std::error::Error for FormatMismatch {}
 
-/// Whether `error` says the file itself is bad (another format, or SQLite's
-/// corrupt and not-a-database codes) and replacing it is the cure. Anything else
+/// Whether `error` says the file itself is bad (an older format, or SQLite's
+/// corrupt and not-a-database codes) and replacing it is the cure. A newer format is
+/// not: its writer is a newer build that may be using the file. Anything else
 /// may be a condition of the moment, or a file someone else is using.
 pub(super) fn is_corrupt(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
-        cause.is::<FormatMismatch>()
+        cause
+            .downcast_ref::<FormatMismatch>()
+            .is_some_and(|mismatch| mismatch.found < FORMAT_VERSION)
             || matches!(
                 cause.downcast_ref::<rusqlite::Error>(),
                 Some(rusqlite::Error::SqliteFailure(failure, _))
@@ -339,14 +350,12 @@ fn try_open(path: &Path, max_bytes: usize, identity: &Digest) -> Result<(Connect
     Ok((connection, loaded))
 }
 
-/// Delete the rows of any other host identity, then read back the rows worth most
-/// per byte until `max_bytes` is used, and delete the rest (rows that no longer
-/// fit, rows over the value limit, rows whose size or checksum disagrees with their
-/// value). Metadata is read first so values are read only for the rows kept.
+/// Read back this identity's rows worth most per byte until `max_bytes` is used, and delete its
+/// other rows (those that no longer fit, rows over the value limit, rows whose size or checksum
+/// disagrees with their value). Metadata is read first so values are read only for the rows kept.
+/// Rows of other identities are not read and not deleted, unless keeping them would take the
+/// file past `max_bytes` in all: then the ones worth least per byte go first.
 fn load(connection: &mut Connection, max_bytes: usize, identity: &Digest) -> Result<Vec<Loaded>> {
-    // Before ranking: rows no build like this one can hit must not take a place
-    // from rows it can.
-    let foreign = connection.execute("DELETE FROM results WHERE identity != ?", [&identity[..]])?;
     struct Meta {
         key: Vec<u8>,
         callee: String,
@@ -356,10 +365,10 @@ fn load(connection: &mut Connection, max_bytes: usize, identity: &Digest) -> Res
     }
     let metas: Vec<Meta> = connection
         .prepare(
-            "SELECT key, callee, size, cost_ns, hits FROM results
+            "SELECT key, callee, size, cost_ns, hits FROM results WHERE identity = ?
              ORDER BY CAST(hits AS REAL) * cost_ns / MAX(size, 1) DESC",
         )?
-        .query_map([], |row| {
+        .query_map([&identity[..]], |row| {
             Ok(Meta {
                 key: row.get(0)?,
                 callee: row.get(1)?,
@@ -398,7 +407,33 @@ fn load(connection: &mut Connection, max_bytes: usize, identity: &Digest) -> Res
             });
         }
     }
-    if !doomed.is_empty() || foreign > 0 {
+    // Other identities' rows: only the excess over the cap, worst first.
+    let foreign_bytes: i64 = connection.query_row(
+        "SELECT COALESCE(SUM(size), 0) FROM results WHERE identity != ?",
+        [&identity[..]],
+        |row| row.get(0),
+    )?;
+    let mut excess = i64::try_from(used)
+        .unwrap_or(i64::MAX)
+        .saturating_add(foreign_bytes)
+        .saturating_sub(i64::try_from(max_bytes).unwrap_or(i64::MAX));
+    if excess > 0 {
+        let worst_first: Vec<(Vec<u8>, i64)> = connection
+            .prepare(
+                "SELECT key, size FROM results WHERE identity != ?
+                 ORDER BY CAST(hits AS REAL) * cost_ns / MAX(size, 1) ASC",
+            )?
+            .query_map([&identity[..]], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (key, size) in worst_first {
+            if excess <= 0 {
+                break;
+            }
+            excess -= size.max(0);
+            doomed.push(key);
+        }
+    }
+    if !doomed.is_empty() {
         let tx = connection.transaction()?;
         {
             let mut delete = tx.prepare("DELETE FROM results WHERE key = ?")?;
@@ -472,10 +507,27 @@ impl Drop for Persistence {
         let Some((handle, done)) = writer else {
             return;
         };
-        if self.tx.send(Msg::Shutdown).is_err() {
-            return;
+        // The wait is one budget for queueing the shutdown and for the writer to finish: a full
+        // queue behind a stuck writer must not hold the dropping thread for ever.
+        let deadline = Instant::now() + SHUTDOWN_WAIT;
+        let mut shutdown = Msg::Shutdown;
+        loop {
+            match self.tx.try_send(shutdown) {
+                Ok(()) => break,
+                Err(TrySendError::Disconnected(_)) => return,
+                Err(TrySendError::Full(back)) => {
+                    if Instant::now() >= deadline {
+                        eprintln!(
+                            "loom: result cache writer queue stayed full for {SHUTDOWN_WAIT:?}; detaching it"
+                        );
+                        return;
+                    }
+                    shutdown = back;
+                    thread::sleep(Duration::from_millis(5));
+                }
+            }
         }
-        match done.recv_timeout(SHUTDOWN_WAIT) {
+        match done.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
             Ok(()) => {
                 let _ = handle.join();
             }

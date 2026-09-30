@@ -969,9 +969,19 @@ async fn a_clean_failure_is_shared_with_the_callers_already_waiting_and_a_later_
     let calls = (0..5).map(|i| call_main(&runtime, &hash, &[0x80], i, &effects));
     let results = futures::future::join_all(calls).await;
     assert!(results.iter().all(|result| result.is_err()), "{results:?}");
+    // The waiters were given the callee's trap without the leader's trace scope.
+    let waiters: Vec<_> = results[1..]
+        .iter()
+        .map(|result| result.as_ref().unwrap_err())
+        .collect();
     assert!(
-        results.iter().all(|result| *result == results[0]),
-        "{results:?}"
+        waiters.iter().all(|error| *error == waiters[0]),
+        "{waiters:?}"
+    );
+    assert!(
+        matches!(waiters[0], CallError::Trapped { message, .. } if !message.contains("root/call:")),
+        "{:?}",
+        waiters[0]
     );
     assert_eq!(
         ran(),
@@ -1083,8 +1093,54 @@ async fn one_slow_call_in_a_batch_does_not_hold_up_the_calls_after_it() -> Resul
     Ok(())
 }
 
+#[test]
+fn results_are_charged_to_the_budget_in_request_order_so_the_same_calls_fail_every_time() {
+    let frame = Request {
+        target: Target::Hash([3; 32]),
+        entry: "main",
+        argc: 0,
+        payload: &[0x80],
+    }
+    .encode();
+    let frames: Vec<&[u8]> = vec![frame.as_slice(); 6];
+    let cost = 10 + RESPONSE_FRAME_OVERHEAD;
+    let outcomes = || -> Vec<Result<Vec<u8>, CallError>> {
+        vec![
+            Ok(vec![0; 10]),
+            Err(CallError::Decode {
+                message: "x".into(),
+            }),
+            Ok(vec![0; 10]),
+            Ok(vec![0; 10]),
+            Ok(vec![0; 1]),
+            Ok(vec![0; 10]),
+        ]
+    };
+    // Room for two results: the third Ok and everything after it is dropped, small ones too, and
+    // the failed call keeps its own error and costs nothing.
+    let mut charged = outcomes();
+    charge_in_order(&frames, &mut charged, 2 * cost);
+    assert!(charged[0].is_ok() && charged[2].is_ok());
+    assert!(matches!(&charged[1], Err(CallError::Decode { .. })));
+    for index in [3, 4, 5] {
+        assert!(
+            matches!(&charged[index], Err(CallError::Trapped { message, .. }) if message.contains("dropped")),
+            "{index}: {:?}",
+            charged[index]
+        );
+    }
+    // The same results give the same outcome.
+    let mut again = outcomes();
+    charge_in_order(&frames, &mut again, 2 * cost);
+    assert_eq!(charged, again);
+    // With room for all, nothing changes.
+    let mut roomy = outcomes();
+    charge_in_order(&frames, &mut roomy, 100 * cost);
+    assert_eq!(roomy, outcomes());
+}
+
 #[tokio::test]
-async fn a_batch_past_its_byte_budget_turns_the_rest_into_per_call_errors() -> Result<()> {
+async fn a_batch_that_holds_too_many_result_bytes_does_not_start_more_calls() -> Result<()> {
     let store = Store::memory()?;
     let pure = register(&store, &constant_module(7)?, &[("main", 0)], &[])?;
     let runtime = Runtime::new(store)?;
@@ -1096,41 +1152,139 @@ async fn a_batch_past_its_byte_budget_turns_the_rest_into_per_call_errors() -> R
         payload: &[0x80],
     }
     .encode();
-    let samples = || runtime.isolated_call_round_trip_us()["samples"].clone();
-
-    // Budget already spent: the call is not run at all.
-    let spent = AtomicUsize::new(BATCH_RESPONSE_BYTES);
+    let held = AtomicUsize::new(BATCH_HOLD_BYTES);
     let refused = runtime
-        .batch_element(&frame, "root", 0, &effects, &spent)
+        .batch_element(&frame, "root", 0, &effects, &held)
         .await;
     assert!(
         matches!(&refused, Err(CallError::Trapped { message, .. }) if message.contains("not run")),
         "{refused:?}"
     );
-    assert_eq!(samples(), json!(0));
-
-    // Room for less than its result: it runs and the result is dropped.
-    let spent = AtomicUsize::new(BATCH_RESPONSE_BYTES - 3);
-    let dropped = runtime
-        .batch_element(&frame, "root", 1, &effects, &spent)
-        .await;
-    assert!(
-        matches!(&dropped, Err(CallError::Trapped { message, .. }) if message.contains("dropped")),
-        "{dropped:?}"
-    );
-    assert_eq!(samples(), json!(1));
-
-    // With room it is returned and charged its response frame (tag byte, length prefix, bytes).
-    let spent = AtomicUsize::new(0);
+    assert_eq!(runtime.isolated_call_round_trip_us()["samples"], json!(0));
+    let held = AtomicUsize::new(0);
     let bytes = runtime
-        .batch_element(&frame, "root", 2, &effects, &spent)
+        .batch_element(&frame, "root", 1, &effects, &held)
         .await
         .unwrap();
-    assert_eq!(
-        spent.load(std::sync::atomic::Ordering::Relaxed),
-        bytes.len() + 5
-    );
+    assert_eq!(held.load(std::sync::atomic::Ordering::Relaxed), bytes.len());
     Ok(())
+}
+
+/// A kernel that records a depth refusal on its runtime while the callee runs, as a call below
+/// the callee would have when it reached the depth limit.
+struct RefusesDepth(Mutex<Option<Runtime>>);
+impl crate::HostKernel for RefusesDepth {
+    fn family(&self) -> &str {
+        "test"
+    }
+    fn version(&self) -> u32 {
+        1
+    }
+    fn ops(&self) -> &[&'static str] {
+        &["cbor7"]
+    }
+    fn call(&self, _: &crate::KernelContext<'_>, _: &str, _: &[&[u8]]) -> Result<Vec<u8>, String> {
+        if let Some(runtime) = self.0.lock().unwrap().as_ref() {
+            runtime
+                .inner
+                .depth_refusals
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(vec![0x07])
+    }
+}
+
+#[tokio::test]
+async fn a_run_during_which_a_call_was_refused_for_depth_is_not_clean_and_is_not_stored()
+-> Result<()> {
+    let store = Store::memory()?;
+    let hash = register(&store, &kernel_module(33)?, &[("main", 0)], &["kernel"])?;
+    let runtime = Runtime::new(store)?;
+    let kernel = Arc::new(RefusesDepth(Mutex::new(None)));
+    runtime.register_kernel(kernel.clone())?;
+    let effects = traced();
+    let kernels = runtime.kernel_fingerprint();
+    let request = Request {
+        target: Target::Hash(loom_proto::isolated::parse_digest(&hash).unwrap()),
+        entry: "main",
+        argc: 0,
+        payload: &[0x80],
+    };
+    // The control: nothing was refused, so the run is clean and stored.
+    let ran = runtime
+        .run_isolated(&hash, &request, "root", 0, &effects, true, &kernels)
+        .await;
+    assert!(ran.result.is_ok() && ran.clean);
+    assert_eq!(runtime.call_result_stats().stores, 1);
+    runtime.clear_call_results(None);
+    // With a refusal inside the window the same run is neither clean nor stored.
+    *kernel.0.lock().unwrap() = Some(runtime.clone());
+    let ran = runtime
+        .run_isolated(&hash, &request, "root", 1, &effects, true, &kernels)
+        .await;
+    assert!(ran.result.is_ok());
+    assert!(!ran.clean, "a depth refusal during the run went unnoticed");
+    assert_eq!(runtime.call_result_stats().stores, 1, "no new entry");
+    // And the refusal itself is counted where it happens.
+    let before = runtime
+        .inner
+        .depth_refusals
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let deep = EffectContext {
+        depth: MAX_DEPTH,
+        ..traced()
+    };
+    call_main(&runtime, &hash, &[0x80], 2, &deep)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        runtime
+            .inner
+            .depth_refusals
+            .load(std::sync::atomic::Ordering::Relaxed),
+        before + 1
+    );
+    *kernel.0.lock().unwrap() = None;
+    Ok(())
+}
+
+#[test]
+fn only_a_callees_own_deterministic_failures_are_shared_with_waiters() {
+    let hash = "ab".repeat(32);
+    let host =
+        |message: &str| anyhow::anyhow!("{message}").context("shared execution call:x/call:0");
+    for error in [
+        host("shared execution deadline exceeded"),
+        host("shared execution cancelled"),
+        host("artifact missing"),
+        anyhow::Error::new(GuestFailure::new("wasm trap: interrupt")),
+        anyhow::Error::new(CallError::DepthExceeded { depth: 64 }),
+        anyhow::Error::new(CallError::Trapped {
+            hash: hash.clone(),
+            message: "from a nested call, with its scope call:y/call:1".into(),
+        }),
+    ] {
+        assert_eq!(shareable_failure(&hash, &error), None, "{error:#}");
+    }
+    let trap = anyhow::Error::new(GuestFailure::new("wasm trap: unreachable"))
+        .context("shared execution call:x/call:0");
+    assert_eq!(
+        shareable_failure(&hash, &trap),
+        Some(CallError::Trapped {
+            hash: hash.clone(),
+            message: "wasm trap: unreachable".into(),
+        }),
+        "the host's context (the leader's scope) is not shared"
+    );
+    let decode = anyhow::Error::new(CallError::Decode {
+        message: "bad".into(),
+    });
+    assert!(shareable_failure(&hash, &decode).is_some());
+    let missing = anyhow::Error::new(DefinitionNotFound { hash: hash.clone() });
+    assert_eq!(
+        shareable_failure(&hash, &missing),
+        Some(CallError::NotFound { hash })
+    );
 }
 
 /// `main` yields `length` bytes from address 1200 and returns the yield code as its CBOR value.

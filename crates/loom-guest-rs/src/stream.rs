@@ -36,14 +36,16 @@ pub enum StreamError {
 
 impl std::fmt::Display for StreamError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Cancelled => "the consumer of this stream is gone",
-            Self::NotStreaming => "this execution was not started as a stream",
-            Self::Denied => "the yield effect is not allowed here",
-            Self::Encode => "the value could not be encoded",
-            Self::TooLarge => "the value is larger than one stream item may be",
-            Self::Unknown(_) => "the host answered the yield with an unknown code",
-        })
+        match self {
+            Self::Cancelled => f.write_str("the consumer of this stream is gone"),
+            Self::NotStreaming => f.write_str("this execution was not started as a stream"),
+            Self::Denied => f.write_str("the yield effect is not allowed here"),
+            Self::Encode => f.write_str("the value could not be encoded"),
+            Self::TooLarge => f.write_str("the value is larger than one stream item may be"),
+            Self::Unknown(code) => {
+                write!(f, "the host answered the yield with an unknown code {code}")
+            }
+        }
     }
 }
 impl std::error::Error for StreamError {}
@@ -52,4 +54,15 @@ impl std::error::Error for StreamError {}
 pub fn emit<T: Serialize>(value: &T) -> Result<(), StreamError> {
     let bytes = loom_proto::isolated::encode_payload(value).map_err(|_| StreamError::Encode)?;
     crate::core::yield_value(&bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unknown_yield_code_is_named_in_the_message() {
+        assert!(StreamError::Unknown(9).to_string().contains('9'));
+        assert_ne!(StreamError::Unknown(9), StreamError::Denied);
+    }
 }

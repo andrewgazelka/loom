@@ -186,8 +186,9 @@ pub fn call<F: Invocation>(def: Def<F>, args: F::Args) -> Result<F::Output, Call
 ///
 /// Anything that goes wrong with one call is that element's `Err`, at its position, and does not
 /// stop the others: a callee failure, an argument that fails to encode (`CallError::Decode`), and
-/// a result the batch has no room left for (the host returns at most 64 MiB of results per batch;
-/// the calls past it report `CallError::Trapped` and which ones depends on completion order).
+/// a result the batch has no room left for (the host returns at most 64 MiB of results per batch,
+/// counted in argument order: the first result that does not fit and every later one report
+/// `CallError::Trapped`).
 /// The outer `Err` is only for a batch the host could not answer at all. More than
 /// [`MAX_BATCH`] elements go to the host in consecutive batches of that size, so they are
 /// concurrent within a batch, not across batches.

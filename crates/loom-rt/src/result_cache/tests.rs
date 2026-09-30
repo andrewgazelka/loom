@@ -373,17 +373,49 @@ fn a_corrupt_file_is_replaced_and_the_cache_starts_empty() {
 }
 
 #[test]
-fn a_file_of_another_format_version_is_replaced() {
+fn a_file_of_an_older_format_version_is_replaced_and_a_newer_one_is_left_alone() {
+    let set_version = |dir: &tempfile::TempDir, version: i64| {
+        let db = rusqlite::Connection::open(dir.path().join("cache.db")).unwrap();
+        db.execute_batch(&format!("PRAGMA user_version={version}"))
+            .unwrap();
+    };
     let dir = tempfile::tempdir().unwrap();
     let cache = reopen(&dir, MAX_BYTES);
     cache.put("f", "main", 0, b"a", &K, b"1", MS);
     drop(cache);
-    let db = rusqlite::Connection::open(dir.path().join("cache.db")).unwrap();
-    db.execute_batch("PRAGMA user_version=99").unwrap();
-    drop(db);
+    set_version(&dir, 1);
     let again = reopen(&dir, MAX_BYTES);
     assert_eq!(again.stats().loaded_at_start, 0);
     assert!(again.get("f", "main", 0, b"a", &K).is_none());
+    drop(again);
+    assert_eq!(
+        rows_in_file(&dir),
+        0,
+        "the older file was replaced by an empty one"
+    );
+
+    // A newer build's file is not ours to delete: this build runs without persistence and the
+    // rows stay for the build that wrote them.
+    let dir = tempfile::tempdir().unwrap();
+    let cache = reopen(&dir, MAX_BYTES);
+    cache.put("f", "main", 0, b"a", &K, b"1", MS);
+    drop(cache);
+    set_version(&dir, 99);
+    let older_build = reopen(&dir, MAX_BYTES);
+    assert_eq!(older_build.stats().loaded_at_start, 0);
+    older_build.put("g", "main", 0, b"a", &K, b"2", MS);
+    assert_eq!(
+        older_build.get("g", "main", 0, b"a", &K).unwrap(),
+        b"2",
+        "memory still works"
+    );
+    drop(older_build);
+    assert_eq!(rows_in_file(&dir), 1, "the newer file still holds its row");
+    let version: i64 = rusqlite::Connection::open(dir.path().join("cache.db"))
+        .unwrap()
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 99);
 }
 
 #[test]
@@ -469,7 +501,7 @@ fn rows_in_file(dir: &tempfile::TempDir) -> i64 {
 }
 
 #[test]
-fn another_host_identity_is_another_key_and_its_rows_are_dropped_at_load() {
+fn another_host_identity_is_another_key_and_its_rows_are_kept_at_load() {
     let (a, b) = ([1u8; 32], [2u8; 32]);
     assert_ne!(
         key(&a, "f", "main", 0, b"x", &K).digest,
@@ -490,8 +522,36 @@ fn another_host_identity_is_another_key_and_its_rows_are_dropped_at_load() {
     drop(other);
     assert_eq!(
         rows_in_file(&dir),
-        0,
-        "the other build's row was deleted at load"
+        1,
+        "the other build's row is not ours to delete"
+    );
+    let back = ResultCache::persistent_as(MAX_BYTES, dir.path(), a);
+    assert_eq!(
+        back.get("f", "main", 0, b"x", &K).unwrap(),
+        b"42",
+        "and its own build still hits it"
+    );
+}
+
+#[test]
+fn another_identitys_rows_are_trimmed_only_past_the_byte_cap_and_the_worst_go_first() {
+    let (a, b) = ([1u8; 32], [2u8; 32]);
+    let dir = tempfile::tempdir().unwrap();
+    let first = ResultCache::persistent_as(MAX_BYTES, dir.path(), a);
+    // Three 2-byte rows, the middle one worth the most per byte.
+    first.put("cheap", "main", 0, b"x", &K, b"aa", MS);
+    first.put("dear", "main", 0, b"x", &K, b"bb", 100 * MS);
+    first.put("cheap2", "main", 0, b"x", &K, b"cc", MS);
+    drop(first);
+    assert_eq!(rows_in_file(&dir), 3);
+    // Room for 4 bytes in all: two of the three rows stay, and `dear` is one of them.
+    let other = ResultCache::persistent_as(4, dir.path(), b);
+    drop(other);
+    assert_eq!(rows_in_file(&dir), 2);
+    let back = ResultCache::persistent_as(MAX_BYTES, dir.path(), a);
+    assert!(
+        back.get("dear", "main", 0, b"x", &K).is_some(),
+        "the worst rows went first"
     );
 }
 

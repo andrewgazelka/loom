@@ -95,6 +95,9 @@ struct Inner {
     /// Extra concurrent lanes all batches together may use beyond their first; see
     /// `Runtime::isolated_batch` for why a batch never waits for one.
     batch_lanes: Arc<tokio::sync::Semaphore>,
+    /// Isolated calls refused for depth, ever. A result computed while one happened may hold
+    /// a depth-dependent value, so it is not clean; see `isolated.rs`.
+    depth_refusals: AtomicU64,
     /// Native ops guests may call; see `kernel`.
     kernels: kernel::Kernels,
     component_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
@@ -338,6 +341,7 @@ impl Runtime {
                 batch_lanes: Arc::new(tokio::sync::Semaphore::new(
                     4 * std::thread::available_parallelism().map_or(4, |n| n.get()),
                 )),
+                depth_refusals: AtomicU64::new(0),
                 kernels: kernel::Kernels::default(),
                 component_locks: Mutex::new(HashMap::new()),
                 effect_locks: Mutex::new(HashMap::new()),

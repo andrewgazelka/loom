@@ -14,16 +14,80 @@ use std::sync::atomic::AtomicUsize;
 /// whole execution.
 pub(crate) const BATCH_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 
+/// Result bytes a batch may hold before calls not yet started are refused: a memory backstop,
+/// four responses' worth. Below it, the response budget is charged deterministically.
+pub(crate) const BATCH_HOLD_BYTES: usize = 4 * BATCH_RESPONSE_BYTES;
+
+/// Bytes a response frame adds to a result: a tag byte and a length prefix.
+const RESPONSE_FRAME_OVERHEAD: usize = 5;
+
+fn over_budget(request: &Request<'_>, what: &str) -> CallError {
+    CallError::Trapped {
+        hash: request.target.label(),
+        message: format!("the batch's results exceed {BATCH_RESPONSE_BYTES} bytes: {what}"),
+    }
+}
+
+/// Charge the batch's results against `budget` in request order: the first `Ok` that would take
+/// the total past it, and every `Ok` after it, is replaced by an `Err` for its own position. A
+/// failed call costs nothing. The outcome depends on the results alone, so a replay sees the same
+/// calls fail.
+fn charge_in_order(frames: &[&[u8]], outcomes: &mut [Result<Vec<u8>, CallError>], budget: usize) {
+    let mut total = 0usize;
+    let mut exhausted = false;
+    for (frame, outcome) in frames.iter().zip(outcomes.iter_mut()) {
+        let Ok(bytes) = outcome else {
+            continue;
+        };
+        total = total.saturating_add(bytes.len() + RESPONSE_FRAME_OVERHEAD);
+        exhausted |= total > budget;
+        if exhausted && let Ok(request) = Request::parse(frame) {
+            *outcome = Err(over_budget(&request, "this result was dropped"));
+        }
+    }
+}
+
 /// One identical pure call in flight. The callers that joined it (subscribed while it ran) wait on
 /// it; the leader publishes its outcome into it, or drops it and leaves them with nothing.
 pub(crate) type Flight = tokio::sync::watch::Sender<Option<Result<Vec<u8>, CallError>>>;
 
-/// A run of a callee, and whether it was clean: it recorded no effect under its scope and no
-/// kernel failed while it ran, so its outcome depends on its inputs alone. Only a clean outcome is
-/// cached or handed to other callers.
+/// A run of a callee, and whether it was clean: it recorded no effect under its scope, no kernel
+/// failed and no call was refused for depth while it ran, so its outcome depends on its inputs
+/// alone. Only a clean outcome is cached or handed to other callers.
 struct Ran {
     result: Result<Vec<u8>, CallError>,
     clean: bool,
+    /// For a failed run: the failure as other callers may be given it, or `None` when it must
+    /// not be shared (see [`shareable_failure`]).
+    shareable: Option<CallError>,
+}
+
+/// The failure of a run as a caller that only waited for it may be given: the callee's own
+/// deterministic failures (a decode or arity error, a missing definition, a trap in its own
+/// code), with no text from the run that produced it. Host-side failures (an execution deadline,
+/// cancellation, a missing or unbuildable artifact, an I/O error) belong to the leader's moment
+/// and its scope, so they are not shared and each waiter makes its own attempt. A trap is shared
+/// as the guest's own message, without the context the host adds (the leader's trace scope).
+fn shareable_failure(hash: &str, error: &anyhow::Error) -> Option<CallError> {
+    if let Some(error) = error.downcast_ref::<CallError>() {
+        return matches!(
+            error,
+            CallError::Decode { .. } | CallError::Arity { .. } | CallError::NotFound { .. }
+        )
+        .then(|| error.clone());
+    }
+    if let Some(missing) = error.downcast_ref::<DefinitionNotFound>() {
+        return Some(CallError::NotFound {
+            hash: missing.hash.clone(),
+        });
+    }
+    // A wasm trap is a `GuestFailure`, and so is the interrupt the host raises for a deadline or a
+    // cancellation, which is the leader's moment and not the callee's behaviour.
+    let guest = error.downcast_ref::<GuestFailure>()?;
+    (!guest.message.contains("interrupt")).then(|| CallError::Trapped {
+        hash: hash.into(),
+        message: guest.message.clone(),
+    })
 }
 
 /// The caller that runs a single-flight call. It owns the in-flight entry: the entry is removed
@@ -131,6 +195,7 @@ impl Runtime {
             });
         }
         if effects.depth >= MAX_DEPTH {
+            self.inner.depth_refusals.fetch_add(1, Ordering::Relaxed);
             return Err(CallError::DepthExceeded {
                 depth: effects.depth,
             });
@@ -165,8 +230,9 @@ impl Runtime {
         // would (no child trace of their own), but only a clean one: a run that recorded an effect
         // or saw a kernel failure is not evidence for anyone else (a waiter's policy may differ,
         // and its trace must hold its own record), so each waiter then runs its own attempt. A
-        // clean failure is shared with the waiters that joined before it, instead of being retried
-        // serially by each; the next separate request starts afresh.
+        // deterministic failure of the callee is shared with the waiters that joined before it,
+        // instead of being retried serially by each (a failure of the host, such as a deadline, is
+        // not: see `shareable_failure`); the next separate request starts afresh.
         let key = (
             hash.clone(),
             request.entry.to_owned(),
@@ -210,9 +276,12 @@ impl Runtime {
                 let ran = self
                     .run_isolated(&hash, &request, scope, occurrence, effects, true, &kernels)
                     .await;
-                // A depth refusal depends on where the caller sits, not on the call.
-                if ran.clean && !matches!(ran.result, Err(CallError::DepthExceeded { .. })) {
-                    leader.publish(&ran.result);
+                if ran.clean {
+                    match (&ran.result, ran.shareable) {
+                        (Ok(_), _) => leader.publish(&ran.result),
+                        (Err(_), Some(failure)) => leader.publish(&Err(failure)),
+                        (Err(_), None) => {}
+                    }
                 }
                 ran.result
             }
@@ -226,18 +295,22 @@ impl Runtime {
     /// Concurrency is lanes, each taking the next unstarted call when it is free, so one slow call
     /// holds up only its own lane. The first lane is always there; up to one per core in all
     /// (`width`) are added by taking a slot from the runtime-wide `batch_lanes` (four per core for
-    /// every batch together) without waiting. A batch that finds no slot runs its calls on the
-    /// lane it has. Nothing in the host ever waits for a lane, and the unconditional lane always
-    /// makes progress, so nested batches cannot deadlock however deep they go, while the live
-    /// instances a fan-out creates are bounded by the slots plus one per level instead of
-    /// `width ^ depth`. (A plain semaphore held around running a callee would deadlock: a parent
-    /// sits inside `run_isolated` for as long as its children run, because the guest suspends in
-    /// the host call. What a suspended parent releases is the execution's own guest slot, taken
-    /// back in the `loom.call_many` import, not anything held here.)
+    /// every batch together) without waiting, and a lane gives its slot back when it runs out of
+    /// calls, not when the batch ends. A batch that finds no slot runs its calls on the lane it
+    /// has. Nothing in the host ever waits for a lane, and the unconditional lane always makes
+    /// progress, so nested batches cannot deadlock however deep they go, while the live instances
+    /// a fan-out creates are bounded by the slots plus one per level instead of `width ^ depth`.
+    /// (A plain semaphore held around running a callee would deadlock: a parent sits inside
+    /// `run_isolated` for as long as its children run, because the guest suspends in the host
+    /// call. What a suspended parent releases is the execution's own guest slot, taken back in the
+    /// `loom.call_many` import, not anything held here.)
     ///
-    /// Results are also budgeted: once the batch's results reach [`BATCH_RESPONSE_BYTES`], calls
-    /// not yet started are not run and a result that would overflow is dropped, each an `Err`
-    /// for its own position. Which calls those are depends on completion order.
+    /// Results are budgeted to [`BATCH_RESPONSE_BYTES`] in request order: every call runs, then
+    /// the results are charged index by index and the first one that does not fit, with every
+    /// later one, becomes an `Err` for its own position (see [`charge_in_order`]). So which calls
+    /// fail for size is a function of the results alone, not of completion order. The one
+    /// exception is a backstop on memory: once [`BATCH_HOLD_BYTES`] of results are held, calls
+    /// not yet started are not run.
     pub(crate) async fn isolated_batch(
         &self,
         frames: &[&[u8]],
@@ -248,17 +321,20 @@ impl Runtime {
         let width = std::thread::available_parallelism()
             .map_or(4, |n| n.get())
             .max(2);
-        let mut slots = Vec::new();
+        // One entry per lane; only the extra lanes hold a slot, and each holds it for as long as
+        // its own future lives.
+        let mut lane_slots = vec![None];
         for _ in 1..width.min(frames.len()) {
             match self.inner.batch_lanes.clone().try_acquire_owned() {
-                Ok(slot) => slots.push(slot),
+                Ok(slot) => lane_slots.push(Some(slot)),
                 Err(_) => break,
             }
         }
         let next = AtomicUsize::new(0);
-        let spent = AtomicUsize::new(0);
-        let (next, spent) = (&next, &spent);
-        let lanes = (0..=slots.len()).map(|_| async move {
+        let held = AtomicUsize::new(0);
+        let (next, held) = (&next, &held);
+        let lanes = lane_slots.into_iter().map(|slot| async move {
+            let _slot = slot;
             let mut done = Vec::new();
             loop {
                 let index = next.fetch_add(1, Ordering::Relaxed);
@@ -266,50 +342,51 @@ impl Runtime {
                     break;
                 };
                 let outcome = self
-                    .batch_element(frame, scope, base + index as i64, effects, spent)
+                    .batch_element(frame, scope, base + index as i64, effects, held)
                     .await;
                 done.push((index, outcome));
             }
             done
         });
         let finished = futures::future::join_all(lanes).await;
-        drop(slots);
         let mut outcomes: Vec<Option<Result<Vec<u8>, CallError>>> =
             (0..frames.len()).map(|_| None).collect();
         for (index, outcome) in finished.into_iter().flatten() {
             outcomes[index] = Some(outcome);
         }
-        outcomes
+        let mut outcomes: Vec<_> = outcomes
             .into_iter()
             .map(|outcome| outcome.expect("each index is taken by exactly one lane"))
-            .collect()
+            .collect();
+        charge_in_order(frames, &mut outcomes, BATCH_RESPONSE_BYTES);
+        outcomes
     }
 
-    /// One call of a batch, charged against the batch's byte budget `spent`.
+    /// One call of a batch. `held` counts the result bytes the batch holds so far, for the memory
+    /// backstop only; the response budget is charged afterwards by [`charge_in_order`].
     async fn batch_element(
         &self,
         frame: &[u8],
         scope: &str,
         occurrence: i64,
         effects: &EffectContext,
-        spent: &AtomicUsize,
+        held: &AtomicUsize,
     ) -> Result<Vec<u8>, CallError> {
         let request = Request::parse(frame)?;
-        let over_budget = |what: &str| CallError::Trapped {
-            hash: request.target.label(),
-            message: format!("the batch's results exceed {BATCH_RESPONSE_BYTES} bytes: {what}"),
-        };
-        if spent.load(Ordering::Relaxed) >= BATCH_RESPONSE_BYTES {
-            return Err(over_budget("this call was not run"));
+        if held.load(Ordering::Relaxed) >= BATCH_HOLD_BYTES {
+            return Err(over_budget(
+                &request,
+                "the batch holds too many result bytes; this call was not run",
+            ));
         }
         let bytes = self
             .isolated_call(request, scope, occurrence, effects)
             .await?;
-        // Its response frame is a tag byte and a length prefix around the bytes.
-        let cost = bytes.len() + 5;
-        if spent.fetch_add(cost, Ordering::Relaxed) + cost > BATCH_RESPONSE_BYTES {
-            return Err(over_budget("this call ran but its result was dropped"));
+        // A result that cannot fit the response alone is dropped at once, whatever the others are.
+        if bytes.len() + RESPONSE_FRAME_OVERHEAD > BATCH_RESPONSE_BYTES {
+            return Err(over_budget(&request, "this result alone does not fit"));
         }
+        held.fetch_add(bytes.len(), Ordering::Relaxed);
         Ok(bytes)
     }
 
@@ -335,6 +412,7 @@ impl Runtime {
         };
         let started = Instant::now();
         let kernel_failures = self.kernel_failures();
+        let depth_refusals = self.inner.depth_refusals.load(Ordering::Relaxed);
         let outcome = self
             .core_call_entry(
                 hash,
@@ -352,16 +430,23 @@ impl Runtime {
             }
             samples.push(started.elapsed().as_secs_f64() * 1_000_000.0);
         }
-        let result = outcome
-            .map(|call| call.output.bytes)
-            .map_err(|error| host_failure(hash, error));
+        let (result, shareable) = match outcome {
+            Ok(call) => (Ok(call.output.bytes), None),
+            Err(error) => {
+                let shareable = shareable_failure(hash, &error);
+                (Err(host_failure(hash, error)), shareable)
+            }
+        };
         // Clean: the call really did nothing but compute. The static row can undercount, the
         // trace cannot. A kernel failure (denied, missing blob, I/O) is recorded nowhere else and
-        // depends on host state, so a call during which one happened is not clean either; another
-        // call's failure in the same window only makes this conservative. Without a trace there
-        // is nothing to prove it with.
+        // depends on host state, so a call during which one happened is not clean either. Nor is
+        // one during which a call below it was refused for depth: the callee may have turned that
+        // refusal into a value, which then depends on how deep the caller sits. Another call's
+        // failure or refusal in the same window only makes this conservative. Without a trace
+        // there is nothing to prove it with.
         let clean = cacheable
             && self.kernel_failures() == kernel_failures
+            && self.inner.depth_refusals.load(Ordering::Relaxed) == depth_refusals
             && effects
                 .trace
                 .as_ref()
@@ -377,7 +462,11 @@ impl Runtime {
                 u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
             );
         }
-        Ran { result, clean }
+        Ran {
+            result,
+            clean,
+            shareable,
+        }
     }
 
     /// Whether the stored signature says `entry` of `hash` has a fully known

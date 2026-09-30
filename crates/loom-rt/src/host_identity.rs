@@ -53,3 +53,28 @@ fn executable_stamp() -> io::Result<Vec<u8>> {
     stamp.extend_from_slice(&modified.as_nanos().to_le_bytes());
     Ok(stamp)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_wasmtime_constant_is_the_version_this_crate_pins() {
+        let manifest = include_str!("../Cargo.toml");
+        let pinned = manifest
+            .lines()
+            .find_map(|line| {
+                line.trim_start()
+                    .strip_prefix("wasmtime = {")?
+                    .split("version = \"=")
+                    .nth(1)?
+                    .split('"')
+                    .next()
+            })
+            .expect("crates/loom-rt/Cargo.toml pins wasmtime with `version = \"=x.y.z\"`");
+        assert_eq!(
+            pinned, WASMTIME_VERSION,
+            "update WASMTIME_VERSION in host_identity.rs with the pin in Cargo.toml"
+        );
+    }
+}
