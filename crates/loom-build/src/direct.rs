@@ -13,6 +13,8 @@ pub(crate) mod artifacts;
 pub(crate) mod compiler_cache;
 pub(crate) mod definition_rlibs;
 mod trusted_sources;
+mod server;
+pub use server::RustcServers;
 
 pub(crate) struct Built {
     pub bytes: Vec<u8>,

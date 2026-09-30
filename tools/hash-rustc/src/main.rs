@@ -29,9 +29,10 @@ mod mono;
 mod object_cache;
 mod object_store;
 mod preimages;
+mod serve;
 
 use std::path::PathBuf;
-use std::process::{Command, ExitCode};
+use std::process::ExitCode;
 
 use rustc_driver::{Callbacks, Compilation};
 use rustc_interface::interface;
@@ -69,6 +70,20 @@ impl Callbacks for HashCallbacks {
 }
 
 fn main() -> ExitCode {
+    let mut arguments = std::env::args();
+    if arguments.nth(1).as_deref() == Some("--loom-serve") {
+        let Some(socket) = arguments.next() else {
+            eprintln!("hash-rustc: --loom-serve requires a socket path");
+            return ExitCode::FAILURE;
+        };
+        return serve::serve(&socket);
+    }
+    compile(std::env::args().collect())
+}
+
+/// One compile: `args` is a rustc command line, `args[0]` the program. The
+/// process environment names the side outputs (`LOOM_ITEM_HASHES`, ...).
+fn compile(args: Vec<String>) -> ExitCode {
     let result = rustc_driver::catch_with_exit_code(|| {
         let mut callbacks = HashCallbacks {
             destination: std::env::var_os("LOOM_ITEM_HASHES").map(PathBuf::from),
@@ -89,16 +104,11 @@ fn main() -> ExitCode {
             );
             return ExitCode::FAILURE;
         }
-        let args: Vec<String> = std::env::args().collect();
         rustc_driver::run_compiler(&args, &mut callbacks);
         if let Some(mut document) = callbacks.document {
-            let compiler = PathBuf::from(env!("HASH_RUSTC_SYSROOT")).join("bin/rustc");
-            let output = Command::new(compiler)
-                .arg("-vV")
-                .output()
-                .expect("pinned rustc -vV");
-            assert!(output.status.success(), "pinned rustc -vV failed");
-            document.toolchain = String::from_utf8(output.stdout).expect("UTF-8 rustc version");
+            // `rustc -vV` of the compiler this driver links, captured by build.rs;
+            // spawning it per compile cost a whole rustc start-up (about 45 ms).
+            document.toolchain = include_str!(env!("HASH_RUSTC_VERSION_FILE")).to_owned();
             let path = callbacks.destination.expect("requested side output");
             if let Err(error) = document
                 .preimages

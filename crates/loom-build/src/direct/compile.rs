@@ -13,6 +13,8 @@ pub(crate) struct Request<'a> {
     pub toolchain: &'a crate::GuestToolchain,
     pub driver: &'a crate::identity::Driver,
     pub identity_directory: &'a Path,
+    /// Served compilers for the root compile; see `server`.
+    pub servers: &'a super::RustcServers,
 }
 
 /// Compile the root crate of `directory`. A graph key (manifest, lock, compiler
@@ -30,6 +32,8 @@ pub(crate) struct Request<'a> {
 /// `admission_ms` (cargo metadata, source policy) → `compiler_mirror_ms` →
 /// `cargo_bootstrap_ms` → `root_rustc_ms` →
 /// `artifact_capture_ms` → `identity_publish_ms`.
+const ROOT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(300);
+
 pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
     let mut stages = crate::Stages::start();
     let Request {
@@ -43,6 +47,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
         toolchain,
         driver,
         identity_directory,
+        servers,
     } = request;
     // Cargo canonicalizes paths (notably /tmp -> /private/tmp on macOS). Use
     // that same spelling for graph ownership and relocation, not string aliases.
@@ -198,7 +203,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
             };
             driver.configure(&mut command, identity_directory);
             let mut wrapped = super::entry_abi::WrappedSource::write(directory)?;
-            let output = run(command).await;
+            let output = servers.run(command, &driver.path, ROOT_DEADLINE).await;
             wrapped.restore()?;
             let output = output?;
             let compiled_source = wrapped.into_text();
@@ -348,7 +353,7 @@ pub(crate) async fn build(request: Request<'_>) -> Result<Built, BuildError> {
     } else {
         hash_command
     };
-    let hash_output = run(hash_command).await?;
+    let hash_output = servers.run(hash_command, &driver.path, ROOT_DEADLINE).await?;
     if !hash_output.status.success() {
         return Err(rejected(format!(
             "hash-rustc driver {}: {}",

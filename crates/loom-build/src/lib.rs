@@ -161,6 +161,9 @@ pub struct Builder {
     prepared: Arc<prepared::Memo>,
     /// Key of the last successful standard-library fetch; see `prepare_compiler_dependencies`.
     compiler_dependencies: Arc<std::sync::Mutex<Option<String>>>,
+    /// Long-lived compilers the root compile runs on; shared by every builder
+    /// derived from this one, since a served compile keeps no cache state.
+    rustc_servers: Arc<direct::RustcServers>,
 }
 #[derive(Debug)]
 pub struct BuildOutput {
@@ -197,6 +200,7 @@ impl Builder {
             driver_path: std::env::var_os("LOOM_HASH_RUSTC").map(PathBuf::from),
             prepared: Arc::default(),
             compiler_dependencies: Arc::default(),
+            rustc_servers: Arc::default(),
         }
     }
     /// Mutable build workspaces have one owner. Tenant services select their
@@ -213,6 +217,7 @@ impl Builder {
             driver_path: self.driver_path.clone(),
             prepared: Arc::default(),
             compiler_dependencies: self.compiler_dependencies.clone(),
+            rustc_servers: self.rustc_servers.clone(),
         }
     }
     pub fn cache_directory(&self) -> &Path {
@@ -233,6 +238,7 @@ impl Builder {
             driver_path: self.driver_path.clone(),
             prepared: self.prepared.clone(),
             compiler_dependencies: self.compiler_dependencies.clone(),
+            rustc_servers: self.rustc_servers.clone(),
         }
     }
     pub async fn preflight(&self) -> Result<(), BuildError> {
@@ -412,6 +418,7 @@ impl Builder {
             driver: &driver,
             identity_directory: &directory,
             store: &self.store,
+            servers: &self.rustc_servers,
         })
         .await?;
         stages.absorb(built.stages);
