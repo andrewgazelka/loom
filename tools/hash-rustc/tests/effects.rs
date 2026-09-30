@@ -81,6 +81,35 @@ pub fn entry(depth: u32) { let _ = renamed::isolated::call(TARGET, depth); renam
 }
 
 #[test]
+fn a_kernel_call_contributes_the_fixed_kernel_label_directly_or_through_put() {
+    let directory = tempfile::tempdir().unwrap();
+    let document = compile(
+        directory.path(),
+        r#"
+pub fn entry() {
+    let _ = renamed::kernel::call("rgb-host.ray", &[&[1u8, 2, 3][..]]);
+}
+"#,
+        json!({}),
+    );
+    let row = entry_row(&document);
+    assert_eq!(row["labels"], json!(["kernel"]), "{document:#}");
+    assert_eq!(row["unknown"], json!([]), "{document:#}");
+
+    // `put` is a helper over `call`: the label arrives through its body.
+    let through_put = compile(
+        directory.path(),
+        r#"
+pub fn entry() {
+    let _ = renamed::kernel::put(&[&[1u8, 2, 3][..]]);
+}
+"#,
+        json!({}),
+    );
+    assert_eq!(entry_row(&through_put)["labels"], json!(["kernel"]), "{through_put:#}");
+}
+
+#[test]
 fn non_literal_perform_is_rejected_with_span() {
     assert_rejected(
         "pub fn entry(label: &str) {\n    renamed::perform(label, ());\n}\n",

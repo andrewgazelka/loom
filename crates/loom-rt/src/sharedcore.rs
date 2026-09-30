@@ -6,7 +6,7 @@ use futures::{
     future::{AbortHandle, Abortable, RemoteHandle},
     task::SpawnExt,
 };
-use std::sync::atomic::{AtomicBool, AtomicU8};
+use std::sync::atomic::AtomicBool;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 use wasmtime::{
     Caller, Config, ExternType, Instance as CoreInstance, Module, SharedMemory, Strategy,
@@ -182,37 +182,16 @@ fn copy_out(memory: &SharedMemory, pointer: u32, length: u32) -> Result<Vec<u8>>
         length as usize <= loom_proto::TRACE_MAX_BLOB_BYTES,
         "guest message exceeds byte limit"
     );
-    let start = pointer as usize;
-    let end = start
-        .checked_add(length as usize)
-        .context("guest range overflow")?;
-    let data = memory.data();
-    anyhow::ensure!(end <= data.len(), "guest message outside shared memory");
-    Ok(data[start..end]
-        .iter()
-        .map(|cell| {
-            // Atomic accesses are required even when the guest claims exclusive ownership.
-            unsafe { AtomicU8::from_ptr(cell.get()).load(Ordering::Relaxed) }
-        })
-        .collect())
+    // Atomic word copies: another guest thread may write this memory, so a plain
+    // memcpy would be a data race even when the guest claims exclusive ownership.
+    crate::shared_copy::read(memory.data(), pointer as usize, length as usize)
 }
 fn copy_in(memory: &SharedMemory, pointer: u32, bytes: &[u8]) -> Result<()> {
-    let start = pointer as usize;
-    let end = start
-        .checked_add(bytes.len())
-        .context("guest range overflow")?;
     anyhow::ensure!(
         bytes.len() <= loom_proto::TRACE_MAX_BLOB_BYTES,
         "guest message exceeds byte limit"
     );
-    let data = memory.data();
-    anyhow::ensure!(end <= data.len(), "guest allocation outside shared memory");
-    for (cell, byte) in data[start..end].iter().zip(bytes) {
-        unsafe {
-            AtomicU8::from_ptr(cell.get()).store(*byte, Ordering::Relaxed);
-        }
-    }
-    Ok(())
+    crate::shared_copy::write(memory.data(), pointer as usize, bytes)
 }
 /// Wasm exports alignment zero when there is no TLS block. No allocation is
 /// made in that case; use alignment one for bookkeeping and checked arithmetic.
@@ -252,6 +231,19 @@ async fn respond(caller: &mut Caller<'_, Guest>, bytes: Vec<u8>) -> Result<i64> 
     let pointer = allocate(caller, bytes.len().try_into()?, 1).await?;
     copy_in(&caller.data().execution.memory, pointer, &bytes)?;
     Ok(((bytes.len() as u64) << 32 | pointer as u64) as i64)
+}
+/// Bytes a single kernel call may read from the guest, summed over its buffers.
+const KERNEL_MAX_BYTES: usize = 256 * 1024 * 1024;
+/// Write `bytes` then `tag` into one fresh guest allocation and return it packed
+/// as `length << 32 | pointer` (the length includes the tag).
+async fn respond_tagged(caller: &mut Caller<'_, Guest>, bytes: Vec<u8>, tag: u8) -> Result<i64> {
+    let total = bytes.len() + 1;
+    anyhow::ensure!(total <= KERNEL_MAX_BYTES, "kernel reply too large");
+    let pointer = allocate(caller, total.try_into()?, 1).await?;
+    let memory = caller.data().execution.memory.clone();
+    crate::shared_copy::write(memory.data(), pointer as usize, &bytes)?;
+    crate::shared_copy::write(memory.data(), pointer as usize + bytes.len(), &[tag])?;
+    Ok(((total as u64) << 32 | pointer as u64) as i64)
 }
 pub(super) enum Entry<'a> {
     /// `args` is one DAG-CBOR array of typed arguments, never decoded here.

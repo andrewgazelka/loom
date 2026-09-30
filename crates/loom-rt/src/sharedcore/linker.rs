@@ -133,6 +133,73 @@ pub(super) fn linker(
             },
         )
         .map_err(error)?;
+    // Native kernels (`kernel.rs`). The guest passes an op name and a gather list
+    // of buffers (`iov`: `count` pairs of u32 pointer and length); the host reads
+    // each once, runs the op, and writes the reply straight into one guest
+    // allocation: the result bytes followed by a tag byte (0 ok, 1 an error whose
+    // message is the bytes). The tag trails so the guest can pop it and keep the
+    // allocation as the result, with no copy. Kernel ops are pure: no trace entry,
+    // no occurrence number, no suspension of the guest's permit.
+    linker
+        .func_wrap_async(
+            "loom",
+            "kernel",
+            |mut caller: Caller<'_, Guest>, (op_ptr, op_len, iov_ptr, count): (i32, i32, i32, i32)| {
+                Box::new(async move {
+                    let result: Result<i64> = async {
+                        let execution = caller.data().execution.clone();
+                        let outcome: Result<Vec<u8>, String> = (|| {
+                            anyhow::ensure!(
+                                execution.effects.permits("kernel"),
+                                "the kernel effect is not allowed here"
+                            );
+                            anyhow::ensure!((0..=64).contains(&count), "kernel call with {count} buffers");
+                            let op = crate::shared_copy::read(
+                                execution.memory.data(),
+                                op_ptr as u32 as usize,
+                                (op_len as u32).min(256) as usize,
+                            )?;
+                            let op = String::from_utf8(op)?;
+                            let table = crate::shared_copy::read(
+                                execution.memory.data(),
+                                iov_ptr as u32 as usize,
+                                count as usize * 8,
+                            )?;
+                            let mut buffers: Vec<Vec<u8>> = Vec::with_capacity(count as usize);
+                            let mut total = 0usize;
+                            for pair in table.chunks_exact(8) {
+                                let pointer = u32::from_le_bytes(pair[..4].try_into().unwrap());
+                                let length = u32::from_le_bytes(pair[4..].try_into().unwrap()) as usize;
+                                total += length;
+                                anyhow::ensure!(total <= KERNEL_MAX_BYTES, "kernel arguments exceed {KERNEL_MAX_BYTES} bytes");
+                                buffers.push(crate::shared_copy::read(
+                                    execution.memory.data(),
+                                    pointer as usize,
+                                    length,
+                                )?);
+                            }
+                            let slices: Vec<&[u8]> = buffers.iter().map(Vec::as_slice).collect();
+                            Ok(execution.runtime.call_kernel(&op, &slices))
+                        })()
+                        .map_err(|error: anyhow::Error| format!("{error:#}"))
+                        .and_then(|result| result);
+                        execution
+                            .runtime
+                            .inner
+                            .effect_wire_bytes
+                            .fetch_add(outcome.as_ref().map_or(0, |bytes| bytes.len() as u64), Ordering::Relaxed);
+                        let (tag, bytes) = match outcome {
+                            Ok(bytes) => (0u8, bytes),
+                            Err(message) => (1u8, message.into_bytes()),
+                        };
+                        respond_tagged(&mut caller, bytes, tag).await
+                    }
+                    .await;
+                    result.map_err(host_error)
+                })
+            },
+        )
+        .map_err(error)?;
     linker
         .func_wrap_async(
             "loom",

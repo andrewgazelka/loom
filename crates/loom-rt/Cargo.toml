@@ -13,6 +13,7 @@ anyhow = "1"
 serde_json = "1"
 blake3 = "1"
 lru = "0.16"
+arc-swap = "1"
 tokio = { version = "1", features = ["full"] }
 futures = { version = "0.3", features = ["thread-pool"] }
 uuid = { version = "1", features = ["v4"] }

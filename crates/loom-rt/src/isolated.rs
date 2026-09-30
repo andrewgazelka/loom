@@ -83,11 +83,15 @@ impl Runtime {
         let entry = (!request.entry.is_empty()).then_some(request.entry);
         // A pure callee's answer for these arguments, when it was computed before.
         let cacheable = effects.trace.is_some() && self.callee_is_pure(&hash, request.entry);
+        let kernels = self.kernel_fingerprint();
         if cacheable
-            && let Some(bytes) =
-                self.inner
-                    .call_results
-                    .get(&hash, request.entry, request.argc, request.payload)
+            && let Some(bytes) = self.inner.call_results.get(
+                &hash,
+                request.entry,
+                request.argc,
+                request.payload,
+                &kernels,
+            )
         {
             return Ok(bytes);
         }
@@ -130,6 +134,7 @@ impl Runtime {
                 request.entry,
                 request.argc,
                 request.payload,
+                &kernels,
                 &result,
                 u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
             );
@@ -137,8 +142,9 @@ impl Runtime {
         Ok(result)
     }
 
-    /// Whether the stored signature says `entry` of `hash` has an empty, fully
-    /// known effect row. A missing definition, a JavaScript one, or an unnamed
+    /// Whether the stored signature says `entry` of `hash` has a fully known
+    /// effect row that is empty or names only `kernel` (pure native ops, which
+    /// record nothing in the trace; the kernel versions are in the cache key). A missing definition, a JavaScript one, or an unnamed
     /// entry on a definition with several, is not pure for this purpose.
     fn callee_is_pure(&self, hash: &str, entry: &str) -> bool {
         let Ok(Some(definition)) = self.inner.store.executable_definition(hash) else {
@@ -152,7 +158,9 @@ impl Runtime {
         } else {
             definition.sig.exports.iter().find(|export| export.name == entry)
         };
-        selected.is_some_and(|export| export.effects.labels.is_empty() && !export.effects.unknown)
+        selected.is_some_and(|export| {
+            !export.effects.unknown && export.effects.labels.iter().all(|label| label == "kernel")
+        })
     }
 
     /// A denied call is an effect the trace records (a permitted one is not:

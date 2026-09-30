@@ -11,6 +11,9 @@ pub(super) fn effect(tcx: TyCtxt<'_>, id: DefId) -> Option<&'static str> {
         // An isolated call is not a `perform`; it reaches the host through its
         // own import and always carries the fixed label `call`.
         "isolated::call" => "$isolated_call",
+        // A native kernel call reaches the host through its own import and always
+        // carries the fixed label `kernel`.
+        "kernel::call" => "$kernel",
         "handlers::handle" => "$handle",
         "handlers::handle_any" => "$handle_any",
         "handlers::handle_pinned" => "$handle_pinned",

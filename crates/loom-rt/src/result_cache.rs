@@ -61,6 +61,8 @@ struct Key {
     entry: String,
     argc: u32,
     payload: [u8; 32],
+    /// The registered host kernels and their versions when the result was made.
+    kernels: [u8; 32],
 }
 
 struct Entry {
@@ -130,12 +132,13 @@ impl Default for ResultCache {
     }
 }
 
-fn key(callee: &str, entry: &str, argc: u32, payload: &[u8]) -> Key {
+fn key(callee: &str, entry: &str, argc: u32, payload: &[u8], kernels: &[u8; 32]) -> Key {
     Key {
         callee: callee.into(),
         entry: entry.into(),
         argc,
         payload: *blake3::hash(payload).as_bytes(),
+        kernels: *kernels,
     }
 }
 
@@ -161,8 +164,15 @@ impl ResultCache {
         }
     }
 
-    pub(crate) fn get(&self, callee: &str, entry: &str, argc: u32, payload: &[u8]) -> Option<Vec<u8>> {
-        let key = key(callee, entry, argc, payload);
+    pub(crate) fn get(
+        &self,
+        callee: &str,
+        entry: &str,
+        argc: u32,
+        payload: &[u8],
+        kernels: &[u8; 32],
+    ) -> Option<Vec<u8>> {
+        let key = key(callee, entry, argc, payload, kernels);
         let mut inner = self.inner.lock().expect("result cache poisoned");
         let clock = inner.clock;
         let Some(found) = inner.map.get_mut(&key) else {
@@ -194,6 +204,7 @@ impl ResultCache {
         entry: &str,
         argc: u32,
         payload: &[u8],
+        kernels: &[u8; 32],
         result: &[u8],
         cost_ns: u64,
     ) {
@@ -211,7 +222,7 @@ impl ResultCache {
             return;
         }
         stats.stored += 1;
-        let key = key(callee, entry, argc, payload);
+        let key = key(callee, entry, argc, payload, kernels);
         if let Some(old) = inner.map.remove(&key) {
             inner.order.remove(&order_key(old.priority, old.seq));
             inner.bytes -= old.bytes.len();

@@ -468,3 +468,125 @@ async fn a_call_that_recorded_an_effect_is_not_stored_even_when_its_row_is_empty
     assert_eq!(runtime.call_result_stats().stores, 0, "no effect-touching call is remembered");
     Ok(())
 }
+
+/// A kernel family with one pure op that answers CBOR `7` and counts its calls.
+struct Cbor7(std::sync::atomic::AtomicU64);
+impl crate::HostKernel for Cbor7 {
+    fn family(&self) -> &str {
+        "test"
+    }
+    fn version(&self) -> u32 {
+        1
+    }
+    fn ops(&self) -> &[&'static str] {
+        &["cbor7"]
+    }
+    fn call(&self, _: &crate::KernelContext<'_>, _: &str, _: &[&[u8]]) -> Result<Vec<u8>, String> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(vec![0x07])
+    }
+}
+
+/// A callee whose `main` calls kernel op `test.cbor7` through the `loom.kernel`
+/// import (no buffers) and returns the reply as its own result frame: the
+/// kernel's reply is the result bytes then a tag byte; the frame is a tag byte
+/// then the result.
+fn kernel_module(salt: u8) -> Result<Vec<u8>> {
+    let mut artifact = wat::parse_str(format!(
+        r#"(module
+        (import "env" "memory" (memory 1 1 shared))
+        (import "loom" "kernel" (func $kernel (param i32 i32 i32 i32) (result i64)))
+        (global (export "__stack_pointer") (mut i32) (i32.const 65536))
+        (global (export "__loom_stack_low") (mut i32) (i32.const 32768))
+        (global (export "__loom_stack_high") (mut i32) (i32.const 65536))
+        (global $heap (mut i32) (i32.const 8192))
+        (func $alloc (export "loom_alloc") (param $size i32) (param i32) (result i32)
+            (local $pointer i32)
+            global.get $heap local.tee $pointer
+            local.get $size i32.add global.set $heap local.get $pointer)
+        (func (export "loom_dealloc") (param i32 i32 i32))
+        (data (i32.const 1024) "test.cbor7")
+        (data (i32.const 1100) "\{salt:02x}")
+        (func (export "loom_call_main") (param i32 i32) (result i64)
+            (local $packed i64) (local $src i32) (local $len i32) (local $dst i32)
+            i32.const 1024 i32.const 10 i32.const 1104 i32.const 0 call $kernel
+            local.set $packed
+            local.get $packed i32.wrap_i64 local.set $src
+            local.get $packed i64.const 32 i64.shr_u i32.wrap_i64 local.set $len
+            local.get $len i32.const 1 call $alloc local.set $dst
+            local.get $dst i32.const 0 i32.store8
+            local.get $dst i32.const 1 i32.add local.get $src local.get $len i32.const 1 i32.sub memory.copy
+            local.get $len i64.extend_i32_u i64.const 32 i64.shl
+            local.get $dst i64.extend_i32_u i64.or)
+    )"#
+    ))?;
+    loom_proto::core_protocol::stamp(&mut artifact);
+    Ok(artifact)
+}
+
+#[tokio::test]
+async fn a_guest_calls_a_host_kernel_through_the_import_and_reads_its_reply() -> Result<()> {
+    let store = Store::memory()?;
+    let hash = register(&store, &kernel_module(1)?, &[("main", 0)], &["kernel"])?;
+    let runtime = Runtime::new(store)?;
+    let kernel = Arc::new(Cbor7(Default::default()));
+    runtime.register_kernel(kernel.clone())?;
+    let value = tokio::time::timeout(Duration::from_secs(60), runtime.call_def(&hash, json!([])))
+        .await??;
+    assert_eq!(value, json!(7));
+    assert_eq!(kernel.0.load(std::sync::atomic::Ordering::Relaxed), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_unregistered_op_or_a_row_without_the_kernel_label_is_refused_not_run() -> Result<()> {
+    let store = Store::memory()?;
+    // The row is empty, so the callee's allowed effects exclude `kernel`.
+    let denied = register(&store, &kernel_module(2)?, &[("main", 0)], &[])?;
+    let runtime = Runtime::new(store)?;
+    let kernel = Arc::new(Cbor7(Default::default()));
+    runtime.register_kernel(kernel.clone())?;
+    let attempt = runtime.call_def(&denied, json!([])).await;
+    assert!(attempt.is_err() || attempt.as_ref().is_ok_and(|value| *value != json!(7)), "{attempt:?}");
+    assert_eq!(kernel.0.load(std::sync::atomic::Ordering::Relaxed), 0, "the kernel never ran");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_callee_that_only_calls_pure_kernels_is_cached_until_the_kernel_versions_change() -> Result<()> {
+    let store = Store::memory()?;
+    let hash = register(&store, &kernel_module(3)?, &[("main", 0)], &["kernel"])?;
+    let runtime = Runtime::new(store)?;
+    let kernel = Arc::new(Cbor7(Default::default()));
+    runtime.register_kernel(kernel.clone())?;
+    let effects = traced();
+    let ran = || kernel.0.load(std::sync::atomic::Ordering::Relaxed);
+
+    let first = call_main(&runtime, &hash, &[0x80], 0, &effects).await.unwrap();
+    let second = call_main(&runtime, &hash, &[0x80], 1, &effects).await.unwrap();
+    assert_eq!(first, second);
+    assert_eq!(ran(), 1, "the second call was answered from the result cache");
+    assert_eq!(runtime.call_result_stats().hits, 1);
+
+    // Another kernel family appears: the fingerprint moves, so the old result is
+    // not served, and the callee runs again.
+    struct Other;
+    impl crate::HostKernel for Other {
+        fn family(&self) -> &str {
+            "other"
+        }
+        fn version(&self) -> u32 {
+            1
+        }
+        fn ops(&self) -> &[&'static str] {
+            &[]
+        }
+        fn call(&self, _: &crate::KernelContext<'_>, _: &str, _: &[&[u8]]) -> Result<Vec<u8>, String> {
+            Ok(Vec::new())
+        }
+    }
+    runtime.register_kernel(Arc::new(Other))?;
+    call_main(&runtime, &hash, &[0x80], 2, &effects).await.unwrap();
+    assert_eq!(ran(), 2, "a changed kernel set is a different key");
+    Ok(())
+}

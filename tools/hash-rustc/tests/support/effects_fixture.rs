@@ -23,6 +23,10 @@ pub mod handlers {
     }
 }
 pub use handlers::{handle, handle_any, handle_pinned};
+pub mod kernel {
+    pub fn call(_op: &str, _args: &[&[u8]]) -> Result<Vec<u8>, ()> { Ok(Vec::new()) }
+    pub fn put(parts: &[&[u8]]) -> Result<[u8; 32], ()> { call("loom.put", parts).map(|_| [0; 32]) }
+}
 pub fn external_total() { handle(&["sleep"], || now(), || sleep()); }
 pub fn external_unknown(label: &str) { perform(label, ()); }
 pub fn external_erased_callback() {

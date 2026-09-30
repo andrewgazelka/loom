@@ -2963,6 +2963,7 @@ name = "loom-rt"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "blake3",
  "futures",
  "libc",

@@ -2,7 +2,10 @@ mod call;
 mod sandbox;
 pub use sandbox::WasmSandbox;
 mod compilation_cache;
+mod kernel;
 mod result_cache;
+mod shared_copy;
+pub use kernel::{Handle, HostKernel, KernelContext};
 pub use result_cache::{CalleeStats, ResultCacheStats};
 pub use call::{CallEffects, GuestFailure};
 pub use compilation_cache::{CompilationCacheStats, LoomCompilationCache};
@@ -84,6 +87,8 @@ struct Inner {
     core_modules: Mutex<ModuleCache>,
     /// Results of isolated calls to pure callees; see `result_cache`.
     call_results: result_cache::ResultCache,
+    /// Native ops guests may call; see `kernel`.
+    kernels: kernel::Kernels,
     component_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     effect_locks: Mutex<HashMap<String, Weak<AsyncMutex<()>>>>,
     handler_round_trip_us: Mutex<HandlerMeasurements>,
@@ -312,6 +317,7 @@ impl Runtime {
                     .create()?,
                 core_modules: Mutex::new(ModuleCache::default()),
                 call_results: result_cache::ResultCache::default(),
+                kernels: kernel::Kernels::default(),
                 component_locks: Mutex::new(HashMap::new()),
                 effect_locks: Mutex::new(HashMap::new()),
                 handler_round_trip_us: Mutex::new(HandlerMeasurements::default()),

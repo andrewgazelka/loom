@@ -24,6 +24,8 @@ unsafe extern "C" {
     fn host_perform(pointer: u32, length: u32) -> u64;
     #[link_name = "call"]
     fn host_call(pointer: u32, length: u32) -> u64;
+    #[link_name = "kernel"]
+    pub(crate) fn host_kernel(op_ptr: u32, op_len: u32, iov_ptr: u32, count: u32) -> u64;
     #[link_name = "spawn"]
     pub(crate) fn host_spawn(function: u32, data: u32, detached: i32) -> u64;
     #[link_name = "join"]
