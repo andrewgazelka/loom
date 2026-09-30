@@ -14,6 +14,20 @@ section, sections padded to 8`). Inputs are uploaded with `POST /v1/blob`; the c
 `loom::kernel::get`, welds, writes the result with `loom::kernel::put` and returns a `StoreRef`; the client
 downloads it with `GET /v1/blob/{hash}`. No float travels as JSON or as DAG-CBOR numbers.
 
+## The step the engine's gate runs (2026-09-30)
+
+`loom/definitions/skin-weld/lib.rs` in rgb is what `loom export-dir` writes from the daemon, and the daemon's source is
+`assemble.py`'s output, so the committed file can go stale when `crates/skin-weld/src` changes. The gate asks:
+
+```sh
+python3 assemble.py --rgb <rgb checkout> --check <rgb>/loom/definitions/skin-weld/lib.rs    # rc 0 current, 1 stale, 2 cannot assemble
+```
+
+Exit 1 prints the first differing lines and the regeneration steps (`assemble.py --out guest.rs`, `loom update skin-weld
+guest.rs --manifest Cargo.toml --lock Cargo.lock`, `loom export-dir loom/definitions skin-weld`). Exit 2 means one of the
+asserted rewrites (the two `dyn Fn` sites, the `thiserror` derive) no longer matches: the engine's source changed in a way
+the assembler must learn. `--rgb` defaults to `$RGB_DIR`.
+
 Reproduce:
 
 ```sh
