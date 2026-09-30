@@ -255,7 +255,10 @@ async fn workflow() {
             );
         }
     }
-    assert!(wrapper_rows > 0, "no instruction maps to the SDK wrapper macro");
+    assert!(
+        wrapper_rows > 0,
+        "no instruction maps to the SDK wrapper macro"
+    );
     let cache = response_header(&router, &format!("/v1/wasm/{component}"), "cache-control").await;
     assert_eq!(cache, "private, max-age=31536000, immutable");
 

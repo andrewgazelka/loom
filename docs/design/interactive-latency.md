@@ -32,8 +32,10 @@ the reliable numbers. Instruments: `eval` now returns `build.stages` (the build 
   waiting lld at the end of a request that never linked (no 250 ms wait for lld to start), also on an early return or panic
   (`Drop`), records a signal death as a line in `stderr`, and passes `DYLD_LIBRARY_PATH` and `LD_LIBRARY_PATH` from the request to
   the lld. A server that dies mid-request (SIGKILL, crash, discarded after a timeout) leaves its directory and a blocked lld; the
-  next server's startup sweeps directories whose server pid is dead (or is itself), kills the `pid` only when `ps` shows it is
-  still that `rust-lld` on that directory's pipe, and removes the directory. `loom-link` links directly whenever nothing was handed
+  next server's startup sweeps directories whose server is gone (the server holds an `flock` on `<dir>/lock`, which the kernel
+  drops when it dies, so a recycled pid in the name cannot keep a directory alive), kills the `pid` only when `ps` shows it is
+  still that `rust-lld` on that directory's pipe, and removes the directory only once that lld is gone (an lld that cannot be
+  tied to the directory, or a missing `ps`, keeps the directory for the next startup). `loom-link` links directly whenever nothing was handed
   to the waiting lld: another `version`, an empty argument (LLVM's response-file tokenizer, `cl::TokenizeGNUCommandLine`, drops an
   empty token, so `""` in the file would vanish), lld dead before it read its arguments, or a pipe that broke mid-write. While it
   waits it stops when its parent process is gone or the directory is removed. The host lld is `lib/rustlib/<host>/bin/rust-lld`,

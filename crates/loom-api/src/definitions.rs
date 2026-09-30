@@ -35,15 +35,27 @@ impl Service {
         intake.store = self.store.stage_intake()?;
         intake.builder = Arc::new(self.builder.for_store(intake.store.clone()));
         intake
-            .define_staged(request, Some(&self.store), &progress, true, loom_build::BuildProfile::Standard)
+            .define_staged(
+                request,
+                Some(&self.store),
+                &progress,
+                true,
+                loom_build::BuildProfile::Standard,
+            )
             .await
     }
     /// Compile one node directly into an already private staged store; update
     /// sessions and bundle imports publish the staged graph as one transaction.
     pub(super) async fn define_update_node(&self, request: DefineRequest) -> Result<Response> {
         let progress = self.build_progress.start(&request.name);
-        self.define_staged(request, None, &progress, true, loom_build::BuildProfile::Standard)
-            .await
+        self.define_staged(
+            request,
+            None,
+            &progress,
+            true,
+            loom_build::BuildProfile::Standard,
+        )
+        .await
     }
     /// Compile one definition and keep it in memory only (`bind_name` false):
     /// no name, no staged copy of the store, no durable rows. `eval`'s cells are
@@ -152,8 +164,7 @@ impl Service {
                 component_hash: Some(component_hash.clone()),
                 sig: checked.sig,
             };
-            self.store
-                .install_transient(def.clone(), built.component)?;
+            self.store.install_transient(def.clone(), built.component)?;
             return Ok(Response {
                 ok: true,
                 seq: self.store.latest_seq()?,
