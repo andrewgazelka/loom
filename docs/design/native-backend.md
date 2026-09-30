@@ -8,6 +8,18 @@ One Rust cell compiles as wasm (today) or as native code, behind the same bounda
 as one DAG-CBOR array, one tagged DAG-CBOR frame out, effects through `perform`. The choice is a build
 target, not a different program.
 
+## Is native worth it? (read this first)
+
+Measured 2026-09-30 (`docs/spikes/native-abi/README.md`): the same sieve runs in 100 us native, 506 us as
+optimized wasm (opt-level 2) and 7,950 us as `interactive` wasm (opt-level 0). So most of the apparent
+native advantage is the default `eval` profile; optimized wasm is about 5x off native on this loop. What
+wasm keeps that native gives up: the memory sandbox, fibers (the runtime suspends a guest at `perform` and
+resumes it, which deep handlers, generators and cancellation are built on; a native cell would need a
+stackful-coroutine crate and can only be cancelled cooperatively), epoch interruption, memory limits, and
+same-result-everywhere behaviour. Native should therefore be built only for a measured need (heavy
+compute, threads/rayon, SIMD wider than wasm128, direct use of the engine's own crates), and the first
+step is an optimized-wasm profile for engine work, which needs no new backend.
+
 ## Two uses
 
 * **Script mode** (user, 2026-09-30: "use rust as a script that does not need sandboxing, fine, but native

@@ -13,7 +13,7 @@ Machine: this Mac, load average 13, `cargo build --release --offline` from the r
 
 | call | native | wasm today (Loom, same machine class) |
 |---|---|---|
-| `primes(200_000)` | 100 us | 7,950 us (`eval` run_ms, earlier today) |
+| `primes(200_000)` | 100 us (load 13) | 7,950 us at wasm `interactive` (opt-level 0), **506 us at wasm optimized** (`eval optimize: true`, opt-level 2; load 35, median of 15) |
 | 424-command scene out, no effects | 13 us | 7,800 us with one effect dispatch per command |
 | sum 1M f32 passed as a CBOR array of floats (9 MB) | 3,600 us | not measured |
 | the same 1M f32 as one CBOR byte string (4 MB) | 576 us, most of it the sum loop | not measured |
@@ -30,5 +30,8 @@ What it says:
   offset is not aligned), which is free on arm64 and x86-64. That gave 6x on this input and shrank it
   from 9 MB to 4 MB. The scene case shows the cost of the current shape (tuples of floats): 19 KB out
   for 424 commands.
-* Native compute and effect-free calls are 80x to 600x faster than the wasm path, but the wasm number
-  includes per-effect dispatch and handler round trips (about 18 us each) that the spike does not have.
+* Correction (same day): the first comparison put native against wasm built at opt-level 0, which is what
+  `eval` uses by default. Against optimized wasm the sieve is about 5x slower than native (506 us against
+  100 us, measured at different machine loads, so the ratio is rough), not 80x. Most of the gap in the
+  first table was the build profile, not wasm. Only the effect-dispatch rows are a real structural cost of
+  the wasm path (about 18 us per effect, which native in-process calls would not pay).
