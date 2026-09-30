@@ -135,6 +135,13 @@ impl<'tcx> Scan<'_, 'tcx> {
         args: ty::GenericArgsRef<'tcx>,
         inputs: &[&'tcx hir::Expr<'tcx>],
     ) {
+        // A constructor (`Self::Unit`, `Some`, a tuple struct) builds a value and runs no body.
+        if matches!(
+            self.analysis.tcx.def_kind(id),
+            rustc_hir::def::DefKind::Ctor(..)
+        ) {
+            return;
+        }
         let callee = self
             .analysis
             .resolve(id, self.instantiate(args))

@@ -81,6 +81,26 @@ pub fn entry(depth: u32) { let _ = renamed::isolated::call(TARGET, depth); renam
 }
 
 #[test]
+fn a_unit_variant_cast_to_an_integer_is_not_a_call() {
+    let directory = tempfile::tempdir().unwrap();
+    let document = compile(
+        directory.path(),
+        r#"
+#[derive(Clone, Copy, Default)]
+enum K { A, #[default] B }
+impl K {
+    fn pick(x: bool) -> Self { if x { Self::A } else { Self::B } }
+}
+pub fn entry() -> u32 { K::pick(true) as u32 + K::default() as u32 }
+"#,
+        json!({}),
+    );
+    let row = entry_row(&document);
+    assert_eq!(row["labels"], json!([]), "{document:#}");
+    assert_eq!(row["unknown"], json!([]), "{document:#}");
+}
+
+#[test]
 fn a_generator_emit_contributes_the_fixed_yield_label() {
     let directory = tempfile::tempdir().unwrap();
     let document = compile(

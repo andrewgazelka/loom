@@ -219,6 +219,21 @@ async fn eval_runs_a_bare_block_as_a_cell() {
     );
 }
 
+#[tokio::test]
+#[ignore = "requires Rust guest toolchain and LOOM_COMPILER_CACHE_OWNER"]
+async fn eval_accepts_unit_variants_and_derived_default_enums() {
+    // Effect analysis once died with an ICE (`Instance::try_resolve` on `Ctor(Variant, Const)`) for
+    // `Self::A` and `#[derive(Default)] #[default]`: a constructor builds a value and runs no body.
+    let service = service();
+    let reply = eval(
+        &service,
+        json!({"source":"#[derive(Clone, Copy, Default)]\nenum K { A, #[default] B }\nimpl K { fn pick(x: bool) -> Self { if x { Self::A } else { Self::B } } }\npub fn f() -> u32 { K::pick(true) as u32 + 10 * K::default() as u32 }","entry":"f"}),
+    )
+    .await;
+    assert!(reply.ok, "{reply:?}");
+    assert_eq!(reply.result["output"], 10);
+}
+
 const CRATES_IO: &str = "registry+https://github.com/rust-lang/crates.io-index";
 
 fn crate_manifest(dependency: &str) -> String {
