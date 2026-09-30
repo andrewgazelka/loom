@@ -539,7 +539,7 @@ fn damage_is_a_typed_error_and_putting_the_object_again_heals_an_inline_row() ->
 }
 
 #[test]
-fn map_object_hands_out_the_file_in_place_and_refuses_a_corrupt_one() -> Result<()> {
+fn map_object_maps_a_private_clone_so_the_store_file_cannot_change_what_a_reader_sees() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let store = Store::open(directory.path().join("store.db"))?;
     let big = pattern(3 * MIB + 123);
@@ -548,30 +548,58 @@ fn map_object_hands_out_the_file_in_place_and_refuses_a_corrupt_one() -> Result<
     assert!(mapped.is_file_backed());
     assert_eq!(&*mapped, big.as_slice());
     assert_eq!(mapped.hash(), hash);
-    // A file mapped from offset 0 starts on a page boundary, and its padded length is a page multiple
-    // that covers it (what a no-copy GPU buffer needs).
+    // A file mapped from offset 0 starts on a page boundary, and its padded length is a page multiple that
+    // covers it (what a no-copy GPU buffer needs).
     let page = unsafe { libc_page() };
     assert_eq!(mapped.as_ptr() as usize % page, 0);
-    assert_eq!(mapped.page_aligned_len() % page, 0);
-    assert!(mapped.page_aligned_len() >= big.len() && mapped.page_aligned_len() < big.len() + page);
-    assert!(mapped.still_intact());
+    let padded = mapped.page_aligned_len().context("file-backed")?;
+    assert_eq!(padded % page, 0);
+    assert!(padded >= big.len() && padded < big.len() + page);
+    // The padding reads as zero (no SIGBUS inside the last page).
+    let tail = unsafe { std::slice::from_raw_parts(mapped.as_ptr().add(big.len()), padded - big.len()) };
+    assert!(tail.iter().all(|&b| b == 0));
+    // No stray temp file is left behind: the private copy was unlinked at once.
+    assert!(std::fs::read_dir(directory.path().join("objects").join("tmp"))?.next().is_none());
 
-    // Small values are not files: an owned copy, same bytes.
+    // A length that is already a page multiple is not padded further.
+    let exact = store.put("blob", &pattern(2 * MIB))?;
+    let exact = store.map_object(&exact)?.context("exact")?;
+    assert_eq!(exact.page_aligned_len(), Some(2 * MIB));
+
+    // Small values are not files: an owned copy with no page alignment to offer.
     let small = pattern(10 * 1024);
     let small_hash = store.put("blob", &small)?;
     let copy = store.map_object(&small_hash)?.context("inline object")?;
-    assert!(!copy.is_file_backed());
+    assert!(!copy.is_file_backed() && !copy.is_cloned());
+    assert_eq!(copy.page_aligned_len(), None);
     assert_eq!(&*copy, small.as_slice());
     assert!(store.map_object(&"0".repeat(64))?.is_none());
 
-    // The mapping survives the store replacing nothing and dropping the handle; a rewrite in place
-    // (same-uid, size kept) is visible to `still_intact`, and a fresh map refuses the corrupt file.
-    drop(mapped);
-    let mapped = store.map_object(&hash)?.context("spilled object")?;
+    // A same-uid writer rewriting the store's object in place (size kept) does not change an existing
+    // mapping: it is of a private copy. A fresh map refuses the corrupt file.
     corrupt_in_place(&object_path(directory.path(), &hash))?;
-    assert!(!mapped.still_intact(), "the stamp moved when the file was rewritten");
+    assert_eq!(&*mapped, big.as_slice(), "the mapping is of its own inode");
     let error = store.map_object(&hash).err().context("corrupt file must not map")?;
     assert!(loom_store::ObjectError::is_in(&error), "{error:#}");
+
+    // A missing file is the typed error too, and a wrong-kind hash is invisible to `of_kind`.
+    let gone = store.put("blob", &pattern(MIB + 7))?;
+    std::fs::remove_file(object_path(directory.path(), &gone))?;
+    let error = store.map_object(&gone).err().context("missing file")?;
+    assert!(loom_store::ObjectError::is_in(&error), "{error:#}");
+    let other = store.put("component", &pattern(MIB + 9))?;
+    assert!(store.map_object_of_kind(&other, "kernel-blob")?.is_none());
+    assert!(store.map_object_of_kind(&other, "component")?.is_some());
+    // A store reference whose length disagrees with the object is refused, not trusted.
+    let real = store.put("blob", &pattern(MIB + 11))?;
+    let mut hash_bytes = [0u8; 32];
+    for (index, pair) in real.as_bytes().chunks(2).enumerate() {
+        hash_bytes[index] = u8::from_str_radix(std::str::from_utf8(pair)?, 16)?;
+    }
+    let good = loom_proto::StoreRef { hash: hash_bytes, len: (MIB + 11) as u64 };
+    assert!(store.map_store_ref(&good, None)?.is_some());
+    let lying = loom_proto::StoreRef { len: 5, ..good };
+    assert!(store.map_store_ref(&lying, None).is_err());
     Ok(())
 }
 

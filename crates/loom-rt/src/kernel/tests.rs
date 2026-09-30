@@ -285,6 +285,16 @@ fn a_kernel_reads_a_large_blob_in_place_and_returns_a_large_result_as_a_handle()
     assert!(mapped.is_file_backed());
     assert_eq!(mapped.len(), big.len());
     assert_eq!(mapped[5], big[5].wrapping_mul(2));
-    // Only blobs written through `loom.put` are reachable this way.
+    // Only blobs written through `loom.put` are reachable this way: not an unknown hash, and not an object
+    // another part of the system stored under a different kind.
     assert!(runtime.map_blob(&[7u8; 32]).unwrap().is_none());
+    let component = vec![9u8; 2 << 20];
+    let other = runtime.inner.store.put("component", &component).unwrap();
+    let other: Handle = unhex(&other).unwrap();
+    assert!(runtime.map_blob(&other).unwrap().is_none());
+    // A reference with the right hash but a wrong length is refused.
+    let reference = loom_proto::StoreRef { hash: doubled, len: big.len() as u64 };
+    assert!(runtime.map_ref(&reference).unwrap().is_some());
+    let lying = loom_proto::StoreRef { len: 1, ..reference };
+    assert!(runtime.map_ref(&lying).is_err());
 }

@@ -381,27 +381,52 @@ impl Spill {
         Ok(bytes)
     }
 
-    /// A read-only mapping of the whole object, verified like [`Self::read`] (once per stamp), with the
-    /// open handle and the stamp it was verified under so the caller can check it again later.
-    pub(crate) fn map(&self, hash: &str, size: u64) -> Result<(memmap2::Mmap, File, Stamp)> {
+    /// A read-only mapping of the whole object that no other process can reach. The object is
+    /// hash-verified as in [`Self::restore`] (once per stamp), then cloned (APFS, reflink) or, where the
+    /// filesystem cannot clone, copied from the verified handle into a private temp file that is unlinked
+    /// at once and mapped. So the mapping is of an inode with no path: a same-uid writer cannot rewrite it
+    /// in place or truncate it, and renaming or replacing the store's object does not touch it. The second
+    /// value is whether the private file was a clone (no bytes were copied) or a real copy.
+    pub(crate) fn map(&self, hash: &str, size: u64) -> Result<(memmap2::Mmap, bool)> {
         let file = self.open_file(hash, size)?;
-        let before = Stamp::of(&file)?;
-        // SAFETY: the file is a store object: read-only mode, never rewritten in place (writers rename a
-        // new file over it). A same-uid process that chmods and rewrites it in place could change pages
-        // under the reader; that is the integrity caveat `MappedObject::still_intact` lets a holder check.
-        let map = unsafe { memmap2::Mmap::map(&file) }
-            .with_context(|| format!("map spilled object {hash}"))?;
-        ensure!(
-            map.len() as u64 == size && Stamp::of(&file)? == before,
-            "spilled object {hash} changed while being mapped"
-        );
-        if !self.is_verified(hash, &before) {
-            if blake3::hash(&map).to_hex().as_str() != hash {
-                return Err(ObjectError::mismatch(hash));
+        let verified = self
+            .verify(hash, &file)?
+            .ok_or_else(|| ObjectError::mismatch(hash))?;
+        let temp = sibling_temp(&self.root.join("tmp").join("map"))?;
+        let mut cloned = true;
+        let placed = match clone_file(&file, &temp) {
+            Ok(()) => make_user_writable(&temp),
+            Err(_) => {
+                cloned = false;
+                copy_new(&file, &temp, size)
             }
-            self.mark_verified(hash, before);
+        };
+        let mapped = placed
+            .with_context(|| format!("place {hash} at {}", temp.display()))
+            .and_then(|()| {
+                ensure!(
+                    Stamp::of(&file)? == verified,
+                    "spilled object {hash} changed while being mapped"
+                );
+                let private = File::open(&temp)
+                    .with_context(|| format!("open the private copy of {hash}"))?;
+                // Unlinked before anything reads it; the open handle keeps the inode alive for the mapping.
+                fs::remove_file(&temp)?;
+                // SAFETY: the file has no path and no other handle, and is never written again, so
+                // nothing can change or shorten it while mapped.
+                let map = unsafe { memmap2::MmapOptions::new().map_copy_read_only(&private) }
+                    .with_context(|| format!("map the private copy of {hash}"))?;
+                ensure!(
+                    map.len() as u64 == size,
+                    "the private copy of {hash} has {} bytes, not {size}",
+                    map.len()
+                );
+                Ok(map)
+            });
+        if mapped.is_err() {
+            let _ = fs::remove_file(&temp);
         }
-        Ok((map, file, before))
+        Ok((mapped?, cloned))
     }
 
     /// The first `limit` bytes, unverified: a preview cannot prove the whole hash.

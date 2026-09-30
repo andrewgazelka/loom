@@ -75,5 +75,16 @@ about 267 blob files in 16 directories (about 287 entries per 100k objects); thr
 4. The result cache file is disposable: on any corruption it is deleted and starts empty. Hit counts are flushed in batches (60 to
    73k bumps/s at 1000 per transaction). Eviction deletes rows in one transaction, then unlinks spilled files; nothing else holds
    those inodes now that restores do not link, so an unlink cannot change a file a consumer is reading.
-5. Later, separately: `cas.hash` as a 32-byte BLOB instead of hex TEXT (halves index size, touches every `REFERENCES cas(hash)`);
+5. Mapping an object (`Store::map_object`, `crates/loom-store/src/mapped.rs`) follows rule 3: it verifies the object
+   (rule 2), clones it from the verified handle to a private file under `objects/tmp/`, unlinks that file at
+   once, and maps the still-open inode read-only. The mapping is therefore of an inode with no path, and no
+   descriptor is kept per mapping. A same-uid process cannot rewrite or truncate what a reader sees, and the
+   store's own object can be replaced or unlinked meanwhile. On APFS (and reflink filesystems) the clone is
+   a metadata operation; elsewhere it is a real copy (`MappedObject::is_cloned` says which), so "zero copy"
+   holds only where the filesystem clones. The file's start is page-aligned and its last page reads as zero,
+   so `page_aligned_len` is a valid length for a no-copy GPU buffer. Any future sweeper or eviction must
+   unlink, never truncate or rewrite in place. Residual risk: an I/O error or an ejected volume during a
+   page fault raises SIGBUS. A `StoreRef`'s length is written by whoever made it; `Store::map_store_ref`
+   checks it against the object.
+6. Later, separately: `cas.hash` as a 32-byte BLOB instead of hex TEXT (halves index size, touches every `REFERENCES cas(hash)`);
    never `WITHOUT ROWID` on tables with inline blobs (4.6x space at 1 KB rows in the first run).

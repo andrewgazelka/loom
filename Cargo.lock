@@ -3023,7 +3023,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "blake3",
+ "libc",
  "loom-proto",
+ "memmap2",
  "rusqlite",
  "serde",
  "serde_json",

@@ -256,6 +256,12 @@ impl Runtime {
         self.inner.store.map_object_of_kind(&hex(handle), BLOB_KIND)
     }
 
+    /// [`Self::map_blob`] for a [`loom_proto::StoreRef`] a cell or kernel returned: the object's real length
+    /// must equal the reference's, since a cell wrote the number.
+    pub fn map_ref(&self, reference: &loom_proto::StoreRef) -> Result<Option<loom_store::MappedObject>> {
+        self.inner.store.map_store_ref(reference, Some(BLOB_KIND))
+    }
+
     /// Run kernel op `op` (`family.name`, or the built-in `loom.put`) on the
     /// gather list `args`. This is what the `loom.kernel` import does.
     pub fn call_kernel(&self, op: &str, args: &[&[u8]]) -> Result<Vec<u8>, String> {
