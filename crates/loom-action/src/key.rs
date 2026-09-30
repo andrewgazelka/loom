@@ -18,8 +18,9 @@ pub struct Input {
 }
 
 /// A process run as a function. Every field is part of the key. `runtime` contributes its paths
-/// and, for each path that is a regular file, its size, mtime and ctime in nanoseconds, so
-/// replacing or rewriting such a file changes the key. The contents of a runtime DIRECTORY are
+/// and, for each path that is a regular file, its inode, size and mtime in nanoseconds (not ctime:
+/// a chmod or a hard link is not a change of content), so replacing or rewriting such a file
+/// changes the key. Every runtime path must exist. The contents of a runtime DIRECTORY are
 /// not keyed at all: only `tool_identity` covers them, so a directory of libraries or a sysroot
 /// needs an identity string that changes when the directory does (a version banner, a store path).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,9 +47,24 @@ pub struct Action {
     pub network: bool,
 }
 
-/// (size, mtime ns, ctime ns): changes whenever the file's bytes or metadata are written, and the
-/// ctime cannot be set back by the file's owner.
+/// (size, mtime ns, ctime ns) of a tool binary: changes whenever the file's bytes or metadata are
+/// written, and the ctime cannot be set back by the file's owner.
 pub(crate) type FileStamp = (u64, i64, i64);
+
+/// (inode, size, mtime ns) of a runtime file.
+pub(crate) type RuntimeStamp = (u64, u64, i64);
+
+fn runtime_stamp(metadata: &std::fs::Metadata) -> RuntimeStamp {
+    use std::os::unix::fs::MetadataExt;
+    (
+        metadata.ino(),
+        metadata.len(),
+        metadata
+            .mtime()
+            .saturating_mul(1_000_000_000)
+            .saturating_add(metadata.mtime_nsec()),
+    )
+}
 
 pub(crate) fn file_stamp(metadata: &std::fs::Metadata) -> FileStamp {
     use std::os::unix::fs::MetadataExt;
@@ -104,23 +120,42 @@ impl Action {
         Ok(())
     }
 
+    /// Each runtime path with its stamp when it is a regular file (a directory has none), sorted.
+    /// The runner takes these before a run and again after it: a runtime file that changed while
+    /// the tool ran makes the result unrecordable.
+    pub(crate) fn runtime_stamps(&self) -> Result<Vec<(String, Option<RuntimeStamp>)>> {
+        let mut stamps = self
+            .runtime
+            .iter()
+            .map(|path| {
+                let metadata = std::fs::metadata(path).with_context(|| {
+                    format!(
+                        "runtime path {} cannot be read; every runtime path must exist",
+                        path.display()
+                    )
+                })?;
+                let stamp = metadata.is_file().then(|| runtime_stamp(&metadata));
+                Ok((path.to_string_lossy().into_owned(), stamp))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        stamps.sort();
+        Ok(stamps)
+    }
+
     /// The action's identity: BLAKE3 over its canonical form and the tool's content hash.
     pub fn key(&self, tool_hash: &str) -> Result<String> {
+        self.key_with(tool_hash, &self.runtime_stamps()?)
+    }
+
+    pub(crate) fn key_with(
+        &self,
+        tool_hash: &str,
+        runtime: &[(String, Option<RuntimeStamp>)],
+    ) -> Result<String> {
         self.validate()?;
         let mut outputs = self.outputs.clone();
         outputs.sort();
         outputs.dedup();
-        let mut runtime = self
-            .runtime
-            .iter()
-            .map(|path| {
-                let metadata = std::fs::metadata(path)
-                    .with_context(|| format!("stat runtime path {}", path.display()))?;
-                let stamp = metadata.is_file().then(|| file_stamp(&metadata));
-                Ok((path.to_string_lossy().into_owned(), stamp))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        runtime.sort();
         let canonical = serde_json::to_vec(&serde_json::json!({
             "format": FORMAT,
             "platform": format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),

@@ -18,7 +18,7 @@
 //! stamp of its inode, size and timestamps; any change forces a re-hash.
 //!
 //! This module knows files only; the SQL side is in `blobs.rs`.
-use anyhow::{Context, Result, anyhow, ensure};
+use anyhow::{Context, Result, ensure};
 use std::{
     collections::{BTreeSet, HashMap, VecDeque},
     fs::{self, File, OpenOptions},
@@ -30,6 +30,47 @@ use std::{
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+/// A stored object that cannot be served: its bytes are gone or are not what its hash says. A
+/// caller that can rebuild the object (recompile, re-run) matches this through
+/// [`ObjectError::is_in`]; every other error (full disk, permissions, a locked store) is not damage
+/// and must not be treated as a cache miss.
+#[derive(Debug)]
+pub enum ObjectError {
+    /// The index names an object whose file is not there.
+    Missing { hash: String },
+    /// The bytes on disk or in the row are not the object `hash`, or not the recorded size.
+    Corrupt { hash: String, reason: String },
+}
+
+impl std::fmt::Display for ObjectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Missing { hash } => write!(
+                f,
+                "spilled object {hash} is missing: the objects directory does not match the database"
+            ),
+            Self::Corrupt { hash, reason } => write!(f, "object {hash}: {reason}"),
+        }
+    }
+}
+
+impl std::error::Error for ObjectError {}
+
+impl ObjectError {
+    pub(crate) fn mismatch(hash: &str) -> anyhow::Error {
+        Self::Corrupt {
+            hash: hash.to_owned(),
+            reason: "CAS content hash mismatch".to_owned(),
+        }
+        .into()
+    }
+
+    /// Whether `error`, or any error it wraps, is object damage.
+    pub fn is_in(error: &anyhow::Error) -> bool {
+        error.downcast_ref::<Self>().is_some()
+    }
+}
 
 /// Values of this many bytes and up are files.
 pub(crate) const SPILL_BYTES: usize = 1 << 20;
@@ -183,14 +224,14 @@ impl Spill {
     /// file this process has not verified is hashed now. False means the file
     /// must be (re)written. A present file's shard is marked for a directory
     /// sync, since its writer may not have completed one.
-    fn intact(&self, hash: &str, size: u64) -> Result<bool> {
+    pub fn intact(&self, hash: &str, size: u64) -> Result<bool> {
         let path = self.path(hash)?;
         let file = match File::open(&path) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
             Err(error) => return Err(error.into()),
         };
-        if file.metadata()?.len() != size || !self.verify(hash, &file)? {
+        if file.metadata()?.len() != size || self.verify(hash, &file)?.is_none() {
             return Ok(false);
         }
         self.mark_dirty(path.parent().context("object path has no shard")?);
@@ -301,18 +342,21 @@ impl Spill {
         let path = self.path(hash)?;
         let file = File::open(&path).map_err(|error| {
             if error.kind() == io::ErrorKind::NotFound {
-                anyhow!(
-                    "spilled object {hash} is missing: the objects directory does not match the database"
-                )
+                anyhow::Error::new(ObjectError::Missing {
+                    hash: hash.to_owned(),
+                })
             } else {
                 anyhow::Error::from(error).context(format!("open spilled object {hash}"))
             }
         })?;
         let length = file.metadata()?.len();
-        ensure!(
-            length == size,
-            "spilled object {hash} has {length} bytes on disk but the index records {size}"
-        );
+        if length != size {
+            return Err(ObjectError::Corrupt {
+                hash: hash.to_owned(),
+                reason: format!("{length} bytes on disk but the index records {size}"),
+            }
+            .into());
+        }
         Ok(file)
     }
 
@@ -329,10 +373,9 @@ impl Spill {
             "spilled object {hash} changed while being read"
         );
         if !self.is_verified(hash, &before) {
-            ensure!(
-                blake3::hash(&bytes).to_hex().as_str() == hash,
-                "CAS content hash mismatch"
-            );
+            if blake3::hash(&bytes).to_hex().as_str() != hash {
+                return Err(ObjectError::mismatch(hash));
+            }
             self.mark_verified(hash, before);
         }
         Ok(bytes)
@@ -355,17 +398,25 @@ impl Spill {
     /// may write to it. The object is hash-verified first unless this process
     /// already verified this very file.
     pub fn restore(&self, hash: &str, size: u64, destination: &Path) -> Result<()> {
-        let source = self.path(hash)?;
         let file = self.open_file(hash, size)?;
-        ensure!(self.verify(hash, &file)?, "CAS content hash mismatch");
+        let verified = self
+            .verify(hash, &file)?
+            .ok_or_else(|| ObjectError::mismatch(hash))?;
         let temp = sibling_temp(destination)?;
-        let placed = match clone_file(&source, &temp) {
+        // Cloned from the verified handle, never from the path: a rename over the path after the
+        // check cannot change what is cloned. The copy reads the same handle.
+        let placed = match clone_file(&file, &temp) {
             Ok(()) => make_user_writable(&temp),
             Err(_) => copy_new(&file, &temp, size),
         };
         let outcome = placed
             .with_context(|| format!("place {hash} at {}", temp.display()))
             .and_then(|()| {
+                // A write to the file while it was cloned or copied shows in its stamp.
+                ensure!(
+                    Stamp::of(&file)? == verified,
+                    "spilled object {hash} changed while being restored"
+                );
                 fs::rename(&temp, destination)
                     .with_context(|| format!("replace {}", destination.display()))
             });
@@ -417,14 +468,14 @@ impl Spill {
         }
     }
 
-    /// Whether the content of `file`, a fresh handle on the object `hash`, hashes
-    /// to `hash`. Answered from the verified stamp when this very file was
-    /// verified before; otherwise hashed, and recorded when it matches. The file
-    /// changing while it is hashed is an error.
-    fn verify(&self, hash: &str, file: &File) -> Result<bool> {
+    /// The stamp of `file`, a fresh handle on the object `hash`, when its content hashes to `hash`;
+    /// `None` when it does not. Answered from the verified stamp when this very file was verified
+    /// before; otherwise hashed, and recorded when it matches. The file changing while it is hashed
+    /// is an error.
+    fn verify(&self, hash: &str, file: &File) -> Result<Option<Stamp>> {
         let before = Stamp::of(file)?;
         if self.is_verified(hash, &before) {
-            return Ok(true);
+            return Ok(Some(before));
         }
         let mut hasher = blake3::Hasher::new();
         hasher
@@ -434,11 +485,11 @@ impl Spill {
             Stamp::of(file)? == before,
             "spilled object {hash} changed while being verified"
         );
-        let matches = hasher.finalize().to_hex().as_str() == hash;
-        if matches {
-            self.mark_verified(hash, before);
+        if hasher.finalize().to_hex().as_str() != hash {
+            return Ok(None);
         }
-        Ok(matches)
+        self.mark_verified(hash, before);
+        Ok(Some(before))
     }
 }
 
@@ -530,23 +581,28 @@ fn sync_directory(_directory: &Path) -> Result<()> {
     Ok(())
 }
 
-/// `clonefile(2)`: a copy-on-write copy on APFS, atomic, fails if `destination` exists.
+/// `fclonefileat(2)` from the open `source`: a copy-on-write copy of exactly that inode on APFS,
+/// atomic, fails if `destination` exists.
 #[cfg(target_os = "macos")]
-fn clone_file(source: &Path, destination: &Path) -> io::Result<()> {
+fn clone_file(source: &File, destination: &Path) -> io::Result<()> {
     use std::{
         ffi::{CString, c_char, c_int},
-        os::unix::ffi::OsStrExt,
+        os::{fd::AsRawFd, unix::ffi::OsStrExt},
     };
     unsafe extern "C" {
-        fn clonefile(source: *const c_char, destination: *const c_char, flags: u32) -> c_int;
+        fn fclonefileat(
+            source_fd: c_int,
+            destination_dir_fd: c_int,
+            destination: *const c_char,
+            flags: c_int,
+        ) -> c_int;
     }
-    let to_c = |path: &Path| {
-        CString::new(path.as_os_str().as_bytes())
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))
-    };
-    let (source, destination) = (to_c(source)?, to_c(destination)?);
-    // SAFETY: both arguments are NUL-terminated C strings that outlive the call.
-    if unsafe { clonefile(source.as_ptr(), destination.as_ptr(), 0) } == 0 {
+    /// `AT_FDCWD` on macOS: resolve `destination` against the working directory.
+    const AT_FDCWD: c_int = -2;
+    let destination = CString::new(destination.as_os_str().as_bytes())
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    // SAFETY: the descriptor is open for the call and the path is a NUL-terminated C string.
+    if unsafe { fclonefileat(source.as_raw_fd(), AT_FDCWD, destination.as_ptr(), 0) } == 0 {
         Ok(())
     } else {
         Err(io::Error::last_os_error())
@@ -554,6 +610,6 @@ fn clone_file(source: &Path, destination: &Path) -> io::Result<()> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn clone_file(_source: &Path, _destination: &Path) -> io::Result<()> {
+fn clone_file(_source: &File, _destination: &Path) -> io::Result<()> {
     Err(io::Error::from(io::ErrorKind::Unsupported))
 }

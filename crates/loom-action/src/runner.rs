@@ -5,7 +5,7 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use loom_process::{ProcessSandbox, ProcessSpec};
-use loom_store::Store;
+use loom_store::{ObjectError, Store};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -147,15 +147,20 @@ impl Runner {
         Ok((tool, hash, stamp))
     }
 
-    /// A recorded result whose every blob is still stored; anything less is a miss.
+    /// A recorded result whose every blob is still stored and intact; anything less is a miss.
     fn lookup(&self, key: &str) -> Result<Option<ActionResult>> {
         let Some(result_hash) = self.store.action_result(key)? else {
             return Ok(None);
         };
-        // A record that cannot be read or decoded is a miss, not an error: the run that follows
-        // records a new document under the key and replaces it.
-        let Ok(Some(bytes)) = self.store.get(&result_hash) else {
-            return Ok(None);
+        // A record that is damaged or cannot be decoded is a miss, not an error: the run that
+        // follows records a new document under the key and replaces it (putting the same bytes
+        // again also repairs a corrupt row). Any other store failure propagates, so it shows
+        // before a tool runs and not after.
+        let bytes = match self.store.get(&result_hash) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return Ok(None),
+            Err(error) if ObjectError::is_in(&error) => return Ok(None),
+            Err(error) => return Err(error),
         };
         let Ok(result) = serde_json::from_slice::<ActionResult>(&bytes) else {
             return Ok(None);
@@ -165,8 +170,10 @@ impl Runner {
             .values()
             .map(|output| output.hash.as_str())
             .chain([result.stdout.as_str(), result.stderr.as_str()]);
+        // Hashed, not just present: a same-size corrupt object must not be a hit forever. The
+        // store remembers what it verified, so the restore that follows does not hash again.
         for hash in blobs {
-            if !self.store.has_object(hash)? {
+            if !self.store.verify_object(hash)? {
                 return Ok(None);
             }
         }
@@ -177,7 +184,8 @@ impl Runner {
         let started = Instant::now();
         action.validate()?;
         let (tool, tool_hash, tool_stamp) = self.tool_hash(&action.tool)?;
-        let key = action.key(&tool_hash)?;
+        let runtime_before = action.runtime_stamps()?;
+        let key = action.key_with(&tool_hash, &runtime_before)?;
         if let Some(result) = self.lookup(&key)? {
             self.hits.fetch_add(1, Ordering::Relaxed);
             return Ok(Outcome {
@@ -227,6 +235,8 @@ impl Runner {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
+            // Its own process group, so a kill reaches everything the tool started.
+            .process_group(0)
             .kill_on_drop(true);
         let mut child = command.spawn().context("spawn sandboxed tool")?;
         let stdout_pipe = child.stdout.take().context("tool stdout is not piped")?;
@@ -243,7 +253,11 @@ impl Runner {
         let (status, stdout_bytes, stderr_bytes) = match finished {
             Ok(Ok(finished)) => finished,
             failed => {
-                // Too much output, or the clock ran out: the tool must not outlive the error.
+                // Too much output, or the clock ran out: nothing the tool started may outlive the error.
+                if let Some(group) = child.id() {
+                    // SAFETY: plain signal to the group this run created; no memory is involved.
+                    unsafe { libc::killpg(group as libc::pid_t, libc::SIGKILL) };
+                }
                 let _ = child.kill().await;
                 return Err(match failed {
                     Ok(Err(error)) => error,
@@ -299,6 +313,16 @@ impl Runner {
                 elapsed: started.elapsed(),
             });
         }
+        // A runtime file rewritten while the tool ran means the result may not belong to the key:
+        // hand it back, but record nothing.
+        if !matches!(action.runtime_stamps(), Ok(now) if now == runtime_before) {
+            return Ok(Outcome {
+                key,
+                result,
+                cached: false,
+                elapsed: started.elapsed(),
+            });
+        }
         let result_hash = self
             .store
             .put("action-result", &serde_json::to_vec(&result)?)?;
@@ -331,11 +355,14 @@ async fn read_capped(reader: impl AsyncRead + Unpin, name: &str) -> Result<Vec<u
 /// The declared output `name` under `root` as an open handle and whether it is executable, or
 /// `None` when the tool did not leave a regular file there. The tool controls the scratch tree,
 /// so the path is resolved fully and must stay under `root` (a symlinked directory pointing at
-/// the host's files is an error, not an output); only a regular file is ever opened (a FIFO would
-/// block); and the handle must be the very file the resolved path still names, so what is stored
-/// is what was vetted.
+/// the host's files is an error, not an output). The file is opened `O_NOFOLLOW | O_NONBLOCK`
+/// (a final symlink fails, a FIFO cannot block), must be a regular file, and the path must still
+/// resolve to where it was vetted, so what is stored is what was vetted.
 fn open_output(root: &Path, name: &str) -> Result<Option<(File, bool)>> {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::os::{
+        fd::AsRawFd,
+        unix::fs::{OpenOptionsExt, PermissionsExt},
+    };
     let path = root.join(relative(name)?);
     let Ok(resolved) = path.canonicalize() else {
         return Ok(None);
@@ -344,19 +371,26 @@ fn open_output(root: &Path, name: &str) -> Result<Option<(File, bool)>> {
         resolved.starts_with(root),
         "declared output {name:?} resolves outside the work directory"
     );
-    let Ok(named) = std::fs::symlink_metadata(&resolved) else {
-        return Ok(None);
-    };
-    if !named.file_type().is_file() {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&resolved)
+        .with_context(|| format!("open output {name:?}"))?;
+    let opened = file.metadata()?;
+    if !opened.is_file() {
         return Ok(None);
     }
-    let file = File::open(&resolved).with_context(|| format!("open output {name:?}"))?;
-    let opened = file.metadata()?;
     ensure!(
-        opened.is_file()
-            && (opened.dev(), opened.ino()) == (named.dev(), named.ino())
-            && path.canonicalize().is_ok_and(|again| again == resolved),
+        path.canonicalize().is_ok_and(|again| again == resolved),
         "declared output {name:?} changed while it was collected"
     );
+    // Blocking mode again for the reader that stores it; a regular file never needed the flag.
+    // SAFETY: the descriptor is open and owned by `file` for the whole block.
+    unsafe {
+        let flags = libc::fcntl(file.as_raw_fd(), libc::F_GETFL);
+        if flags >= 0 {
+            libc::fcntl(file.as_raw_fd(), libc::F_SETFL, flags & !libc::O_NONBLOCK);
+        }
+    }
     Ok(Some((file, opened.permissions().mode() & 0o111 != 0)))
 }

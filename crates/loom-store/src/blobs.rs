@@ -96,10 +96,13 @@ pub(crate) fn insert_object(
         codec == loom_proto::RAW_CODEC && bytes.len() >= SPILL_BYTES && spillable_kind(kind)
     });
     let Some(spill) = spill else {
-        connection.execute(
+        let inserted = connection.execute(
             "INSERT OR IGNORE INTO cas(hash,kind,bytes,created_at,codec) VALUES (?,?,?,coalesce(?,unixepoch()),?)",
             params![hash, kind, bytes, created_at, codec],
         )?;
+        if inserted == 0 {
+            heal_inline(connection, hash, bytes)?;
+        }
         return Ok(());
     };
     let existing: Option<bool> = connection
@@ -120,6 +123,27 @@ pub(crate) fn insert_object(
         bytes.len() as u64,
         created_at,
     )
+}
+
+/// An inline row exists under `hash` already. When its bytes differ from `bytes` and `bytes` do hash
+/// to `hash`, the stored row is corrupt and is replaced, so putting an object again repairs it (an
+/// `INSERT OR IGNORE` alone would keep the bad row forever). Bytes that do not hash to `hash` are
+/// never written, so this cannot introduce corruption.
+fn heal_inline(connection: &Connection, hash: &str, bytes: &[u8]) -> Result<()> {
+    let differs: Option<bool> = connection
+        .query_row(
+            "SELECT bytes<>? FROM cas WHERE hash=? AND external=0",
+            params![bytes, hash],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if differs == Some(true) && blake3::hash(bytes).to_hex().as_str() == hash {
+        connection.execute(
+            "UPDATE cas SET bytes=? WHERE hash=? AND external=0",
+            params![bytes, hash],
+        )?;
+    }
+    Ok(())
 }
 
 /// Index an object whose file is already in place.

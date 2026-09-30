@@ -52,10 +52,9 @@ impl Store {
             return match stored {
                 // Inline values are verified on every read.
                 blobs::Stored::Inline(bytes) => {
-                    ensure!(
-                        blake3::hash(&bytes).to_hex().as_str() == hash,
-                        "CAS content hash mismatch"
-                    );
+                    if blake3::hash(&bytes).to_hex().as_str() != hash {
+                        return Err(ObjectError::mismatch(hash));
+                    }
                     Ok(Some(bytes))
                 }
                 // A spilled file is verified once per process inside `read`.
@@ -108,6 +107,43 @@ impl Store {
                 .has(&hash, size.context("external CAS row has no size")?),
         }
     }
+    /// Whether the object at `hash` is stored and its bytes hash to `hash`: `has_object` plus a
+    /// content check, answered from the verified-file stamp when this process already hashed this
+    /// very file (so it is cheap for an object about to be restored). A cache hit that will hand
+    /// the object to a consumer asks this, so a corrupt object is a miss that a re-run repairs.
+    pub fn verify_object(&self, hash: &str) -> Result<bool> {
+        self.recording.barrier(false)?;
+        let hash = bare_hash(hash)?;
+        let stored = {
+            let connection = self.lock()?;
+            let row: Option<(bool, Option<u64>)> = connection
+                .query_row(
+                    "SELECT external,size FROM cas WHERE hash=?",
+                    [&hash],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            match row {
+                Some((true, size)) => Some(size.context("external CAS row has no size")?),
+                Some((false, _)) => None,
+                None => return Ok(false),
+            }
+        };
+        match stored {
+            Some(size) => self
+                .spill
+                .as_deref()
+                .context("external CAS object in a store that has no objects directory")?
+                .intact(&hash, size),
+            None => Ok(self
+                .lock()?
+                .query_row("SELECT bytes FROM cas WHERE hash=?", [&hash], |row| {
+                    row.get::<_, Vec<u8>>(0)
+                })
+                .optional()?
+                .is_some_and(|bytes| blake3::hash(&bytes).to_hex().as_str() == hash)),
+        }
+    }
     /// Make the raw object at `hash` (a bare hash or a CID) appear at `dest`,
     /// replacing any existing file atomically (exclusive temp name, then rename).
     /// A spilled object is cloned on APFS, else copied, and its BLAKE3 is checked
@@ -132,10 +168,9 @@ impl Store {
         );
         match stored {
             blobs::Stored::Inline(bytes) => {
-                ensure!(
-                    blake3::hash(&bytes).to_hex().as_str() == hash,
-                    "CAS content hash mismatch"
-                );
+                if blake3::hash(&bytes).to_hex().as_str() != hash {
+                    return Err(ObjectError::mismatch(&hash));
+                }
                 spill::write_atomic(dest, &bytes)
             }
             blobs::Stored::External { size } => self

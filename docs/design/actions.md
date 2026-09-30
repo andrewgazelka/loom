@@ -9,7 +9,7 @@ output files it must write, and a network flag. Its key is BLAKE3 over all of th
 platform (`crates/loom-action/src/key.rs`). `Runner::run` answers a known key from the store and runs nothing; otherwise it
 lays the inputs out in a fresh scratch directory (`Store::restore_to`: a clone on APFS, else a copy; never a hard link, so a tool cannot write through to the store), runs the tool inside
 `loom-process`'s sandbox, and records the result (exit code, stdout, stderr and each declared output as blobs) only when the
-tool exited 0 and wrote every declared output. A failure is returned, never cached. A recorded result with a missing blob is a miss.
+tool exited 0 and wrote every declared output. A failure is returned, never cached. A recorded result with a missing or corrupt blob (hashed, not just present), or an unreadable or undecodable record, is a miss; the rerun repairs it. A runtime regular file (inode, size, mtime) is part of the key, and one rewritten while the tool ran makes the result unrecorded. Stdout and stderr are capped at 16 MiB each.
 
 Local first: identity is the tool's content hash plus a caller string, not a toolchain closure, and the format is Loom's own (no
 Bazel REAPI). A result is valid on this machine's runtime libraries and is not portable.
@@ -43,6 +43,6 @@ running non-async-signal-safe code between `fork` and `exec` in a multithreaded 
   path already does), with proc macros and build scripts needing declared inputs or being uncacheable.
 * Incremental rustc as declared mutable scratch beside a content-addressed output (possible because the cache is per machine).
 * Output directories (only regular files are declared and kept), a tree hash as an input (today a flat path to hash map plus
-  `ingest_directory`), and killing a tool's descendants on timeout (only the direct child is killed).
+  `ingest_directory`). On timeout or output overflow the tool runs in its own process group and the whole group is killed.
 * Without clone support (Linux today) a spilled input is copied into the scratch directory, which costs a copy per 1 MiB-plus input; a
   reflink attempt (FICLONE) would remove that. Restores were hard links until a review found a same-uid tool could write through the link into the store.

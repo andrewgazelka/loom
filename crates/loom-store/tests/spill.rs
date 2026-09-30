@@ -493,3 +493,47 @@ fn intake_refuses_a_corrupt_source_file_instead_of_carrying_it_over() -> Result<
     assert_eq!(b.get(&hash)?, None);
     Ok(())
 }
+
+#[test]
+fn damage_is_a_typed_error_and_putting_the_object_again_heals_an_inline_row() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let store = Store::open(directory.path().join("store.db"))?;
+    let is_damage = |error: &anyhow::Error| loom_store::ObjectError::is_in(error);
+
+    // A missing spilled file and a corrupt one are damage; an unrelated failure is not.
+    let big = pattern(2 * MIB);
+    let hash = store.put("blob", &big)?;
+    let file = object_path(directory.path(), &hash);
+    std::fs::remove_file(&file)?;
+    assert!(is_damage(&store.get(&hash).unwrap_err()));
+    assert!(is_damage(
+        &store
+            .restore_to(&hash, &directory.path().join("out"))
+            .unwrap_err()
+    ));
+    store.put("blob", &big)?;
+    corrupt_in_place(&file)?;
+    assert!(is_damage(&store.get(&hash).unwrap_err()));
+    let not_damage = store.get("not a hash").unwrap_err();
+    assert!(!is_damage(&not_damage), "{not_damage:#}");
+
+    // A corrupt inline row is damage too, and INSERT OR IGNORE used to keep it for ever.
+    let small = pattern(4096);
+    let small_hash = store.put("blob", &small)?;
+    store.with_connection(|c| {
+        Ok(c.execute(
+            "UPDATE cas SET bytes=zeroblob(4096) WHERE hash=?",
+            [&small_hash],
+        )?)
+    })?;
+    assert!(is_damage(&store.get(&small_hash).unwrap_err()));
+    assert!(!store.verify_object(&small_hash)?);
+    store.put("blob", &small)?;
+    assert_eq!(store.get(&small_hash)?.as_deref(), Some(small.as_slice()));
+    assert!(store.verify_object(&small_hash)?);
+    assert!(
+        !store.verify_object(&hash)?,
+        "the corrupt spilled file is not intact"
+    );
+    Ok(())
+}

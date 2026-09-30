@@ -37,6 +37,7 @@ use loom_proto::{Def, Event, Value};
 pub use machine::MachineRoot;
 pub use recording::RecordingTimings;
 use rusqlite::{Connection, OptionalExtension, params};
+pub use spill::ObjectError;
 use spill::Spill;
 use std::{
     collections::BTreeMap,

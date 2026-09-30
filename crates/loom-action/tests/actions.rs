@@ -418,6 +418,17 @@ fn the_key_follows_regular_runtime_files_and_a_directory_is_left_to_the_identity
         "a rewritten runtime file kept the key"
     );
 
+    // A chmod changes ctime but not content: the key must survive it.
+    let stable = action.key("tool").unwrap();
+    let mut permissions = std::fs::metadata(file.path()).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o600);
+    std::fs::set_permissions(file.path(), permissions).unwrap();
+    assert_eq!(
+        action.key("tool").unwrap(),
+        stable,
+        "a chmod of a runtime file changed the key"
+    );
+
     action.runtime.push(directory.path().to_owned());
     let with_directory = action.key("tool").unwrap();
     std::fs::write(directory.path().join("lib"), b"new library").unwrap();
@@ -428,6 +439,13 @@ fn the_key_follows_regular_runtime_files_and_a_directory_is_left_to_the_identity
     );
     action.tool_identity = "libs 2".into();
     assert_ne!(action.key("tool").unwrap(), with_directory);
+
+    action.runtime.push(directory.path().join("absent"));
+    let error = format!("{:#}", action.key("tool").unwrap_err());
+    assert!(
+        error.contains("runtime path") && error.contains("absent"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -446,4 +464,86 @@ fn an_input_tree_path_with_a_backslash_is_refused() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("backslash"), "{error}");
+}
+
+/// Same-size damage to a stored object, as a same-uid writer could do to a file or a row.
+fn flip_first_byte_of_file(path: &std::path::Path) {
+    use std::io::Write;
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let mut permissions = std::fs::metadata(path).unwrap().permissions();
+    permissions.set_readonly(false);
+    std::fs::set_permissions(path, permissions).unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .write_all(b"X")
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_same_size_corrupt_spilled_output_is_a_miss_that_the_rerun_repairs() {
+    let directory = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path().join("store.db")).unwrap();
+    let runner = Runner::new(store, scratch.path()).unwrap();
+    let action = shell(
+        "x=$(printf '%1048576s' ''); printf '%s%s' \"$x\" \"$x\" > out.txt",
+        BTreeMap::new(),
+        &["out.txt"],
+    );
+    let first = runner.run(&action).await.unwrap();
+    let output = first.result.outputs["out.txt"].clone();
+    let file = directory
+        .path()
+        .join("objects")
+        .join(&output.hash[..1])
+        .join(&output.hash);
+    // Control: before the damage the cached result restores.
+    assert!(runner.run(&action).await.unwrap().cached);
+    flip_first_byte_of_file(&file);
+    assert_eq!(
+        std::fs::metadata(&file).unwrap().len(),
+        2 << 20,
+        "same size"
+    );
+    let second = runner.run(&action).await.unwrap();
+    assert!(
+        !second.cached,
+        "a corrupt output must not be served as a hit"
+    );
+    assert_eq!(second.result, first.result);
+    let restored = scratch.path().join("restored");
+    runner.restore_output(&output, &restored).unwrap();
+    assert_eq!(std::fs::read(&restored).unwrap().len(), 2 << 20);
+    assert!(
+        runner.run(&action).await.unwrap().cached,
+        "and the repaired result is a hit again"
+    );
+}
+
+#[tokio::test]
+async fn a_corrupt_result_row_is_repaired_by_the_rerun_not_rerun_forever() {
+    let (runner, store, _scratch) = runner();
+    let action = shell("printf y > out.txt", BTreeMap::new(), &["out.txt"]);
+    let first = runner.run(&action).await.unwrap();
+    let record = store.action_result(&first.key).unwrap().unwrap();
+    store
+        .with_connection(|c| {
+            Ok(c.execute(
+                "UPDATE cas SET bytes=CAST(upper(CAST(bytes AS TEXT)) AS BLOB) WHERE hash=?",
+                [&record],
+            )?)
+        })
+        .unwrap();
+    assert!(store.get(&record).is_err(), "the row is corrupt");
+    assert!(!runner.run(&action).await.unwrap().cached);
+    assert!(
+        store.get(&record).is_ok(),
+        "the same document put again healed the row"
+    );
+    assert!(
+        runner.run(&action).await.unwrap().cached,
+        "so the next run is a hit"
+    );
 }

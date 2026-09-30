@@ -321,16 +321,28 @@ impl Recipe {
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
-                if store.restore_to(hash, path).is_err() {
-                    complete = false;
+                match store.restore_to(hash, path) {
+                    Ok(()) => {}
+                    // Only a missing or corrupt object means "recompile"; a full disk, a
+                    // permission error or a store failure must surface, not hide as a rebuild.
+                    Err(error) if loom_store::ObjectError::is_in(&error) => complete = false,
+                    Err(error) => return Err(rejected(format!("{error:#}"))),
                 }
                 continue;
             }
-            // An unreadable or corrupt stored object (a spilled executable whose file fails its
-            // hash, say) is recompiled like an absent one.
-            let Ok(Some(bytes)) = store.get(hash) else {
-                complete = false;
-                continue;
+            // A missing or corrupt stored object (a spilled executable whose file fails its hash,
+            // say) is recompiled like an absent one; any other failure propagates.
+            let bytes = match store.get(hash) {
+                Ok(Some(bytes)) => bytes,
+                Ok(None) => {
+                    complete = false;
+                    continue;
+                }
+                Err(error) if loom_store::ObjectError::is_in(&error) => {
+                    complete = false;
+                    continue;
+                }
+                Err(error) => return Err(rejected(format!("{error:#}"))),
             };
             if blake3::hash(&bytes).to_hex().as_str() != hash {
                 return Err(rejected("corrupt Rust artifact in CAS"));

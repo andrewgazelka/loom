@@ -62,12 +62,15 @@ about 267 blob files in 16 directories (about 287 entries per 100k objects); thr
    file (inode, size, mtime and ctime in nanoseconds) taken from the open handle, in a bounded FIFO set; any change of the stamp
    (a write through any link, a replacement) forces a re-hash on the next read or restore. A background scrub can verify the
    rest. Inline values keep verifying as today. `put`, `put_file` and intake compare an existing file by hash, not just size,
-   unless its stamp is already verified, and rewrite it on mismatch. `Store::has_object` (row exists and the spilled file is
+   unless its stamp is already verified, and rewrite it on mismatch; an inline put whose existing row fails its hash replaces the
+   row's bytes (a corrupt inline row used to survive `INSERT OR IGNORE` forever). A missing or corrupt object is the typed
+   `ObjectError` (Missing, Corrupt); callers that can rebuild match it with `ObjectError::is_in` and treat every other error as a
+   real failure, not a cache miss. `Store::has_object` (row exists and the spilled file is
    present at the recorded size) is the check for a cache hit; `size_of` answers from the index alone.
 3. Restoring a spilled blob to a build directory or sandbox never hard-links: it uses `clonefile` on APFS, else a copy, into an
    exclusive temp name beside the destination, then a rename. The result is an independent 0644 file (inline objects are the
-   same), so a consumer that can write to it cannot reach the store's inode. The object is verified as in rule 2 before the
-   clone or copy. Adopting an object from another store directory (intake, backup) is a hashed copy, refused when the source
+   same), so a consumer that can write to it cannot reach the store's inode. The object is verified as in rule 2 through an open handle, the clone (`fclonefileat`) or copy reads that same handle, and the
+   handle's stamp is re-read afterwards; a change during the restore fails it. Adopting an object from another store directory (intake, backup) is a hashed copy, refused when the source
    does not match its hash, for the same reason.
 4. The result cache file is disposable: on any corruption it is deleted and starts empty. Hit counts are flushed in batches (60 to
    73k bumps/s at 1000 per transaction). Eviction deletes rows in one transaction, then unlinks spilled files; nothing else holds
