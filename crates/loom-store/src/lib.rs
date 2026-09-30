@@ -113,7 +113,20 @@ impl Store {
         connection.execute_batch(include_str!("schema.sql"))?;
         migration::run(&mut connection)?;
         effect_index::migrate(&mut connection)?;
-        connection.execute_batch("PRAGMA synchronous=NORMAL;")?;
+        // NORMAL keeps commits off the fsync path; the recording writer's durability
+        // barrier (`flush`) is what synchronizes. Reads and the WAL file are tuned
+        // for the store's shape: a few hundred large immutable blobs (rlibs, wasm
+        // components of 0.1 to 1 MB) beside many small rows. Measured on a 185 MB
+        // store: a 1.3 MB blob read takes 0.20 ms at the default 8 MB page cache and
+        // 0.09 ms with a 64 MB cache and a 256 MB memory map. The WAL is bounded at
+        // 64 MB after a checkpoint instead of keeping its high-water size.
+        connection.execute_batch(
+            "PRAGMA synchronous=NORMAL;
+             PRAGMA cache_size=-65536;
+             PRAGMA mmap_size=268435456;
+             PRAGMA journal_size_limit=67108864;
+             PRAGMA temp_store=MEMORY;",
+        )?;
         durability.verify(&connection)?;
         let connection = Arc::new(Mutex::new(connection));
         let recording = Arc::new(recording::Writer::new(connection.clone(), durability)?);
