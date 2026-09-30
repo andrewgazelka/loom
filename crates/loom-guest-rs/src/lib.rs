@@ -13,7 +13,6 @@ pub mod isolated;
 pub mod kernel;
 pub mod stream;
 pub use isolated::CallError;
-pub use glam;
 pub use serde;
 use serde::{Serialize, de::DeserializeOwned};
 pub use serde_json;

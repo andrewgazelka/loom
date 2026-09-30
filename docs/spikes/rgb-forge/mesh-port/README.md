@@ -3,7 +3,7 @@
 Modules: `geom`, `mesh`, `ops`, `shapes`, `hull`, `mass`, `subdiv` from `crates/rgb-mesh/src` (rgb, read only) plus
 `check/tol.rs` and rgb-bvh's `Aabb` (44 lines, `rgb-bvh/src/lib.rs:42-85`). One entry, `mesh_hash(segments)`, builds meshes with
 rgb's own `shapes`, `ops`, `subdiv`, `hull` and `mass` functions and returns 14 stage hashes; its effect row is empty.
-Lock: glam =0.33.10, libm =0.2.16, robust =1.2.0, smallvec =1.16.2 (all crates.io, checksums equal the cached archives).
+Lock: glam =0.33.10, libm =0.2.16, robust =1.2.0, smallvec =1.16.2 (all crates.io, checksums equal the cached archives). (At the time glam and libm were in the SDK's lock; glam left the SDK on 2026-09-30 because linking it cost about 20 ms of every warm eval, and `libm` now needs its build script admitted, so use glam's default features.)
 Full bundle, drivers and native comparison programs: `/Volumes/Projects/tmp/loom-rgb-spike/mesh-port/` (scratch; `port.patch` here is the text edit set).
 
 ## Result

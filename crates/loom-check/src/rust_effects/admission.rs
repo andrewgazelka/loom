@@ -4,6 +4,26 @@ use super::*;
 /// module, outside the runtime's per-tenant boundary.
 const HOST_READING_MACROS: [&str; 5] = ["include", "include_str", "include_bytes", "env", "option_env"];
 
+/// `include!`, `include_str!` and `include_bytes!` read a file. One whose only argument is a
+/// relative string literal with no `..` names a file inside the package: it sits under the scanned
+/// source directory (its text is checked like any other), so it reaches nothing outside. An
+/// absolute path, a parent escape or a computed path (`concat!(env!(..), ..)`) is refused, and so
+/// are `env!` and `option_env!`, which read the host's environment.
+fn is_file_include(name: &str) -> bool {
+    matches!(name, "include" | "include_str" | "include_bytes")
+}
+
+fn in_package_path(tokens: &proc_macro2::TokenStream) -> bool {
+    let Ok(literal) = syn::parse2::<syn::LitStr>(tokens.clone()) else {
+        return false;
+    };
+    let path = std::path::Path::new(literal.value().as_str()).to_owned();
+    !path.as_os_str().is_empty()
+        && path
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)))
+}
+
 /// Attributes that name a symbol, section or import of the module. They must not
 /// appear in source, nor in any macro's tokens, where a `macro_rules!` body or a
 /// macro argument could expand to one.
@@ -32,11 +52,9 @@ pub(crate) fn unsafe_source_diagnostics(file: &syn::File) -> Vec<loom_proto::Dia
     }
     impl<'ast> Visit<'ast> for UnsafeSource {
         fn visit_macro(&mut self, node: &'ast syn::Macro) {
-            if node
-                .path
-                .segments
-                .last()
-                .is_some_and(|segment| HOST_READING_MACROS.iter().any(|name| segment.ident == name))
+            if let Some(segment) = node.path.segments.last()
+                && HOST_READING_MACROS.iter().any(|name| segment.ident == name)
+                && !(is_file_include(&segment.ident.to_string()) && in_package_path(&node.tokens))
             {
                 self.reject("compile-time host access (include, env)");
             }
@@ -180,12 +198,14 @@ mod unsafe_tests {
             "#[allow_internal_unsafe] macro_rules! bad {()=>{0}}",
             "#[rustc_allow_const_fn_unstable(foo)] fn main() {}",
             "#[path=\"../outside.rs\"] mod outside;",
-            "include!(\"outside.rs\");",
+            "include!(\"../outside.rs\");",
+            "include!(\"/etc/passwd\");",
+            "include!(concat!(env!(\"HOME\"), \"/x.rs\"));",
             "const S: &str = include_str!(\"/etc/passwd\");",
             "const B: &[u8] = include_bytes!(\"../secret\");",
             "const H: &str = env!(\"HOME\");",
             "const H: Option<&str> = option_env!(\"HOME\");",
-            "use core::include as load; load!(\"outside.rs\");",
+            "use core::include as load; load!(\"inside.rs\");",
             "fn main() { generate!({include!(\"outside.rs\")}); }",
         ] {
             let file = syn::parse_file(source).unwrap();
@@ -195,6 +215,8 @@ mod unsafe_tests {
             );
         }
         for source in [
+            "mod features { include!(\"features/impl_encase.rs\"); }",
+            "const DATA: &[u8] = include_bytes!(\"data/table.bin\");",
             "pub fn main() { let values = vec![1, 2]; let _ = values[0]; }",
             "fn main() { unsafe { operation(); } }",
             "unsafe fn operation() {}",

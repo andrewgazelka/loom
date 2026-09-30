@@ -234,6 +234,25 @@ async fn eval_accepts_unit_variants_and_derived_default_enums() {
     assert_eq!(reply.result["output"], 10);
 }
 
+#[tokio::test]
+#[ignore = "requires Rust guest toolchain, LOOM_COMPILER_CACHE_OWNER and glam 0.33.10 in ~/.cargo/registry"]
+async fn eval_uses_glam_whose_tests_directory_and_dormant_include_are_not_compiled() {
+    // glam ships `tests/support.rs` with a `#[path]` attribute and `include!("features/..")` under an
+    // inactive feature. Only a dependency's compiled library sources are scanned, and a relative
+    // in-package `include!` is admitted, so the crate builds.
+    let service = service();
+    let manifest = crate_manifest("glam = \"=0.33.10\"");
+    let lock = registry_lock(
+        "glam",
+        "0.33.10",
+        "928452f9c953e142b2f0973e4bd5f34445fcaa8069556ea97a3c9d34d15a4cf8",
+    );
+    let cell = "use glam::DVec3;\nlet a = DVec3::new(1.0, 2.0, 3.0);\n(a.cross(DVec3::Y).length() * 1000.0) as u32";
+    let reply = eval(&service, json!({"source":cell,"manifest":manifest,"lock":lock})).await;
+    assert!(reply.ok, "{reply:?}");
+    assert_eq!(reply.result["output"], 3162);
+}
+
 const CRATES_IO: &str = "registry+https://github.com/rust-lang/crates.io-index";
 
 fn crate_manifest(dependency: &str) -> String {

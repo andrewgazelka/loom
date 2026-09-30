@@ -71,10 +71,28 @@ pub(super) async fn graph_shareable(
         if trusted_sources::approved(root, source)? {
             trusted.push(source.canonicalize()?.to_string_lossy().into_owned());
         } else {
+            let is_root = source.canonicalize()? == directory.canonicalize()?;
+            // What a dependency compiles is its library-kind targets (and build scripts and
+            // procedural macros, refused elsewhere). Its tests, benches, examples and binaries are
+            // never built, so their sources are not scanned; a crate that ships a `tests/` helper
+            // with `#[path]` is not refused for it. The root package is ours: every target counts.
+            let mut rust_roots: Vec<PathBuf> = Vec::new();
             for target in package["targets"]
                 .as_array()
                 .ok_or_else(|| rejected("package targets missing"))?
             {
+                let kinds: Vec<&str> = target["kind"]
+                    .as_array()
+                    .map(|kinds| kinds.iter().filter_map(|kind| kind.as_str()).collect())
+                    .unwrap_or_default();
+                let compiled = is_root
+                    || kinds.iter().any(|kind| {
+                        ["lib", "rlib", "cdylib", "dylib", "staticlib", "proc-macro", "custom-build"]
+                            .contains(kind)
+                    });
+                if !compiled {
+                    continue;
+                }
                 let input = target["src_path"]
                     .as_str()
                     .ok_or_else(|| rejected("compiler source input missing"))?;
@@ -91,8 +109,11 @@ pub(super) async fn graph_shareable(
                         serde_json::to_string(&diagnostics).map_err(rejected)?
                     )));
                 }
+                if let Some(parent) = input.parent() {
+                    rust_roots.push(parent.to_owned());
+                }
             }
-            inspect_untrusted_source(source, source.canonicalize()? == directory.canonicalize()?)?;
+            inspect_untrusted_source(source, is_root, (!is_root).then_some(rust_roots.as_slice()))?;
         }
     }
     let trusted_path = target
@@ -202,14 +223,19 @@ pub(super) fn materialize_root_workspace(
     Ok(())
 }
 
+/// `rust_roots`, when given, limits the scan of `.rs` files to the directories a dependency's
+/// compiled targets live in (`build.rs` is always scanned); manifests, `.cargo` and toolchain
+/// files are scanned package-wide either way.
 pub(super) fn inspect_untrusted_source(
     directory: &Path,
     generated_root: bool,
+    rust_roots: Option<&[PathBuf]>,
 ) -> Result<(), BuildError> {
     fn collect(
         root: &Path,
         directory: &Path,
         generated_root: bool,
+        rust_roots: Option<&[PathBuf]>,
         files: &mut BTreeMap<String, loom_check::SourceFile>,
     ) -> Result<(), BuildError> {
         for entry in std::fs::read_dir(directory)? {
@@ -229,14 +255,20 @@ pub(super) fn inspect_untrusted_source(
                 )));
             }
             if kind.is_dir() {
-                collect(root, &path, false, files)?;
+                collect(root, &path, false, rust_roots, files)?;
             } else if kind.is_file() {
                 let relative = path
                     .strip_prefix(root)
                     .map_err(rejected)?
                     .to_string_lossy()
                     .replace('\\', "/");
-                if path.extension().is_some_and(|extension| extension == "rs")
+                let rust_source = path.extension().is_some_and(|extension| extension == "rs")
+                    && (name == "build.rs"
+                        || rust_roots.is_none_or(|roots| {
+                            path.canonicalize()
+                                .is_ok_and(|path| roots.iter().any(|root| path.starts_with(root)))
+                        }));
+                if rust_source
                     || name == "Cargo.toml"
                     || name == "rust-toolchain"
                     || name == "rust-toolchain.toml"
@@ -254,7 +286,7 @@ pub(super) fn inspect_untrusted_source(
         Ok(())
     }
     let mut files = BTreeMap::new();
-    collect(directory, directory, generated_root, &mut files)?;
+    collect(directory, directory, generated_root, rust_roots, &mut files)?;
     let diagnostics =
         loom_check::untrusted_package_diagnostics(&loom_check::SourceBundle { files });
     if !diagnostics.is_empty() {
@@ -265,4 +297,56 @@ pub(super) fn inspect_untrusted_source(
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn package(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let directory = tempfile::tempdir().unwrap();
+        for (name, text) in files {
+            let path = directory.path().join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        directory
+    }
+
+    const MANIFEST: &str = "[package]\nname=\"dep\"\nversion=\"0.1.0\"\nedition=\"2024\"\n";
+
+    #[test]
+    fn a_dependency_that_ships_a_tests_helper_with_a_path_attribute_is_admitted_for_its_library() {
+        let dependency = package(&[
+            ("Cargo.toml", MANIFEST),
+            ("src/lib.rs", "pub fn f() -> u32 { 1 }\n"),
+            ("tests/support.rs", "#[path = \"../src/lib.rs\"]\nmod lib;\n"),
+        ]);
+        let root = dependency.path().canonicalize().unwrap();
+        let compiled = vec![root.join("src")];
+        inspect_untrusted_source(&root, false, Some(&compiled)).unwrap();
+        // Scanning the whole package, as the root package is, still refuses the helper: the filter is what admits it.
+        assert!(inspect_untrusted_source(&root, false, None).is_err());
+    }
+
+    #[test]
+    fn the_compiled_directory_and_build_scripts_are_still_scanned() {
+        let in_source = package(&[
+            ("Cargo.toml", MANIFEST),
+            ("src/lib.rs", "pub fn f() -> u32 { 1 }\n"),
+            ("src/more.rs", "include!(\"/etc/passwd\");\n"),
+        ]);
+        let root = in_source.path().canonicalize().unwrap();
+        assert!(inspect_untrusted_source(&root, false, Some(&[root.join("src")])).is_err());
+        let build_script = package(&[
+            ("Cargo.toml", MANIFEST),
+            ("src/lib.rs", "pub fn f() -> u32 { 1 }\n"),
+            ("build.rs", "fn main() {}\n"),
+        ]);
+        let root = build_script.path().canonicalize().unwrap();
+        assert!(
+            inspect_untrusted_source(&root, false, Some(&[root.join("src")])).is_err(),
+            "a build script outside the compiled directory is refused anyway"
+        );
+    }
 }
