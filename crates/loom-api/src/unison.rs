@@ -180,6 +180,20 @@ impl Service {
         Ok(json!({"old":old.hash,"new":new.hash,"added":added,"removed":removed,"changed":changed}))
     }
     /// Call `entry` of `def` with `args` and report its output and effects.
+    /// The client's `src/lib.rs` for a Rust definition: the stored text, or the file of a source bundle.
+    fn submitted_lib_source(&self, hash: &str) -> Result<String> {
+        let stored = self.store.source(hash)?.context("definition source missing from CAS")?;
+        if !stored.trim_start().starts_with('{') {
+            return Ok(stored);
+        }
+        let bundle: loom_check::SourceBundle = serde_json::from_str(&stored)?;
+        Ok(bundle
+            .files
+            .get("src/lib.rs")
+            .and_then(loom_check::SourceFile::as_text)
+            .context("source bundle missing UTF-8 src/lib.rs")?
+            .to_owned())
+    }
     pub(super) async fn run_entry(
         &self,
         def: &Def,
@@ -191,7 +205,20 @@ impl Service {
             let (call, offsets) = self.runtime.call_entry_sites(&def.hash, entry, args).await?;
             let artifact = def.component_hash.as_deref().context("definition has no built artifact")?;
             let bytes = self.store.get(artifact)?.context("artifact missing")?;
-            (call, Some(crate::wasm::source_lines(&bytes, &offsets)?))
+            let mut lines = crate::wasm::source_lines(&bytes, &offsets)?;
+            eprintln!("DBG raw0={:?} offsets0={:?} compiled={:?}", lines.first(), offsets.first(), crate::wasm::compiled_source(&self.store, artifact).map(|(t, m)| (t.len(), m)).map_err(|e| e.to_string()));
+            // DWARF counts the compiler's text (no comments, no blank lines); report the client's lines.
+            if let Ok((compiled, _)) = crate::wasm::compiled_source(&self.store, artifact) {
+                let submitted = self.submitted_lib_source(&def.hash)?;
+                let map = crate::wasm::submitted_lines(&submitted, &compiled);
+                for frames in &mut lines {
+                    *frames = frames
+                        .iter()
+                        .filter_map(|&line| map.get(line as usize - 1).copied().flatten())
+                        .collect();
+                }
+            }
+            (call, Some(lines))
         } else {
             (self.runtime.call_entry_timed(&def.hash, entry, args).await?, None)
         };

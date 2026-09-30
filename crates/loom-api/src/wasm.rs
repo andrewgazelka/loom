@@ -347,12 +347,35 @@ pub(crate) fn source_lines(bytes: &[u8], offsets: &[Vec<u64>]) -> Result<Vec<Vec
         .map(|frames| {
             frames
                 .iter()
-                .filter_map(|&offset| table.lookup(offset.checked_sub(code.start as u64)?))
+                // A frame's offset is where execution resumes after the call, which can begin the next
+                // statement (or other file's inlined code); the call instruction is the byte before.
+                .filter_map(|&offset| table.lookup(offset.checked_sub(code.start as u64 + 1)?))
                 .filter(|row| row.file == "src/lib.rs")
                 .map(|row| row.line)
                 .collect()
         })
         .collect())
+}
+
+/// Where each line of the compiled text came from in the submitted source. The compiler sees the
+/// source without comments and blank lines, so its DWARF line numbers count fewer lines than the
+/// client wrote; this walks both texts in order and pairs each compiled line with the next
+/// submitted line of the same trimmed text. Index 0 is compiled line 1; `None` when no such line
+/// exists (the compiled text was rewritten in a way this does not follow).
+pub(crate) fn submitted_lines(submitted: &str, compiled: &str) -> Vec<Option<u32>> {
+    let mut lines = submitted.lines().enumerate().peekable();
+    compiled
+        .lines()
+        .map(|line| {
+            let want = line.trim();
+            for (index, candidate) in lines.by_ref() {
+                if candidate.trim() == want {
+                    return Some(index as u32 + 1);
+                }
+            }
+            None
+        })
+        .collect()
 }
 
 /// The path a line row names. Relative names join their directory (itself
@@ -451,6 +474,21 @@ mod tests {
             file_path(root, None, "/loom/source"),
             "/loom/source",
             "the root itself is not shortened to nothing"
+        );
+    }
+
+    #[test]
+    fn compiled_lines_map_back_past_dropped_comments_and_blank_lines() {
+        let submitted = "use a;\n\n// note\nfn f() {\n    g();\n\n    h();\n}\n";
+        let compiled = "use a;\nfn f() {\n    g();\n    h();\n}\n";
+        assert_eq!(
+            submitted_lines(submitted, compiled),
+            [Some(1), Some(4), Some(5), Some(7), Some(8)]
+        );
+        // A line the submitted text does not have maps to nothing and does not derail the rest.
+        assert_eq!(
+            submitted_lines("a\nb\n", "a\nx\nb\n"),
+            [Some(1), None, None]
         );
     }
 
