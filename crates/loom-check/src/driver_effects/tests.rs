@@ -165,3 +165,29 @@ async fn helper_bundle_files_do_not_require_entries() {
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
     assert_eq!(checked.sig.exports.len(), 1);
 }
+
+#[tokio::test]
+async fn an_unresolved_call_makes_the_row_unknown_and_is_reported_to_the_caller_not_as_an_error() {
+    let mut checked = check("pub fn main() {}").await;
+    let unresolved = checked
+        .apply_driver_effects_json(&output(
+            &["sleep"],
+            serde_json::json!([
+                {"item":"weld", "span":"src/lib.rs:933:9", "kind":"call"},
+                {"item":"weld", "span":"src/lib.rs:933:9", "kind":"call"},
+            ]),
+        ))
+        .unwrap();
+    assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+    assert_eq!(unresolved.len(), 1, "one entry per site");
+    assert_eq!(unresolved[0].span, "src/lib.rs:933:9");
+    assert!(checked.sig.effects.unknown, "the row says it could not see into a call");
+    assert_eq!(checked.sig.effects.labels, ["sleep"]);
+    // A label site (the default kind, what older drivers write) is still an error.
+    let mut other = check("pub fn main() {}").await;
+    let none = other
+        .apply_driver_effects_json(&output(&[], serde_json::json!([{"item":"x", "span":"src/lib.rs:1:1"}])))
+        .unwrap();
+    assert!(none.is_empty());
+    assert_eq!(other.diagnostics.len(), 1);
+}

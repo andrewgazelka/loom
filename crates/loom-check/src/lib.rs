@@ -73,6 +73,9 @@ impl Checker {
         Ok(checked)
     }
 }
+pub fn diagnostic_for(lang: Lang, code: &str, message: &str) -> Diagnostic {
+    diagnostic(lang, code, message)
+}
 fn diagnostic(lang: Lang, code: &str, message: &str) -> Diagnostic {
     Diagnostic {
         lang,

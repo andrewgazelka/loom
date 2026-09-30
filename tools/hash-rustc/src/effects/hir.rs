@@ -123,6 +123,11 @@ impl<'tcx> Scan<'_, 'tcx> {
             }
             return;
         }
+        if unresolved_calls_allowed() {
+            let site = unknown_call(self.analysis.tcx, expr.span, self.instance.to_string());
+            self.node.row.unknown.insert(site);
+            return;
+        }
         self.analysis
             .tcx
             .dcx()
@@ -142,15 +147,17 @@ impl<'tcx> Scan<'_, 'tcx> {
         ) {
             return;
         }
-        let callee = self
-            .analysis
-            .resolve(id, self.instantiate(args))
-            .unwrap_or_else(|| {
-                self.analysis
-                    .tcx
-                    .dcx()
-                    .span_fatal(expr.span, "effect analysis cannot resolve callee")
-            });
+        let Some(callee) = self.analysis.resolve(id, self.instantiate(args)) else {
+            if unresolved_calls_allowed() {
+                let site = unknown_call(self.analysis.tcx, expr.span, self.instance.to_string());
+                self.node.row.unknown.insert(site);
+                return;
+            }
+            self.analysis
+                .tcx
+                .dcx()
+                .span_fatal(expr.span, "effect analysis cannot resolve callee")
+        };
         match sdk_effect(self.analysis.tcx, callee.def_id()) {
             Some("$perform") => {
                 self.node.edges.push(Edge {

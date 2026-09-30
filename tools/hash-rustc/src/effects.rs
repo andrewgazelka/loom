@@ -20,6 +20,33 @@ pub struct Row {
 pub struct Unknown {
     pub item: String,
     pub span: String,
+    /// `"label"`: a `perform` whose label is not a constant. `"call"`: a call the analysis cannot resolve (a
+    /// `dyn` method, an unresolved closure); only recorded when `LOOM_UNRESOLVED_CALLS=unknown`.
+    #[serde(default = "label_kind")]
+    pub kind: String,
+}
+fn label_kind() -> String {
+    "label".into()
+}
+/// Whether an unresolvable call widens the row to `unknown` instead of failing the build. The host sets this
+/// for code it trusts (`LOOM_ALLOW_UNRESOLVED_CALLS`); untrusted code keeps the hard error, because a call the
+/// analysis cannot see into could perform anything.
+fn unresolved_calls_allowed() -> bool {
+    std::env::var("LOOM_UNRESOLVED_CALLS").is_ok_and(|value| value == "unknown")
+}
+fn unknown_call(tcx: TyCtxt<'_>, span: rustc_span::Span, item: String) -> Unknown {
+    let span = span.source_callsite();
+    let location = tcx.sess.source_map().lookup_char_pos(span.lo());
+    Unknown {
+        item,
+        span: format!(
+            "{}:{}:{}",
+            location.file.name.prefer_local_unconditionally(),
+            location.line,
+            location.col.0 + 1
+        ),
+        kind: "call".into(),
+    }
 }
 #[derive(Default, Serialize)]
 pub struct Document {

@@ -219,6 +219,9 @@ impl Driver {
         command
             .env("RUSTC", &self.path)
             .envs(Self::environment(directory));
+        if crate::host_allows_unresolved_calls() {
+            command.env("LOOM_UNRESOLVED_CALLS", "unknown");
+        }
     }
     /// Verify the driver's document and preimages, import them into the CAS,
     /// and derive the definition identity: the Merkle root over the exported

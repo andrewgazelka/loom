@@ -8,6 +8,13 @@ use std::collections::{BTreeMap, BTreeSet};
 pub struct UnknownEffect {
     pub item: String,
     pub span: String,
+    /// `"label"` (a `perform` whose label is not constant: an error) or `"call"` (a call the driver could not
+    /// resolve, reported only when the host lets the driver widen such calls; see `apply_driver_effects`).
+    #[serde(default = "label_kind")]
+    pub kind: String,
+}
+fn label_kind() -> String {
+    "label".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,7 +36,11 @@ impl CheckedDef {
     /// Source checking leaves rows pending (`unknown = true`). The build must
     /// call this before admitting executable code; missing rows are errors.
     /// Unrelated driver fields are ignored so this contract can evolve independently.
-    pub fn apply_driver_effects_json(&mut self, json: &str) -> Result<(), CheckError> {
+    ///
+    /// Returns the sites of calls the driver could not resolve (`kind == "call"`). They make the entry's row
+    /// `unknown` and are not errors here: whether they are acceptable is the caller's policy decision (trusted
+    /// code yes; a definition with an allowed-effects list no).
+    pub fn apply_driver_effects_json(&mut self, json: &str) -> Result<Vec<UnknownEffect>, CheckError> {
         #[derive(Deserialize)]
         struct Output {
             effects: DriverEffects,
@@ -38,7 +49,7 @@ impl CheckedDef {
         self.apply_driver_effects(&output.effects)
     }
 
-    pub fn apply_driver_effects(&mut self, effects: &DriverEffects) -> Result<(), CheckError> {
+    pub fn apply_driver_effects(&mut self, effects: &DriverEffects) -> Result<Vec<UnknownEffect>, CheckError> {
         if self.sig.exports.is_empty() {
             return Err(CheckError::Effects(
                 "definition has no exported entry".into(),
@@ -75,10 +86,15 @@ impl CheckedDef {
             .retain(|error| error.code != "LOOM_EFFECT_INFERENCE");
         let mut aggregate = BTreeSet::new();
         let mut unknown = false;
+        let mut unresolved: Vec<UnknownEffect> = Vec::new();
         for export in &mut self.sig.exports {
             let row = rows[&export.name];
             let labels: BTreeSet<_> = row.labels.iter().cloned().collect();
             for site in &row.unknown {
+                if site.kind == "call" {
+                    unresolved.push(site.clone());
+                    continue;
+                }
                 let mut error = diagnostic(
                     self.lang,
                     "LOOM_EFFECT_INFERENCE",
@@ -106,7 +122,8 @@ impl CheckedDef {
             labels: aggregate.into_iter().collect(),
             unknown,
         };
-        Ok(())
+        unresolved.dedup_by(|a, b| a.span == b.span && a.item == b.item);
+        Ok(unresolved)
     }
 }
 

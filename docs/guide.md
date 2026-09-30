@@ -395,6 +395,10 @@ pub fn parallel(n: u32, chunk: u32) -> u32 {
 
 Measured (2026-09-30, optimized wasm, machine load about 31): counting primes below 1,200,000 by trial division took 71 ms as one call and 12 ms as 16 chunks (5.9x, same answer); the same call again, every chunk cached, took 0.5 ms.
 
+### Calls the analysis cannot resolve
+
+Effect rows come from resolving every call, so a call through a trait object (`&dyn Fn(..)`, `Box<dyn Trait>`) or an unresolved closure cannot be analysed and the build fails with "cannot resolve this callable". A host started with `LOOM_ALLOW_UNRESOLVED_CALLS=1` (the operator saying that definitions without an allowed-effects list are trusted) lets the compiler driver widen such a call to an `unknown` effect row instead: the definition builds, its row is marked `unknown` (so it is never cached as pure, and the runtime bounds it only by its own allowed-effects list, which it has none of). A definition added with an `allowed_effects` list is refused with the call's line, whatever the host allows, and so is every definition on a host without the switch. A lone `&dyn Fn` bound to one closure is folded into a direct call by rustc and needs no admission. The engine's own `skin-weld` crate, with its two `dyn Fn` sites untouched, builds and produces bit-identical output under this switch (`docs/spikes/rgb-forge/skin-weld`, `assemble.py --keep-dyn`).
+
 ## Guest-defined effect handlers
 
 `loom::handle_any(handler, body)` installs a deep handler around an ordinary Rust

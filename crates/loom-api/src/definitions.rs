@@ -142,7 +142,41 @@ impl Service {
             .store
             .get(&identity.item_hashes_ref)?
             .context("driver item document missing")?;
-        checked.apply_driver_effects_json(std::str::from_utf8(&item_json)?)?;
+        let unresolved = checked.apply_driver_effects_json(std::str::from_utf8(&item_json)?)?;
+        // A call the driver could not see into makes the row `unknown`. That is accepted for code the operator
+        // trusts (no allowed-effects list, and the host opted in); a definition with a policy, or a host that
+        // did not opt in, needs every call resolved, as before.
+        if !unresolved.is_empty()
+            && (request.allowed_effects.is_some() || !loom_build::host_allows_unresolved_calls())
+        {
+            for site in &unresolved {
+                let mut error = loom_check::diagnostic_for(
+                    request.lang,
+                    "LOOM_EFFECT_INFERENCE",
+                    &format!(
+                        "the call at {} cannot be resolved, so its effects are unknown; {}",
+                        site.span,
+                        if request.allowed_effects.is_some() {
+                            "a definition with an allowed-effects list needs every call resolved"
+                        } else {
+                            "this host does not admit unresolved calls (LOOM_ALLOW_UNRESOLVED_CALLS)"
+                        }
+                    ),
+                );
+                if let Some((file_line, col)) = site.span.rsplit_once(':')
+                    && let Some((file, line)) = file_line.rsplit_once(':')
+                    && let (Ok(line), Ok(col)) = (line.parse::<usize>(), col.parse())
+                {
+                    error.file = file.into();
+                    // The driver counts the compiler's text (unparsed); report the caller's line.
+                    error.line = loom_check::rust_original_lines(&request.source)
+                        .and_then(|map| map.get(line.checked_sub(1)?).map(|line| *line as usize))
+                        .unwrap_or(line);
+                    error.col = col;
+                }
+                checked.diagnostics.push(error);
+            }
+        }
         if !checked.diagnostics.is_empty() {
             return Ok(Response {
                 ok: false,

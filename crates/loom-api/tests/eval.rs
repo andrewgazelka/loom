@@ -467,3 +467,26 @@ async fn a_compile_error_is_reported_on_the_line_the_caller_wrote_past_comments_
     let error = reply.diagnostics.iter().find(|d| d.message.contains("mismatched")).expect("a type error");
     assert_eq!(error.line, 7, "{:?}", reply.diagnostics);
 }
+
+#[tokio::test]
+#[ignore = "requires Rust guest toolchain and LOOM_COMPILER_CACHE_OWNER"]
+async fn a_dyn_call_is_refused_unless_the_host_admits_unresolved_calls_for_unpolicied_code() {
+    // Effect rows come from resolving every call. A call through `&dyn Fn` cannot be resolved, so by default
+    // it is an error; a host started with LOOM_ALLOW_UNRESOLVED_CALLS=1 admits it for a definition with no
+    // allowed-effects list (the row becomes `unknown`), and never for one that has a list.
+    let service = service();
+    // A table of trait objects that rustc cannot devirtualize (a lone `&dyn Fn` bound to one closure is folded
+    // into a direct call and needs no admission).
+    let source = "pub fn f(x: u32) -> u32 {\n    let double = |v: u32| v * 2;\n    let triple = |v: u32| v * 3;\n    let table: [(&dyn Fn(u32) -> u32, u32); 2] = [(&double, 10), (&triple, 100)];\n    let mut total = 0;\n    for (op, base) in table {\n        total += op(x) + base;\n    }\n    total\n}\n";
+    let reply = eval(&service, json!({"source": source, "args": [4]})).await;
+    if loom_build::host_allows_unresolved_calls() {
+        assert!(reply.ok, "{reply:?}");
+        assert_eq!(reply.result["output"], 4 * 2 + 10 + 4 * 3 + 100);
+        let policed = eval(&service, json!({"source": source, "args": [4], "allowed_effects": []})).await;
+        assert!(!policed.ok && policed.diagnostics.iter().any(|d| d.message.contains("cannot be resolved")));
+    } else {
+        assert!(!reply.ok, "{reply:?}");
+        let message = format!("{reply:?}");
+        assert!(message.contains("cannot resolve") || message.contains("cannot be resolved"), "{message}");
+    }
+}

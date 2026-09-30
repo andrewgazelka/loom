@@ -14,10 +14,12 @@ for name in ("bridge", "check", "topology"):
 def rewrite(text, old, new):
     assert text.count(old) == 1, old
     return text.replace(old, new)
-lib = rewrite(lib, "(head, &head_nodes, head_s, &head_share as &dyn Fn(f64) -> f64),", "(head, &head_nodes, head_s, true),")
-lib = rewrite(lib, "(body, &body_nodes, body_s, &body_share),", "(body, &body_nodes, body_s, false),")
-lib = rewrite(lib, "let k = share(s[v]);", "let k = if share { head_share(s[v]) } else { body_share(s[v]) };")
-lib = rewrite(lib, "positions: &dyn Fn(u32) -> DVec3,", "positions: &impl Fn(u32) -> DVec3,")
+# `--keep-dyn` leaves the crate as the engine wrote it, for a daemon started with LOOM_ALLOW_UNRESOLVED_CALLS=1.
+if "--keep-dyn" not in sys.argv:
+    lib = rewrite(lib, "(head, &head_nodes, head_s, &head_share as &dyn Fn(f64) -> f64),", "(head, &head_nodes, head_s, true),")
+    lib = rewrite(lib, "(body, &body_nodes, body_s, &body_share),", "(body, &body_nodes, body_s, false),")
+    lib = rewrite(lib, "let k = share(s[v]);", "let k = if share { head_share(s[v]) } else { body_share(s[v]) };")
+    lib = rewrite(lib, "positions: &dyn Fn(u32) -> DVec3,", "positions: &impl Fn(u32) -> DVec3,")
 lib = lib.replace("#[cfg(test)]\nmod tests;\n", "").replace("#[cfg(test)]\nmod bridge_tests;\n", "")
 lib = re.sub(r"^pub use ", "use ", lib, flags=re.M)
 lib = re.sub(r"^pub fn ", "pub(crate) fn ", lib, flags=re.M)

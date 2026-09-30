@@ -176,6 +176,13 @@ impl BuildProfile {
     }
 }
 
+/// Whether this host lets the compiler driver widen a call it cannot resolve (a `dyn Trait` method, an
+/// unresolved closure) to an `unknown` effect row instead of failing the build: the operator's statement that
+/// definitions without an allowed-effects list are trusted (`LOOM_ALLOW_UNRESOLVED_CALLS=1`). Off by default.
+pub fn host_allows_unresolved_calls() -> bool {
+    std::env::var_os("LOOM_ALLOW_UNRESOLVED_CALLS").is_some_and(|value| value != "0")
+}
+
 pub struct Builder {
     store: loom_store::Store,
     root: PathBuf,

@@ -173,6 +173,12 @@ fn call<'tcx>(
 ) {
     let callable = instantiate(analysis, instance, func.ty(&body.local_decls, analysis.tcx));
     let ty::FnDef(id, arguments) = *callable.kind() else {
+        if !matches!(callable.kind(), ty::FnPtr(..)) && unresolved_calls_allowed() {
+            node.row
+                .unknown
+                .insert(unknown_call(analysis.tcx, span, instance.to_string()));
+            return;
+        }
         for callee in analysis.indirect(callable, span) {
             selected_call(analysis, instance, body, callee, args, span, node);
         }
@@ -181,12 +187,18 @@ fn call<'tcx>(
     let arguments = arguments
         .no_bound_vars()
         .expect("monomorphic function arguments");
-    let callee = analysis.resolve(id, arguments).unwrap_or_else(|| {
+    let Some(callee) = analysis.resolve(id, arguments) else {
+        if unresolved_calls_allowed() {
+            node.row
+                .unknown
+                .insert(unknown_call(analysis.tcx, span, instance.to_string()));
+            return;
+        }
         analysis
             .tcx
             .dcx()
             .span_fatal(span, "cannot resolve effect callee")
-    });
+    };
     selected_call(analysis, instance, body, callee, args, span, node);
 }
 fn selected_call<'tcx>(
@@ -199,6 +211,12 @@ fn selected_call<'tcx>(
     node: &mut Node<'tcx>,
 ) {
     if matches!(callee.def, ty::InstanceKind::Virtual(..)) {
+        if unresolved_calls_allowed() {
+            node.row
+                .unknown
+                .insert(unknown_call(analysis.tcx, span, instance.to_string()));
+            return;
+        }
         analysis
             .tcx
             .dcx()
