@@ -1,6 +1,7 @@
 # Native backend beside wasm (design, 2026-09-30)
 
-Status: spike only (`docs/spikes/native-abi`). Nothing in the runtime changes yet.
+Status: spike only (`docs/spikes/native-abi`). Nothing in the runtime changes yet. **Deferred** (rgb, 2026-09-30): the
+engine stays on wasm; native waits for a named job that misses its budget (`game-engine-needs.md`).
 
 ## Goal
 

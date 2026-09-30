@@ -42,13 +42,42 @@ here is built yet; it orders the work in `native-backend.md` and `host-kernels.m
 | Metal compute kernel returning a shared buffer | host kernels take and return content-hash handles of bytes | A kernel may return a `DeviceBuffer` handle (host-owned `MTLBuffer`, shared storage) that the engine maps; it never crosses DAG-CBOR. Needs a host resource table with lifetimes |
 | Fast math | wasm: `cranelift` default; native: rustc | Stable Rust has no fast-math flag; native `release` uses `-C target-cpu=native` and LLVM's default contract, and the engine's Metal kernels keep their own fast-math. Nightly intrinsics only behind an explicit profile |
 
+## Decision (rgb, 2026-09-30): stay on wasm
+
+The engine's own measurement (its `docs/agents/incremental-generation.md`): forge-shaped kernels in wasm32
+ran 1.0 to 1.9x native single-threaded, but 3.7 to 7.2x with NaN canonicalisation on. So:
+
+* Stay on wasm with an optimized profile and host kernels for the hot crates. Revisit native only for a
+  named job that misses its budget after parallelism and host kernels. **First candidates if it ever comes
+  up: hair strand growth and skin/atlas detail synthesis** (per-strand and per-texel loops).
+* Never enable NaN canonicalisation (`LOOM_WASM_NAN_CANONICALIZATION`) or relaxed-simd determinism for engine
+  work; same-machine run-to-run determinism is enough and fast-math is the engine's default.
+* Dominated by native crates, so host kernels either way: Manifold and xatlas (C++), Jolt, `rgb-bvh`
+  queries, image decode, GPU bakes (Metal).
+* Parallelism: across cells first (`call_many`: per garment, per strand chunk, per texture tile). For loops
+  inside one job, a **host `parallel_for` kernel** (host runs index chunks, guest supplies the body) rather
+  than guest threads.
+* Cancellation of a stale slider job is high value: the live loop is the product and epoch interruption is a
+  real reason to stay on wasm.
+
+BVH guidance from the engine: there is no single `TriBvh`. `rgb-bvh` (generic `Bvh<T>` over f64 `Aabb`s:
+build, refit, `query_aabb`, `query_sphere`, `lod_cut`) is a good host-kernel candidate (byte-packed items in,
+node array out). The render triangle BVH (`space-client/src/render/bvh.rs`) is being replaced by Metal
+hardware ray tracing, so for that path hand over packed vertex and index arrays (f32x3 or f16x4 positions,
+u32 indices), never BVH nodes. The private `TriBvh` helpers (`space-face/src/solids.rs`,
+`ship-check/src/soup.rs`) are trusted, pure and tested: fine first native-kernel guinea pigs. The first real
+end-to-end check: pack the authoring mesh (`rgb_mesh::Mesh`, f64 positions plus polygon faces) into
+`Packed<f32>`, run one forge op (subdivide or weld, `skin-weld`) through Loom, and compare with the
+in-process result; that exercises `StoreRef` and `map_object` on real data.
+
 ## Order of work (proposed)
 
 1. **Store `map_object` and `StoreRef`** (small, unblocks BVH and mesh handoff, benefits wasm cells too).
 2. **Packed views in the SDK** (`Bytes`, `Packed<T>`), then move the rgb host-kernel adapter onto them.
 3. **Cancellation** (verb plus epoch for wasm, flag for native).
-4. **Native script mode** (SDK split, host-target graph, cdylib link, `target`/`profile`).
-5. **Batch cache lookups**, **streaming**, **`DeviceBuffer` kernels**.
+4. **Optimized wasm profile for engine work** (exists as `eval optimize`; expose as `profile` on `add`).
+5. **Batch cache lookups**, **streaming**, **host `parallel_for`**, **`DeviceBuffer` kernels**.
+6. Native script mode: deferred until a named job needs it (`native-backend.md`).
 
 ## Not asked for
 
