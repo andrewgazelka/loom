@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
 
   type Cmd = { op: string; args: any };
-  let { scene = [] }: { scene?: Cmd[] } = $props();
+  let { scene = [], drawMs = $bindable(0) }: { scene?: Cmd[]; drawMs?: number } = $props();
 
   let canvas: HTMLCanvasElement;
   let w = 0, h = 0, dpr = 1;
@@ -103,7 +103,9 @@
       }
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, w, h);
+      const t0 = performance.now();
       if (is3d) draw3d(ctx, scene as Cmd[]); else draw2d(ctx, scene as Cmd[]);
+      drawMs = Math.round((drawMs * 7 + (performance.now() - t0)) / 8 * 10) / 10;
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);

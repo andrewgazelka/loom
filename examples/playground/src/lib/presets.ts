@@ -1,4 +1,4 @@
-export type Preset = { name: string; note: string; cell: string; glam?: boolean; animate?: boolean };
+export type Preset = { name: string; note: string; cell: string; glam?: boolean; animate?: boolean; lib?: { name: string; source: string } };
 
 export const manifest = `[package]
 name = "cell"
@@ -142,6 +142,42 @@ pub fn frame(_ms: u32) -> Scene {
                 let p = at(i, j);
                 canvas3d::line(p.into(), at(i, j + 1).into(), [140, 160, 255]);
                 canvas3d::line(p.into(), at(i + 1, j).into(), [140, 160, 255]);
+            }
+        }
+    })
+}`,
+  },
+  {
+    name: "library",
+    note: "Terrain again, but its height function is a stored definition. The cell pins it by hash.",
+    lib: {
+      name: "terrain-surface",
+      source: `pub fn height(x: f32, z: f32) -> f32 {
+    let r = (x * x + z * z).sqrt();
+    0.42 * (r * 5.0).cos() / (1.0 + 2.2 * r)
+        + 0.12 * (x * 3.0).sin() * (z * 2.0).cos()
+}
+`,
+    },
+    cell: `// surface:: is a dependency pinned by content hash, not by name or version.
+pub fn frame(_ms: u32) -> Scene {
+    collect(|| {
+        let n = 36;
+        let colour = |h: f32| {
+            let k = ((h + 0.25) / 0.6).clamp(0.0, 1.0);
+            [(50.0 + 200.0 * k) as u8, (90.0 + 110.0 * k) as u8, (220.0 - 130.0 * k) as u8]
+        };
+        let at = |i: usize, j: usize| {
+            let x = i as f32 / n as f32 * 2.4 - 1.2;
+            let z = j as f32 / n as f32 * 2.4 - 1.2;
+            [x, surface::height(x, z), z]
+        };
+        for i in 0..n {
+            for j in 0..n {
+                let (a, b, c, d) = (at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1));
+                let mean = (a[1] + b[1] + c[1] + d[1]) / 4.0;
+                canvas3d::tri(a, b, c, colour(mean));
+                canvas3d::tri(a, c, d, colour(mean));
             }
         }
     })

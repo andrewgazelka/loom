@@ -7,14 +7,19 @@
   import Editor from "$lib/Editor.svelte";
   import Stage from "$lib/Stage.svelte";
 
-  let current: Preset = $state(presets[0]);
+  let current: Preset = $state.raw(presets[0]); // raw: `p === current` must compare the preset objects themselves
   let cell = $state(presets[0].cell);
   let prelude = $state(basePrelude);
-  let tab: "cell" | "canvas" = $state("cell");
+  let tab: "cell" | "canvas" | "lib" = $state("cell");
   let busy = $state(false);
   let reply: any = $state.raw(null);
   let scene: any[] = $state.raw([]); // raw: a deep proxy over thousands of commands makes every frame crawl
   let frameMs = $state(0);
+  let drawMs = $state(0);
+  // Stored definition the cell depends on (Unison-style): name, hash chain, the hash the cell pins.
+  type Rev = { hash: string; timestamp: number; changed: string[] };
+  let lib: { revs: Rev[]; pinned: string; source: string; error: string; busy: boolean } | null = $state(null);
+  let seen: string[] = $state([]); // cell hashes in this session, newest first
   let ticket = 0;
   let timer: ReturnType<typeof setTimeout>;
 
@@ -34,9 +39,12 @@
     Object.entries(scene.reduce((m: Record<string, number>, c: any) => ((m[c.op] = (m[c.op] ?? 0) + 1), m), {})) as [string, number][],
   );
   const active = {
-    get value() { return tab === "cell" ? cell : prelude; },
-    set value(v: string) { if (tab === "cell") cell = v; else prelude = v; },
+    get value() { return tab === "cell" ? cell : tab === "canvas" ? prelude : (lib?.source ?? ""); },
+    set value(v: string) { if (tab === "cell") cell = v; else if (tab === "canvas") prelude = v; else if (lib) lib.source = v; },
   };
+  const short = (h: string) => h.slice(0, 8);
+  const head = $derived(lib?.revs.at(-1)?.hash);
+  const cellHash = $derived(reply?.ok ? (reply.result.hash as string) : null);
 
   async function post(path: string, body: unknown) {
     const res = await fetch(path, { method: "POST", body: JSON.stringify(body) });
@@ -52,12 +60,15 @@
       entry: "frame",
       args: [0],
       ...(current.glam ? { manifest, lock } : {}),
+      ...(current.lib && lib ? { deps: { surface: lib.pinned } } : {}),
     });
     if (mine !== ticket) return; // a newer edit replaced this run
     reply = body;
     busy = false;
     if (!body.ok) return;
     scene = body.result.output;
+    const h = body.result.hash as string;
+    if (seen[0] !== h) seen = [h, ...seen].slice(0, 6);
     if (current.animate) animate(mine, body.result.hash);
   }
 
@@ -65,6 +76,8 @@
   async function animate(mine: number, hash: string) {
     const start = performance.now();
     while (mine === ticket) {
+      // A background tab paints nothing: stop asking Rust for frames until it is visible again.
+      if (document.hidden) { await new Promise((ok) => setTimeout(ok, 300)); continue; }
       const t0 = performance.now();
       const r = await post("/api/run", { target: hash, args: [Math.round(t0 - start)] });
       if (mine !== ticket) return;
@@ -75,10 +88,55 @@
     }
   }
 
-  function pick(p: Preset) {
+  const command = (c: string, args: unknown) => post("/api/cmd", { command: c, args });
+
+  // Load (or create) the stored definition and pin the cell to its newest hash.
+  async function loadLib(def: { name: string; source: string }) {
+    let h = await command("history", { name: def.name });
+    if (!h.ok) {
+      const added = await command("add", { name: def.name, lang: "rust", source: def.source });
+      if (!added.ok) { lib = { revs: [], pinned: "", source: def.source, error: added.result?.error ?? "add failed", busy: false }; return; }
+      h = await command("history", { name: def.name });
+    }
+    const revs: Rev[] = h.result.map((r: any) => ({
+      hash: r.hash,
+      timestamp: r.timestamp,
+      changed: (r.changes?.changed ?? []).map((c: any) => c.name),
+    }));
+    const latest = revs.at(-1)!.hash;
+    const viewed = await command("view", { target: latest });
+    lib = { revs, pinned: latest, source: viewed.ok ? (viewed.result.formatted_source ?? viewed.result.source) : def.source, error: "", busy: false };
+  }
+
+  // Publish the edited source as a new revision of the name. Cells pinned to the old hash keep running the old code.
+  async function publish() {
+    if (!lib || !current.lib) return;
+    lib.busy = true; lib.error = "";
+    const u = await command("update", { name: current.lib.name, source: lib.source });
+    const problems = (u.result?.update?.diagnostics ?? []).flatMap((d: any) => d.diagnostics ?? []);
+    if (!u.ok || (u.result?.update && !u.result.update.changes?.length && problems.length)) {
+      lib.error = u.ok ? problems.map((d: any) => d.message).join("\n") : (u.result?.error ?? "update failed");
+      lib.busy = false;
+      return;
+    }
+    const h = await command("history", { name: current.lib.name });
+    if (h.ok) lib.revs = h.result.map((r: any) => ({ hash: r.hash, timestamp: r.timestamp, changed: (r.changes?.changed ?? []).map((c: any) => c.name) }));
+    lib.busy = false;
+  }
+
+  function pin(hash: string) {
+    if (!lib || lib.pinned === hash) return;
+    lib.pinned = hash;
+    run();
+  }
+
+  async function pick(p: Preset) {
     current = p;
     cell = p.cell;
     tab = "cell";
+    lib = null;
+    seen = [];
+    if (p.lib) await loadLib(p.lib);
     run();
   }
 
@@ -113,12 +171,20 @@
       <div class="bar">
         <button class="tab" class:on={tab === "cell"} onclick={() => (tab = "cell")}>cell.rs</button>
         <button class="tab" class:on={tab === "canvas"} onclick={() => (tab = "canvas")}>canvas.rs</button>
+        {#if lib}<button class="tab" class:on={tab === "lib"} onclick={() => (tab = "lib")}>surface.rs</button>{/if}
         <span class="spacer"></span>
         {#if elsewhere > 0}<span class="warn">{elsewhere} more in {tab === "cell" ? "canvas.rs" : "cell.rs"}</span>{/if}
         <kbd>⌘↵</kbd>
         <button class="run" onclick={run} disabled={busy}>{busy ? "Building" : "Run"}</button>
       </div>
       <Editor bind:value={active.value} {run} {problems} />
+      {#if lib && tab === "lib"}
+        <div class="publish">
+          <button class="run" onclick={publish} disabled={lib.busy}>{lib.busy ? "Publishing" : "Publish new revision"}</button>
+          <span>{current.lib?.name}: edit, publish, then pin the cell to the new hash.</span>
+        </div>
+        {#if lib.error}<pre class="liberr">{lib.error}</pre>{/if}
+      {/if}
     </section>
 
     <section class="card stage">
@@ -126,6 +192,7 @@
         <span class="file">stage</span>
         <span class="spacer"></span>
         {#if reply?.ok}
+          {#if cellHash}<span class="chip" title="Content hash of this cell and its pinned dependencies">cell <b>{short(cellHash)}</b></span>{/if}
           <span class="chip"><b>{reply.wall_ms}</b> ms build + run</span>
           {#if current.animate && frameMs}<span class="chip"><b>{frameMs}</b> ms / frame</span>{/if}
         {/if}
@@ -136,14 +203,35 @@
           {#if !diagnostics.length}<li>{reply.result?.error ?? JSON.stringify(reply)}</li>{/if}
         </ul>
       {:else}
-        <Stage {scene} />
+        <Stage {scene} bind:drawMs />
         <p class="effects">
           {#each counts as [op, n]}<span><b>{op}</b> × {n}</span>{/each}
           {#if !counts.length}running…{/if}
+          <span class="spacer"></span><span>paint <b>{drawMs}</b> ms</span>
         </p>
       {/if}
     </section>
   </div>
+
+  {#if lib}
+    <section class="card library">
+      <div class="bar"><span class="file">{current.lib?.name}</span><span class="spacer"></span><span class="chip">{lib.revs.length} revision{lib.revs.length === 1 ? "" : "s"}</span></div>
+      <div class="revs">
+        {#each lib.revs as r, i}
+          <button class="rev" class:pinned={r.hash === lib.pinned} onclick={() => pin(r.hash)}>
+            <b>{short(r.hash)}</b>
+            <span>{i === 0 ? "first" : r.changed.length ? `changed ${r.changed.join(", ")}` : "no item changed"}</span>
+            {#if r.hash === lib.pinned}<em>pinned</em>{:else if r.hash === head}<em class="newer">newest · click to pin</em>{:else}<em class="newer">old · still runs</em>{/if}
+          </button>
+        {/each}
+      </div>
+      <p class="why">
+        The cell depends on <code>surface @ {short(lib.pinned)}</code>. A definition is its content hash: renaming a
+        local or reformatting keeps the hash, changing behaviour moves it, and a pinned hash keeps running after the
+        name moves on. Cell hashes this session: {#each seen as h, i}<code class:now={i === 0}>{short(h)}</code>{/each}
+      </p>
+    </section>
+  {/if}
 </main>
 
 <style>
@@ -178,4 +266,17 @@
   .errors { list-style: none; margin: 0; padding: 16px; font: 13.5px/1.65 "JetBrains Mono", ui-monospace, monospace; color: #f7768e; min-height: 200px; }
   .errors li { margin-bottom: 6px; }
   .where { color: #545b7f; margin-right: 12px; }
+  .publish { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-top: 1px solid rgba(255,255,255,0.06); color: #7a86b8; font-size: 12.5px; }
+  .liberr { margin: 0; padding: 10px 16px 14px; color: #f7768e; font: 12.5px/1.6 "JetBrains Mono", ui-monospace, monospace; white-space: pre-wrap; }
+  .library { margin-top: 16px; }
+  .revs { display: flex; gap: 10px; flex-wrap: wrap; padding: 14px; }
+  .rev { display: flex; flex-direction: column; gap: 2px; align-items: flex-start; text-align: left; border: 1px solid rgba(255,255,255,0.08); background: transparent; color: #7a86b8; padding: 8px 12px; border-radius: 10px; cursor: pointer; font: 12.5px "JetBrains Mono", ui-monospace, monospace; }
+  .rev b { color: #c8d0f0; font-weight: 500; }
+  .rev em { font-style: normal; color: #545b7f; }
+  .rev.pinned { border-color: #7aa2f7; }
+  .rev.pinned em { color: #7aa2f7; }
+  .rev .newer { color: #ff9e64; }
+  .why { margin: 0; padding: 0 16px 16px; color: #7a86b8; font-size: 13px; }
+  .why code { font: 12px "JetBrains Mono", ui-monospace, monospace; color: #c8d0f0; margin: 0 4px; }
+  .why code.now { color: #7aa2f7; }
 </style>
