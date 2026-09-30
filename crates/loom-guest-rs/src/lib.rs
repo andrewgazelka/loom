@@ -19,7 +19,7 @@ pub use serde_json;
 
 pub type EffectError = String;
 pub use loom_proto::{
-    Bytes, DirEntry, EntryKind, Packed, StoreRef, TypeSig, Value, decode, decode_host, encode,
+    Bytes, DirEntry, Element, EntryKind, Packed, StoreRef, TypeSig, Value, decode, decode_host, encode,
 };
 
 /// Perform an effect and decode its result. The call suspends until it completes.
