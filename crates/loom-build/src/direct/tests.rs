@@ -176,7 +176,6 @@ fn root_edits_reuse_incremental_state_and_execute_new_code() {
         "-Ccodegen-units=16".into(),
         "-C".into(),
         format!("incremental={}", incremental.display()),
-        "-Funsafe-code".into(),
         format!("--remap-path-prefix={}=/loom/build", workspace.display()),
         format!("--remap-path-prefix={}=/loom/source", workspace.display()),
         "-Zincremental-info".into(),

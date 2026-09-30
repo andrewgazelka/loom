@@ -122,9 +122,8 @@ pub mod cas {
 /// DWARF lines for wrapper instructions name this file (the macro's own
 /// lines), not the guest's: rustc does not collapse them to the call site.
 ///
-/// `allow_internal_unsafe` lets this macro carry the `unsafe` it needs while
-/// the guest keeps `-Funsafe-code`: guest source cannot invoke it, because the
-/// checker refuses guest macros and the host appends the call afterwards.
+/// The host appends the call to this macro after the guest's source; guest
+/// source cannot invoke it, because the checker refuses guest macros.
 #[doc(hidden)]
 #[macro_export]
 #[cfg_attr(target_arch = "wasm32", allow_internal_unsafe)]

@@ -131,13 +131,9 @@ impl Recipe {
                 self.arguments.push(argument);
             }
         }
-        if !self
-            .arguments
-            .iter()
-            .any(|argument| argument == "-Funsafe-code")
-        {
-            self.arguments.push("-Funsafe-code".into());
-        }
+        // `unsafe` is allowed (admission policy, `loom-check`): the boundary is the per-tenant
+        // wasm runtime. A recorded recipe from before that policy may still carry the lint.
+        self.arguments.retain(|argument| argument != "-Funsafe-code");
         self.source = directory.into();
         Ok(())
     }

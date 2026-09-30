@@ -44,7 +44,7 @@ if [ "$trusted" = no ]; then
     esac
   done
   export RUSTC_BOOTSTRAP=1
-  set -- "$@" -Funsafe-code -Zallow-features=
+  set -- "$@" -Zallow-features=
 fi
 # rustc randomizes archive object-member names when incremental is enabled.
 # Dependency artifacts must reproduce byte-for-byte; only the root keeps its
