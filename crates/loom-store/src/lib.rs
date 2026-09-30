@@ -18,6 +18,8 @@ mod intake;
 mod language;
 mod legacy;
 mod machine;
+mod mapped;
+pub use mapped::MappedObject;
 mod migration;
 mod objects;
 mod paths;

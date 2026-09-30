@@ -70,6 +70,16 @@ end-to-end check: pack the authoring mesh (`rgb_mesh::Mesh`, f64 positions plus 
 `Packed<f32>`, run one forge op (subdivide or weld, `skin-weld`) through Loom, and compare with the
 in-process result; that exercises `StoreRef` and `map_object` on real data.
 
+## Built so far
+
+* `Store::map_object(hash)` and `map_object_of_kind`: a read-only `mmap` of a spilled object file, verified
+  once per stamp, returned as `MappedObject` (`as_slice`, `as_ptr`, `page_aligned_len`, `still_intact`);
+  inline values come back as a copy (`is_file_backed() == false`). `crates/loom-store/src/mapped.rs`.
+* Kernels: `KernelContext::map` (read a blob in place), `KernelContext::put` (return a large result as a
+  32-byte handle) and `Runtime::map_blob` (the embedder maps that result). `crates/loom-rt/src/kernel.rs`.
+* `loom_proto::StoreRef { hash, len }`: the wire form of "a result that lives in the store".
+* Not done: SDK sugar for guests to build and return a `StoreRef`, and a verb to map from outside the process.
+
 ## Order of work (proposed)
 
 1. **Store `map_object` and `StoreRef`** (small, unblocks BVH and mesh handoff, benefits wasm cells too).

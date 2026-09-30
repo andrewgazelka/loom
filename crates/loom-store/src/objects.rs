@@ -286,7 +286,7 @@ impl Store {
 }
 
 /// The bare 64-hex hash of a hash or CID.
-fn bare_hash(hash: &str) -> Result<String> {
+pub(crate) fn bare_hash(hash: &str) -> Result<String> {
     if hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()) {
         Ok(hash.to_owned())
     } else {

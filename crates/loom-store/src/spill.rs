@@ -381,6 +381,29 @@ impl Spill {
         Ok(bytes)
     }
 
+    /// A read-only mapping of the whole object, verified like [`Self::read`] (once per stamp), with the
+    /// open handle and the stamp it was verified under so the caller can check it again later.
+    pub(crate) fn map(&self, hash: &str, size: u64) -> Result<(memmap2::Mmap, File, Stamp)> {
+        let file = self.open_file(hash, size)?;
+        let before = Stamp::of(&file)?;
+        // SAFETY: the file is a store object: read-only mode, never rewritten in place (writers rename a
+        // new file over it). A same-uid process that chmods and rewrites it in place could change pages
+        // under the reader; that is the integrity caveat `MappedObject::still_intact` lets a holder check.
+        let map = unsafe { memmap2::Mmap::map(&file) }
+            .with_context(|| format!("map spilled object {hash}"))?;
+        ensure!(
+            map.len() as u64 == size && Stamp::of(&file)? == before,
+            "spilled object {hash} changed while being mapped"
+        );
+        if !self.is_verified(hash, &before) {
+            if blake3::hash(&map).to_hex().as_str() != hash {
+                return Err(ObjectError::mismatch(hash));
+            }
+            self.mark_verified(hash, before);
+        }
+        Ok((map, file, before))
+    }
+
     /// The first `limit` bytes, unverified: a preview cannot prove the whole hash.
     pub fn read_prefix(&self, hash: &str, size: u64, limit: u64) -> Result<Vec<u8>> {
         let file = self.open_file(hash, size)?;

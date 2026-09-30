@@ -537,3 +537,47 @@ fn damage_is_a_typed_error_and_putting_the_object_again_heals_an_inline_row() ->
     );
     Ok(())
 }
+
+#[test]
+fn map_object_hands_out_the_file_in_place_and_refuses_a_corrupt_one() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let store = Store::open(directory.path().join("store.db"))?;
+    let big = pattern(3 * MIB + 123);
+    let hash = store.put("blob", &big)?;
+    let mapped = store.map_object(&hash)?.context("spilled object")?;
+    assert!(mapped.is_file_backed());
+    assert_eq!(&*mapped, big.as_slice());
+    assert_eq!(mapped.hash(), hash);
+    // A file mapped from offset 0 starts on a page boundary, and its padded length is a page multiple
+    // that covers it (what a no-copy GPU buffer needs).
+    let page = unsafe { libc_page() };
+    assert_eq!(mapped.as_ptr() as usize % page, 0);
+    assert_eq!(mapped.page_aligned_len() % page, 0);
+    assert!(mapped.page_aligned_len() >= big.len() && mapped.page_aligned_len() < big.len() + page);
+    assert!(mapped.still_intact());
+
+    // Small values are not files: an owned copy, same bytes.
+    let small = pattern(10 * 1024);
+    let small_hash = store.put("blob", &small)?;
+    let copy = store.map_object(&small_hash)?.context("inline object")?;
+    assert!(!copy.is_file_backed());
+    assert_eq!(&*copy, small.as_slice());
+    assert!(store.map_object(&"0".repeat(64))?.is_none());
+
+    // The mapping survives the store replacing nothing and dropping the handle; a rewrite in place
+    // (same-uid, size kept) is visible to `still_intact`, and a fresh map refuses the corrupt file.
+    drop(mapped);
+    let mapped = store.map_object(&hash)?.context("spilled object")?;
+    corrupt_in_place(&object_path(directory.path(), &hash))?;
+    assert!(!mapped.still_intact(), "the stamp moved when the file was rewritten");
+    let error = store.map_object(&hash).err().context("corrupt file must not map")?;
+    assert!(loom_store::ObjectError::is_in(&error), "{error:#}");
+    Ok(())
+}
+
+unsafe fn libc_page() -> usize {
+    unsafe extern "C" {
+        fn getpagesize() -> i32;
+    }
+    unsafe { getpagesize() as usize }
+}

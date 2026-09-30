@@ -9,7 +9,7 @@ impl HostKernel for Test {
         3
     }
     fn ops(&self) -> &[&'static str] {
-        &["echo", "sum", "blob_len", "boom"]
+        &["echo", "sum", "blob_len", "boom", "map_sum", "double"]
     }
     fn call(
         &self,
@@ -33,6 +33,28 @@ impl HostKernel for Test {
                     .ok_or("blob_len takes one 32-byte handle")?;
                 let bytes = context.blob(&handle)?.ok_or("unknown handle")?;
                 Ok((bytes.len() as u64).to_le_bytes().to_vec())
+            }
+            // Sum the bytes of a blob in place, through the mapping, and say whether it was file-backed.
+            "map_sum" => {
+                let handle: Handle = args
+                    .first()
+                    .and_then(|part| (*part).try_into().ok())
+                    .ok_or("map_sum takes one 32-byte handle")?;
+                let mapped = context.map(&handle)?.ok_or("unknown handle")?;
+                let sum: u64 = mapped.iter().map(|b| *b as u64).sum();
+                let mut out = sum.to_le_bytes().to_vec();
+                out.push(u8::from(mapped.is_file_backed()));
+                Ok(out)
+            }
+            // Return a large result as a handle instead of bytes.
+            "double" => {
+                let handle: Handle = args
+                    .first()
+                    .and_then(|part| (*part).try_into().ok())
+                    .ok_or("double takes one 32-byte handle")?;
+                let mapped = context.map(&handle)?.ok_or("unknown handle")?;
+                let doubled: Vec<u8> = mapped.iter().map(|b| b.wrapping_mul(2)).collect();
+                Ok(context.put(&doubled)?.to_vec())
             }
             "boom" => panic!("kernel bug"),
             other => Err(format!("no op {other}")),
@@ -237,4 +259,32 @@ async fn blocking_calls_run_off_the_caller_thread_and_return_the_same_bytes() {
     for (i, task) in many.into_iter().enumerate() {
         assert_eq!(task.await.unwrap().unwrap(), vec![i as u8]);
     }
+}
+
+#[test]
+fn a_kernel_reads_a_large_blob_in_place_and_returns_a_large_result_as_a_handle() {
+    // A file-backed store, so a blob of 1 MiB and up is an object file the kernel maps.
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = Runtime::new(Store::open(directory.path().join("store.db")).unwrap()).unwrap();
+    runtime.register_kernel(Arc::new(Test)).unwrap();
+    let big: Vec<u8> = (0..(2 << 20)).map(|i| (i % 251) as u8).collect();
+    let handle = runtime.call_kernel("loom.put", &[&big]).unwrap();
+    let out = runtime.call_kernel("test.map_sum", &[&handle]).unwrap();
+    let expected: u64 = big.iter().map(|b| *b as u64).sum();
+    assert_eq!(u64::from_le_bytes(out[..8].try_into().unwrap()), expected);
+    assert_eq!(out[8], 1, "a 2 MiB blob is mapped from its object file, not copied");
+    // A small blob is an inline copy.
+    let small = runtime.call_kernel("loom.put", &[&big[..1000]]).unwrap();
+    assert_eq!(runtime.call_kernel("test.map_sum", &[&small]).unwrap()[8], 0);
+
+    // The kernel returns a 32-byte handle; the embedder maps the result without copying it out of a reply.
+    let doubled = runtime.call_kernel("test.double", &[&handle]).unwrap();
+    assert_eq!(doubled.len(), 32);
+    let doubled: Handle = doubled.try_into().unwrap();
+    let mapped = runtime.map_blob(&doubled).unwrap().expect("the result blob");
+    assert!(mapped.is_file_backed());
+    assert_eq!(mapped.len(), big.len());
+    assert_eq!(mapped[5], big[5].wrapping_mul(2));
+    // Only blobs written through `loom.put` are reachable this way.
+    assert!(runtime.map_blob(&[7u8; 32]).unwrap().is_none());
 }

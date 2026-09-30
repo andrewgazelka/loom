@@ -69,6 +69,25 @@ impl KernelContext<'_> {
     }
 }
 
+impl KernelContext<'_> {
+    /// [`Self::blob`] without the copy: a file-backed blob (1 MiB and up) is a read-only mapping of the
+    /// store's object file, verified once, so a kernel reading a large mesh touches the pages in place.
+    pub fn map(&self, handle: &Handle) -> Result<Option<loom_store::MappedObject>, String> {
+        self.store
+            .map_object_of_kind(&hex(handle), BLOB_KIND)
+            .map_err(|error| format!("mapping kernel blob: {error:#}"))
+    }
+    /// Store `bytes` the way `loom.put` does and return the handle. A kernel returns a handle (32 bytes)
+    /// instead of a large result; the caller reads it with [`Runtime::map_blob`] or hands it to the next op.
+    pub fn put(&self, bytes: &[u8]) -> Result<Handle, String> {
+        let stored = self
+            .store
+            .put(BLOB_KIND, bytes)
+            .map_err(|error| format!("storing kernel blob: {error:#}"))?;
+        unhex(&stored).ok_or_else(|| "the store returned a malformed hash".into())
+    }
+}
+
 fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write;
     bytes
@@ -229,6 +248,12 @@ impl Runtime {
         })
         .await
         .map_err(|error| format!("kernel task failed: {error}"))?
+    }
+
+    /// The bytes a kernel handle names, as memory (see [`KernelContext::map`]). For the embedder: the
+    /// engine maps a large result in place instead of copying it out of a reply.
+    pub fn map_blob(&self, handle: &Handle) -> Result<Option<loom_store::MappedObject>> {
+        self.inner.store.map_object_of_kind(&hex(handle), BLOB_KIND)
     }
 
     /// Run kernel op `op` (`family.name`, or the built-in `loom.put`) on the
