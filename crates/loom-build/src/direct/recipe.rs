@@ -1,5 +1,8 @@
 use super::*;
 
+/// Artifacts from this size up are restored by `Store::restore_to` (the store keeps them as files).
+const LINK_RESTORE_BYTES: u64 = 1 << 20;
+
 impl Recipe {
     pub(super) fn parse(bytes: &[u8], source: &Path) -> Result<Self, BuildError> {
         let values = bytes
@@ -295,6 +298,21 @@ impl Recipe {
                 && store.codec(hash).map_err(rejected)?.is_some()
                 && artifacts::executable(path)? == artifact.executable
             {
+                continue;
+            }
+            // A large artifact is a file in the store: clone or link it into place (verified once
+            // per process by the store) instead of reading, hashing and rewriting all of it.
+            // Executables are written fresh, since a linked file's mode belongs to the store.
+            if !artifact.executable
+                && store
+                    .size_of(hash)
+                    .map_err(rejected)?
+                    .is_some_and(|size| size >= LINK_RESTORE_BYTES)
+            {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                store.restore_to(hash, path).map_err(rejected)?;
                 continue;
             }
             let Some(bytes) = store.get(hash).map_err(rejected)? else {
