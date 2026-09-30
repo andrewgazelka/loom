@@ -234,9 +234,13 @@ mod tests {
         );
     }
     #[test]
-    fn dependency_macro_unsafe_is_rejected_even_when_rustc_lint_exempts_expansion() {
+    fn a_macro_that_expands_to_unsafe_is_allowed_but_one_that_includes_files_is_not() {
         assert!(
-            !untrusted_source_diagnostics(include_str!("../tests/fixtures/unsafe-macro.rs"))
+            untrusted_source_diagnostics(include_str!("../tests/fixtures/unsafe-macro.rs"))
+                .is_empty()
+        );
+        assert!(
+            !untrusted_source_diagnostics("macro_rules! leak {()=>{include_str!(\"/etc/passwd\")}}")
                 .is_empty()
         );
         assert!(
