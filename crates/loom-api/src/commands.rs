@@ -154,7 +154,7 @@ impl Service {
                 stats["call_results"] = json!({
                     "hits":results.hits,"misses":results.misses,"stores":results.stores,"entries":results.entries,
                     "bytes":results.bytes,"evictions":results.evictions,"skipped_cheap":results.skipped_cheap,
-                    "saved_ns":results.saved_ns,"by_callee":by_callee,
+                    "saved_ns":results.saved_ns,"persisted_entries":results.persisted_entries,"loaded_at_start":results.loaded_at_start,"by_callee":by_callee,
                 });
                 Ok(stats)
             }

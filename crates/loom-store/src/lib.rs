@@ -18,6 +18,7 @@ mod legacy;
 mod machine;
 mod migration;
 mod objects;
+mod paths;
 mod projections;
 mod publication;
 mod recording;

@@ -216,3 +216,162 @@ fn a_different_kernel_fingerprint_is_a_different_key() {
         "a result made under other kernel versions is not served"
     );
 }
+
+fn reopen(dir: &tempfile::TempDir, max_bytes: usize) -> ResultCache {
+    ResultCache::persistent(max_bytes, dir.path())
+}
+
+#[test]
+fn results_survive_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = reopen(&dir, MAX_BYTES);
+    first.put("f", "main", 1, b"x", &K, b"42", MS);
+    first.put("g", "main", 0, b"y", &K, b"43", MS);
+    drop(first); // flushes and joins the writer
+    let second = reopen(&dir, MAX_BYTES);
+    assert_eq!(second.get("f", "main", 1, b"x", &K).unwrap(), b"42");
+    assert_eq!(second.get("g", "main", 0, b"y", &K).unwrap(), b"43");
+    assert!(second.get("f", "main", 1, b"other", &K).is_none());
+    let stats = second.stats();
+    assert_eq!((stats.loaded_at_start, stats.persisted_entries, stats.entries), (2, 2, 2));
+    assert_eq!(stats.bytes, 4);
+    // A hit on a loaded result saves what its computation cost the first time.
+    assert_eq!(stats.saved_ns, 2 * MS);
+}
+
+#[test]
+fn a_cache_without_a_directory_stays_in_memory() {
+    let cache = ResultCache::open(None);
+    cache.put("f", "main", 0, b"x", &K, b"1", MS);
+    cache.flush_persisted();
+    let stats = cache.stats();
+    assert_eq!((stats.entries, stats.persisted_entries, stats.loaded_at_start), (1, 0, 0));
+}
+
+#[test]
+fn eviction_removes_the_persisted_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = reopen(&dir, 900);
+    let payload = |n: u8| [n];
+    cache.put("f", "main", 0, &payload(1), &K, &[0; 400], 20 * MS);
+    cache.put("f", "main", 0, &payload(2), &K, &[0; 400], MS / 5);
+    cache.flush_persisted();
+    assert_eq!(cache.stats().persisted_entries, 2);
+    cache.put("f", "main", 0, &payload(3), &K, &[0; 400], 10 * MS); // evicts payload 2
+    cache.flush_persisted();
+    let stats = cache.stats();
+    assert_eq!((stats.evictions, stats.entries, stats.persisted_entries), (1, 2, 2));
+    drop(cache);
+    let again = reopen(&dir, 900);
+    assert!(again.get("f", "main", 0, &payload(1), &K).is_some());
+    assert!(again.get("f", "main", 0, &payload(2), &K).is_none(), "the evicted result does not return");
+    assert!(again.get("f", "main", 0, &payload(3), &K).is_some());
+}
+
+#[test]
+fn clearing_removes_persisted_rows_including_ones_not_in_memory() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = reopen(&dir, MAX_BYTES);
+    cache.put("f", "main", 0, b"a", &K, b"1", MS);
+    cache.put("f", "main", 0, b"b", &K, b"2", MS);
+    cache.put("g", "main", 0, b"a", &K, b"3", MS);
+    assert_eq!(cache.clear(Some("f")), 2);
+    cache.flush_persisted();
+    assert_eq!(cache.stats().persisted_entries, 1);
+    drop(cache);
+    let second = reopen(&dir, MAX_BYTES);
+    assert!(second.get("f", "main", 0, b"a", &K).is_none());
+    assert_eq!(second.get("g", "main", 0, b"a", &K).unwrap(), b"3");
+    assert_eq!(second.clear(None), 1);
+    drop(second);
+    let third = reopen(&dir, MAX_BYTES);
+    assert_eq!((third.stats().entries, third.stats().loaded_at_start), (0, 0));
+}
+
+#[test]
+fn a_corrupt_file_is_replaced_and_the_cache_starts_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("cache.db"), b"this is not a sqlite database, at all").unwrap();
+    let cache = reopen(&dir, MAX_BYTES);
+    assert_eq!((cache.stats().entries, cache.stats().loaded_at_start), (0, 0));
+    cache.put("f", "main", 0, b"a", &K, b"1", MS);
+    drop(cache);
+    let again = reopen(&dir, MAX_BYTES);
+    assert_eq!(again.get("f", "main", 0, b"a", &K).unwrap(), b"1", "the replacement file works");
+}
+
+#[test]
+fn a_file_of_another_format_version_is_replaced() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = reopen(&dir, MAX_BYTES);
+    cache.put("f", "main", 0, b"a", &K, b"1", MS);
+    drop(cache);
+    let db = rusqlite::Connection::open(dir.path().join("cache.db")).unwrap();
+    db.execute_batch("PRAGMA user_version=99").unwrap();
+    drop(db);
+    let again = reopen(&dir, MAX_BYTES);
+    assert_eq!(again.stats().loaded_at_start, 0);
+    assert!(again.get("f", "main", 0, b"a", &K).is_none());
+}
+
+#[test]
+fn a_result_over_one_mib_is_served_from_memory_but_not_persisted() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = reopen(&dir, MAX_BYTES);
+    let big = vec![9u8; persist::MAX_VALUE_BYTES + 1];
+    let fits = vec![9u8; persist::MAX_VALUE_BYTES];
+    cache.put("f", "main", 0, b"big", &K, &big, 10_000 * MS);
+    cache.put("f", "main", 0, b"fits", &K, &fits, 10_000 * MS);
+    assert_eq!(cache.get("f", "main", 0, b"big", &K).unwrap(), big);
+    cache.flush_persisted();
+    let stats = cache.stats();
+    assert_eq!((stats.entries, stats.persisted_entries), (2, 1));
+    drop(cache);
+    let again = reopen(&dir, MAX_BYTES);
+    assert!(again.get("f", "main", 0, b"big", &K).is_none());
+    assert_eq!(again.get("f", "main", 0, b"fits", &K).unwrap(), fits);
+}
+
+#[test]
+fn a_different_kernel_fingerprint_does_not_hit_a_persisted_result() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = reopen(&dir, MAX_BYTES);
+    cache.put("f", "main", 0, b"a", &K, b"1", MS);
+    drop(cache);
+    let again = reopen(&dir, MAX_BYTES);
+    assert!(again.get("f", "main", 0, b"a", &[8; 32]).is_none());
+    assert!(again.get("f", "main", 0, b"a", &K).is_some());
+}
+
+#[test]
+fn a_smaller_cache_keeps_the_rows_worth_most_per_byte_and_trims_the_rest() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = reopen(&dir, MAX_BYTES);
+    let payload = |n: u8| [n];
+    cache.put("f", "main", 0, &payload(1), &K, &[0; 400], MS / 5); // 500 ns per byte
+    cache.put("f", "main", 0, &payload(2), &K, &[0; 400], 20 * MS); // 50,000 ns per byte
+    drop(cache);
+    let small = reopen(&dir, 500);
+    assert_eq!((small.stats().loaded_at_start, small.stats().persisted_entries), (1, 1));
+    assert!(small.get("f", "main", 0, &payload(2), &K).is_some());
+    assert!(small.get("f", "main", 0, &payload(1), &K).is_none());
+    drop(small);
+    let big = reopen(&dir, MAX_BYTES);
+    assert_eq!(big.stats().loaded_at_start, 1, "the trimmed row is gone from the file");
+}
+
+#[test]
+fn hits_are_written_in_the_batch_and_change_what_a_smaller_cache_keeps() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = reopen(&dir, MAX_BYTES);
+    let payload = |n: u8| [n];
+    cache.put("f", "main", 0, &payload(1), &K, &[0; 400], MS); // cheaper, but used
+    cache.put("f", "main", 0, &payload(2), &K, &[0; 400], 4 * MS); // dearer, never asked again
+    for _ in 0..8 {
+        assert!(cache.get("f", "main", 0, &payload(1), &K).is_some());
+    }
+    drop(cache); // pending hit bumps are written on shutdown
+    let small = reopen(&dir, 500);
+    assert!(small.get("f", "main", 0, &payload(1), &K).is_some(), "nine hits outweigh a 4x cost");
+    assert!(small.get("f", "main", 0, &payload(2), &K).is_none());
+}

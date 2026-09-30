@@ -310,6 +310,8 @@ impl Runtime {
         engine: Option<Arc<loom_v8::V8Engine>>,
     ) -> Result<Self> {
         let (core_engine, compilation_cache) = sharedcore::engine(store.clone())?;
+        // Persistent when the store is a file; never fails the runtime.
+        let call_results = result_cache::ResultCache::open(store.directory());
         let runtime = Self {
             host_authority: true,
             inner: Arc::new(Inner {
@@ -326,7 +328,7 @@ impl Runtime {
                     .name_prefix("loom-guest-")
                     .create()?,
                 core_modules: Mutex::new(ModuleCache::default()),
-                call_results: result_cache::ResultCache::default(),
+                call_results,
                 inflight: Mutex::new(HashMap::new()),
                 kernels: kernel::Kernels::default(),
                 component_locks: Mutex::new(HashMap::new()),

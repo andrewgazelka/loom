@@ -25,10 +25,13 @@
 //!   2 KB outlives a 0.2 ms result of 500 KB, and an entry that keeps hitting keeps
 //!   its place; `L` rising ages out entries that stop being used.
 //!
-//! The cache is in memory and bounded in bytes; a restart empties it, which is
-//! always safe.
+//! The cache is in memory and bounded in bytes. When the store is a file, results
+//! of up to 1 MiB are also written behind to `cache.db` beside it and read back at
+//! the next start ([`persist`]); without a file, or when that file cannot be used,
+//! a restart empties the cache, which is always safe.
 use std::{
     collections::{BTreeMap, HashMap},
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -49,20 +52,21 @@ const COPY_NS_PER_BYTE: f64 = 0.1;
 /// covers the memory the entry occupies and the chance it is never asked again.
 const WORTH_FACTOR: f64 = 4.0;
 
+mod persist;
+
 /// Whether recomputing costs enough more than looking up to keep the result.
 pub(crate) fn worth_storing(cost_ns: u64, result_bytes: usize) -> bool {
     let lookup = LOOKUP_BASE_NS as f64 + result_bytes as f64 * COPY_NS_PER_BYTE;
     cost_ns as f64 >= WORTH_FACTOR * lookup
 }
 
+/// What a result is stored under: the callee (kept for per-callee accounting and
+/// clearing) and a BLAKE3 digest of everything that determines the result, which is
+/// also the primary key of the persisted row.
 #[derive(Clone, Hash, PartialEq, Eq)]
 struct Key {
     callee: String,
-    entry: String,
-    argc: u32,
-    payload: [u8; 32],
-    /// The registered host kernels and their versions when the result was made.
-    kernels: [u8; 32],
+    digest: [u8; 32],
 }
 
 struct Entry {
@@ -71,6 +75,9 @@ struct Entry {
     hits: u64,
     priority: f64,
     seq: u64,
+    /// Whether a row for this result was sent to (or read from) `cache.db`, so
+    /// hits and eviction are reported to it.
+    persisted: bool,
 }
 
 /// What one callee's results have done for the host.
@@ -111,6 +118,9 @@ pub(crate) struct ResultCache {
     stores: AtomicU64,
     evictions: AtomicU64,
     skipped_cheap: AtomicU64,
+    persist: Option<persist::Persistence>,
+    /// Results read back from `cache.db` when this cache was opened.
+    loaded_at_start: usize,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -124,6 +134,10 @@ pub struct ResultCacheStats {
     pub skipped_cheap: u64,
     /// Nanoseconds of computation all hits avoided.
     pub saved_ns: u64,
+    /// Rows in `cache.db` as of its writer's last transaction; 0 without persistence.
+    pub persisted_entries: usize,
+    /// Results read back from `cache.db` when the cache was opened.
+    pub loaded_at_start: usize,
 }
 
 impl Default for ResultCache {
@@ -132,13 +146,21 @@ impl Default for ResultCache {
     }
 }
 
+/// The digest covers the kernel fingerprint, the arity, the callee and the entry
+/// (length-prefixed, so no two field splits collide) and then the payload.
 fn key(callee: &str, entry: &str, argc: u32, payload: &[u8], kernels: &[u8; 32]) -> Key {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"loom result cache key v1");
+    hasher.update(kernels);
+    hasher.update(&argc.to_le_bytes());
+    for part in [callee, entry] {
+        hasher.update(&(part.len() as u64).to_le_bytes());
+        hasher.update(part.as_bytes());
+    }
+    hasher.update(payload);
     Key {
         callee: callee.into(),
-        entry: entry.into(),
-        argc,
-        payload: *blake3::hash(payload).as_bytes(),
-        kernels: *kernels,
+        digest: *hasher.finalize().as_bytes(),
     }
 }
 
@@ -161,6 +183,58 @@ impl ResultCache {
             stores: AtomicU64::new(0),
             evictions: AtomicU64::new(0),
             skipped_cheap: AtomicU64::new(0),
+            persist: None,
+            loaded_at_start: 0,
+        }
+    }
+
+    /// The cache a runtime uses: persistent in `dir` when the store has one, in
+    /// memory only otherwise.
+    pub(crate) fn open(dir: Option<PathBuf>) -> Self {
+        match dir {
+            Some(dir) => Self::persistent(MAX_BYTES, &dir),
+            None => Self::default(),
+        }
+    }
+
+    /// A cache of `max_bytes` that keeps `cache.db` in `dir` and starts from what it
+    /// holds. A file that cannot be used is replaced (or, failing that, ignored)
+    /// with a warning; this never fails.
+    pub(crate) fn persistent(max_bytes: usize, dir: &Path) -> Self {
+        let mut cache = Self::with_capacity(max_bytes);
+        if let Some((persistence, loaded)) = persist::open(dir, max_bytes) {
+            let inner = cache.inner.get_mut().expect("result cache poisoned");
+            for row in loaded {
+                let size = row.value.len();
+                inner.seq += 1;
+                let entry = Entry {
+                    bytes: Arc::from(row.value),
+                    cost_ns: row.cost_ns,
+                    hits: row.hits,
+                    priority: priority(inner.clock, row.hits, row.cost_ns, size),
+                    seq: inner.seq,
+                    persisted: true,
+                };
+                let key = Key {
+                    callee: row.callee,
+                    digest: row.digest,
+                };
+                inner.order.insert(order_key(entry.priority, entry.seq), key.clone());
+                inner.bytes += size;
+                inner.callees.entry(key.callee.clone()).or_default().bytes += size as u64;
+                inner.map.insert(key, entry);
+                cache.loaded_at_start += 1;
+            }
+            cache.persist = Some(persistence);
+        }
+        cache
+    }
+
+    /// Wait until everything stored, evicted or cleared so far is in `cache.db`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn flush_persisted(&self) {
+        if let Some(persistence) = &self.persist {
+            persistence.flush();
         }
     }
 
@@ -181,6 +255,7 @@ impl ResultCache {
             return None;
         };
         let bytes = found.bytes.clone();
+        let persisted = found.persisted;
         let cost_ns = found.cost_ns;
         let (old_priority, old_seq) = (found.priority, found.seq);
         found.hits += 1;
@@ -192,6 +267,9 @@ impl ResultCache {
         stats.hits += 1;
         stats.saved_ns += cost_ns;
         drop(inner);
+        if persisted && let Some(persistence) = &self.persist {
+            persistence.hit(key.digest);
+        }
         self.hits.fetch_add(1, Ordering::Relaxed);
         Some(bytes.to_vec())
     }
@@ -223,9 +301,14 @@ impl ResultCache {
         }
         stats.stored += 1;
         let key = key(callee, entry, argc, payload, kernels);
+        // Values over the persistence limit stay in memory only.
+        let persist_new = result.len() <= persist::MAX_VALUE_BYTES;
         if let Some(old) = inner.map.remove(&key) {
             inner.order.remove(&order_key(old.priority, old.seq));
             inner.bytes -= old.bytes.len();
+            if old.persisted && !persist_new && let Some(persistence) = &self.persist {
+                persistence.delete(key.digest);
+            }
             if let Some(stats) = inner.callees.get_mut(callee) {
                 stats.bytes = stats.bytes.saturating_sub(old.bytes.len() as u64);
             }
@@ -240,6 +323,9 @@ impl ResultCache {
             let victim = inner.map.remove(&victim_key).expect("ordered entry present");
             inner.clock = victim.priority.max(inner.clock);
             inner.bytes -= victim.bytes.len();
+            if victim.persisted && let Some(persistence) = &self.persist {
+                persistence.delete(victim_key.digest);
+            }
             if let Some(stats) = inner.callees.get_mut(&victim_key.callee) {
                 stats.bytes = stats.bytes.saturating_sub(victim.bytes.len() as u64);
             }
@@ -247,13 +333,26 @@ impl ResultCache {
         }
         inner.seq += 1;
         let seq = inner.seq;
-        let value = Entry {
+        let mut value = Entry {
             bytes: Arc::from(result),
             cost_ns,
             hits: 1,
             priority: priority(inner.clock, 1, cost_ns, result.len()),
             seq,
+            persisted: false,
         };
+        if persist_new && let Some(persistence) = &self.persist {
+            persistence.put(persist::Row {
+                digest: key.digest,
+                callee: callee.to_owned(),
+                entry: entry.to_owned(),
+                argc,
+                cost_ns,
+                hits: value.hits,
+                value: value.bytes.clone(),
+            });
+            value.persisted = true;
+        }
         inner.order.insert(order_key(value.priority, seq), key.clone());
         inner.bytes += result.len();
         if let Some(stats) = inner.callees.get_mut(callee) {
@@ -287,6 +386,11 @@ impl ResultCache {
                 stats.bytes = 0;
             }
         }
+        // Sent under the lock so it lands after every store it must remove, and
+        // waits for room: a cleared result must not return after a restart.
+        if let Some(persistence) = &self.persist {
+            persistence.clear(callee);
+        }
         doomed.len()
     }
 
@@ -301,6 +405,8 @@ impl ResultCache {
             evictions: self.evictions.load(Ordering::Relaxed),
             skipped_cheap: self.skipped_cheap.load(Ordering::Relaxed),
             saved_ns: inner.callees.values().map(|stats| stats.saved_ns).sum(),
+            persisted_entries: self.persist.as_ref().map_or(0, |p| p.entries() as usize),
+            loaded_at_start: self.loaded_at_start,
         }
     }
 
