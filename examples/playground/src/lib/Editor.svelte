@@ -12,20 +12,25 @@
   import { tags as t } from "@lezer/highlight";
 
   type Problem = { line: number; col: number; message: string; snippet?: string };
-  let { value = $bindable(""), problems = [], run, running = null }: { value?: string; problems?: Problem[]; run: () => void; running?: number | null } = $props();
+  let { value = $bindable(""), problems = [], run, heat = null }: { value?: string; problems?: Problem[]; run: () => void; heat?: Map<number, number> | null } = $props();
 
-  // The line the program is executing, taken from the module's DWARF (see `run` with `sites`).
-  const setRunning = StateEffect.define<number | null>();
-  const runningLine = StateField.define({
+  // A heat map of the lines the program ran, from the module's DWARF (`run` with `sites`): a line glows when
+  // it issues an effect and fades as later steps run. Values are 0..1.
+  const setHeat = StateEffect.define<Map<number, number> | null>();
+  const heatLines = StateField.define({
     create: () => Decoration.none,
     update(deco, tr) {
       deco = deco.map(tr.changes);
       for (const effect of tr.effects) {
-        if (!effect.is(setRunning)) continue;
-        const n = effect.value;
-        deco = n && n >= 1 && n <= tr.state.doc.lines
-          ? Decoration.set([Decoration.line({ class: "cm-running" }).range(tr.state.doc.line(n).from)])
-          : Decoration.none;
+        if (!effect.is(setHeat)) continue;
+        const marks = [];
+        for (const [n, h] of effect.value ?? []) {
+          if (n < 1 || n > tr.state.doc.lines || h < 0.02) continue;
+          const style = `background-color: rgba(200, 208, 240, ${(0.04 + 0.22 * h).toFixed(3)}); box-shadow: inset 2px 0 0 rgba(200, 208, 240, ${(0.45 * h).toFixed(3)})`;
+          marks.push(Decoration.line({ attributes: { style } }).range(tr.state.doc.line(n).from));
+        }
+        marks.sort((x, y) => x.from - y.from);
+        deco = Decoration.set(marks);
       }
       return deco;
     },
@@ -61,7 +66,7 @@
         doc: value,
         extensions: [
           rust(),
-          runningLine,
+          heatLines,
           lineNumbers(),
           lintGutter(),
           history(),
@@ -91,7 +96,6 @@
             ".cm-line": { padding: "0 20px 0 6px" },
             ".cm-gutters": { backgroundColor: c.bg, color: c.dim, border: "0", paddingLeft: "6px" },
             ".cm-lineNumbers .cm-gutterElement": { padding: "0 10px 0 8px", minWidth: "26px" },
-            ".cm-running": { backgroundColor: "rgba(200, 208, 240, 0.11)", boxShadow: "inset 2px 0 0 rgba(200, 208, 240, 0.35)" },
             ".cm-activeLine": { backgroundColor: "rgba(122,162,247,0.07)" },
             ".cm-activeLineGutter": { backgroundColor: "transparent", color: c.fg },
             ".cm-cursor": { borderLeftColor: c.accent, borderLeftWidth: "2px" },
@@ -114,7 +118,7 @@
   });
 
   $effect(() => {
-    view?.dispatch({ effects: setRunning.of(running) });
+    view?.dispatch({ effects: setHeat.of(heat) });
   });
 
   // rustc diagnostics become squiggles and gutter markers.

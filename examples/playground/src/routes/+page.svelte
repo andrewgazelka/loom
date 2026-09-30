@@ -23,7 +23,8 @@
   // Replay of the effects in the order they ran: how many are drawn so far, and which cell line issued the latest.
   let lineOf: number[] = $state.raw([]);
   let replay: number | null = $state(null);
-  const running = $derived(replay !== null && replay > 0 ? (lineOf[replay - 1] || null) : null);
+  // Heat per cell line: 1 when an effect on that line has just run, fading as later effects run.
+  let heat: Map<number, number> | null = $state.raw(null);
   let ticket = 0;
   let timer: ReturnType<typeof setTimeout>;
 
@@ -90,17 +91,35 @@
     lineOf = sites.map((frames) => frames.find((l) => l <= cellLines) ?? 0);
     const n = scene.length;
     const start = performance.now(), duration = Math.min(1600, 500 + n * 2);
-    await new Promise<void>((done) => {
+    const hot = new Map<number, number>();
+    let done = 0, last = start;
+    await new Promise<void>((finish) => {
       const step = (now: number) => {
-        if (mine !== ticket) return done();
+        if (mine !== ticket) return finish();
         const k = Math.min(n, Math.floor(((now - start) / duration) * n));
+        // Fade what is already hot, then light the lines of the effects that ran since the last frame.
+        const fade = Math.pow(0.5, (now - last) / 220);
+        last = now;
+        for (const [line, h] of hot) hot.set(line, h * fade);
+        for (; done < k; done++) if (lineOf[done]) hot.set(lineOf[done], 1);
+        heat = new Map(hot);
         replay = k;
-        if (k >= n) return done();
+        if (k >= n) return finish();
         requestAnimationFrame(step);
       };
       requestAnimationFrame(step);
     });
+    // Let the last heat die out rather than cutting it off.
+    while (mine === ticket && [...hot.values()].some((h) => h > 0.02)) {
+      await new Promise((ok) => requestAnimationFrame(ok));
+      const now = performance.now();
+      const fade = Math.pow(0.5, (now - last) / 220);
+      last = now;
+      for (const [line, h] of hot) hot.set(line, h * fade);
+      heat = new Map(hot);
+    }
     if (mine !== ticket) return;
+    heat = null;
     replay = null;
     if (current.animate) animate(mine, hash);
   }
@@ -218,7 +237,7 @@
         <kbd>⌘↵</kbd>
         <button class="run" onclick={run} disabled={busy}>{busy ? "Building" : "Run"}</button>
       </div>
-      <Editor bind:value={active.value} {run} {problems} running={tab === "cell" ? running : null} />
+      <Editor bind:value={active.value} {run} {problems} heat={tab === "cell" ? heat : null} />
       {#if lib && tab === "lib"}
         <div class="publish">
           <button class="run" onclick={publish} disabled={lib.busy}>{lib.busy ? "Publishing" : "Publish new revision"}</button>
