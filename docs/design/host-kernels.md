@@ -1,7 +1,23 @@
 # Host kernels: native BVH and physics for wasm guests
 
-Design, 2026-09-29. Nothing here is built. It answers the rgb session's request (docs/spikes/rgb-forge,
-section 4) using rgb's real APIs, read at `/Volumes/Projects/andrewgazelka/rgb` (paths below are in that repo).
+Design, 2026-09-29, with the first slice built (see **Status**). It answers the rgb session's request
+(docs/spikes/rgb-forge, section 4) using rgb's real APIs, read at `/Volumes/Projects/andrewgazelka/rgb`
+(paths below are in that repo).
+
+## Status
+
+Built and tested in Loom (commit `c2fd573`): `HostKernel` and `Runtime::register_kernel`
+(`crates/loom-rt/src/kernel.rs`), the `loom.kernel` import (`sharedcore/linker.rs`), the guest calls
+`loom::kernel::call` and `put` (`crates/loom-guest-rs/src/kernel.rs`), the `kernel` effect label in the
+driver, the result-cache rules of section 5, and bulk shared-memory copies (`shared_copy.rs`).
+
+The rgb side is `rgb-host-kernels`, a crate that implements section 3's ops over rgb's real `TriBvh`
+(rgb's `geom.rs` included unmodified). It is for rgb to adopt; it lives outside both repos until they
+decide where (`/Volumes/Projects/tmp/loom-rgb-spike/rgb-host-kernels`, copied to `docs/spikes/rgb-forge/`).
+Differences from the first sketch below: there is no explicit `tribvh_build` op (the first query on a handle
+builds and caches the BVH), the import takes a gather list of buffers so a batch and its handle are not
+concatenated, the reply carries its tag byte last so the guest keeps the host's allocation with no copy, and
+purity is the `kernel` row label plus the kernel-version fingerprint in the cache key, not a per-op label.
 
 ## 1. What rgb actually calls
 
