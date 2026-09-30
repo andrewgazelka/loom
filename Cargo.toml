@@ -8,6 +8,10 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 
+# One-line fix to wasmtime's incremental compilation cache keys; see vendor/README.md.
+[patch.crates-io]
+wasmtime-internal-cranelift = { path = "vendor/wasmtime-internal-cranelift" }
+
 [profile.dev]
 debug = 0
 

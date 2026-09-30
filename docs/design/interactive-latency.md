@@ -38,12 +38,20 @@ the reliable numbers. Instruments: `eval` now returns `build.stages` (the build 
 * **`wasm-component-ld`** (6 ms startup): it shells out to `wasm-ld`, so no gain.
 * **Raising the daemon's CPU priority**: a single thread was slowed only 1.0 to 1.2x by the load; priority barely moved the numbers.
 
-## Open: wasmtime's function cache misses about 60 functions per new cell
+## Fixed: wasmtime's function cache missed about 60 functions per new cell
 
-Two sibling cells have byte-identical bodies for all 527 functions, yet each new cell misses about 60 lookups (of about 670), and even
-recompiling one module twice through one cache keeps missing (525, 208, 143, 136, 89, ...). Keys are perfectly stable when every lookup
-misses (0 of 673 differ between two compiles) and drift once hits are mixed in (49 of 673 differ when every lookup hits), serial or
-parallel, so a compile leaves state that changes later functions' keys. It is upstream (Cranelift `compile_with_cache` and the pooled
-per-thread context in `wasmtime-internal-cranelift` 48.0.1); the cause is not found (`Function::clear`, the constant pool and the
-dedupe maps were read and reset correctly). Worth about 10 ms of the 15 to 35; the scratch programs are in
-`/Volumes/Projects/tmp/loom-rt-examples/` (`cachemiss`, `keyseq*`, `clifdiff`, `modbench`).
+Two sibling cells have byte-identical bodies for all 527 functions, yet each new cell missed about 60 lookups (of about 670), and even
+recompiling one module twice through one cache kept missing (525, 208, 143, 136, 89, ...). Keys were perfectly stable when every
+lookup missed (0 of 673 differ between two compiles) and drifted once hits were mixed in, so a compile left state behind that changed
+later functions' keys. Bisected in a scratch copy of `wasmtime-internal-cranelift`: not the translator, the ABI, the validator or the
+debug slot; resetting the pooled `cranelift_codegen::Context` fixed it; within it, `func.stencil`; within that, one field:
+`DataFlowGraph::clear` (cranelift-codegen 0.135.3, `src/ir/dfg.rs`) resets every table except **`exception_tables`**, which the incremental
+cache key hashes. Wasmtime pools one context per thread, so a function's key depended on which functions that context had compiled.
+
+The fix is one line in a vendored copy of the crate (`vendor/README.md`, `[patch.crates-io]` in the root `Cargo.toml`): clear
+`exception_tables` after the pooled context's `clear()`. A 60-function WAT module reproduces the bug (the regression test
+`recompiling_the_same_module_through_the_cache_stores_nothing_new` fails without the line: "compiled 17 functions again"). Per eval the cache
+now shows 672 hits and 1 miss (the cell's own function); module compile 23.6 to 9.9 ms and the interleaved A/B median 89 to 76 ms
+(load 68). The scratch programs that found it are in `/Volumes/Projects/tmp/loom-rt-examples/` (`cachemiss`, `keyseq*`, `clifdiff`, `modbench`)
+and `/Volumes/Projects/tmp/cachetest` (the patchable copy with `RESET=` switches). To report upstream: clear `exception_tables` in
+`DataFlowGraph::clear`.

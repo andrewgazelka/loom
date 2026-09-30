@@ -99,3 +99,47 @@ fn storage_failure_aborts_its_compile_window_and_retry_can_recover() -> Result<(
     assert_eq!(cache.get(b"function").unwrap().as_ref(), b"native code");
     Ok(())
 }
+
+/// A module with many exported functions, imports and indirect calls: enough to make wasmtime create
+/// the per-function contexts whose leftovers used to change later functions' cache keys.
+fn many_functions_wat() -> String {
+    let mut wat = String::from(
+        "(module (import \"env\" \"memory\" (memory 1 1 shared)) (import \"h\" \"a\" (func $a (param i32) (result i32)))\n\
+         (type $t (func (param i32) (result i32))) (table 8 funcref)\n",
+    );
+    for i in 0..60 {
+        let indirect = if i % 3 == 0 { "i32.const 1 call_indirect (type $t)" } else { "" };
+        wat.push_str(&format!(
+            "(func $f{i} (export \"f{i}\") (param i32) (result i32) local.get 0 i32.const {} i32.add call $a i32.const 3 i32.mul {indirect} i32.const {i} i32.xor)\n",
+            i + 1
+        ));
+    }
+    wat.push_str("(elem (i32.const 0) $f0 $f1 $f2))");
+    wat
+}
+
+#[test]
+fn recompiling_the_same_module_through_the_cache_stores_nothing_new() -> Result<()> {
+    // wasmtime pools a Cranelift context per thread, and `DataFlowGraph::clear` used to forget
+    // `exception_tables`, so a function's cache key depended on what the context had compiled before:
+    // an identical recompile kept missing (25 of 124 lookups for this module). `vendor/README.md`.
+    let store = Store::memory()?;
+    let (engine, cache) = crate::sharedcore::engine(store)?;
+    let wat = many_functions_wat();
+    let first = cache.stats();
+    let module = cache.compile(|| wasmtime::Module::new(&engine, &wat).map_err(|error| anyhow::anyhow!("{error:#}")))?;
+    drop(module);
+    let after_first = cache.stats();
+    assert!(after_first.inserts > first.inserts, "the first compile fills the cache");
+    for round in 1..=3 {
+        let before = cache.stats();
+        cache.compile(|| wasmtime::Module::new(&engine, &wat).map_err(|error| anyhow::anyhow!("{error:#}")))?;
+        let after = cache.stats();
+        assert_eq!(
+            after.inserts, before.inserts,
+            "recompile {round} of an identical module compiled {} functions again",
+            after.inserts - before.inserts
+        );
+    }
+    Ok(())
+}

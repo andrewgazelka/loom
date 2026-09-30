@@ -6632,8 +6632,6 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-cranelift"
 version = "48.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0238b4a52773457ad1b8a1a26be90486e0ca0108cf46b9be16cc1d8d8cabdfa1"
 dependencies = [
  "cranelift-codegen",
  "cranelift-control",
