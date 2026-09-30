@@ -141,6 +141,7 @@ impl Service {
                 stats["recording_checkpoint_nanos"] = json!(recording.checkpoint_nanos);
                 stats["last_reply_storage_nanos"] =
                     json!(self.last_reply_storage_nanos.load(Ordering::Relaxed));
+                stats["calls"] = self.ledger.snapshot();
                 stats["effect_wire_bytes"] = json!(self.runtime.effect_wire_bytes());
                 stats["handler_round_trip_us"] = self.runtime.handler_round_trip_us();
                 let results = self.runtime.call_result_stats();

@@ -188,13 +188,9 @@ impl Runtime {
             module,
             memory,
             effects: {
-                let mut delegated = effects.delegated(hash, definition.allowed_effects.as_deref());
-                // The inferred row bounds what the guest may perform, unless the analysis could not see into
-                // some call (`unknown`): then the definition's own allowed-effects list is the only bound
-                // (none, for the trusted code that is admitted with an unknown row).
-                if !definition.sig.effects.unknown {
-                    delegated = delegated.with_inferred(&definition.sig.effects.labels);
-                }
+                let mut delegated = effects
+                    .delegated(hash, definition.allowed_effects.as_deref())
+                    .with_inferred(&definition.sig.effects.labels);
                 // Like `stream`, the site log belongs to the call that asked for it, not to callees.
                 delegated.sites = effects.sites.clone();
                 delegated

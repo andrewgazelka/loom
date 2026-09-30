@@ -158,6 +158,13 @@ impl<'tcx> Scan<'_, 'tcx> {
                 .dcx()
                 .span_fatal(expr.span, "effect analysis cannot resolve callee")
         };
+        // A method of a trait object resolves to a virtual instance whose body is not known: which
+        // implementation runs is decided at run time.
+        if matches!(callee.def, ty::InstanceKind::Virtual(..)) && unresolved_calls_allowed() {
+            let site = unknown_call(self.analysis.tcx, expr.span, self.instance.to_string());
+            self.node.row.unknown.insert(site);
+            return;
+        }
         match sdk_effect(self.analysis.tcx, callee.def_id()) {
             Some("$perform") => {
                 self.node.edges.push(Edge {

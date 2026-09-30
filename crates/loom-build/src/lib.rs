@@ -180,7 +180,8 @@ impl BuildProfile {
 /// unresolved closure) to an `unknown` effect row instead of failing the build: the operator's statement that
 /// definitions without an allowed-effects list are trusted (`LOOM_ALLOW_UNRESOLVED_CALLS=1`). Off by default.
 pub fn host_allows_unresolved_calls() -> bool {
-    std::env::var_os("LOOM_ALLOW_UNRESOLVED_CALLS").is_some_and(|value| value != "0")
+    // Only an explicit yes: an empty value, `0`, `false` or a typo leaves the error on.
+    std::env::var("LOOM_ALLOW_UNRESOLVED_CALLS").is_ok_and(|value| matches!(value.as_str(), "1" | "true"))
 }
 
 pub struct Builder {

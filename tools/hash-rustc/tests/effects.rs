@@ -2,7 +2,7 @@ use serde_json::{Value, json};
 
 #[path = "support/effects_fixture.rs"]
 mod effects_fixture;
-use effects_fixture::{assert_rejected, compile};
+use effects_fixture::{assert_rejected, compile, run, run_with_env};
 
 fn entry_row(document: &Value) -> &Value {
     document["effects"]["entries"]
@@ -406,4 +406,54 @@ fn arbitrary_sdk_wrapper_is_inferred_from_its_body() {
         "pub fn entry() { renamed::arbitrary_wrapper(); }",
         json!(["custom.arbitrary"]),
     );
+}
+
+const DYN_SOURCE: &str = r#"
+trait Shape { fn area(&self) -> u32; }
+struct Square(u32);
+struct Wide(u32);
+impl Shape for Square { fn area(&self) -> u32 { self.0 * self.0 } }
+impl Shape for Wide { fn area(&self) -> u32 { self.0 * 2 } }
+fn total(shapes: &[Box<dyn Shape>], call: &dyn Fn(u32) -> u32) -> u32 {
+    let mut sum = 0;
+    for shape in shapes { sum += call(shape.area()); }
+    sum
+}
+pub fn entry() {
+    renamed::sleep();
+    let shapes: Vec<Box<dyn Shape>> = vec![Box::new(Square(3)), Box::new(Wide(4))];
+    let double = |v: u32| v * 2;
+    let _ = total(&shapes, &double);
+}
+"#;
+
+#[test]
+fn a_call_through_a_trait_object_is_an_error_unless_the_host_widens_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let refused = run(directory.path(), DYN_SOURCE, json!({}));
+    assert!(!refused.status.success(), "a dyn call must not compile without the switch");
+    let message = String::from_utf8_lossy(&refused.stderr);
+    assert!(message.contains("cannot"), "{message}");
+    assert!(!directory.path().join("hashes.json").exists());
+
+    let directory = tempfile::tempdir().unwrap();
+    let output = run_with_env(directory.path(), DYN_SOURCE, json!({}), &[("LOOM_UNRESOLVED_CALLS", "unknown")]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let document: Value =
+        serde_json::from_slice(&std::fs::read(directory.path().join("hashes.json")).unwrap()).unwrap();
+    let row = entry_row(&document);
+    assert_eq!(row["labels"], json!(["sleep"]), "the effects it could see are still reported: {document:#}");
+    let unknown = row["unknown"].as_array().unwrap();
+    assert!(!unknown.is_empty(), "{document:#}");
+    assert!(unknown.iter().all(|site| site["kind"] == "call"), "{document:#}");
+    // The virtual method call and the dyn Fn call are both sites, each with a file:line:column span.
+    assert!(unknown.iter().all(|site| site["span"].as_str().unwrap().matches(':').count() >= 2), "{document:#}");
+    // The switch must be exactly "unknown": any other value keeps the error.
+    let directory = tempfile::tempdir().unwrap();
+    let off = run_with_env(directory.path(), DYN_SOURCE, json!({}), &[("LOOM_UNRESOLVED_CALLS", "0")]);
+    assert!(!off.status.success());
 }

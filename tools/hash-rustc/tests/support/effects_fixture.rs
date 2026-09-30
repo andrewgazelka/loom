@@ -56,6 +56,10 @@ fn successful(output: Output) {
 }
 
 pub fn run(directory: &Path, source: &str, handler_rows: Value) -> Output {
+    run_with_env(directory, source, handler_rows, &[])
+}
+
+pub fn run_with_env(directory: &Path, source: &str, handler_rows: Value, env: &[(&str, &str)]) -> Output {
     std::fs::write(directory.join("sdk.rs"), SDK).unwrap();
     successful(
         Command::new(env!("CARGO_BIN_EXE_hash-rustc"))
@@ -85,6 +89,7 @@ pub fn run(directory: &Path, source: &str, handler_rows: Value) -> Output {
         .env("LOOM_ITEM_HASHES", directory.join("hashes.json"))
         .env("LOOM_ITEM_PREIMAGES", directory.join("preimages"))
         .env("LOOM_HANDLER_ROWS", handler_rows.to_string())
+        .envs(env.iter().copied())
         .output()
         .unwrap()
 }

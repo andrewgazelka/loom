@@ -29,7 +29,7 @@ async fn inferred_trait_dispatch() {
         checked.sig.effects.unknown,
         "source alone cannot prove purity"
     );
-    checked
+    let _ = checked
         .apply_driver_effects_json(&output(&["sleep"], serde_json::json!([])))
         .unwrap();
     assert!(checked.diagnostics.is_empty());
@@ -40,7 +40,7 @@ async fn inferred_trait_dispatch() {
 #[tokio::test]
 async fn unknown_label_error_names_call_site() {
     let mut checked = check("pub fn main(label: String) { loom::perform(label, ()); }").await;
-    checked
+    let _ = checked
         .apply_driver_effects_json(&output(
             &[],
             serde_json::json!([
@@ -93,7 +93,7 @@ async fn multiple_root_functions_export_but_nested_functions_do_not() {
             .collect::<Vec<_>>(),
         ["main", "other"]
     );
-    checked.apply_driver_effects_json(r#"{"effects":{"entries":{"guest::main":{"labels":["now"],"unknown":[]},"guest::other":{"labels":[],"unknown":[]}},"instances":{}}}"#).unwrap();
+    let _ = checked.apply_driver_effects_json(r#"{"effects":{"entries":{"guest::main":{"labels":["now"],"unknown":[]},"guest::other":{"labels":[],"unknown":[]}},"instances":{}}}"#).unwrap();
     assert!(checked.diagnostics.is_empty());
     assert_eq!(checked.sig.effects.labels, ["now"]);
 }
@@ -114,7 +114,7 @@ async fn missing_entry_is_rejected_without_mutation() {
 #[tokio::test]
 async fn resolving_all_labels_clears_previous_call_site_errors() {
     let mut checked = check("pub fn main(label: &str) { loom::perform(label, ()); }").await;
-    checked
+    let _ = checked
         .apply_driver_effects_json(&output(
             &["sleep"],
             serde_json::json!([
@@ -125,7 +125,7 @@ async fn resolving_all_labels_clears_previous_call_site_errors() {
         .unwrap();
     assert_eq!(checked.diagnostics.len(), 2);
     assert_eq!(checked.sig.effects.labels, ["sleep"]);
-    checked
+    let _ = checked
         .apply_driver_effects_json(&output(&["now", "sleep"], serde_json::json!([])))
         .unwrap();
     assert!(checked.diagnostics.is_empty());

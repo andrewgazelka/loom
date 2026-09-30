@@ -149,13 +149,33 @@ impl Service {
         if !unresolved.is_empty()
             && (request.allowed_effects.is_some() || !loom_build::host_allows_unresolved_calls())
         {
-            for site in &unresolved {
-                let mut error = loom_check::diagnostic_for(
+            for site in unresolved.iter() {
+                // The driver counts the compiler's text (unparsed); report the caller's line, for the cell's own
+                // file. A helper file, a dependency or a source bundle keeps the raw line.
+                let located = site
+                    .span
+                    .rsplit_once(':')
+                    .and_then(|(file_line, col)| {
+                        let (file, line) = file_line.rsplit_once(':')?;
+                        Some((file.to_owned(), line.parse::<usize>().ok()?, col.parse::<usize>().ok()?))
+                    });
+                let own_source = !request.source.trim_start().starts_with('{');
+                let shown = located.as_ref().map(|(file, line, col)| {
+                    let line = (file == "src/lib.rs" && own_source)
+                        .then(|| loom_check::rust_original_lines(&request.source))
+                        .flatten()
+                        .and_then(|map| map.get(line.checked_sub(1)?).map(|line| *line as usize))
+                        .unwrap_or(*line);
+                    (file.clone(), line, *col)
+                });
+                let place = shown
+                    .as_ref()
+                    .map_or_else(|| site.span.clone(), |(file, line, col)| format!("{file}:{line}:{col}"));
+                let mut error = loom_check::diagnostic(
                     request.lang,
                     "LOOM_EFFECT_INFERENCE",
                     &format!(
-                        "the call at {} cannot be resolved, so its effects are unknown; {}",
-                        site.span,
+                        "the call at {place} cannot be resolved, so its effects are unknown; {}",
                         if request.allowed_effects.is_some() {
                             "a definition with an allowed-effects list needs every call resolved"
                         } else {
@@ -163,15 +183,9 @@ impl Service {
                         }
                     ),
                 );
-                if let Some((file_line, col)) = site.span.rsplit_once(':')
-                    && let Some((file, line)) = file_line.rsplit_once(':')
-                    && let (Ok(line), Ok(col)) = (line.parse::<usize>(), col.parse())
-                {
-                    error.file = file.into();
-                    // The driver counts the compiler's text (unparsed); report the caller's line.
-                    error.line = loom_check::rust_original_lines(&request.source)
-                        .and_then(|map| map.get(line.checked_sub(1)?).map(|line| *line as usize))
-                        .unwrap_or(line);
+                if let Some((file, line, col)) = shown {
+                    error.file = file;
+                    error.line = line;
                     error.col = col;
                 }
                 checked.diagnostics.push(error);

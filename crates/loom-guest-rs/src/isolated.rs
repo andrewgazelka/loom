@@ -272,13 +272,43 @@ pub fn parallel_for<R: DeserializeOwned>(
     n: u32,
     chunk: u32,
 ) -> Result<Vec<Result<R, CallError>>, CallError> {
-    call_map(def, chunks(n, chunk))
+    let plan = chunk_plan(n, chunk)?;
+    call_map(def, plan)
+}
+
+/// The most chunks one [`parallel_for`] creates. Each is a call with its own frame and instance; a range that
+/// would need more is an error, not a million-instance fan-out. Raise `chunk` instead.
+pub const MAX_CHUNKS: usize = 16 * 1024;
+
+/// [`chunks`], refusing a plan of more than [`MAX_CHUNKS`] (a `chunk` of 0 counts as 1, so `n` itself must fit).
+pub fn chunk_plan(n: u32, chunk: u32) -> Result<Vec<(u32, u32)>, CallError> {
+    let size = chunk.max(1) as usize;
+    let count = (n as usize).div_ceil(size);
+    if count > MAX_CHUNKS {
+        return Err(CallError::Decode {
+            message: format!(
+                "parallel_for({n}, chunk {chunk}) would make {count} chunks; the most is {MAX_CHUNKS}, so use a larger chunk"
+            ),
+        });
+    }
+    Ok(chunks(n, chunk))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use loom_proto::Bytes;
+
+    #[test]
+    fn a_plan_with_too_many_chunks_is_refused_and_an_empty_range_is_empty() {
+        assert!(chunk_plan(0, 10).unwrap().is_empty());
+        assert_eq!(chunk_plan(10, 4).unwrap().len(), 3);
+        assert_eq!(chunk_plan(MAX_CHUNKS as u32, 1).unwrap().len(), MAX_CHUNKS);
+        let error = chunk_plan(MAX_CHUNKS as u32 + 1, 1).unwrap_err();
+        assert!(matches!(&error, CallError::Decode { message } if message.contains("larger chunk")), "{error:?}");
+        assert!(chunk_plan(1_000_000, 0).is_err(), "a chunk of 0 is 1, which is too many for a million");
+        assert_eq!(chunk_plan(u32::MAX, u32::MAX).unwrap(), [(0, u32::MAX)]);
+    }
 
     #[test]
     fn chunks_cover_the_range_once_in_order() {

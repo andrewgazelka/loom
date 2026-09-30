@@ -22,6 +22,7 @@ mod actor_websocket;
 pub use actor_websocket::WebSocketHub;
 mod build_progress;
 mod call_cancel;
+mod call_ledger;
 mod cas_browser;
 mod wasm;
 use anyhow::{Context, Result, bail, ensure};
@@ -71,6 +72,7 @@ pub struct Service {
     build_progress: build_progress::BuildProgress,
     last_reply_storage_nanos: Arc<AtomicU64>,
     calls: call_cancel::ActiveCalls,
+    ledger: call_ledger::CallLedger,
 }
 impl Service {
     pub fn new(store: Store, root: PathBuf, languages: Vec<Lang>) -> Result<Self> {
@@ -115,6 +117,7 @@ impl Service {
             build_progress: build_progress::BuildProgress::default(),
             last_reply_storage_nanos: Arc::new(AtomicU64::new(0)),
             calls: Default::default(),
+            ledger: Default::default(),
         })
     }
 

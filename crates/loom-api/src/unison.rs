@@ -375,25 +375,37 @@ impl Service {
                 Ok(json!(history))
             }
             "run" => {
-                let target = field(args, "target")?;
-                let def = self.resolve_run_target(target)?;
-                let selected = self.store.resolve_entry(target)?;
-                let entry = match &selected {
-                    Some(entry) => entry.name.as_str(),
-                    None => select_entry(&def, target)?,
-                };
-                self.cancellable(args, self.run_entry(
-                    &def,
-                    entry,
-                    args.get("args").cloned().unwrap_or_else(|| json!([])),
-                    args.get("sites").and_then(Value::as_bool).unwrap_or(false),
-                ))
+                self.recorded("run", async {
+                    let target = field(args, "target")?;
+                    let def = self.resolve_run_target(target)?;
+                    let selected = self.store.resolve_entry(target)?;
+                    let entry = match &selected {
+                        Some(entry) => entry.name.as_str(),
+                        None => select_entry(&def, target)?,
+                    };
+                    self.cancellable(
+                        args,
+                        self.run_entry(
+                            &def,
+                            entry,
+                            args.get("args").cloned().unwrap_or_else(|| json!([])),
+                            args.get("sites").and_then(Value::as_bool).unwrap_or(false),
+                        ),
+                    )
+                    .await
+                })
                 .await
             }
-            "run_many" => self.cancellable(args, self.run_many(args)).await,
-            "eval" => {
-                self.cancellable_with(args, |token| self.eval(args, token))
+            "run_many" => {
+                self.recorded("run_many", self.cancellable(args, self.run_many(args)))
                     .await
+            }
+            "eval" => {
+                self.recorded(
+                    "eval",
+                    self.cancellable_with(args, |token| self.eval(args, token)),
+                )
+                .await
             }
             "cancel" => self.cancel_call(args),
             "find" => {

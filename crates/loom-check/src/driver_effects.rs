@@ -17,6 +17,18 @@ fn label_kind() -> String {
     "label".into()
 }
 
+/// The calls the driver could not resolve in a definition (see `CheckedDef::apply_driver_effects`). Dropping
+/// it unread admits them, so the compiler warns when a caller ignores it.
+#[must_use = "unresolved calls are admitted or refused by the caller; ignoring them admits them"]
+#[derive(Debug, Clone, Default)]
+pub struct UnresolvedCalls(pub Vec<UnknownEffect>);
+impl std::ops::Deref for UnresolvedCalls {
+    type Target = Vec<UnknownEffect>;
+    fn deref(&self) -> &Vec<UnknownEffect> {
+        &self.0
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DriverEffectRow {
     pub labels: Vec<String>,
@@ -40,7 +52,7 @@ impl CheckedDef {
     /// Returns the sites of calls the driver could not resolve (`kind == "call"`). They make the entry's row
     /// `unknown` and are not errors here: whether they are acceptable is the caller's policy decision (trusted
     /// code yes; a definition with an allowed-effects list no).
-    pub fn apply_driver_effects_json(&mut self, json: &str) -> Result<Vec<UnknownEffect>, CheckError> {
+    pub fn apply_driver_effects_json(&mut self, json: &str) -> Result<UnresolvedCalls, CheckError> {
         #[derive(Deserialize)]
         struct Output {
             effects: DriverEffects,
@@ -49,7 +61,7 @@ impl CheckedDef {
         self.apply_driver_effects(&output.effects)
     }
 
-    pub fn apply_driver_effects(&mut self, effects: &DriverEffects) -> Result<Vec<UnknownEffect>, CheckError> {
+    pub fn apply_driver_effects(&mut self, effects: &DriverEffects) -> Result<UnresolvedCalls, CheckError> {
         if self.sig.exports.is_empty() {
             return Err(CheckError::Effects(
                 "definition has no exported entry".into(),
@@ -122,8 +134,10 @@ impl CheckedDef {
             labels: aggregate.into_iter().collect(),
             unknown,
         };
-        unresolved.dedup_by(|a, b| a.span == b.span && a.item == b.item);
-        Ok(unresolved)
+        // One entry per source site, however many exports or monomorphizations reach it.
+        unresolved.sort_by(|a, b| a.span.cmp(&b.span));
+        unresolved.dedup_by(|a, b| a.span == b.span);
+        Ok(UnresolvedCalls(unresolved))
     }
 }
 

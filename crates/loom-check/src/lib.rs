@@ -8,7 +8,7 @@ pub use crates::{CrateDependency, crate_dependencies};
 mod driver_effects;
 mod handler_references;
 mod rust_effects;
-pub use driver_effects::{DriverEffectRow, DriverEffects, UnknownEffect};
+pub use driver_effects::{DriverEffectRow, DriverEffects, UnknownEffect, UnresolvedCalls};
 mod safety;
 use loom_proto::{DefineRequest, Diagnostic, ExportSig, Lang, ParamSig, TypeSig, ValueShape};
 pub use safety::{
@@ -73,10 +73,7 @@ impl Checker {
         Ok(checked)
     }
 }
-pub fn diagnostic_for(lang: Lang, code: &str, message: &str) -> Diagnostic {
-    diagnostic(lang, code, message)
-}
-fn diagnostic(lang: Lang, code: &str, message: &str) -> Diagnostic {
+pub fn diagnostic(lang: Lang, code: &str, message: &str) -> Diagnostic {
     Diagnostic {
         lang,
         file: "src/lib.rs".into(),

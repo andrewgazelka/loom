@@ -118,7 +118,8 @@ async fn compile(builder: &Builder, store: &Store, name: &str, source: &str) -> 
     let item_json = store
         .get(&identity.item_hashes_ref)?
         .context("fixture driver JSON missing")?;
-    checked.apply_driver_effects_json(std::str::from_utf8(&item_json)?)?;
+    let unresolved = checked.apply_driver_effects_json(std::str::from_utf8(&item_json)?)?;
+    ensure!(unresolved.is_empty(), "fixture {name} has unresolved calls");
     ensure!(
         checked.diagnostics.is_empty(),
         "fixture effects {name}: {:?}",

@@ -62,6 +62,7 @@ fn body<'tcx>(analysis: &Analysis<'tcx>, instance: Instance<'tcx>) -> Option<&'t
     }
     match instance.def {
         ty::InstanceKind::Intrinsic(_) | ty::InstanceKind::LlvmIntrinsic(_) => None,
+        ty::InstanceKind::Virtual(_, _) if unresolved_calls_allowed() => None,
         ty::InstanceKind::Virtual(_, _) => analysis.tcx.dcx().fatal(format!(
             "cannot infer effects for unresolved virtual call {instance}"
         )),
