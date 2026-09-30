@@ -81,6 +81,9 @@ in-process result; that exercises `StoreRef` and `map_object` on real data.
 * Cancellation: `run` and `eval` take `call_id`; `cancel {call_id}` drops the running call (`crates/loom-api/src/call_cancel.rs`). Measured: a wasm loop of 40 billion iterations at 99% CPU was cancelled after 1.5 s, the reply came back at once and the daemon was at 0% CPU within 2 s.
 * Batch: `run_many` (verb) over `Runtime::call_many_cached`: pure callees answered from the result cache, misses stored, duplicates in a batch run once. 200 distinct skin-weld calls cold 649 ms, the same 200 cached 59 ms (parallel 8, load ~35).
 * Parallel-for: `loom::isolated::parallel_for(def, n, chunk)` (a range-shaped front for `call_map`, which already is a host-run parallel loop): 5.9x on a 1.2M-range prime count at load ~31, cached repeat 0.5 ms.
+* Profiles: `add`/`update` already build at opt-level 2; `eval` takes `profile` (`interactive` default, `standard`). Opt-level 3 measured no faster than 2 (skin-weld 3.3 to 3.9 ms at 2 against native 2.8 ms).
+* Embedder single flight: identical pure `call_entry_cached` calls in flight at once run once (clean answers only).
+* `stats.calls`: per-verb requests, failures and wall time, plus `run_many` hit/miss counts (`docs/guide.md`, "What the daemon has done").
 * Not done: SDK sugar for guests to build and return a `StoreRef`, and a verb to map from outside the process.
 
 ## Order of work (proposed)
