@@ -7,6 +7,7 @@ impl Store {
         self.recording.barrier(false)?;
         let mut c = self.lock()?;
         let tx = c.transaction()?;
+        let spill = self.spill.as_deref();
         let recorded: Vec<Event> = {
             let mut q = tx.prepare("SELECT seq,bytes,ts FROM definition_events ORDER BY seq")?;
             let mut rows = q.query([])?;
@@ -49,6 +50,7 @@ impl Store {
                     };
                     super::publication::project(
                         &tx,
+                        spill,
                         &def,
                         e["name"].as_str(),
                         e["source_hash"].as_str().context("missing source hash")?,

@@ -3,6 +3,7 @@ use super::*;
 
 pub(super) fn write(
     connection: &Connection,
+    spill: Option<&Spill>,
     candidate: &Def,
     name: Option<&str>,
     source: &str,
@@ -20,14 +21,23 @@ pub(super) fn write(
         labels.dedup();
     }
     def.observed_effects.clear();
-    let source_hash = put(connection, "source_bundle", source.as_bytes())?;
+    let source_hash = put(connection, spill, "source_bundle", source.as_bytes())?;
     validate(connection, &def)?;
     let event = serde_json::json!({
         "type": "defined", "def": def, "name": name,
         "source_hash": source_hash, "deps": deps, "identity": identity,
     });
     let seq = record_definition_event(connection, &event)?;
-    project(connection, &def, name, &source_hash, deps, identity, seq)?;
+    project(
+        connection,
+        spill,
+        &def,
+        name,
+        &source_hash,
+        deps,
+        identity,
+        seq,
+    )?;
     Ok(seq)
 }
 
@@ -61,6 +71,7 @@ pub(super) fn validate(connection: &Connection, candidate: &Def) -> Result<()> {
 
 pub(super) fn project(
     connection: &Connection,
+    spill: Option<&Spill>,
     definition: &Def,
     name: Option<&str>,
     source_hash: &str,
@@ -75,11 +86,8 @@ pub(super) fn project(
             definition.hash,
             identity.behavior_hash
         );
-        let bytes: Vec<u8> = connection.query_row(
-            "SELECT bytes FROM cas WHERE hash=?",
-            [&identity.item_hashes_ref],
-            |row| row.get(0),
-        )?;
+        let bytes = blobs::cas_bytes(connection, spill, &identity.item_hashes_ref)?
+            .context("driver item document missing from CAS")?;
         let document: Value = serde_json::from_slice(&bytes)?;
         let exports: BTreeMap<String, String> = serde_json::from_value(document["exports"].clone())
             .context("driver document has no exports; rebuild with the current driver")?;

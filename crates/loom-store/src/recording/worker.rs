@@ -10,6 +10,7 @@ fn commit(
     shared: &Shared,
     durable: bool,
     durability: Durability,
+    spill: Option<&Spill>,
 ) -> Result<()> {
     let mut connection = connection
         .lock()
@@ -75,6 +76,12 @@ fn commit(
         shared.effects_generation.fetch_add(1, Ordering::Release);
     }
     if durable {
+        // Object files were renamed into place before their rows were written;
+        // make those directory entries durable before the checkpoint makes the
+        // rows durable, so a durable row never names a lost file.
+        if let Some(spill) = spill {
+            spill.sync_dirs()?;
+        }
         // NORMAL mode synchronizes the WAL and database during checkpointing.
         // A busy checkpoint cannot acknowledge the requested durability barrier.
         let checkpoint_started = Instant::now();
@@ -107,6 +114,7 @@ pub(super) fn run(
     receiver: mpsc::Receiver<Message>,
     shared: Arc<Shared>,
     durability: Durability,
+    spill: Option<Arc<Spill>>,
 ) {
     let mut records = Vec::new();
     let mut deadline = Instant::now() + Duration::from_millis(100);
@@ -148,8 +156,15 @@ pub(super) fn run(
         let result = if let Some(error) = existing_error {
             Err(error)
         } else {
-            commit(&connection, &mut records, &shared, durable, durability)
-                .map_err(|error| format!("{error:#}"))
+            commit(
+                &connection,
+                &mut records,
+                &shared,
+                durable,
+                durability,
+                spill.as_deref(),
+            )
+            .map_err(|error| format!("{error:#}"))
         };
         if let Err(error) = &result {
             *shared.error.lock().expect("recording error lock") = Some(error.clone());

@@ -20,10 +20,17 @@ fn streaming_file_roundtrip_reopens_and_refuses_corruption() -> Result<()> {
     store.export_file(cid, &destination)?;
     assert_eq!(std::fs::read(&destination)?, bytes);
     assert!(store.export_file(cid, &destination).is_err());
-    store.with_connection(|connection| {
-        connection.execute("UPDATE cas SET bytes=x'00' WHERE hash=?", [&hash])?;
-        Ok(())
-    })?;
+    // A 2 MiB object is a file under objects/. Replace it with same-size garbage
+    // and reopen: the once-per-process verification set starts empty.
+    drop(store);
+    let object = directory
+        .path()
+        .join("objects")
+        .join(&hash[..1])
+        .join(&hash);
+    std::fs::remove_file(&object)?;
+    std::fs::write(&object, vec![0x5a; bytes.len()])?;
+    let store = Store::open(&database)?;
     let corrupt = directory.path().join("corrupt");
     assert!(store.export_file(cid, &corrupt).is_err());
     assert!(!corrupt.exists());

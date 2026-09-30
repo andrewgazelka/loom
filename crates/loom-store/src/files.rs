@@ -1,4 +1,5 @@
-//! Stream large native artifacts through the existing SQLite CAS blob column.
+//! Stream large native artifacts into the CAS: object files from `SPILL_BYTES` up,
+//! the SQLite blob column below that or in a store without an objects directory.
 use super::*;
 use std::{
     fs::{File, OpenOptions},
@@ -9,8 +10,10 @@ use std::{
 const CHUNK_BYTES: usize = 64 * 1024;
 
 impl Store {
-    /// Hash once, then copy into a transaction-owned incremental SQLite blob.
-    /// A second hash refuses source mutation between the discovery and copy passes.
+    /// Hash once, then copy: into an object file when the source is `SPILL_BYTES`
+    /// or more and the store has an objects directory, else into a
+    /// transaction-owned incremental SQLite blob. A second hash refuses source
+    /// mutation between the discovery and copy passes.
     pub fn put_file(&self, kind: &str, path: &Path) -> Result<String> {
         ensure!(
             !matches!(
@@ -25,10 +28,6 @@ impl Store {
             "CAS source must be a regular file"
         );
         let length = input.metadata()?.len();
-        ensure!(
-            length <= i32::MAX as u64,
-            "CAS source exceeds SQLite blob limit"
-        );
         let mut hasher = blake3::Hasher::new();
         let mut buffer = vec![0; CHUNK_BYTES];
         loop {
@@ -41,6 +40,40 @@ impl Store {
         let hash = hasher.finalize().to_hex().to_string();
         input.seek(SeekFrom::Start(0))?;
         self.recording.barrier(false)?;
+        if let Some(spill) = self
+            .spill
+            .as_deref()
+            .filter(|_| length >= spill::SPILL_BYTES as u64)
+        {
+            let existing: Option<bool> = self
+                .lock()?
+                .query_row("SELECT external FROM cas WHERE hash=?", [&hash], |row| {
+                    row.get(0)
+                })
+                .optional()?;
+            // The copy runs without the connection. An existing inline row (a
+            // large object stored before spilling) keeps its bytes and needs no file.
+            if existing != Some(false) {
+                spill.ingest(&hash, &mut input, length)?;
+            }
+            let mut connection = self.lock()?;
+            let transaction = connection.transaction()?;
+            blobs::insert_external(
+                &transaction,
+                &hash,
+                kind,
+                loom_proto::RAW_CODEC,
+                length,
+                None,
+            )?;
+            transaction.execute("INSERT OR IGNORE INTO cas_codecs VALUES (?,85)", [&hash])?;
+            transaction.commit()?;
+            return Ok(hash);
+        }
+        ensure!(
+            length <= i32::MAX as u64,
+            "CAS source exceeds SQLite blob limit"
+        );
         let mut connection = self.lock()?;
         let transaction = connection.transaction()?;
         let existing: Option<i64> = transaction
@@ -131,38 +164,62 @@ impl Store {
         );
         self.recording.barrier(false)?;
         let connection = self.lock()?;
-        let rowid: Option<i64> = connection.query_row("SELECT cas.rowid FROM cas JOIN cas_codecs USING(hash) WHERE cas.hash=? AND cas_codecs.codec=85", [&address.hash], |row| row.get(0)).optional()?;
-        let rowid = rowid.context("CAS file not found in this tenant")?;
+        let row: Option<(i64, bool, Option<u64>)> = connection.query_row("SELECT cas.rowid,cas.external,cas.size FROM cas JOIN cas_codecs USING(hash) WHERE cas.hash=? AND cas_codecs.codec=85", [&address.hash], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?;
+        let (rowid, external, size) = row.context("CAS file not found in this tenant")?;
+        if external {
+            let size = size.context("external CAS row has no size")?;
+            // Stream the object file without holding the connection.
+            drop(connection);
+            let spill = self
+                .spill
+                .as_deref()
+                .context("external CAS object in a store that has no objects directory")?;
+            let mut input = spill.open_file(&address.hash, size)?;
+            copy_verified(&mut input, &address.hash, destination, &check_cancelled)?;
+            spill.mark_verified(&address.hash);
+            return Ok(());
+        }
         let mut blob =
             connection.blob_open(rusqlite::DatabaseName::Main, "cas", "bytes", rowid, true)?;
-        let mut output = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(destination)?;
-        let result = (|| -> Result<()> {
-            let mut hash = blake3::Hasher::new();
-            let mut buffer = vec![0; CHUNK_BYTES];
-            loop {
-                check_cancelled()?;
-                let n = blob.read(&mut buffer)?;
-                if n == 0 {
-                    break;
-                }
-                output.write_all(&buffer[..n])?;
-                hash.update(&buffer[..n]);
-            }
-            ensure!(
-                hash.finalize().to_hex().as_str() == address.hash,
-                "CAS content hash mismatch"
-            );
-            check_cancelled()?;
-            output.sync_all()?;
-            Ok(())
-        })();
-        drop(output);
-        if result.is_err() {
-            std::fs::remove_file(destination).context("remove incomplete CAS export")?;
-        }
-        result
+        copy_verified(&mut blob, &address.hash, destination, &check_cancelled)
     }
+}
+
+/// Copy `input` into a new file at `destination`, refusing content that does not
+/// hash to `expected`; a failed copy leaves no file behind.
+fn copy_verified(
+    input: &mut impl Read,
+    expected: &str,
+    destination: &Path,
+    check_cancelled: &dyn Fn() -> Result<()>,
+) -> Result<()> {
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)?;
+    let result = (|| -> Result<()> {
+        let mut hash = blake3::Hasher::new();
+        let mut buffer = vec![0; CHUNK_BYTES];
+        loop {
+            check_cancelled()?;
+            let n = input.read(&mut buffer)?;
+            if n == 0 {
+                break;
+            }
+            output.write_all(&buffer[..n])?;
+            hash.update(&buffer[..n]);
+        }
+        ensure!(
+            hash.finalize().to_hex().as_str() == expected,
+            "CAS content hash mismatch"
+        );
+        check_cancelled()?;
+        output.sync_all()?;
+        Ok(())
+    })();
+    drop(output);
+    if result.is_err() {
+        std::fs::remove_file(destination).context("remove incomplete CAS export")?;
+    }
+    result
 }

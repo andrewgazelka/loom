@@ -7,14 +7,21 @@ use super::*;
 impl Store {
     /// The formatted text recorded for the source revision `source_hash`.
     pub fn formatted_source(&self, source_hash: &str) -> Result<Option<String>> {
-        Ok(self
-            .lock()?
+        let connection = self.lock()?;
+        let formatted_hash: Option<String> = connection
             .query_row(
-                "SELECT CAST(c.bytes AS TEXT) FROM formatted_sources f JOIN cas c ON c.hash=f.formatted_hash WHERE f.source_hash=?",
+                "SELECT formatted_hash FROM formatted_sources WHERE source_hash=?",
                 [source_hash],
                 |row| row.get(0),
             )
-            .optional()?)
+            .optional()?;
+        formatted_hash
+            .map(|hash| -> Result<String> {
+                let bytes = blobs::cas_bytes(&connection, self.spill.as_deref(), &hash)?
+                    .context("formatted source object missing from CAS")?;
+                Ok(String::from_utf8(bytes)?)
+            })
+            .transpose()
     }
 
     /// Record `formatted` as the formatting of the source revision `source_hash`
@@ -23,7 +30,12 @@ impl Store {
     pub fn record_formatted_source(&self, source_hash: &str, formatted: &str) -> Result<String> {
         self.recording.barrier(false)?;
         let connection = self.lock()?;
-        let hash = put(&connection, "source-formatted", formatted.as_bytes())?;
+        let hash = put(
+            &connection,
+            self.spill.as_deref(),
+            "source-formatted",
+            formatted.as_bytes(),
+        )?;
         connection.execute(
             "INSERT OR IGNORE INTO formatted_sources(source_hash,formatted_hash) VALUES (?1,?2)",
             params![source_hash, hash],

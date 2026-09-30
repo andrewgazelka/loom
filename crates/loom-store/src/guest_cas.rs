@@ -85,7 +85,7 @@ impl Store {
         let connection = self.lock()?;
         let length: Option<u64> = connection
             .query_row(
-                "SELECT length(bytes) FROM cas WHERE hash=?",
+                "SELECT coalesce(size,length(bytes)) FROM cas WHERE hash=?",
                 [&address.hash],
                 |row| row.get(0),
             )

@@ -1,4 +1,5 @@
 pub use rusqlite::Error as DatabaseError;
+mod blobs;
 mod files;
 mod guest_cas;
 pub use guest_cas::CAS_GUEST_MAX_BYTES;
@@ -22,6 +23,7 @@ mod paths;
 mod projections;
 mod publication;
 mod recording;
+mod spill;
 #[cfg(test)]
 mod tests;
 mod trace;
@@ -34,6 +36,7 @@ use loom_proto::{Def, Event, Value};
 pub use machine::MachineRoot;
 pub use recording::RecordingTimings;
 use rusqlite::{Connection, OptionalExtension, params};
+use spill::Spill;
 use std::{
     collections::BTreeMap,
     path::Path,
@@ -48,6 +51,9 @@ pub struct Store {
     connection: Arc<Mutex<Connection>>,
     /// In-memory definitions of `eval` cells; see `transient`.
     transient: Arc<transient::Transient>,
+    /// Object files of values from `spill::SPILL_BYTES` up; `None` for a memory store,
+    /// which keeps everything inline. A staged intake store shares its parent's.
+    spill: Option<Arc<Spill>>,
 }
 impl Store {
     /// Tenant directories must reject both cloned owners and separate handles
@@ -72,16 +78,34 @@ impl Store {
         }
     }
 
+    /// Open the database at `path`; large blobs live in `objects/` beside it.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        Self::initialize(Connection::open(path)?, recording::Durability::Wal)
+        let connection = Connection::open(path)?;
+        let spill = connection
+            .path()
+            .filter(|path| !path.is_empty())
+            .map(|path| {
+                let directory = Path::new(path)
+                    .parent()
+                    .filter(|directory| !directory.as_os_str().is_empty())
+                    .unwrap_or(Path::new("."));
+                Spill::open(directory).map(Arc::new)
+            })
+            .transpose()?;
+        Self::initialize(connection, recording::Durability::Wal, spill)
     }
     pub fn memory() -> Result<Self> {
         Self::initialize(
             Connection::open_in_memory()?,
             recording::Durability::Ephemeral,
+            None,
         )
     }
-    fn initialize(mut connection: Connection, durability: recording::Durability) -> Result<Self> {
+    fn initialize(
+        mut connection: Connection,
+        durability: recording::Durability,
+        spill: Option<Arc<Spill>>,
+    ) -> Result<Self> {
         legacy::validate(&connection)?;
         language::validate(&connection)?;
         connection.create_scalar_function(
@@ -112,6 +136,7 @@ impl Store {
         dag_migration::run(&mut connection)?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         connection.execute_batch(include_str!("schema.sql"))?;
+        blobs::migrate_schema(&connection)?;
         migration::run(&mut connection)?;
         effect_index::migrate(&mut connection)?;
         // NORMAL keeps commits off the fsync path; the recording writer's durability
@@ -130,11 +155,16 @@ impl Store {
         )?;
         durability.verify(&connection)?;
         let connection = Arc::new(Mutex::new(connection));
-        let recording = Arc::new(recording::Writer::new(connection.clone(), durability)?);
+        let recording = Arc::new(recording::Writer::new(
+            connection.clone(),
+            durability,
+            spill.clone(),
+        )?);
         Ok(Self {
             recording,
             connection,
             transient: Arc::default(),
+            spill,
         })
     }
     fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
@@ -165,7 +195,7 @@ impl Store {
 pub fn content_hash(bytes: &[u8]) -> String {
     blake3::hash(bytes).to_hex().to_string()
 }
-fn put(c: &Connection, kind: &str, bytes: &[u8]) -> Result<String> {
+fn put(c: &Connection, spill: Option<&Spill>, kind: &str, bytes: &[u8]) -> Result<String> {
     ensure!(
         !matches!(
             kind,
@@ -174,10 +204,7 @@ fn put(c: &Connection, kind: &str, bytes: &[u8]) -> Result<String> {
         "structured CAS kind requires put_value"
     );
     let hash = blake3::hash(bytes).to_hex().to_string();
-    c.execute(
-        "INSERT OR IGNORE INTO cas(hash,kind,bytes,created_at,codec) VALUES (?,?,?,unixepoch(),85)",
-        params![hash, kind, bytes],
-    )?;
+    blobs::insert_object(c, spill, &hash, kind, loom_proto::RAW_CODEC, bytes, None)?;
     c.execute("INSERT OR IGNORE INTO cas_codecs VALUES (?,85)", [&hash])?;
     Ok(hash)
 }

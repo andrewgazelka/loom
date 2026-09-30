@@ -107,9 +107,14 @@ impl Store {
                 block.cid,
                 block.hash
             );
-            tx.execute(
-                "INSERT OR IGNORE INTO cas(hash,kind,bytes,created_at,codec) VALUES (?,?,?,unixepoch(),?)",
-                params![block.hash, *kind, block.bytes, block.codec],
+            blobs::insert_object(
+                &tx,
+                self.spill.as_deref(),
+                &block.hash,
+                kind,
+                block.codec,
+                &block.bytes,
+                None,
             )?;
             tx.execute(
                 "INSERT OR IGNORE INTO cas_codecs VALUES (?,?)",

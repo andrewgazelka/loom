@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 fn legacy(path: &std::path::Path) -> Result<Connection> {
     let c = Connection::open(path)?;
     let schema = include_str!("../src/schema.sql")
-        .replacen(",codec INTEGER NOT NULL CHECK(codec IN (85,113))", "", 1)
+        .replacen(",codec INTEGER NOT NULL CHECK(codec IN (85,113)),external INTEGER NOT NULL DEFAULT 0 CHECK(external IN (0,1)),size INTEGER", "", 1)
         .replace("loom_json(c.bytes) AS bytes", "c.bytes");
     c.execute_batch(&schema)?;
     Ok(c)

@@ -119,9 +119,11 @@ mod tests {
         assert_eq!(store.get(&component)?.unwrap(), b"module one");
         // Nothing durable: the definition table and the CAS never saw it.
         let durable: i64 = store.with_connection(|connection| {
-            Ok(connection.query_row("SELECT count(*) FROM defs WHERE hash='a'", [], |row| {
-                row.get(0)
-            })?)
+            Ok(
+                connection.query_row("SELECT count(*) FROM defs WHERE hash='a'", [], |row| {
+                    row.get(0)
+                })?,
+            )
         })?;
         assert_eq!(durable, 0);
         Ok(())
@@ -156,13 +158,24 @@ mod tests {
     fn a_mismatched_component_is_refused_and_old_cells_are_dropped() -> Result<()> {
         let store = Store::memory()?;
         let (def, _) = cell("a", b"one");
-        assert!(store.install_transient(def, b"other bytes".to_vec()).is_err());
+        assert!(
+            store
+                .install_transient(def, b"other bytes".to_vec())
+                .is_err()
+        );
         for index in 0..(CELLS + 5) {
-            let (def, bytes) = cell(&format!("cell-{index}"), format!("module {index}").as_bytes());
+            let (def, bytes) = cell(
+                &format!("cell-{index}"),
+                format!("module {index}").as_bytes(),
+            );
             store.install_transient(def, bytes)?;
         }
         assert!(store.executable_definition("cell-0")?.is_none());
-        assert!(store.executable_definition(&format!("cell-{}", CELLS + 4))?.is_some());
+        assert!(
+            store
+                .executable_definition(&format!("cell-{}", CELLS + 4))?
+                .is_some()
+        );
         Ok(())
     }
 }

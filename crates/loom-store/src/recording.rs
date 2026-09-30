@@ -3,7 +3,7 @@ mod tests;
 mod worker;
 use worker::run;
 
-use super::{encode, record_definition_event};
+use super::{Spill, encode, record_definition_event};
 use anyhow::{Result, anyhow, ensure};
 use loom_proto::Value;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -126,13 +126,18 @@ pub(crate) struct Writer {
     durability: Durability,
 }
 impl Writer {
-    pub fn new(connection: Arc<Mutex<Connection>>, durability: Durability) -> Result<Self> {
+    /// `spill` is the store's object directory, synced at every durable barrier.
+    pub fn new(
+        connection: Arc<Mutex<Connection>>,
+        durability: Durability,
+        spill: Option<Arc<Spill>>,
+    ) -> Result<Self> {
         let (sender, receiver) = mpsc::sync_channel(8192);
         let shared = Arc::new(Shared::default());
         let worker_shared = shared.clone();
         let thread = thread::Builder::new()
             .name("loom-recording".into())
-            .spawn(move || run(connection, receiver, worker_shared, durability))?;
+            .spawn(move || run(connection, receiver, worker_shared, durability, spill))?;
         Ok(Self {
             sender: Some(sender),
             shared,

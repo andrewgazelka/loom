@@ -30,7 +30,7 @@ impl Store {
         }
         let prefix = request.q.as_ref().map(|prefix| prefix.to_ascii_lowercase());
         let connection = self.lock()?;
-        let mut query=connection.prepare("SELECT hash,kind,length(bytes),created_at FROM cas WHERE hash>coalesce(?1,'') AND (?2 IS NULL OR kind=?2) AND (?3 IS NULL OR hash LIKE ?3 || '%') ORDER BY hash LIMIT ?4")?;
+        let mut query=connection.prepare("SELECT hash,kind,coalesce(size,length(bytes)),created_at FROM cas WHERE hash>coalesce(?1,'') AND (?2 IS NULL OR kind=?2) AND (?3 IS NULL OR hash LIKE ?3 || '%') ORDER BY hash LIMIT ?4")?;
         let mut entries = query
             .query_map(
                 params![request.after, request.kind, prefix, request.limit + 1],
@@ -63,7 +63,7 @@ impl Store {
         let connection = self.lock()?;
         let mut entry = connection
             .query_row(
-                "SELECT hash,kind,length(bytes),created_at FROM cas WHERE hash=?",
+                "SELECT hash,kind,coalesce(size,length(bytes)),created_at FROM cas WHERE hash=?",
                 [&hash],
                 row_entry,
             )
@@ -82,14 +82,27 @@ impl Store {
             return Ok(None);
         }
         let hash = address_hash(address)?;
-        Ok(self
+        let row: Option<(bool, Option<u64>, Vec<u8>)> = self
             .lock()?
             .query_row(
-                "SELECT coalesce(substr(bytes,1,?),X'') FROM cas WHERE hash=?",
+                "SELECT external,size,coalesce(substr(bytes,1,?),X'') FROM cas WHERE hash=?",
                 params![limit, hash],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
-            .optional()?)
+            .optional()?;
+        let Some((external, size, prefix)) = row else {
+            return Ok(None);
+        };
+        if !external {
+            return Ok(Some(prefix));
+        }
+        // A spilled object's preview comes from its file and is not hash-checked.
+        let size = size.context("external CAS row has no size")?;
+        let spill = self
+            .spill
+            .as_deref()
+            .context("external CAS object in a store that has no objects directory")?;
+        Ok(Some(spill.read_prefix(&hash, size, limit as u64)?))
     }
 }
 fn is_hash(hash: &str) -> bool {

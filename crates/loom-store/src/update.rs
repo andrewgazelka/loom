@@ -83,7 +83,13 @@ impl Store {
             "update session conflict: expected revision {expected_revision}, found {}",
             session.revision
         );
-        publish_staged(&source, &tx, publications)?;
+        publish_staged(
+            &source,
+            staged.spill.as_deref(),
+            &tx,
+            self.spill.as_deref(),
+            publications,
+        )?;
         let session = save_session(&tx, session_id, expected_revision, final_state)?;
         tx.commit()?;
         Ok(session)
@@ -111,7 +117,13 @@ impl Store {
             identity::current_names(&tx)? == *expected_names,
             "import conflict: current names changed while the bundle was building; retry the import"
         );
-        publish_staged(&source, &tx, publications)?;
+        publish_staged(
+            &source,
+            staged.spill.as_deref(),
+            &tx,
+            self.spill.as_deref(),
+            publications,
+        )?;
         let seq: i64 = tx.query_row(
             "SELECT coalesce(max(seq),0) FROM definition_records",
             [],
@@ -125,13 +137,16 @@ impl Store {
 /// Copy staged build objects, then write every publication with its build event.
 fn publish_staged(
     source: &Connection,
+    source_spill: Option<&Spill>,
     tx: &Connection,
+    spill: Option<&Spill>,
     publications: &[IntakePublication<'_>],
 ) -> Result<()> {
-    intake::import_build_objects(source, tx)?;
+    intake::import_build_objects(source, source_spill, tx, spill)?;
     for publication in publications {
         publication::write(
             tx,
+            spill,
             publication.def,
             publication.name,
             publication.source,

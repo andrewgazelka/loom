@@ -9,14 +9,21 @@ use super::*;
 impl Store {
     /// The text `component_hash` was compiled from, if recorded.
     pub fn compiled_source(&self, component_hash: &str) -> Result<Option<String>> {
-        Ok(self
-            .lock()?
+        let connection = self.lock()?;
+        let compiled_hash: Option<String> = connection
             .query_row(
-                "SELECT CAST(c.bytes AS TEXT) FROM compiled_sources s JOIN cas c ON c.hash=s.compiled_hash WHERE s.component_hash=?",
+                "SELECT compiled_hash FROM compiled_sources WHERE component_hash=?",
                 [component_hash],
                 |row| row.get(0),
             )
-            .optional()?)
+            .optional()?;
+        compiled_hash
+            .map(|hash| -> Result<String> {
+                let bytes = blobs::cas_bytes(&connection, self.spill.as_deref(), &hash)?
+                    .context("compiled source object missing from CAS")?;
+                Ok(String::from_utf8(bytes)?)
+            })
+            .transpose()
     }
 
     /// Record `text` as what `component_hash` was compiled from and return the
@@ -25,7 +32,12 @@ impl Store {
     pub fn record_compiled_source(&self, component_hash: &str, text: &str) -> Result<String> {
         self.recording.barrier(false)?;
         let connection = self.lock()?;
-        let hash = put(&connection, "source-compiled", text.as_bytes())?;
+        let hash = put(
+            &connection,
+            self.spill.as_deref(),
+            "source-compiled",
+            text.as_bytes(),
+        )?;
         connection.execute(
             "INSERT OR IGNORE INTO compiled_sources(component_hash,compiled_hash) VALUES (?1,?2)",
             params![component_hash, hash],

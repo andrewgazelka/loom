@@ -43,7 +43,15 @@ impl Store {
         self.recording.barrier(false)?;
         let mut connection = self.lock()?;
         let tx = connection.transaction()?;
-        let seq = publication::write(&tx, def, name, source, deps, identity)?;
+        let seq = publication::write(
+            &tx,
+            self.spill.as_deref(),
+            def,
+            name,
+            source,
+            deps,
+            identity,
+        )?;
         tx.commit()?;
         Ok(seq)
     }
@@ -191,7 +199,19 @@ impl Store {
     }
 
     pub fn source(&self, hash: &str) -> Result<Option<String>> {
-        Ok(self.lock()?.query_row("SELECT CAST(c.bytes AS TEXT) FROM defs d JOIN cas c ON c.hash=d.source_hash WHERE d.hash=?",[hash],|r|r.get(0)).optional()?)
+        let connection = self.lock()?;
+        let source_hash: Option<String> = connection
+            .query_row("SELECT source_hash FROM defs WHERE hash=?", [hash], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        source_hash
+            .map(|source_hash| -> Result<String> {
+                let bytes = blobs::cas_bytes(&connection, self.spill.as_deref(), &source_hash)?
+                    .context("definition source object missing from CAS")?;
+                Ok(String::from_utf8(bytes)?)
+            })
+            .transpose()
     }
     /// BLAKE3 of the current source revision; the CAS object `source` reads.
     pub fn definition_source_hash(&self, hash: &str) -> Result<Option<String>> {

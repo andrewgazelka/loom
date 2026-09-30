@@ -1,0 +1,336 @@
+//! Raw blobs of 1 MiB and up are immutable files under `objects/`; smaller ones stay in SQLite.
+use anyhow::{Context, Result};
+use loom_proto::{CasListRequest, Def, Lang};
+use loom_store::{IntakePublication, Store, content_hash};
+use serde_json::json;
+use std::{
+    collections::BTreeMap,
+    fs::File,
+    path::{Path, PathBuf},
+    time::{Duration, SystemTime},
+};
+
+const MIB: usize = 1 << 20;
+
+fn pattern(length: usize) -> Vec<u8> {
+    (0..length)
+        .map(|i| (i.wrapping_mul(31) % 251) as u8)
+        .collect()
+}
+
+/// Every object file under `<directory>/objects/<shard>/`, not counting `tmp/`.
+fn object_files(directory: &Path) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    for shard in std::fs::read_dir(directory.join("objects"))? {
+        let shard = shard?;
+        if shard.file_name() == "tmp" {
+            continue;
+        }
+        for file in std::fs::read_dir(shard.path())? {
+            files.push(file?.path());
+        }
+    }
+    Ok(files)
+}
+
+fn object_path(directory: &Path, hash: &str) -> PathBuf {
+    directory.join("objects").join(&hash[..1]).join(hash)
+}
+
+fn list_size(store: &Store, hash: &str) -> Result<u64> {
+    let page = store.cas_list(&CasListRequest {
+        limit: 100,
+        after: None,
+        kind: None,
+        q: None,
+    })?;
+    Ok(page
+        .items
+        .iter()
+        .find(|entry| entry.hash == hash)
+        .context("object missing from the CAS listing")?
+        .size)
+}
+
+#[test]
+fn large_blobs_are_single_files_and_small_ones_stay_inline() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let store = Store::open(directory.path().join("store.db"))?;
+    let big = pattern(2 * MIB);
+    let hash = store.put("blob", &big)?;
+    assert_eq!(hash, content_hash(&big));
+    assert_eq!(store.put("blob", &big)?, hash, "a second put is idempotent");
+    let expected = object_path(directory.path(), &hash);
+    assert_eq!(object_files(directory.path())?, vec![expected.clone()]);
+    assert_eq!(std::fs::metadata(&expected)?.len(), big.len() as u64);
+    assert!(
+        std::fs::metadata(&expected)?.permissions().readonly(),
+        "object files are immutable"
+    );
+    assert_eq!(store.get(&hash)?.as_deref(), Some(big.as_slice()));
+
+    let small = pattern(100 * 1024);
+    let small_hash = store.put("blob", &small)?;
+    assert_eq!(
+        object_files(directory.path())?.len(),
+        1,
+        "100 KB stays inline"
+    );
+    assert_eq!(store.get(&small_hash)?.as_deref(), Some(small.as_slice()));
+
+    // The threshold is exact: 1 MiB is a file, one byte less is not.
+    let edge = store.put("blob", &pattern(MIB))?;
+    assert_eq!(object_files(directory.path())?.len(), 2);
+    store.put("blob", &pattern(MIB - 1))?;
+    assert_eq!(object_files(directory.path())?.len(), 2);
+    assert!(object_path(directory.path(), &edge).exists());
+
+    // Sizes and previews come from the index and the file, not from `length(bytes)`.
+    assert_eq!(store.size_of(&hash)?, Some(big.len() as u64));
+    assert_eq!(store.size_of(&small_hash)?, Some(small.len() as u64));
+    assert_eq!(store.size_of(&"0".repeat(64))?, None);
+    assert_eq!(
+        store.cas_entry(&hash)?.context("entry")?.size,
+        big.len() as u64
+    );
+    assert_eq!(list_size(&store, &hash)?, big.len() as u64);
+    assert_eq!(list_size(&store, &small_hash)?, small.len() as u64);
+    assert_eq!(store.cas_prefix(&hash, 16)?, Some(big[..16].to_vec()));
+    assert_eq!(
+        store.cas_prefix(&small_hash, 16)?,
+        Some(small[..16].to_vec())
+    );
+    let reference = store.reference(&hash, loom_proto::RAW_CODEC)?;
+    assert!(
+        store
+            .guest_cas_effect("cas.get_bytes", json!({"reference": reference}))
+            .is_err(),
+        "a spilled object is over the guest limit"
+    );
+    store.flush()?;
+    Ok(())
+}
+
+#[test]
+fn a_reopened_store_sees_the_blob_and_a_missing_file_is_a_clear_error() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let database = directory.path().join("store.db");
+    let big = pattern(3 * MIB + 5);
+    let hash = {
+        let store = Store::open(&database)?;
+        let hash = store.put("blob", &big)?;
+        store.flush()?;
+        hash
+    };
+    let store = Store::open(&database)?;
+    assert_eq!(store.get(&hash)?.as_deref(), Some(big.as_slice()));
+    drop(store);
+
+    std::fs::remove_file(object_path(directory.path(), &hash))?;
+    let store = Store::open(&database)?;
+    let error = store
+        .get(&hash)
+        .expect_err("missing file must not read as empty");
+    assert!(format!("{error:#}").contains("missing"), "{error:#}");
+    assert!(
+        store
+            .restore_to(&hash, &directory.path().join("out"))
+            .is_err()
+    );
+    assert_eq!(
+        store.size_of(&hash)?,
+        Some(big.len() as u64),
+        "the index still knows it"
+    );
+    // Putting the same bytes again rewrites the missing file.
+    store.put("blob", &big)?;
+    assert_eq!(store.get(&hash)?.as_deref(), Some(big.as_slice()));
+    Ok(())
+}
+
+#[test]
+fn streamed_files_spill_once_and_an_old_store_keeps_its_inline_rows() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let source = directory.path().join("source");
+    let big = pattern(2 * MIB + 7);
+    std::fs::write(&source, &big)?;
+    let store = Store::open(directory.path().join("store.db"))?;
+    let hash = store.put_file("vm-disk", &source)?;
+    assert_eq!(store.put_file("vm-disk", &source)?, hash);
+    assert_eq!(
+        store.put("vm-disk", &big)?,
+        hash,
+        "put and put_file address alike"
+    );
+    assert_eq!(object_files(directory.path())?.len(), 1);
+    assert_eq!(store.get(&hash)?.as_deref(), Some(big.as_slice()));
+    assert_eq!(store.size_of(&hash)?, Some(big.len() as u64));
+    drop(store);
+
+    // A store created before spilling: no external/size columns, one large inline row.
+    let old = directory.path().join("old");
+    std::fs::create_dir(&old)?;
+    let database = old.join("store.db");
+    let inline = pattern(2 * MIB + 11);
+    let inline_hash = content_hash(&inline);
+    let connection = rusqlite::Connection::open(&database)?;
+    connection.execute_batch(
+        "CREATE TABLE cas(hash TEXT PRIMARY KEY,kind TEXT NOT NULL,bytes BLOB NOT NULL,created_at INTEGER NOT NULL,codec INTEGER NOT NULL CHECK(codec IN (85,113)));",
+    )?;
+    connection.execute(
+        "INSERT INTO cas VALUES (?,?,?,0,85)",
+        rusqlite::params![inline_hash, "blob", inline],
+    )?;
+    drop(connection);
+    let store = Store::open(&database)?;
+    assert_eq!(store.get(&inline_hash)?.as_deref(), Some(inline.as_slice()));
+    assert_eq!(store.size_of(&inline_hash)?, Some(inline.len() as u64));
+    assert_eq!(store.put("blob", &inline)?, inline_hash);
+    assert!(
+        object_files(&old)?.is_empty(),
+        "an existing inline row wins; no duplicate file"
+    );
+    store.put("blob", &pattern(2 * MIB + 13))?;
+    assert_eq!(object_files(&old)?.len(), 1, "new large blobs spill");
+    Ok(())
+}
+
+#[test]
+fn restore_to_replaces_atomically_and_matches_the_stored_bytes() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let store = Store::open(directory.path().join("store.db"))?;
+    let big = pattern(2 * MIB);
+    let hash = store.put("blob", &big)?;
+    let small = pattern(4096);
+    let small_hash = store.put("blob", &small)?;
+
+    let out = directory.path().join("restored");
+    store.restore_to(&hash, &out)?;
+    assert_eq!(std::fs::read(&out)?, big);
+    // The destination exists: stale content, then a previous restore.
+    let existing = directory.path().join("existing");
+    std::fs::write(&existing, b"stale")?;
+    store.restore_to(&hash, &existing)?;
+    assert_eq!(std::fs::read(&existing)?, big);
+    store.restore_to(&hash, &existing)?;
+    assert_eq!(std::fs::read(&existing)?, big);
+    // A CID works, and an inline value is written as bytes.
+    let reference = store.reference(&small_hash, loom_proto::RAW_CODEC)?;
+    let cid = reference["$ref"].as_str().context("cid")?;
+    store.restore_to(cid, &existing)?;
+    assert_eq!(std::fs::read(&existing)?, small);
+    // The store's own file is unaffected by replacing a restored copy.
+    assert_eq!(store.get(&hash)?.as_deref(), Some(big.as_slice()));
+    let leftovers: Vec<_> = std::fs::read_dir(directory.path())?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "no temp files left beside the destination"
+    );
+
+    assert!(
+        store.restore_to(&"0".repeat(64), &out).is_err(),
+        "unknown object"
+    );
+    let structured = store.put_value("blob", &json!({"a": 1}))?;
+    assert!(
+        store.restore_to(&structured, &out).is_err(),
+        "DAG-CBOR is not a file"
+    );
+    Ok(())
+}
+
+#[test]
+fn intake_moves_spilled_blobs_as_files() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let open = |name: &str| -> Result<(PathBuf, Store)> {
+        let path = directory.path().join(name);
+        std::fs::create_dir(&path)?;
+        let store = Store::open(path.join("store.db"))?;
+        Ok((path, store))
+    };
+    let definition = |seed: &[u8]| Def {
+        hash: content_hash(seed),
+        lang: Lang::Rust,
+        component_hash: None,
+        sig: Default::default(),
+        allowed_effects: None,
+        observed_effects: Vec::new(),
+    };
+    let deps = BTreeMap::new();
+    let (a_path, a) = open("a")?;
+    let (b_path, b) = open("b")?;
+    let big = pattern(2 * MIB + 3);
+    let hash = a.put("blob", &big)?;
+
+    // Staged from A, committed into another store: the file is linked, not read.
+    let staged = a.stage_intake()?;
+    assert_eq!(staged.get(&hash)?.as_deref(), Some(big.as_slice()));
+    let def = definition(b"into b");
+    b.commit_intake(
+        &staged,
+        IntakePublication {
+            def: &def,
+            name: Some("built"),
+            source: "source",
+            deps: &deps,
+            identity: None,
+            build_event: &json!({"type": "component_built"}),
+        },
+    )?;
+    assert_eq!(b.get(&hash)?.as_deref(), Some(big.as_slice()));
+    assert_eq!(object_files(&b_path)?, vec![object_path(&b_path, &hash)]);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(
+            std::fs::metadata(object_path(&b_path, &hash))?.nlink(),
+            2,
+            "one inode, two directory entries: nothing was copied"
+        );
+    }
+    assert_eq!(a.get(&hash)?.as_deref(), Some(big.as_slice()));
+    b.flush()?;
+
+    // A large object built in the staged store lands in the live directory once.
+    let staged = a.stage_intake()?;
+    let built = pattern(2 * MIB + 9);
+    let built_hash = staged.put("component", &built)?;
+    let def = definition(b"into a");
+    a.commit_intake(
+        &staged,
+        IntakePublication {
+            def: &def,
+            name: Some("built"),
+            source: "source",
+            deps: &deps,
+            identity: None,
+            build_event: &json!({"type": "component_built"}),
+        },
+    )?;
+    assert_eq!(a.get(&built_hash)?.as_deref(), Some(built.as_slice()));
+    assert_eq!(object_files(&a_path)?.len(), 2);
+    Ok(())
+}
+
+#[test]
+fn opening_sweeps_stale_temp_files_only() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let database = directory.path().join("store.db");
+    drop(Store::open(&database)?);
+    let temp = directory.path().join("objects").join("tmp");
+    let stale = temp.join("stale");
+    let fresh = temp.join("fresh");
+    std::fs::write(&stale, b"left by a dead writer")?;
+    std::fs::write(&fresh, b"another process is writing")?;
+    File::options()
+        .write(true)
+        .open(&stale)?
+        .set_modified(SystemTime::now() - Duration::from_secs(2 * 3600))?;
+    drop(Store::open(&database)?);
+    assert!(!stale.exists());
+    assert!(fresh.exists());
+    Ok(())
+}

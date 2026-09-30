@@ -3,7 +3,7 @@ use super::*;
 impl Store {
     pub fn put(&self, kind: &str, bytes: &[u8]) -> Result<String> {
         self.recording.barrier(false)?;
-        put(&*self.lock()?, kind, bytes)
+        put(&*self.lock()?, self.spill.as_deref(), kind, bytes)
     }
     /// The bytes at `hash` when they were stored with `kind`; `None` for a missing hash
     /// and for one stored as anything else, so a caller cannot tell the two apart.
@@ -11,7 +11,9 @@ impl Store {
         self.recording.barrier(false)?;
         let stored: Option<String> = self
             .lock()?
-            .query_row("SELECT kind FROM cas WHERE hash=?", [hash], |row| row.get(0))
+            .query_row("SELECT kind FROM cas WHERE hash=?", [hash], |row| {
+                row.get(0)
+            })
             .optional()?;
         if stored.as_deref() != Some(kind) {
             return Ok(None);
@@ -43,16 +45,22 @@ impl Store {
                 "CID codec is not registered for stored object"
             );
         }
-        if let Some(bytes) = c
-            .query_row("SELECT bytes FROM cas WHERE hash=?", [hash], |r| r.get(0))
-            .optional()?
-        {
-            let bytes: Vec<u8> = bytes;
-            ensure!(
-                blake3::hash(&bytes).to_hex().as_str() == hash,
-                "CAS content hash mismatch"
-            );
-            return Ok(Some(bytes));
+        let stored = blobs::stored(&c, hash)?;
+        // Read an object file without holding the connection.
+        drop(c);
+        if let Some(stored) = stored {
+            return match stored {
+                // Inline values are verified on every read.
+                blobs::Stored::Inline(bytes) => {
+                    ensure!(
+                        blake3::hash(&bytes).to_hex().as_str() == hash,
+                        "CAS content hash mismatch"
+                    );
+                    Ok(Some(bytes))
+                }
+                // A spilled file is verified once per process inside `read`.
+                external => external.load(self.spill.as_deref(), hash).map(Some),
+            };
         }
         // A transient definition's component is held in memory, addressed by
         // its content hash like any CAS blob.
@@ -60,6 +68,56 @@ impl Store {
             return Ok(self.transient.blob(hash));
         }
         Ok(None)
+    }
+    /// The size in bytes of the stored object at `hash` (a bare hash or a CID),
+    /// without reading a spilled file. `None` when nothing is stored there.
+    pub fn size_of(&self, hash: &str) -> Result<Option<u64>> {
+        self.recording.barrier(false)?;
+        let hash = bare_hash(hash)?;
+        Ok(self
+            .lock()?
+            .query_row(
+                "SELECT coalesce(size,length(bytes)) FROM cas WHERE hash=?",
+                [&hash],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+    /// Make the raw object at `hash` (a bare hash or a CID) appear at `dest`,
+    /// replacing any existing file atomically (temp name, then rename).
+    /// A spilled object is cloned on APFS, else hard linked, else copied, and
+    /// its BLAKE3 is checked the first time this process touches it; the result
+    /// may share storage with the store, so it is read-only and must not be
+    /// written through. An inline object is written as a fresh file.
+    pub fn restore_to(&self, hash: &str, dest: &Path) -> Result<()> {
+        self.recording.barrier(false)?;
+        let hash = bare_hash(hash)?;
+        let (codec, stored) = {
+            let c = self.lock()?;
+            let codec: Option<u64> = c
+                .query_row("SELECT codec FROM cas WHERE hash=?", [&hash], |r| r.get(0))
+                .optional()?;
+            (codec, blobs::stored(&c, &hash)?)
+        };
+        let stored = stored.context("CAS object not found")?;
+        ensure!(
+            codec == Some(loom_proto::RAW_CODEC),
+            "CAS restore requires a raw object"
+        );
+        match stored {
+            blobs::Stored::Inline(bytes) => {
+                ensure!(
+                    blake3::hash(&bytes).to_hex().as_str() == hash,
+                    "CAS content hash mismatch"
+                );
+                spill::write_atomic(dest, &bytes)
+            }
+            blobs::Stored::External { size } => self
+                .spill
+                .as_deref()
+                .context("external CAS object in a store that has no objects directory")?
+                .restore(&hash, size, dest),
+        }
     }
     pub fn put_value<T: serde::Serialize>(&self, kind: &str, value: &T) -> Result<String> {
         self.recording.barrier(false)?;
@@ -140,5 +198,16 @@ impl Store {
         )?
         .context("CAS object not found")?;
         Ok(reference)
+    }
+}
+
+/// The bare 64-hex hash of a hash or CID.
+fn bare_hash(hash: &str) -> Result<String> {
+    if hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Ok(hash.to_owned())
+    } else {
+        Ok(loom_proto::parse_reference(hash)
+            .map_err(anyhow::Error::msg)?
+            .hash)
     }
 }
