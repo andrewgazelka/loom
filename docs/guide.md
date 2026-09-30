@@ -379,6 +379,22 @@ These snapshots observe selected files across the process interval. They do not 
 
 Dependencies remain pinned when a definition name moves. `update` retains its existing dependency pins and effect policy unless replacements are supplied. Use `--dep alias=<name-or-hash>` (repeatable) to replace pins and `--allowed_effects '[]'` to deny effects; explicit `null` clears the effect policy. Use `dependents <hash>` to find callers and update each caller explicitly. Actor behavior changes use `promote` or MCP `promote`.
 
+### Parallel-for
+
+`loom::isolated::parallel_for(def, n, chunk)` runs the entry `def` (taking `(start: u32, end: u32)`) once per chunk of `0..n` at the same time and returns the chunk results in order, each `Ok` or `Err` on its own. It is `call_map` with ranges: the host runs the chunks on its own threads (about one per core), each in a fresh instance with its own memory, so a chunk sees only its arguments (pass what it needs, or a blob handle to read with `loom::kernel::get`). There are no guest threads. Pure chunks are answered from the result cache and identical chunks run once. Worth it when a chunk costs about a millisecond or more.
+
+```rust
+use loom::isolated::{Def, parallel_for};
+const COUNT: Def<fn(u32, u32) -> u32> = Def::this().entry("count");
+
+pub fn count(start: u32, end: u32) -> u32 { /* primes in start..end */ }
+pub fn parallel(n: u32, chunk: u32) -> u32 {
+    parallel_for(COUNT, n, chunk).unwrap().into_iter().map(|r| r.unwrap()).sum()
+}
+```
+
+Measured (2026-09-30, optimized wasm, machine load about 31): counting primes below 1,200,000 by trial division took 71 ms as one call and 12 ms as 16 chunks (5.9x, same answer); the same call again, every chunk cached, took 0.5 ms.
+
 ## Guest-defined effect handlers
 
 `loom::handle_any(handler, body)` installs a deep handler around an ordinary Rust

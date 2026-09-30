@@ -251,10 +251,44 @@ pub fn call_map<F: Invocation>(
         .collect())
 }
 
+/// The `(start, end)` ranges [`parallel_for`] hands out: `0..n` in pieces of at most `chunk` (at least 1).
+pub fn chunks(n: u32, chunk: u32) -> Vec<(u32, u32)> {
+    let chunk = chunk.max(1);
+    (0..n)
+        .step_by(chunk as usize)
+        .map(|start| (start, start.saturating_add(chunk).min(n)))
+        .collect()
+}
+
+/// A parallel-for: run the entry `def` once per chunk of `0..n` (at most `chunk` indices each) at the same
+/// time, and return the chunks' results in order. `def` takes `(start, end)`; a chunk that fails is that
+/// chunk's `Err`. The host runs the chunks on its own threads (about one per core), each in a fresh instance
+/// with its own memory, so a chunk sees only its arguments: pass what it needs (or a blob handle to read with
+/// [`crate::kernel::get`]), and return its part of the result. Worth it when a chunk costs about a millisecond
+/// or more, and pure chunks are answered from the result cache like any [`call_map`] element. Built on
+/// [`call_map`], which this is a range-shaped front for; there are no guest threads.
+pub fn parallel_for<R: DeserializeOwned>(
+    def: Def<fn(u32, u32) -> R>,
+    n: u32,
+    chunk: u32,
+) -> Result<Vec<Result<R, CallError>>, CallError> {
+    call_map(def, chunks(n, chunk))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use loom_proto::Bytes;
+
+    #[test]
+    fn chunks_cover_the_range_once_in_order() {
+        assert_eq!(chunks(10, 4), [(0, 4), (4, 8), (8, 10)]);
+        assert_eq!(chunks(8, 4), [(0, 4), (4, 8)]);
+        assert_eq!(chunks(0, 4), []);
+        assert_eq!(chunks(3, 0), [(0, 1), (1, 2), (2, 3)], "a chunk of 0 means 1");
+        assert_eq!(chunks(5, 100), [(0, 5)]);
+        assert_eq!(chunks(u32::MAX, u32::MAX), [(0, u32::MAX)], "no overflow at the top");
+    }
 
     #[test]
     fn every_arity_encodes_one_array() {
