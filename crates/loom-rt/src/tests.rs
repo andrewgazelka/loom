@@ -350,3 +350,28 @@ async fn rejects_unadmitted_artifact_before_execution() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn a_full_module_cache_hands_back_what_it_evicts_instead_of_freeing_it_under_the_caller() {
+    // Freeing a compiled module (unmapping its code, unregistering it from the engine) takes
+    // milliseconds. Dropping it inside `insert`, on the request path, made every cell after the 64th
+    // pay about 15 ms of a warm eval (measured: module step 9.9 ms fresh, 24.8 ms once the cache was
+    // full). The cache returns the evicted modules so the caller frees them elsewhere.
+    let engine = wasmtime::Engine::default();
+    let module = || wasmtime::Module::new(&engine, "(module)").unwrap();
+    let mut cache = ModuleCache::default();
+    for index in 0..MODULE_CACHE_LIMIT {
+        assert!(
+            cache
+                .insert(format!("artifact-{index}"), module())
+                .is_empty()
+        );
+    }
+    assert!(cache.get("artifact-0").is_some());
+    let evicted = cache.insert("artifact-new".into(), module());
+    assert_eq!(evicted.len(), 1, "one module in, one out");
+    assert!(cache.get("artifact-0").is_none(), "the oldest went");
+    assert!(cache.get("artifact-new").is_some());
+    // Replacing an entry already cached evicts nothing.
+    assert!(cache.insert("artifact-new".into(), module()).is_empty());
+}

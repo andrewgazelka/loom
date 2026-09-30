@@ -65,15 +65,24 @@ impl ModuleCache {
     fn get(&self, artifact: &str) -> Option<wasmtime::Module> {
         self.modules.get(artifact).cloned()
     }
-    fn insert(&mut self, artifact: String, module: wasmtime::Module) {
+    /// Cache `module`; the modules it pushes out are returned, not dropped here. Freeing a compiled
+    /// module unmaps its code and unregisters it from the engine, which takes milliseconds: the caller
+    /// drops them off the request path (`Runtime::drop_modules`), or every call after the cache fills
+    /// pays for evicting an old module.
+    #[must_use]
+    fn insert(&mut self, artifact: String, module: wasmtime::Module) -> Vec<wasmtime::Module> {
         if self.modules.insert(artifact.clone(), module).is_none() {
             self.order.push_back(artifact);
         }
+        let mut evicted = Vec::new();
         while self.order.len() > MODULE_CACHE_LIMIT {
-            if let Some(oldest) = self.order.pop_front() {
-                self.modules.remove(&oldest);
+            if let Some(oldest) = self.order.pop_front()
+                && let Some(module) = self.modules.remove(&oldest)
+            {
+                evicted.push(module);
             }
         }
+        evicted
     }
 }
 

@@ -68,3 +68,14 @@ now shows 672 hits and 1 miss (the cell's own function); module compile 23.6 to 
 (load 68). The scratch programs that found it are in `/Volumes/Projects/tmp/loom-rt-examples/` (`cachemiss`, `keyseq*`, `clifdiff`, `modbench`)
 and `/Volumes/Projects/tmp/cachetest` (the patchable copy with `RESET=` switches). To report upstream: clear `exception_tables` in
 `DataFlowGraph::clear`.
+
+## Fixed: a daemon got slower after its 64th cell (2026-09-30, late)
+
+Benchmarks drifted up run after run (module step 9.9 ms on a fresh daemon, 24.8 ms later) and I first blamed the review fixes. A bisect
+(scratch clone with an APFS-cloned build directory, interleaved A/B per commit) showed every commit fast when fresh and slow when aged: the
+bounded module cache (64 compiled modules) evicted the oldest module inside `ModuleCache::insert`, under the cache lock, on the request path,
+and freeing a compiled wasmtime module (unmapping its code, unregistering it from the engine) costs about 15 ms. Every cell after the 64th paid it.
+`insert` now returns the evicted modules and `core_execute` frees them on a blocking thread. Measured on daemons past 130 cells, interleaved:
+module step 9.6 to 9.9 ms against 24.5 to 24.8 ms, wall 77 to 80 against 93 to 96 ms. Earlier latency numbers in this note that were taken
+after the first two or three benchmark runs on one daemon include this cost; the bench script itself sends 41 cells per run.
+Regression test: `a_full_module_cache_hands_back_what_it_evicts_instead_of_freeing_it_under_the_caller`.

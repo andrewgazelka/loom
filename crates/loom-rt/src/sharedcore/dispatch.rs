@@ -138,11 +138,16 @@ impl Runtime {
                 cache.compile(|| Module::new(&engine, &bytes).map_err(error))
             })
             .await??;
-            self.inner
+            let evicted = self
+                .inner
                 .core_modules
                 .lock()
                 .unwrap()
                 .insert(artifact.clone(), module.clone());
+            // Freeing a compiled module takes milliseconds: not on this request's time.
+            if !evicted.is_empty() {
+                tokio::task::spawn_blocking(move || drop(evicted));
+            }
             module
         };
         drop(compile_guard);
