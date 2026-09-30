@@ -1,5 +1,6 @@
 <script lang="ts">
   import { presets, manifest, lock, type Preset } from "$lib/presets";
+  import Editor from "$lib/Editor.svelte";
 
   let current: Preset = $state(presets[2]);
   let source = $state(presets[2].source);
@@ -70,7 +71,7 @@
   </nav>
   <p class="note">{current.note}</p>
 
-  <textarea bind:value={source} spellcheck="false" rows="14"></textarea>
+  <Editor bind:value={source} {run} problems={reply && !reply.ok ? (reply.diagnostics ?? []) : []} />
   <div class="bar">
     <button class="run" onclick={run} disabled={busy}>{busy ? "running…" : "Run"}</button>
     {#if reply}
@@ -103,10 +104,12 @@
 <style>
   :global(:root) {
     --bg: #fbfbfa; --ink: #1f1f1d; --dim: #77756f; --panel: #f1f0ed; --accent: #d9622b; --err: #b3261e;
+    --s-keyword: #b0357a; --s-type: #1a7f7a; --s-function: #2c5fb3; --s-macro: #a4581c; --s-string: #3b7d22; --s-number: #b5541c; --s-punct: #77756f; --s-prop: #1f1f1d;
     color-scheme: light dark;
   }
   @media (prefers-color-scheme: dark) {
-    :global(:root) { --bg: #191918; --ink: #ecebe7; --dim: #9b9992; --panel: #242422; --accent: #ef8a57; --err: #f2867e; }
+    :global(:root) { --bg: #191918; --ink: #ecebe7; --dim: #9b9992; --panel: #242422; --accent: #ef8a57; --err: #f2867e;
+      --s-keyword: #ff8ac0; --s-type: #6fd6cf; --s-function: #8db4ff; --s-macro: #f0a868; --s-string: #a5d98a; --s-number: #f2a979; --s-punct: #9b9992; --s-prop: #ecebe7; }
   }
   :global(body) { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.5 system-ui, sans-serif; }
   main { max-width: 720px; margin: 0 auto; padding: 48px 16px 80px; }
@@ -115,7 +118,6 @@
   nav { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 24px; }
   nav button { border: 0; background: var(--panel); color: var(--ink); padding: 6px 12px; border-radius: 8px; cursor: pointer; font: inherit; font-size: 14px; }
   nav button.on { background: var(--ink); color: var(--bg); }
-  textarea { width: 100%; box-sizing: border-box; background: var(--panel); color: var(--ink); border: 0; border-radius: 10px; padding: 14px; font: 13px/1.5 ui-monospace, Menlo, monospace; resize: vertical; }
   .bar { display: flex; align-items: center; gap: 14px; margin: 12px 0; }
   .run { border: 0; background: var(--accent); color: #fff; padding: 8px 20px; border-radius: 8px; font: inherit; font-weight: 600; cursor: pointer; }
   .run:disabled { opacity: 0.6; cursor: progress; }
