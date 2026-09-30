@@ -207,6 +207,7 @@ pub static VERBS: &[Verb] = &[
             arg!(deps, Map, optional),
             arg!(session, String, optional),
             arg!(optimize, Boolean, optional),
+            arg!(profile, String, optional),
             arg!(allowed_effects, Json, optional),
             arg!(manifest, Source, optional),
             arg!(lock, Source, optional),

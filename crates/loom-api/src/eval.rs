@@ -42,14 +42,17 @@ impl Service {
             .map(|value| serde_json::from_value(value.clone()))
             .transpose()?
             .flatten();
-        let profile = if args
-            .get("optimize")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
-            loom_build::BuildProfile::Standard
-        } else {
-            loom_build::BuildProfile::Interactive
+        let profile = match args.get("profile").filter(|value| !value.is_null()) {
+            Some(value) => match value.as_str().context("profile must be a string")? {
+                "interactive" => loom_build::BuildProfile::Interactive,
+                "standard" => loom_build::BuildProfile::Standard,
+                other => bail!("profile is interactive or standard, not {other:?}"),
+            },
+            // `optimize: true` is the older spelling of `profile: "standard"`.
+            None if args.get("optimize").and_then(Value::as_bool).unwrap_or(false) => {
+                loom_build::BuildProfile::Standard
+            }
+            None => loom_build::BuildProfile::Interactive,
         };
         let cell = loom_build::interactive_cell(source);
         let wrapped = matches!(cell, std::borrow::Cow::Owned(_));
