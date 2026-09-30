@@ -23,8 +23,14 @@ pub fn ingest_directory(store: &Store, directory: &Path) -> Result<BTreeMap<Stri
                 let name = path
                     .strip_prefix(root)?
                     .to_str()
-                    .context("input path is not UTF-8")?
-                    .replace('\\', "/");
+                    .context("input path is not UTF-8")?;
+                // A backslash would fold into `/` on some platforms, making `a\b` collide with
+                // `a/b`, so the name is refused rather than mapped.
+                ensure!(
+                    !name.contains('\\'),
+                    "input path {name:?} contains a backslash"
+                );
+                let name = name.to_owned();
                 let hash = store.put_file("blob", &path)?;
                 into.insert(
                     name,
@@ -34,7 +40,10 @@ pub fn ingest_directory(store: &Store, directory: &Path) -> Result<BTreeMap<Stri
                     },
                 );
             } else {
-                anyhow::bail!("input tree entry {} is not a regular file or directory", path.display());
+                anyhow::bail!(
+                    "input tree entry {} is not a regular file or directory",
+                    path.display()
+                );
             }
         }
         Ok(())
@@ -49,8 +58,8 @@ fn is_executable(path: &Path) -> Result<bool> {
     Ok(std::fs::metadata(path)?.permissions().mode() & 0o111 != 0)
 }
 
-/// Lay the declared inputs out under `root`. Non-executable files are cloned or linked from
-/// the store; executables are copied, since a link's mode belongs to the store.
+/// Lay the declared inputs out under `root`. Every file is an independent copy (cloned on APFS)
+/// the tool may write to; executables are written fresh with mode 0755.
 pub(crate) fn place_inputs(
     store: &Store,
     root: &Path,
@@ -70,7 +79,7 @@ pub(crate) fn place_inputs(
             std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o755))?;
         } else {
             ensure!(
-                store.size_of(&input.hash)?.is_some(),
+                store.has_object(&input.hash)?,
                 "input {name:?} ({}) is not in the store",
                 input.hash
             );

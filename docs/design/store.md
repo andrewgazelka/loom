@@ -37,7 +37,8 @@ under the OpenLDAP Public License 2.8; fjall 3.1.10 MIT OR Apache-2.0 (its tree 
 | disk after 1000 puts | 1.00x | 1.00x |
 
 Also: hashing 128 MB with BLAKE3 took 139 ms against 8.1 ms to `read()` it, and `Store::get` re-hashes on every read. A
-hard link of a 46.6 MB object took 0.22 ms against 8.7 ms to read and write it; `artifact_restore_ms` was 1,701 of about 3,400 ms
+hard link of a 46.6 MB object took 0.22 ms against 8.7 ms to read and write it (links were dropped afterwards, see rule 3; APFS clones keep
+most of that saving); `artifact_restore_ms` was 1,701 of about 3,400 ms
 in the 2026-09-21 warm baseline. On macOS Rust's `sync_all` is F_FULLFSYNC (about 4.4 to 6 ms), so fsyncs are batched, not per blob.
 
 ## Files per 100k objects (the Nix problem)
@@ -47,13 +48,29 @@ about 267 blob files in 16 directories (about 287 entries per 100k objects); thr
 
 ## Rules for the implementation
 
-1. Order of a spilled write: file written to `objects/tmp/<random>`, `sync_all`, `rename` into place, then the index row. A row
-   without its file cannot exist; an orphan file after a crash is harmless and swept by a scan. Directory syncs are batched at the
-   store's existing durability barrier (`durability.rs`), not per blob.
-2. Reading a spilled blob verifies its BLAKE3 once per process per hash (a bounded set), not on every read; a background scrub can
-   verify the rest. Inline values keep verifying as today.
-3. Restoring a spilled blob to a build directory uses `clonefile` on APFS, else a hard link when the consumer only reads, else a copy.
+1. Order of a spilled write: file created exclusively (`O_EXCL`) in `objects/tmp/`, `sync_all`, rename into place, `fsync` of the
+   shard directory, then the index row. The directory sync is inside the write, one extra fsync per spilled blob, because rows
+   are committed by several paths (`put`, `put_file`, intake, the recording writer) and SQLite's auto-checkpoint can make a row
+   durable at any commit; so a durable row never names a file a crash can lose. One gap: when a write is deduplicated (the file
+   is already there) its writer may have died between rename and directory sync, so the shard is marked dirty and synced at the
+   store's durability barrier (`durability.rs`); a row committed by a direct path before that barrier is not covered for that
+   file. A row without its file cannot be created by this code. An orphan file (no row, after a crash or a failed commit) is
+   harmless, but there is no sweep for orphan object files yet: only stale `objects/tmp/` files are removed, at open. A
+   sweeper has to cope with a writer that deduplicates against an old orphan between the scan and the delete, so it is not
+   written yet.
+2. Reading a spilled blob verifies its BLAKE3 once per file per process, not on every read. "Once" is keyed by a stamp of the
+   file (inode, size, mtime and ctime in nanoseconds) taken from the open handle, in a bounded FIFO set; any change of the stamp
+   (a write through any link, a replacement) forces a re-hash on the next read or restore. A background scrub can verify the
+   rest. Inline values keep verifying as today. `put`, `put_file` and intake compare an existing file by hash, not just size,
+   unless its stamp is already verified, and rewrite it on mismatch. `Store::has_object` (row exists and the spilled file is
+   present at the recorded size) is the check for a cache hit; `size_of` answers from the index alone.
+3. Restoring a spilled blob to a build directory or sandbox never hard-links: it uses `clonefile` on APFS, else a copy, into an
+   exclusive temp name beside the destination, then a rename. The result is an independent 0644 file (inline objects are the
+   same), so a consumer that can write to it cannot reach the store's inode. The object is verified as in rule 2 before the
+   clone or copy. Adopting an object from another store directory (intake, backup) is a hashed copy, refused when the source
+   does not match its hash, for the same reason.
 4. The result cache file is disposable: on any corruption it is deleted and starts empty. Hit counts are flushed in batches (60 to
-   73k bumps/s at 1000 per transaction). Eviction deletes rows in one transaction, then unlinks spilled files.
+   73k bumps/s at 1000 per transaction). Eviction deletes rows in one transaction, then unlinks spilled files; nothing else holds
+   those inodes now that restores do not link, so an unlink cannot change a file a consumer is reading.
 5. Later, separately: `cas.hash` as a 32-byte BLOB instead of hex TEXT (halves index size, touches every `REFERENCES cas(hash)`);
    never `WITHOUT ROWID` on tables with inline blobs (4.6x space at 1 KB rows in the first run).

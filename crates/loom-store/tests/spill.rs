@@ -6,6 +6,7 @@ use serde_json::json;
 use std::{
     collections::BTreeMap,
     fs::File,
+    io::Write,
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
@@ -35,6 +36,19 @@ fn object_files(directory: &Path) -> Result<Vec<PathBuf>> {
 
 fn object_path(directory: &Path, hash: &str) -> PathBuf {
     directory.join("objects").join(&hash[..1]).join(hash)
+}
+
+/// Overwrite the first byte of an object file in place, as a same-uid writer could, keeping its size.
+fn corrupt_in_place(path: &Path) -> Result<()> {
+    std::thread::sleep(Duration::from_millis(50));
+    let mut permissions = std::fs::metadata(path)?.permissions();
+    permissions.set_readonly(false);
+    std::fs::set_permissions(path, permissions)?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)?
+        .write_all(b"X")?;
+    Ok(())
 }
 
 fn list_size(store: &Store, hash: &str) -> Result<u64> {
@@ -142,6 +156,11 @@ fn a_reopened_store_sees_the_blob_and_a_missing_file_is_a_clear_error() -> Resul
         Some(big.len() as u64),
         "the index still knows it"
     );
+    assert!(
+        !store.has_object(&hash)?,
+        "but the object is not usable without its file"
+    );
+    assert!(!store.has_object(&"0".repeat(64))?);
     // Putting the same bytes again rewrites the missing file.
     store.put("blob", &big)?;
     assert_eq!(store.get(&hash)?.as_deref(), Some(big.as_slice()));
@@ -265,7 +284,7 @@ fn intake_moves_spilled_blobs_as_files() -> Result<()> {
     let big = pattern(2 * MIB + 3);
     let hash = a.put("blob", &big)?;
 
-    // Staged from A, committed into another store: the file is linked, not read.
+    // Staged from A, committed into another store: the file is copied (hashed on the way), not linked.
     let staged = a.stage_intake()?;
     assert_eq!(staged.get(&hash)?.as_deref(), Some(big.as_slice()));
     let def = definition(b"into b");
@@ -287,8 +306,8 @@ fn intake_moves_spilled_blobs_as_files() -> Result<()> {
         use std::os::unix::fs::MetadataExt;
         assert_eq!(
             std::fs::metadata(object_path(&b_path, &hash))?.nlink(),
-            2,
-            "one inode, two directory entries: nothing was copied"
+            1,
+            "an independent copy: no inode is shared with the source store"
         );
     }
     assert_eq!(a.get(&hash)?.as_deref(), Some(big.as_slice()));
@@ -341,11 +360,136 @@ fn documents_read_inside_sql_stay_inline_whatever_their_size() -> Result<()> {
     let store = Store::open(directory.path().join("s.sqlite"))?;
     // An item document is read with json_each over `cas.bytes`: an external row's empty bytes would
     // make every later lookup fail (found by a 142 KB definition whose item document passed 1 MiB).
-    let document = serde_json::to_vec(&json!({"entry": {"main": "x".repeat(2 * MIB)}, "exports": ["main"]}))?;
+    let document =
+        serde_json::to_vec(&json!({"entry": {"main": "x".repeat(2 * MIB)}, "exports": ["main"]}))?;
     let hash = store.put("item-hashes", &document)?;
-    assert!(object_files(directory.path())?.is_empty(), "no file for a document kind");
+    assert!(
+        object_files(directory.path())?.is_empty(),
+        "no file for a document kind"
+    );
     assert_eq!(store.get(&hash)?.as_deref(), Some(document.as_slice()));
     let opaque = store.put("component", &pattern(2 * MIB))?;
-    assert!(object_path(directory.path(), &opaque).exists(), "an opaque kind still spills");
+    assert!(
+        object_path(directory.path(), &opaque).exists(),
+        "an opaque kind still spills"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_same_size_corruption_of_a_verified_file_is_caught_and_a_reput_repairs_it() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let store = Store::open(directory.path().join("store.db"))?;
+    let big = pattern(2 * MIB);
+    let hash = store.put("blob", &big)?;
+    let file = object_path(directory.path(), &hash);
+    // Verified once in this process; a hash-keyed "verified" flag would now wave corruption through.
+    assert_eq!(store.get(&hash)?.as_deref(), Some(big.as_slice()));
+    store.restore_to(&hash, &directory.path().join("before"))?;
+
+    corrupt_in_place(&file)?;
+    assert_eq!(
+        std::fs::metadata(&file)?.len(),
+        big.len() as u64,
+        "same size"
+    );
+    let error = store
+        .get(&hash)
+        .expect_err("corrupt bytes must not be served");
+    assert!(format!("{error:#}").contains("mismatch"), "{error:#}");
+    let out = directory.path().join("after");
+    assert!(store.restore_to(&hash, &out).is_err());
+    assert!(!out.exists(), "a refused restore leaves nothing behind");
+
+    // Putting the right bytes again replaces the corrupt file (the size check alone would not).
+    assert_eq!(store.put("blob", &big)?, hash);
+    assert_eq!(store.get(&hash)?.as_deref(), Some(big.as_slice()));
+    store.restore_to(&hash, &out)?;
+    assert_eq!(std::fs::read(&out)?, big);
+    Ok(())
+}
+
+#[test]
+fn a_restored_file_is_an_independent_writable_copy_of_the_store_file() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let store = Store::open(directory.path().join("store.db"))?;
+    let big = pattern(2 * MIB);
+    let hash = store.put("blob", &big)?;
+    let inline = store.put("blob", &pattern(4096))?;
+    let stored = object_path(directory.path(), &hash);
+    let out = directory.path().join("out");
+    store.restore_to(&hash, &out)?;
+    let small = directory.path().join("small");
+    store.restore_to(&inline, &small)?;
+    for restored in [&out, &small] {
+        assert!(
+            !std::fs::metadata(restored)?.permissions().readonly(),
+            "{restored:?} is writable"
+        );
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let (restored, original) = (std::fs::metadata(&out)?, std::fs::metadata(&stored)?);
+        assert_ne!(restored.ino(), original.ino(), "no shared inode");
+        assert_eq!(original.nlink(), 1, "the store file has no other names");
+        assert_eq!(
+            std::fs::metadata(&small)?.mode() & 0o777,
+            restored.mode() & 0o777,
+            "inline and spilled restores have the same mode"
+        );
+    }
+    // A consumer writing through its copy cannot reach the store's bytes.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&out)?
+        .write_all(b"tampered")?;
+    assert_eq!(std::fs::read(&stored)?, big);
+    assert_eq!(store.get(&hash)?.as_deref(), Some(big.as_slice()));
+    store.restore_to(&hash, &out)?;
+    assert_eq!(std::fs::read(&out)?, big);
+    Ok(())
+}
+
+#[test]
+fn intake_refuses_a_corrupt_source_file_instead_of_carrying_it_over() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let open = |name: &str| -> Result<(PathBuf, Store)> {
+        let path = directory.path().join(name);
+        std::fs::create_dir(&path)?;
+        let store = Store::open(path.join("store.db"))?;
+        Ok((path, store))
+    };
+    let (a_path, a) = open("a")?;
+    let (b_path, b) = open("b")?;
+    let hash = a.put("blob", &pattern(2 * MIB + 3))?;
+    corrupt_in_place(&object_path(&a_path, &hash))?;
+    let staged = a.stage_intake()?;
+    let def = Def {
+        hash: content_hash(b"into b"),
+        lang: Lang::Rust,
+        component_hash: None,
+        sig: Default::default(),
+        allowed_effects: None,
+        observed_effects: Vec::new(),
+    };
+    let deps = BTreeMap::new();
+    let result = b.commit_intake(
+        &staged,
+        IntakePublication {
+            def: &def,
+            name: Some("built"),
+            source: "source",
+            deps: &deps,
+            identity: None,
+            build_event: &json!({"type": "component_built"}),
+        },
+    );
+    assert!(result.is_err(), "a corrupt source object was imported");
+    assert!(
+        object_files(&b_path)?.is_empty(),
+        "and nothing was left in the destination"
+    );
+    assert_eq!(b.get(&hash)?, None);
     Ok(())
 }

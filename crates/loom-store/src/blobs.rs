@@ -107,7 +107,8 @@ pub(crate) fn insert_object(
             row.get(0)
         })
         .optional()?;
-    // An external row with a missing file is healed by rewriting the file.
+    // An external row whose file is missing, the wrong size or corrupt is healed by rewriting the
+    // file (`ensure` hashes a file this process has not verified).
     if existing != Some(false) {
         spill.ensure(hash, bytes)?;
     }

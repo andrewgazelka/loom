@@ -78,46 +78,57 @@ pub fn collect_effect_index(store: &Store, limit: usize) -> Result<Collection> {
 pub struct Backup {
     pub bytes: u64,
     pub latest_seq: i64,
-    /// Objects stored as files, linked or copied into `objects/` beside the backup.
+    /// Objects stored as files, copied (hash-verified) into `objects/` beside the backup.
     pub spilled_objects: u64,
 }
 
 /// SQLite creates a consistent snapshot including WAL contents. Refuse existing
-/// targets, validate SQLite integrity, and return the snapshot's own sequence.
+/// targets, validate SQLite integrity, and return the snapshot's own sequence. On any failure
+/// the destination database is removed, so a half-made backup is never left behind.
 pub fn backup(store: &Store, destination: &Path) -> Result<Backup> {
     ensure!(!destination.exists(), "backup destination already exists");
     let destination_text = destination
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("backup path must be UTF-8"))?;
-    store.with_connection(|connection| {
-        connection.execute("VACUUM INTO ?", params![destination_text])?;
-        Ok(())
-    })?;
-    // Objects of 1 MiB and up live as files beside the database: bring them next to the copy,
-    // or the copy would open with rows whose bytes are missing.
-    let spilled = store.export_spilled_to(
-        destination
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or(Path::new(".")),
-    )?;
-    let snapshot =
-        Connection::open_with_flags(destination, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let integrity: String = snapshot.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
-    ensure!(
-        integrity == "ok",
-        "backup integrity check failed: {integrity}"
-    );
-    let latest_seq = snapshot.query_row(
-        "SELECT coalesce(max(seq),0) FROM definition_records",
-        [],
-        |row| row.get(0),
-    )?;
-    Ok(Backup {
-        bytes: destination.metadata()?.len(),
-        latest_seq,
-        spilled_objects: spilled,
-    })
+    // Nothing but a complete, checked backup may remain at `destination`: the snapshot is what
+    // names the objects, so it is made first and removed again if anything after it fails.
+    let made = (|| -> Result<Backup> {
+        store.with_connection(|connection| {
+            connection.execute("VACUUM INTO ?", params![destination_text])?;
+            Ok(())
+        })?;
+        // Objects of 1 MiB and up live as files beside the database: bring them next to the copy,
+        // or the copy would open with rows whose bytes are missing.
+        let spilled = store.export_spilled_to(
+            destination
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or(Path::new(".")),
+        )?;
+        let snapshot =
+            Connection::open_with_flags(destination, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let integrity: String =
+            snapshot.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+        ensure!(
+            integrity == "ok",
+            "backup integrity check failed: {integrity}"
+        );
+        let latest_seq = snapshot.query_row(
+            "SELECT coalesce(max(seq),0) FROM definition_records",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(Backup {
+            bytes: destination.metadata()?.len(),
+            latest_seq,
+            spilled_objects: spilled,
+        })
+    })();
+    if made.is_err() {
+        // The copied objects stay: they are whole, hashed files, and a retry reuses them.
+        let _ = std::fs::remove_file(destination);
+    }
+    made
 }
 
 #[cfg(test)]
@@ -181,7 +192,29 @@ mod tests {
         assert_eq!(result.spilled_objects, 1);
         let restored = Store::open(&destination)?;
         assert_eq!(restored.get(&hash)?.as_deref(), Some(big.as_slice()));
-        assert!(stats(&store)?.cas_bytes >= big.len() as u64, "spilled bytes are counted");
+        assert!(
+            stats(&store)?.cas_bytes >= big.len() as u64,
+            "spilled bytes are counted"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_backup_that_cannot_copy_an_object_leaves_no_database_behind() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let live = directory.path().join("live");
+        std::fs::create_dir(&live)?;
+        let store = Store::open(live.join("live.sqlite"))?;
+        let hash = store.put("blob", &vec![7u8; 3 << 20])?;
+        std::fs::remove_file(live.join("objects").join(&hash[..1]).join(&hash))?;
+        let backups = directory.path().join("backups");
+        std::fs::create_dir(&backups)?;
+        let destination = backups.join("one.sqlite");
+        assert!(backup(&store, &destination).is_err());
+        assert!(
+            !destination.exists(),
+            "a failed backup must not look like a backup"
+        );
         Ok(())
     }
 

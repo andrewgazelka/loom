@@ -51,26 +51,39 @@ async fn rustc_is_a_cached_hermetic_action() {
         "{}",
         String::from_utf8_lossy(&runner.read(&first.result.stderr).unwrap())
     );
-    let rlib = runner.read(&first.result.outputs["libdemo.rlib"].hash).unwrap();
+    let rlib = runner
+        .read(&first.result.outputs["libdemo.rlib"].hash)
+        .unwrap();
     assert!(rlib.starts_with(b"!<arch>"), "not an rlib archive");
 
     let again = runner.run(&action(&sysroot, &store, source)).await.unwrap();
     assert!(again.cached);
-    println!("rustc miss {:?}, hit {:?}, rlib {} bytes", first.elapsed, again.elapsed, rlib.len());
+    println!(
+        "rustc miss {:?}, hit {:?}, rlib {} bytes",
+        first.elapsed,
+        again.elapsed,
+        rlib.len()
+    );
 
     // An edit is a new key; a rebuild of the original after forgetting the record must give the same bytes.
     let edited = runner
-        .run(&action(&sysroot, &store, "pub fn add(a: u64, b: u64) -> u64 { a + b + 1 }\n"))
+        .run(&action(
+            &sysroot,
+            &store,
+            "pub fn add(a: u64, b: u64) -> u64 { a + b + 1 }\n",
+        ))
         .await
         .unwrap();
     assert!(!edited.cached);
-    assert_ne!(edited.result.outputs["libdemo.rlib"].hash, first.result.outputs["libdemo.rlib"].hash);
+    assert_ne!(
+        edited.result.outputs["libdemo.rlib"].hash,
+        first.result.outputs["libdemo.rlib"].hash
+    );
     store.clear_action_results().unwrap();
     let rebuilt = runner.run(&action(&sysroot, &store, source)).await.unwrap();
     assert!(!rebuilt.cached);
     assert_eq!(
-        rebuilt.result.outputs["libdemo.rlib"].hash,
-        first.result.outputs["libdemo.rlib"].hash,
+        rebuilt.result.outputs["libdemo.rlib"].hash, first.result.outputs["libdemo.rlib"].hash,
         "rustc is not reproducible under the sandbox for this crate"
     );
 }

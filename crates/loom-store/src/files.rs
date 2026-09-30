@@ -15,6 +15,12 @@ impl Store {
     /// transaction-owned incremental SQLite blob. A second hash refuses source
     /// mutation between the discovery and copy passes.
     pub fn put_file(&self, kind: &str, path: &Path) -> Result<String> {
+        self.put_open_file(kind, File::open(path)?)
+    }
+
+    /// `put_file` from an already opened handle, so a caller that vetted the file through the
+    /// handle (not the path) stores exactly what it vetted.
+    pub fn put_open_file(&self, kind: &str, mut input: File) -> Result<String> {
         ensure!(
             !matches!(
                 kind,
@@ -22,7 +28,6 @@ impl Store {
             ),
             "structured CAS kind requires put_value"
         );
-        let mut input = File::open(path)?;
         ensure!(
             input.metadata()?.is_file(),
             "CAS source must be a regular file"
@@ -175,8 +180,9 @@ impl Store {
                 .as_deref()
                 .context("external CAS object in a store that has no objects directory")?;
             let mut input = spill.open_file(&address.hash, size)?;
+            let stamp = spill::Stamp::of(&input)?;
             copy_verified(&mut input, &address.hash, destination, &check_cancelled)?;
-            spill.mark_verified(&address.hash);
+            spill.mark_file_verified(&address.hash, &input, stamp)?;
             return Ok(());
         }
         let mut blob =

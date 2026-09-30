@@ -63,8 +63,8 @@ impl Store {
 }
 
 /// Copy the objects `destination` lacks. A spilled object moves as its file
-/// (hard link, else a hashed copy; nothing when both stores share the
-/// directory), never through memory; a store without an objects directory loads
+/// (a hashed copy, refused when the source is corrupt; nothing when both stores
+/// share the directory), never through memory; a store without an objects directory loads
 /// it inline, and an inline large object is spilled by the destination.
 pub(super) fn import_build_objects(
     source: &Connection,

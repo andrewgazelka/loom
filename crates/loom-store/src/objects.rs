@@ -83,12 +83,38 @@ impl Store {
             )
             .optional()?)
     }
+    /// Whether the object at `hash` (a bare hash or a CID) is stored and, for a
+    /// spilled one, its file is present with the recorded size. `size_of` answers
+    /// from the index alone; a caller that is about to use the bytes (a cache hit
+    /// naming this object) asks this. Content is not hashed here.
+    pub fn has_object(&self, hash: &str) -> Result<bool> {
+        self.recording.barrier(false)?;
+        let hash = bare_hash(hash)?;
+        let row: Option<(bool, Option<u64>)> = self
+            .lock()?
+            .query_row(
+                "SELECT external,size FROM cas WHERE hash=?",
+                [&hash],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        match row {
+            None => Ok(false),
+            Some((false, _)) => Ok(true),
+            Some((true, size)) => self
+                .spill
+                .as_deref()
+                .context("external CAS object in a store that has no objects directory")?
+                .has(&hash, size.context("external CAS row has no size")?),
+        }
+    }
     /// Make the raw object at `hash` (a bare hash or a CID) appear at `dest`,
-    /// replacing any existing file atomically (temp name, then rename).
-    /// A spilled object is cloned on APFS, else hard linked, else copied, and
-    /// its BLAKE3 is checked the first time this process touches it; the result
-    /// may share storage with the store, so it is read-only and must not be
-    /// written through. An inline object is written as a fresh file.
+    /// replacing any existing file atomically (exclusive temp name, then rename).
+    /// A spilled object is cloned on APFS, else copied, and its BLAKE3 is checked
+    /// unless this process already verified this very file (inode, size and
+    /// timestamps unchanged). The result is an independent 0644 file that shares
+    /// no inode with the store, for spilled and inline objects alike, so a
+    /// consumer may write to it.
     pub fn restore_to(&self, hash: &str, dest: &Path) -> Result<()> {
         self.recording.barrier(false)?;
         let hash = bare_hash(hash)?;
@@ -119,9 +145,9 @@ impl Store {
                 .restore(&hash, size, dest),
         }
     }
-    /// Make every spilled object of this store available under `directory/objects/` (hard links
-    /// where the filesystem allows, else verified copies), so a database copied to `directory`
-    /// opens with all its bytes. Returns how many objects were brought over. A store with no
+    /// Make every spilled object of this store available under `directory/objects/` as a
+    /// verified copy (never a link to the live file; a corrupt source is refused), so a database
+    /// copied to `directory` opens with all its bytes. Returns how many objects were brought over. A store with no
     /// objects directory has nothing to bring.
     pub fn export_spilled_to(&self, directory: &Path) -> Result<u64> {
         self.recording.barrier(false)?;

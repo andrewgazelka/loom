@@ -7,7 +7,7 @@ Status: built 2026-09-30 as the `loom-action` crate; not yet a verb, an SDK effe
 An `Action` is a tool (absolute path), arguments, the complete environment, input files by content hash (from the store), the
 output files it must write, and a network flag. Its key is BLAKE3 over all of that plus the tool binary's own content hash and the
 platform (`crates/loom-action/src/key.rs`). `Runner::run` answers a known key from the store and runs nothing; otherwise it
-lays the inputs out in a fresh scratch directory (`Store::restore_to`: clone on APFS, so no copy), runs the tool inside
+lays the inputs out in a fresh scratch directory (`Store::restore_to`: a clone on APFS, else a copy; never a hard link, so a tool cannot write through to the store), runs the tool inside
 `loom-process`'s sandbox, and records the result (exit code, stdout, stderr and each declared output as blobs) only when the
 tool exited 0 and wrote every declared output. A failure is returned, never cached. A recorded result with a missing blob is a miss.
 
@@ -44,5 +44,5 @@ running non-async-signal-safe code between `fork` and `exec` in a multithreaded 
 * Incremental rustc as declared mutable scratch beside a content-addressed output (possible because the cache is per machine).
 * Output directories (only regular files are declared and kept), a tree hash as an input (today a flat path to hash map plus
   `ingest_directory`), and killing a tool's descendants on timeout (only the direct child is killed).
-* On a filesystem without clone support `restore_to` hard-links a non-executable input: a tool running as the same user could write through
-  the link into the store's file (the store verifies a file's hash once per process). APFS clones are independent copies.
+* Without clone support (Linux today) a spilled input is copied into the scratch directory, which costs a copy per 1 MiB-plus input; a
+  reflink attempt (FICLONE) would remove that. Restores were hard links until a review found a same-uid tool could write through the link into the store.

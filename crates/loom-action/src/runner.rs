@@ -1,17 +1,26 @@
-use crate::{Action, key::relative, materialize::place_inputs};
+use crate::{
+    Action,
+    key::{FileStamp, file_stamp, relative},
+    materialize::place_inputs,
+};
 use anyhow::{Context, Result, ensure};
 use loom_process::{ProcessSandbox, ProcessSpec};
 use loom_store::Store;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap},
+    fs::File,
     path::{Path, PathBuf},
     sync::{
         Mutex,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, Instant},
 };
+use tokio::io::{AsyncRead, AsyncReadExt};
+
+/// The most a tool may write to each of stdout and stderr; more kills it and fails the action.
+const OUTPUT_LIMIT: usize = 16 << 20;
 
 /// Stands for the run's scratch directory in `Action::args` and `Action::env` values.
 pub const ROOT_TOKEN: &str = "@ROOT@";
@@ -54,7 +63,7 @@ pub struct Runner {
     store: Store,
     scratch: PathBuf,
     timeout: Duration,
-    tool_hashes: Mutex<HashMap<(PathBuf, u64, SystemTime), String>>,
+    tool_hashes: Mutex<HashMap<(PathBuf, FileStamp), String>>,
     hits: AtomicU64,
     runs: AtomicU64,
     failures: AtomicU64,
@@ -66,7 +75,9 @@ impl Runner {
         std::fs::create_dir_all(&scratch).context("create action scratch directory")?;
         Ok(Self {
             store,
-            scratch: scratch.canonicalize().context("resolve action scratch directory")?,
+            scratch: scratch
+                .canonicalize()
+                .context("resolve action scratch directory")?,
             timeout: Duration::from_secs(600),
             tool_hashes: Mutex::new(HashMap::new()),
             hits: AtomicU64::new(0),
@@ -96,7 +107,7 @@ impl Runner {
             .with_context(|| format!("blob {hash} is not in the store"))
     }
 
-    /// Write a result's output to `destination` (cloned or linked from the store when large).
+    /// Write a result's output to `destination` (an independent copy, cloned on APFS).
     pub fn restore_output(&self, output: &OutputFile, destination: &Path) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         if output.executable {
@@ -108,21 +119,32 @@ impl Runner {
         }
     }
 
-    fn tool_hash(&self, tool: &Path) -> Result<(PathBuf, String)> {
+    /// The tool's resolved path, content hash and the stamp of the file that was hashed. The hash is
+    /// reused while the stamp (size, mtime, ctime) is unchanged.
+    fn tool_hash(&self, tool: &Path) -> Result<(PathBuf, String, FileStamp)> {
         let tool = tool
             .canonicalize()
             .with_context(|| format!("resolve tool {}", tool.display()))?;
-        let metadata = std::fs::metadata(&tool)?;
-        ensure!(metadata.is_file(), "tool {} is not a regular file", tool.display());
-        let stamp = (tool.clone(), metadata.len(), metadata.modified()?);
-        if let Some(hash) = self.tool_hashes.lock().unwrap().get(&stamp) {
-            return Ok((tool, hash.clone()));
+        let file = File::open(&tool).with_context(|| format!("open tool {}", tool.display()))?;
+        let metadata = file.metadata()?;
+        ensure!(
+            metadata.is_file(),
+            "tool {} is not a regular file",
+            tool.display()
+        );
+        let stamp = file_stamp(&metadata);
+        let cache_key = (tool.clone(), stamp);
+        if let Some(hash) = self.tool_hashes.lock().unwrap().get(&cache_key) {
+            return Ok((tool, hash.clone(), stamp));
         }
         let mut hasher = blake3::Hasher::new();
-        hasher.update_reader(std::fs::File::open(&tool)?)?;
+        hasher.update_reader(&file)?;
         let hash = hasher.finalize().to_hex().to_string();
-        self.tool_hashes.lock().unwrap().insert(stamp, hash.clone());
-        Ok((tool, hash))
+        self.tool_hashes
+            .lock()
+            .unwrap()
+            .insert(cache_key, hash.clone());
+        Ok((tool, hash, stamp))
     }
 
     /// A recorded result whose every blob is still stored; anything less is a miss.
@@ -130,17 +152,21 @@ impl Runner {
         let Some(result_hash) = self.store.action_result(key)? else {
             return Ok(None);
         };
-        let Some(bytes) = self.store.get(&result_hash)? else {
+        // A record that cannot be read or decoded is a miss, not an error: the run that follows
+        // records a new document under the key and replaces it.
+        let Ok(Some(bytes)) = self.store.get(&result_hash) else {
             return Ok(None);
         };
-        let result: ActionResult = serde_json::from_slice(&bytes).context("decode action result")?;
+        let Ok(result) = serde_json::from_slice::<ActionResult>(&bytes) else {
+            return Ok(None);
+        };
         let blobs = result
             .outputs
             .values()
             .map(|output| output.hash.as_str())
             .chain([result.stdout.as_str(), result.stderr.as_str()]);
         for hash in blobs {
-            if self.store.size_of(hash)?.is_none() {
+            if !self.store.has_object(hash)? {
                 return Ok(None);
             }
         }
@@ -150,7 +176,7 @@ impl Runner {
     pub async fn run(&self, action: &Action) -> Result<Outcome> {
         let started = Instant::now();
         action.validate()?;
-        let (tool, tool_hash) = self.tool_hash(&action.tool)?;
+        let (tool, tool_hash, tool_stamp) = self.tool_hash(&action.tool)?;
         let key = action.key(&tool_hash)?;
         if let Some(result) = self.lookup(&key)? {
             self.hits.fetch_add(1, Ordering::Relaxed);
@@ -199,32 +225,58 @@ impl Runner {
             .env_clear()
             .envs(&wrapped.env)
             .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
-        let output = tokio::time::timeout(self.timeout, command.output())
-            .await
-            .map_err(|_| anyhow::anyhow!("action timed out after {:?}", self.timeout))?
-            .context("spawn sandboxed tool")?;
+        let mut child = command.spawn().context("spawn sandboxed tool")?;
+        let stdout_pipe = child.stdout.take().context("tool stdout is not piped")?;
+        let stderr_pipe = child.stderr.take().context("tool stderr is not piped")?;
+        let finished = tokio::time::timeout(self.timeout, async {
+            let (stdout, stderr) = tokio::try_join!(
+                read_capped(stdout_pipe, "stdout"),
+                read_capped(stderr_pipe, "stderr")
+            )?;
+            let status = child.wait().await.context("wait for sandboxed tool")?;
+            anyhow::Ok((status, stdout, stderr))
+        })
+        .await;
+        let (status, stdout_bytes, stderr_bytes) = match finished {
+            Ok(Ok(finished)) => finished,
+            failed => {
+                // Too much output, or the clock ran out: the tool must not outlive the error.
+                let _ = child.kill().await;
+                return Err(match failed {
+                    Ok(Err(error)) => error,
+                    _ => anyhow::anyhow!("action timed out after {:?}", self.timeout),
+                });
+            }
+        };
+        // The tool is run by path. A binary replaced while it ran is not the binary that was keyed.
+        let (_, _, tool_after) = self.tool_hash(&tool)?;
+        ensure!(
+            tool_after == tool_stamp,
+            "tool {} changed while the action ran",
+            tool.display()
+        );
 
-        let stdout = self.store.put("blob", &output.stdout)?;
-        let stderr = self.store.put("blob", &output.stderr)?;
-        let exit_code = output.status.code().unwrap_or(-1);
+        let stdout = self.store.put("blob", &stdout_bytes)?;
+        let stderr = self.store.put("blob", &stderr_bytes)?;
+        let exit_code = status.code().unwrap_or(-1);
         let mut outputs = BTreeMap::new();
         let mut missing = Vec::new();
         if exit_code == 0 {
             for name in &action.outputs {
-                let path = root.join(relative(name)?);
-                match std::fs::symlink_metadata(&path) {
-                    Ok(metadata) if metadata.file_type().is_file() => {
-                        use std::os::unix::fs::PermissionsExt;
+                match open_output(&root, name)? {
+                    Some((file, executable)) => {
                         outputs.insert(
                             name.clone(),
                             OutputFile {
-                                hash: self.store.put_file("blob", &path)?,
-                                executable: metadata.permissions().mode() & 0o111 != 0,
+                                hash: self.store.put_open_file("blob", file)?,
+                                executable,
                             },
                         );
                     }
-                    _ => missing.push(name.clone()),
+                    None => missing.push(name.clone()),
                 }
             }
         }
@@ -247,7 +299,9 @@ impl Runner {
                 elapsed: started.elapsed(),
             });
         }
-        let result_hash = self.store.put("action-result", &serde_json::to_vec(&result)?)?;
+        let result_hash = self
+            .store
+            .put("action-result", &serde_json::to_vec(&result)?)?;
         self.store.record_action_result(&key, &result_hash)?;
         Ok(Outcome {
             key,
@@ -256,4 +310,53 @@ impl Runner {
             elapsed: started.elapsed(),
         })
     }
+}
+
+/// Read at most `OUTPUT_LIMIT` bytes of a tool's output stream; one more byte is an error.
+async fn read_capped(reader: impl AsyncRead + Unpin, name: &str) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader
+        .take(OUTPUT_LIMIT as u64 + 1)
+        .read_to_end(&mut bytes)
+        .await
+        .with_context(|| format!("read tool {name}"))?;
+    ensure!(
+        bytes.len() <= OUTPUT_LIMIT,
+        "the tool wrote more than {} MiB to {name}",
+        OUTPUT_LIMIT >> 20
+    );
+    Ok(bytes)
+}
+
+/// The declared output `name` under `root` as an open handle and whether it is executable, or
+/// `None` when the tool did not leave a regular file there. The tool controls the scratch tree,
+/// so the path is resolved fully and must stay under `root` (a symlinked directory pointing at
+/// the host's files is an error, not an output); only a regular file is ever opened (a FIFO would
+/// block); and the handle must be the very file the resolved path still names, so what is stored
+/// is what was vetted.
+fn open_output(root: &Path, name: &str) -> Result<Option<(File, bool)>> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let path = root.join(relative(name)?);
+    let Ok(resolved) = path.canonicalize() else {
+        return Ok(None);
+    };
+    ensure!(
+        resolved.starts_with(root),
+        "declared output {name:?} resolves outside the work directory"
+    );
+    let Ok(named) = std::fs::symlink_metadata(&resolved) else {
+        return Ok(None);
+    };
+    if !named.file_type().is_file() {
+        return Ok(None);
+    }
+    let file = File::open(&resolved).with_context(|| format!("open output {name:?}"))?;
+    let opened = file.metadata()?;
+    ensure!(
+        opened.is_file()
+            && (opened.dev(), opened.ino()) == (named.dev(), named.ino())
+            && path.canonicalize().is_ok_and(|again| again == resolved),
+        "declared output {name:?} changed while it was collected"
+    );
+    Ok(Some((file, opened.permissions().mode() & 0o111 != 0)))
 }

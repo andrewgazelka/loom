@@ -288,7 +288,8 @@ impl Recipe {
 
     /// Verify every artifact by content hash against the CAS and rewrite any
     /// that differ. `Ok(false)` means at least one artifact is absent from the
-    /// CAS and the unit must be recompiled (`graph::repair_units`).
+    /// CAS (or its spilled file is missing, unreadable or corrupt) and the unit must be
+    /// recompiled (`graph::repair_units`).
     pub(super) fn restore_artifacts(&self, store: &Store) -> Result<bool, BuildError> {
         let mut complete = true;
         for (path, artifact) in &self.artifacts {
@@ -300,9 +301,16 @@ impl Recipe {
             {
                 continue;
             }
-            // A large artifact is a file in the store: clone or link it into place (verified once
-            // per process by the store) instead of reading, hashing and rewriting all of it.
-            // Executables are written fresh, since a linked file's mode belongs to the store.
+            // An object the store no longer has, or whose spilled file is gone or the wrong size,
+            // means the unit must be recompiled (the recompile also rewrites the object).
+            if !store.has_object(hash).map_err(rejected)? {
+                complete = false;
+                continue;
+            }
+            // A large artifact is a file in the store: clone or copy it into place (verified by the
+            // store unless this very file was verified already) instead of reading, hashing and
+            // rewriting all of it. Executables are written fresh so their mode is set here. A
+            // spilled file that cannot be read or fails its hash is treated like a missing one.
             if !artifact.executable
                 && store
                     .size_of(hash)
@@ -312,10 +320,14 @@ impl Recipe {
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
-                store.restore_to(hash, path).map_err(rejected)?;
+                if store.restore_to(hash, path).is_err() {
+                    complete = false;
+                }
                 continue;
             }
-            let Some(bytes) = store.get(hash).map_err(rejected)? else {
+            // An unreadable or corrupt stored object (a spilled executable whose file fails its
+            // hash, say) is recompiled like an absent one.
+            let Ok(Some(bytes)) = store.get(hash) else {
                 complete = false;
                 continue;
             };
