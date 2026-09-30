@@ -454,3 +454,16 @@ pub fn run(_n: u32) -> u32 {\n\
         .await;
     assert!(plain.ok && plain.result.get("sites").is_none());
 }
+
+#[tokio::test]
+#[ignore = "requires Rust guest toolchain and LOOM_COMPILER_CACHE_OWNER"]
+async fn a_compile_error_is_reported_on_the_line_the_caller_wrote_past_comments_and_blank_lines() {
+    // The compiler reads the cell unparsed (no comments, no blank lines), so its own line numbers are
+    // smaller; the reply must count the caller's text.
+    let service = service();
+    let source = "// one\n// two\n\npub fn f() -> u32 {\n\n    // about to fail\n    let x: u32 = \"no\";\n    x\n}\n";
+    let reply = eval(&service, json!({"source": source})).await;
+    assert!(!reply.ok, "{reply:?}");
+    let error = reply.diagnostics.iter().find(|d| d.message.contains("mismatched")).expect("a type error");
+    assert_eq!(error.line, 7, "{:?}", reply.diagnostics);
+}

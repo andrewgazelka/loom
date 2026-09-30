@@ -69,9 +69,20 @@ impl Service {
         let built = started.elapsed();
         if !response.ok {
             let mut response = response;
-            if wrapped {
-                // The header line is ours; the caller's text starts on the next.
-                for diagnostic in &mut response.diagnostics {
+            // The compiler reads the cell unparsed (comments and blank lines dropped, statements
+            // re-wrapped), so its line numbers count that text; report lines of the text the caller sent.
+            let map = loom_check::rust_original_lines(&cell);
+            for diagnostic in &mut response.diagnostics {
+                let own_file = matches!(diagnostic.file.as_str(), "" | "src/lib.rs" | "compiled.rs");
+                if let Some(original) = map
+                    .as_ref()
+                    .filter(|_| own_file)
+                    .and_then(|map| map.get((diagnostic.line as usize).checked_sub(1)?))
+                {
+                    diagnostic.line = *original as usize;
+                }
+                if wrapped {
+                    // The header line is ours; the caller's text starts on the next.
                     diagnostic.line = diagnostic.line.saturating_sub(1).max(1);
                 }
             }
