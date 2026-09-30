@@ -6,8 +6,9 @@ const url = process.env.LOOM_URL ?? "http://127.0.0.1:8850";
 const token = process.env.LOOM_TOKEN ?? "replbench";
 
 export const POST: RequestHandler = async ({ request }) => {
-  const { source, manifest, lock } = await request.json();
-  const args: Record<string, string> = { source };
+  const { source, manifest, lock, entry, args: callArgs } = await request.json();
+  const args: Record<string, unknown> = { source };
+  if (entry) Object.assign(args, { entry, args: callArgs ?? [] });
   if (manifest && lock) Object.assign(args, { manifest, lock });
   const started = performance.now();
   const reply = await fetch(`${url}/v1/command`, {

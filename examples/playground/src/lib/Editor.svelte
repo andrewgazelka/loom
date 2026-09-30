@@ -1,9 +1,10 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import "@fontsource/jetbrains-mono/400.css";
+  import "@fontsource/jetbrains-mono/500.css";
   import { closeBrackets, closeBracketsKeymap } from "@codemirror/autocomplete";
   import { EditorState } from "@codemirror/state";
-  import { EditorView, keymap, drawSelection, highlightActiveLine, lineNumbers } from "@codemirror/view";
+  import { EditorView, keymap, drawSelection, highlightActiveLine, highlightActiveLineGutter, lineNumbers } from "@codemirror/view";
   import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
   import { bracketMatching, indentOnInput, syntaxHighlighting, HighlightStyle } from "@codemirror/language";
   import { setDiagnostics, lintGutter, type Diagnostic } from "@codemirror/lint";
@@ -16,18 +17,23 @@
   let host: HTMLDivElement;
   let view: EditorView | undefined;
 
+  // Always-dark palette (Tokyo Night family); the page around it follows the OS scheme.
+  const c = {
+    bg: "#14151c", fg: "#c8d0f0", dim: "#545b7f", keyword: "#bb9af7", type: "#2ac3de", fn: "#7aa2f7",
+    macro: "#ff9e64", string: "#9ece6a", number: "#ff9e64", punct: "#7a86b8", prop: "#73daca", accent: "#7aa2f7",
+  };
+
   const colors = HighlightStyle.define([
-    { tag: [t.keyword, t.controlKeyword, t.definitionKeyword, t.moduleKeyword, t.operatorKeyword], color: "var(--s-keyword)" },
-    { tag: [t.typeName, t.className, t.namespace], color: "var(--s-type)" },
-    { tag: [t.function(t.variableName), t.function(t.propertyName)], color: "var(--s-function)" },
-    { tag: [t.macroName], color: "var(--s-macro)" },
-    { tag: [t.string, t.character, t.regexp], color: "var(--s-string)" },
-    { tag: [t.number, t.bool, t.null, t.atom], color: "var(--s-number)" },
-    { tag: [t.lineComment, t.blockComment, t.docComment], color: "var(--dim)", fontStyle: "italic" },
-    { tag: [t.attributeName, t.meta, t.annotation], color: "var(--s-macro)" },
-    { tag: [t.labelName, t.self], color: "var(--s-keyword)" },
-    { tag: [t.operator, t.punctuation], color: "var(--s-punct)" },
-    { tag: t.propertyName, color: "var(--s-prop)" },
+    { tag: [t.keyword, t.controlKeyword, t.definitionKeyword, t.moduleKeyword, t.operatorKeyword, t.self], color: c.keyword },
+    { tag: [t.typeName, t.className, t.namespace], color: c.type },
+    { tag: [t.function(t.variableName), t.function(t.propertyName)], color: c.fn },
+    { tag: [t.macroName, t.attributeName, t.meta, t.annotation], color: c.macro },
+    { tag: [t.string, t.character, t.regexp], color: c.string },
+    { tag: [t.number, t.bool, t.null, t.atom], color: c.number },
+    { tag: [t.lineComment, t.blockComment, t.docComment], color: c.dim, fontStyle: "italic" },
+    { tag: [t.operator, t.punctuation, t.separator, t.derefOperator], color: c.punct },
+    { tag: t.propertyName, color: c.prop },
+    { tag: t.labelName, color: c.keyword },
   ]);
 
   onMount(() => {
@@ -43,9 +49,9 @@
           closeBrackets(),
           drawSelection(),
           highlightActiveLine(),
+          highlightActiveLineGutter(),
           indentOnInput(),
           bracketMatching(),
-          EditorView.lineWrapping,
           syntaxHighlighting(colors),
           EditorView.contentAttributes.of({ spellcheck: "false", "aria-label": "Rust source" }),
           keymap.of([{ key: "Mod-Enter", run: () => (run(), true) }, indentWithTab, ...closeBracketsKeymap, ...defaultKeymap, ...historyKeymap]),
@@ -53,15 +59,25 @@
             if (u.docChanged) value = u.state.doc.toString();
           }),
           EditorView.theme({
-            "&": { height: "auto", backgroundColor: "var(--panel)", color: "var(--ink)", fontSize: "13px", borderRadius: "10px" },
-            "&.cm-focused": { outline: "1px solid var(--accent)" },
-            ".cm-scroller": { fontFamily: "'JetBrains Mono', ui-monospace, Menlo, monospace", lineHeight: "1.6" },
-            ".cm-content": { padding: "12px 0", caretColor: "var(--ink)" },
-            ".cm-gutters": { backgroundColor: "transparent", color: "var(--dim)", border: "0" },
-            ".cm-activeLine, .cm-activeLineGutter": { backgroundColor: "color-mix(in srgb, var(--ink) 6%, transparent)" },
-            ".cm-selectionBackground, &.cm-focused .cm-selectionBackground": { backgroundColor: "color-mix(in srgb, var(--accent) 28%, transparent) !important" },
-            ".cm-matchingBracket": { backgroundColor: "color-mix(in srgb, var(--accent) 30%, transparent)", outline: "none" },
-            ".cm-tooltip": { backgroundColor: "var(--panel)", color: "var(--ink)", border: "1px solid var(--dim)", borderRadius: "6px" },
+            "&": { height: "auto", backgroundColor: c.bg, color: c.fg, fontSize: "13.5px" },
+            "&.cm-focused": { outline: "none" },
+            ".cm-scroller": {
+              fontFamily: "'JetBrains Mono', ui-monospace, Menlo, monospace",
+              fontVariantLigatures: "none",
+              lineHeight: "1.65",
+              overflowY: "hidden",
+            },
+            ".cm-content": { padding: "14px 0 18px", caretColor: c.accent },
+            ".cm-line": { padding: "0 20px 0 6px" },
+            ".cm-gutters": { backgroundColor: c.bg, color: c.dim, border: "0", paddingLeft: "6px" },
+            ".cm-lineNumbers .cm-gutterElement": { padding: "0 10px 0 8px", minWidth: "26px" },
+            ".cm-activeLine": { backgroundColor: "rgba(122,162,247,0.07)" },
+            ".cm-activeLineGutter": { backgroundColor: "transparent", color: c.fg },
+            ".cm-cursor": { borderLeftColor: c.accent, borderLeftWidth: "2px" },
+            ".cm-selectionBackground, &.cm-focused .cm-selectionBackground": { backgroundColor: "rgba(122,162,247,0.28) !important" },
+            ".cm-matchingBracket": { backgroundColor: "rgba(122,162,247,0.22)", outline: "none", color: "#fff" },
+            ".cm-tooltip": { backgroundColor: "#1d1f2b", color: c.fg, border: "1px solid #2c3048", borderRadius: "8px", padding: "2px 4px" },
+            ".cm-lintRange-error": { backgroundImage: "none", textDecoration: "underline wavy #f7768e", textUnderlineOffset: "3px" },
           }),
         ],
       }),
@@ -69,7 +85,7 @@
     return () => view?.destroy();
   });
 
-  // Replace the document when a preset is picked (the editor owns edits, the parent owns presets).
+  // The editor owns typing; the parent owns preset changes.
   $effect(() => {
     if (view && value !== view.state.doc.toString()) {
       view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: value } });
@@ -94,4 +110,9 @@
   });
 </script>
 
-<div bind:this={host}></div>
+<div bind:this={host} class="editor"></div>
+
+<style>
+  .editor { overflow-x: auto; }
+  .editor :global(.cm-editor) { min-width: max-content; }
+</style>

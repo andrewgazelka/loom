@@ -1,128 +1,181 @@
 <script lang="ts">
-  import { presets, manifest, lock, type Preset } from "$lib/presets";
+  import { onMount } from "svelte";
+  import "@fontsource/inter/400.css";
+  import "@fontsource/inter/600.css";
+  import "@fontsource/inter/700.css";
+  import { presets, prelude as basePrelude, manifest, lock, type Preset } from "$lib/presets";
   import Editor from "$lib/Editor.svelte";
+  import Stage from "$lib/Stage.svelte";
 
-  let current: Preset = $state(presets[2]);
-  let source = $state(presets[2].source);
+  let current: Preset = $state(presets[0]);
+  let cell = $state(presets[0].cell);
+  let prelude = $state(basePrelude);
+  let tab: "cell" | "canvas" = $state("cell");
   let busy = $state(false);
-  let reply: any = $state(null);
-  let history: { name: string; ms: number }[] = $state([]);
-  let canvas: HTMLCanvasElement | undefined = $state();
-  let mesh: { points: number[]; edges: number[] } | null = $state(null);
+  let reply: any = $state.raw(null);
+  let scene: any[] = $state.raw([]); // raw: a deep proxy over thousands of commands makes every frame crawl
+  let frameMs = $state(0);
+  let ticket = 0;
+  let timer: ReturnType<typeof setTimeout>;
 
-  function pick(p: Preset) {
-    current = p;
-    source = p.source;
+  const cellLines = $derived(cell.split("\n").length);
+  const diagnostics = $derived(
+    (reply && !reply.ok ? (reply.diagnostics ?? []) : []).filter((d: any) => !d.message.startsWith("aborting due to")),
+  );
+  // The prelude is appended after the cell (a blank line between), so the cell's line numbers are the user's own.
+  const problems = $derived(
+    tab === "cell"
+      ? diagnostics.filter((d: any) => d.line <= cellLines)
+      : diagnostics.filter((d: any) => d.line > cellLines + 1).map((d: any) => ({ ...d, line: d.line - cellLines - 1 })),
+  );
+  const elsewhere = $derived(diagnostics.length - problems.length);
+  const timings = $derived(reply?.result?.timings_ms);
+  const counts = $derived(
+    Object.entries(scene.reduce((m: Record<string, number>, c: any) => ((m[c.op] = (m[c.op] ?? 0) + 1), m), {})) as [string, number][],
+  );
+  const active = {
+    get value() { return tab === "cell" ? cell : prelude; },
+    set value(v: string) { if (tab === "cell") cell = v; else prelude = v; },
+  };
+
+  async function post(path: string, body: unknown) {
+    const res = await fetch(path, { method: "POST", body: JSON.stringify(body) });
+    return res.json();
   }
 
   async function run() {
+    clearTimeout(timer);
+    const mine = ++ticket;
     busy = true;
-    const res = await fetch("/api/eval", {
-      method: "POST",
-      body: JSON.stringify({ source, ...(current.glam ? { manifest, lock } : {}) }),
+    const body = await post("/api/eval", {
+      source: `${cell}\n\n${prelude}`,
+      entry: "frame",
+      args: [0],
+      ...(current.glam ? { manifest, lock } : {}),
     });
-    reply = await res.json();
+    if (mine !== ticket) return; // a newer edit replaced this run
+    reply = body;
     busy = false;
-    const out = reply?.result?.output;
-    mesh = current.mesh && Array.isArray(out) ? { points: out[0], edges: out[1] } : null;
-    history = [{ name: current.name, ms: reply.wall_ms }, ...history].slice(0, 8);
+    if (!body.ok) return;
+    scene = body.result.output;
+    if (current.animate) animate(mine, body.result.hash);
   }
 
+  // Animated cells: built once, then the page asks Rust for frame(t) in a loop.
+  async function animate(mine: number, hash: string) {
+    const start = performance.now();
+    while (mine === ticket) {
+      const t0 = performance.now();
+      const r = await post("/api/run", { target: hash, args: [Math.round(t0 - start)] });
+      if (mine !== ticket) return;
+      if (!r.ok) return;
+      scene = r.result.output;
+      frameMs = Math.round(performance.now() - t0);
+      await new Promise((ok) => setTimeout(ok, Math.max(0, 16 - (performance.now() - t0))));
+    }
+  }
+
+  function pick(p: Preset) {
+    current = p;
+    cell = p.cell;
+    tab = "cell";
+    run();
+  }
+
+  // Live: a pause in typing rebuilds the cell (a warm edit costs about 80 ms).
+  let first = true;
   $effect(() => {
-    if (!canvas || !mesh) return;
-    const ctx = canvas.getContext("2d")!;
-    const m = mesh;
-    let raf = 0;
-    const draw = (t: number) => {
-      const w = canvas!.width, h = canvas!.height;
-      ctx.clearRect(0, 0, w, h);
-      ctx.strokeStyle = getComputedStyle(canvas!).getPropertyValue("--ink");
-      ctx.lineWidth = 1;
-      const a = t / 2600, b = 0.6;
-      const pr: [number, number][] = [];
-      for (let i = 0; i < m.points.length; i += 3) {
-        const [x, y, z] = [m.points[i], m.points[i + 1], m.points[i + 2]];
-        const x1 = x * Math.cos(a) + z * Math.sin(a), z1 = -x * Math.sin(a) + z * Math.cos(a);
-        const y2 = y * Math.cos(b) - z1 * Math.sin(b);
-        pr.push([w / 2 + x1 * w * 0.3, h / 2 + y2 * w * 0.3]);
-      }
-      ctx.beginPath();
-      for (let i = 0; i < m.edges.length; i += 2) {
-        const p = pr[m.edges[i]], q = pr[m.edges[i + 1]];
-        ctx.moveTo(p[0], p[1]);
-        ctx.lineTo(q[0], q[1]);
-      }
-      ctx.stroke();
-      raf = requestAnimationFrame(draw);
-    };
-    raf = requestAnimationFrame(draw);
-    return () => cancelAnimationFrame(raf);
+    cell; prelude;
+    if (first) { first = false; return; }
+    clearTimeout(timer);
+    timer = setTimeout(run, 450);
   });
+  onMount(() => { run(); return () => { ticket++; clearTimeout(timer); }; });
 </script>
 
+<svelte:head><title>Loom Playground</title></svelte:head>
+
 <main>
-  <h1>Loom playground</h1>
-  <p class="sub">Rust in, result out. Each run compiles your cell to WebAssembly and runs it in a sandbox.</p>
+  <header>
+    <h1>Loom</h1>
+    <p>Rust in, pixels out. Drawing is an algebraic effect: the cell performs <code>canvas2d</code> and <code>canvas3d</code> effects, a handler collects them, the page paints.</p>
+  </header>
 
   <nav>
     {#each presets as p}
       <button class:on={p === current} onclick={() => pick(p)}>{p.name}</button>
     {/each}
+    <span class="note">{current.note}</span>
   </nav>
-  <p class="note">{current.note}</p>
 
-  <Editor bind:value={source} {run} problems={reply && !reply.ok ? (reply.diagnostics ?? []) : []} />
-  <div class="bar">
-    <button class="run" onclick={run} disabled={busy}>{busy ? "running…" : "Run"}</button>
-    {#if reply}
-      <span class="stat">
-        {reply.wall_ms} ms wall
-        {#if reply.result?.timings_ms}· compile {reply.result.timings_ms.compile} ms · run {reply.result.runtime_ms?.run_ms?.toFixed(2)} ms{/if}
-      </span>
-    {/if}
-  </div>
+  <div class="grid">
+    <section class="card">
+      <div class="bar">
+        <button class="tab" class:on={tab === "cell"} onclick={() => (tab = "cell")}>cell.rs</button>
+        <button class="tab" class:on={tab === "canvas"} onclick={() => (tab = "canvas")}>canvas.rs</button>
+        <span class="spacer"></span>
+        {#if elsewhere > 0}<span class="warn">{elsewhere} more in {tab === "cell" ? "canvas.rs" : "cell.rs"}</span>{/if}
+        <kbd>⌘↵</kbd>
+        <button class="run" onclick={run} disabled={busy}>{busy ? "Building" : "Run"}</button>
+      </div>
+      <Editor bind:value={active.value} {run} {problems} />
+    </section>
 
-  {#if reply}
-    {#if reply.ok}
-      {#if mesh}
-        <canvas bind:this={canvas} width="640" height="360"></canvas>
-        <p class="note">{mesh.points.length / 3} points, {mesh.edges.length / 2} edges, computed in the guest</p>
+    <section class="card stage">
+      <div class="bar">
+        <span class="file">stage</span>
+        <span class="spacer"></span>
+        {#if reply?.ok}
+          <span class="chip"><b>{reply.wall_ms}</b> ms build + run</span>
+          {#if current.animate && frameMs}<span class="chip"><b>{frameMs}</b> ms / frame</span>{/if}
+        {/if}
+      </div>
+      {#if reply && !reply.ok}
+        <ul class="errors">
+          {#each diagnostics as d}<li><span class="where">{d.line}:{d.col}</span>{d.message}</li>{/each}
+          {#if !diagnostics.length}<li>{reply.result?.error ?? JSON.stringify(reply)}</li>{/if}
+        </ul>
       {:else}
-        <pre class="out">{JSON.stringify(reply.result.output, null, 2)}</pre>
+        <Stage {scene} />
+        <p class="effects">
+          {#each counts as [op, n]}<span><b>{op}</b> × {n}</span>{/each}
+          {#if !counts.length}running…{/if}
+        </p>
       {/if}
-    {:else}
-      <pre class="out err">{#each reply.diagnostics ?? [] as d}{d.line ? `line ${d.line}: ` : ""}{d.message}
-{/each}{#if !(reply.diagnostics ?? []).length}{JSON.stringify(reply, null, 2)}{/if}</pre>
-    {/if}
-  {/if}
-
-  {#if history.length}
-    <p class="note">recent: {history.map((h) => `${h.name} ${h.ms} ms`).join(" · ")}</p>
-  {/if}
+    </section>
+  </div>
 </main>
 
 <style>
-  :global(:root) {
-    --bg: #fbfbfa; --ink: #1f1f1d; --dim: #77756f; --panel: #f1f0ed; --accent: #d9622b; --err: #b3261e;
-    --s-keyword: #b0357a; --s-type: #1a7f7a; --s-function: #2c5fb3; --s-macro: #a4581c; --s-string: #3b7d22; --s-number: #b5541c; --s-punct: #77756f; --s-prop: #1f1f1d;
-    color-scheme: light dark;
-  }
-  @media (prefers-color-scheme: dark) {
-    :global(:root) { --bg: #191918; --ink: #ecebe7; --dim: #9b9992; --panel: #242422; --accent: #ef8a57; --err: #f2867e;
-      --s-keyword: #ff8ac0; --s-type: #6fd6cf; --s-function: #8db4ff; --s-macro: #f0a868; --s-string: #a5d98a; --s-number: #f2a979; --s-punct: #9b9992; --s-prop: #ecebe7; }
-  }
-  :global(body) { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.5 system-ui, sans-serif; }
-  main { max-width: 720px; margin: 0 auto; padding: 48px 16px 80px; }
-  h1 { font-size: 28px; margin: 0; letter-spacing: -0.02em; }
-  .sub, .note { color: var(--dim); font-size: 14px; margin: 6px 0 16px; }
-  nav { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 24px; }
-  nav button { border: 0; background: var(--panel); color: var(--ink); padding: 6px 12px; border-radius: 8px; cursor: pointer; font: inherit; font-size: 14px; }
+  :global(:root) { --bg: #f6f5f2; --ink: #1d1d1b; --dim: #7b7972; --accent: #6b7cf0; color-scheme: light dark; }
+  @media (prefers-color-scheme: dark) { :global(:root) { --bg: #0d0e13; --ink: #e8e9f0; --dim: #7d819a; --accent: #8d9bff; } }
+  :global(body) { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.5 "Inter", system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+  main { max-width: 1280px; margin: 0 auto; padding: 48px 20px 80px; }
+  h1 { margin: 0; font-size: 34px; font-weight: 700; letter-spacing: -0.03em; }
+  header p { margin: 4px 0 0; color: var(--dim); max-width: 760px; }
+  code { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 0.9em; color: var(--ink); }
+  nav { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 26px 0 14px; }
+  nav button { border: 0; background: transparent; color: var(--dim); padding: 6px 12px; border-radius: 999px; cursor: pointer; font: inherit; font-size: 14px; }
+  nav button:hover { color: var(--ink); }
   nav button.on { background: var(--ink); color: var(--bg); }
-  .bar { display: flex; align-items: center; gap: 14px; margin: 12px 0; }
-  .run { border: 0; background: var(--accent); color: #fff; padding: 8px 20px; border-radius: 8px; font: inherit; font-weight: 600; cursor: pointer; }
-  .run:disabled { opacity: 0.6; cursor: progress; }
-  .stat { color: var(--dim); font-size: 13px; font-variant-numeric: tabular-nums; }
-  .out { background: var(--panel); border-radius: 10px; padding: 14px; font: 13px/1.5 ui-monospace, Menlo, monospace; overflow: auto; white-space: pre-wrap; }
-  .err { color: var(--err); }
-  canvas { width: 100%; height: auto; background: var(--panel); border-radius: 10px; }
+  .note { margin-left: 10px; color: var(--dim); font-size: 13px; }
+  .grid { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+  @media (max-width: 1000px) { .grid { grid-template-columns: minmax(0, 1fr); } .stage { order: -1; } }
+  .card { background: #14151c; color: #c8d0f0; border-radius: 14px; overflow: hidden; box-shadow: 0 0 0 1px rgba(255,255,255,0.05); }
+  .bar { display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-bottom: 1px solid rgba(255,255,255,0.06); font-size: 12.5px; min-height: 30px; }
+  .file { color: #7a86b8; font-family: "JetBrains Mono", ui-monospace, monospace; }
+  .tab { border: 0; background: transparent; color: #545b7f; font: 12.5px "JetBrains Mono", ui-monospace, monospace; padding: 4px 8px; border-radius: 6px; cursor: pointer; }
+  .tab.on { color: #c8d0f0; background: rgba(255,255,255,0.06); }
+  .spacer { flex: 1; }
+  .warn { color: #ff9e64; }
+  kbd { color: #545b7f; font: 12px "JetBrains Mono", monospace; }
+  .run { border: 0; background: #7aa2f7; color: #0d0e13; padding: 5px 16px; border-radius: 8px; font: 600 13px Inter, system-ui, sans-serif; cursor: pointer; }
+  .run:disabled { opacity: .55; cursor: progress; }
+  .chip { color: #7a86b8; background: rgba(255,255,255,0.05); padding: 2px 9px; border-radius: 999px; font-variant-numeric: tabular-nums; }
+  .chip b { color: #c8d0f0; font-weight: 600; }
+  .effects { display: flex; gap: 14px; flex-wrap: wrap; margin: 0; padding: 10px 16px 14px; color: #545b7f; font: 12px "JetBrains Mono", ui-monospace, monospace; }
+  .effects b { color: #7a86b8; font-weight: 500; }
+  .errors { list-style: none; margin: 0; padding: 16px; font: 13.5px/1.65 "JetBrains Mono", ui-monospace, monospace; color: #f7768e; min-height: 200px; }
+  .errors li { margin-bottom: 6px; }
+  .where { color: #545b7f; margin-right: 12px; }
 </style>
