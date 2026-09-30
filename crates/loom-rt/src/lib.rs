@@ -3,7 +3,7 @@ mod sandbox;
 pub use sandbox::WasmSandbox;
 mod compilation_cache;
 mod result_cache;
-pub use result_cache::ResultCacheStats;
+pub use result_cache::{CalleeStats, ResultCacheStats};
 pub use call::{CallEffects, GuestFailure};
 pub use compilation_cache::{CompilationCacheStats, LoomCompilationCache};
 mod calls;
@@ -266,6 +266,10 @@ impl Runtime {
     /// Hits, misses and stored entries of the isolated-call result cache.
     pub fn call_result_stats(&self) -> ResultCacheStats {
         self.inner.call_results.stats()
+    }
+    /// What each callee's cached results have done, the most time saved first.
+    pub fn call_result_stats_by_callee(&self) -> Vec<(String, CalleeStats)> {
+        self.inner.call_results.by_callee()
     }
     /// Forget the cached results of one callee (by definition hash) or all of
     /// them; returns how many were dropped.

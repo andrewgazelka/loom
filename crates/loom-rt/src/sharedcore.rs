@@ -36,6 +36,14 @@ pub(super) fn engine(store: Store) -> Result<(Engine, Arc<LoomCompilationCache>)
         .wasm_threads(true)
         .shared_memory(true)
         .epoch_interruption(true);
+    // Wasm leaves the payload bits of a NaN unspecified, so two hosts (or two
+    // Cranelift versions) may return different bytes for a computation that
+    // produces one. This makes every float operation write the canonical NaN, at a
+    // cost measured in the rgb spike (docs/spikes/rgb-forge.md). Off by default; the
+    // setting is part of the compilation cache namespace, so builds never mix.
+    if std::env::var_os("LOOM_WASM_NAN_CANONICALIZATION").is_some_and(|value| value != "0") {
+        config.cranelift_nan_canonicalization(true);
+    }
     let cache = Arc::new(LoomCompilationCache::new(store, &config)?);
     config.enable_incremental_compilation(cache.clone())?;
     let engine = crate::wasm_engine::create(&config)?;

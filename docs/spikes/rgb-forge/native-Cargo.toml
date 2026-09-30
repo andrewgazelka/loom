@@ -1,0 +1,16 @@
+[package]
+name = "bracket-native"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[features]
+libm = ["dep:libm"]
+
+[dependencies]
+libm = { version = "0.2", optional = true }
+
+[profile.release]
+opt-level = 2
+debug = false

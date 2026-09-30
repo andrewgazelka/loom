@@ -144,7 +144,18 @@ impl Service {
                 stats["effect_wire_bytes"] = json!(self.runtime.effect_wire_bytes());
                 stats["handler_round_trip_us"] = self.runtime.handler_round_trip_us();
                 let results = self.runtime.call_result_stats();
-                stats["call_results"] = json!({"hits":results.hits,"misses":results.misses,"stores":results.stores,"entries":results.entries});
+                let by_callee: Vec<Value> = self
+                    .runtime
+                    .call_result_stats_by_callee()
+                    .into_iter()
+                    .take(10)
+                    .map(|(hash, callee)| json!({"callee":hash,"computed":callee.computed,"compute_ns":callee.compute_ns,"hits":callee.hits,"saved_ns":callee.saved_ns,"stored":callee.stored,"skipped_cheap":callee.skipped_cheap,"bytes":callee.bytes}))
+                    .collect();
+                stats["call_results"] = json!({
+                    "hits":results.hits,"misses":results.misses,"stores":results.stores,"entries":results.entries,
+                    "bytes":results.bytes,"evictions":results.evictions,"skipped_cheap":results.skipped_cheap,
+                    "saved_ns":results.saved_ns,"by_callee":by_callee,
+                });
                 Ok(stats)
             }
             "gc" => Ok(serde_json::to_value(

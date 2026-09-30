@@ -131,6 +131,7 @@ impl Runtime {
                 request.argc,
                 request.payload,
                 &result,
+                u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
             );
         }
         Ok(result)
