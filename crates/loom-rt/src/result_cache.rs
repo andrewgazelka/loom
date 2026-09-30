@@ -29,6 +29,14 @@
 //! of up to 1 MiB are also written behind to `cache.db` beside it and read back at
 //! the next start ([`persist`]); without a file, or when that file cannot be used,
 //! a restart empties the cache, which is always safe.
+//!
+//! **A result belongs to the build that computed it.** The key's inputs are the
+//! call's, but the answer also depends on the host that ran it (kernels, guest ABI,
+//! wasmtime). So the key digest also covers the host identity
+//! ([`crate::host_identity`]: crate and wasmtime versions, executable path, length
+//! and mtime), and every persisted row is tagged with it. A rebuilt binary has a
+//! new identity: it never hits a previous build's rows (other digests), and its
+//! start-up load deletes them.
 use std::{
     collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
@@ -43,6 +51,12 @@ const MAX_BYTES: usize = 128 * 1024 * 1024;
 /// A result larger than this is not worth the memory whatever it cost.
 const MAX_RESULT_BYTES: usize = 8 << 20;
 
+/// Callees whose statistics are kept; past this the one that saved least is
+/// forgotten to make room, so the map cannot grow with every callee ever seen.
+const MAX_CALLEES: usize = 4096;
+/// Callees [`ResultCache::by_callee`] reports.
+const TOP_CALLEES: usize = 10;
+
 /// A lookup costs about this much before the copy: a payload hash, a lock and a
 /// map probe (measured at 1 to 3 microseconds).
 const LOOKUP_BASE_NS: u64 = 3_000;
@@ -53,6 +67,8 @@ const COPY_NS_PER_BYTE: f64 = 0.1;
 const WORTH_FACTOR: f64 = 4.0;
 
 mod persist;
+
+use crate::host_identity::host_identity;
 
 /// Whether recomputing costs enough more than looking up to keep the result.
 pub(crate) fn worth_storing(cost_ns: u64, result_bytes: usize) -> bool {
@@ -107,7 +123,31 @@ struct Inner {
     clock: f64,
     bytes: usize,
     seq: u64,
+    /// Nanoseconds all hits avoided, kept apart from `callees` so forgetting a
+    /// callee's statistics does not shrink it.
+    saved_ns: u64,
     callees: HashMap<String, CalleeStats>,
+}
+
+impl Inner {
+    /// The statistics of `name`, created if absent; at [`MAX_CALLEES`] the callee
+    /// that saved least (the smallest name among equals) is forgotten first.
+    fn callee_stats(&mut self, name: &str) -> &mut CalleeStats {
+        if !self.callees.contains_key(name) {
+            if self.callees.len() >= MAX_CALLEES {
+                let weakest = self
+                    .callees
+                    .iter()
+                    .min_by(|a, b| a.1.saved_ns.cmp(&b.1.saved_ns).then_with(|| a.0.cmp(b.0)))
+                    .map(|(name, _)| name.clone());
+                if let Some(weakest) = weakest {
+                    self.callees.remove(&weakest);
+                }
+            }
+            self.callees.insert(name.to_owned(), CalleeStats::default());
+        }
+        self.callees.get_mut(name).expect("inserted above")
+    }
 }
 
 pub(crate) struct ResultCache {
@@ -119,6 +159,8 @@ pub(crate) struct ResultCache {
     evictions: AtomicU64,
     skipped_cheap: AtomicU64,
     persist: Option<persist::Persistence>,
+    /// The host identity mixed into every key; see the module comment.
+    identity: [u8; 32],
     /// Results read back from `cache.db` when this cache was opened.
     loaded_at_start: usize,
 }
@@ -146,11 +188,19 @@ impl Default for ResultCache {
     }
 }
 
-/// The digest covers the kernel fingerprint, the arity, the callee and the entry
+/// The digest covers the host identity, the kernel fingerprint, the arity, the callee and the entry
 /// (length-prefixed, so no two field splits collide) and then the payload.
-fn key(callee: &str, entry: &str, argc: u32, payload: &[u8], kernels: &[u8; 32]) -> Key {
+fn key(
+    identity: &[u8; 32],
+    callee: &str,
+    entry: &str,
+    argc: u32,
+    payload: &[u8],
+    kernels: &[u8; 32],
+) -> Key {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"loom result cache key v1");
+    hasher.update(b"loom result cache key v2");
+    hasher.update(identity);
     hasher.update(kernels);
     hasher.update(&argc.to_le_bytes());
     for part in [callee, entry] {
@@ -184,6 +234,7 @@ impl ResultCache {
             evictions: AtomicU64::new(0),
             skipped_cheap: AtomicU64::new(0),
             persist: None,
+            identity: *host_identity(),
             loaded_at_start: 0,
         }
     }
@@ -201,8 +252,14 @@ impl ResultCache {
     /// holds. A file that cannot be used is replaced (or, failing that, ignored)
     /// with a warning; this never fails.
     pub(crate) fn persistent(max_bytes: usize, dir: &Path) -> Self {
+        Self::persistent_as(max_bytes, dir, *host_identity())
+    }
+
+    /// [`Self::persistent`] for a given host identity, so a test can be another build.
+    fn persistent_as(max_bytes: usize, dir: &Path, identity: [u8; 32]) -> Self {
         let mut cache = Self::with_capacity(max_bytes);
-        if let Some((persistence, loaded)) = persist::open(dir, max_bytes) {
+        cache.identity = identity;
+        if let Some((persistence, loaded)) = persist::open(dir, max_bytes, &identity) {
             let inner = cache.inner.get_mut().expect("result cache poisoned");
             for row in loaded {
                 let size = row.value.len();
@@ -219,9 +276,11 @@ impl ResultCache {
                     callee: row.callee,
                     digest: row.digest,
                 };
-                inner.order.insert(order_key(entry.priority, entry.seq), key.clone());
+                inner
+                    .order
+                    .insert(order_key(entry.priority, entry.seq), key.clone());
                 inner.bytes += size;
-                inner.callees.entry(key.callee.clone()).or_default().bytes += size as u64;
+                inner.callee_stats(&key.callee).bytes += size as u64;
                 inner.map.insert(key, entry);
                 cache.loaded_at_start += 1;
             }
@@ -246,7 +305,7 @@ impl ResultCache {
         payload: &[u8],
         kernels: &[u8; 32],
     ) -> Option<Vec<u8>> {
-        let key = key(callee, entry, argc, payload, kernels);
+        let key = key(&self.identity, callee, entry, argc, payload, kernels);
         let mut inner = self.inner.lock().expect("result cache poisoned");
         let clock = inner.clock;
         let Some(found) = inner.map.get_mut(&key) else {
@@ -262,10 +321,13 @@ impl ResultCache {
         found.priority = priority(clock, found.hits, cost_ns, bytes.len());
         let new_priority = found.priority;
         inner.order.remove(&order_key(old_priority, old_seq));
-        inner.order.insert(order_key(new_priority, old_seq), key.clone());
-        let stats = inner.callees.entry(key.callee.clone()).or_default();
+        inner
+            .order
+            .insert(order_key(new_priority, old_seq), key.clone());
+        let stats = inner.callee_stats(&key.callee);
         stats.hits += 1;
         stats.saved_ns += cost_ns;
+        inner.saved_ns += cost_ns;
         drop(inner);
         if persisted && let Some(persistence) = &self.persist {
             persistence.hit(key.digest);
@@ -287,7 +349,7 @@ impl ResultCache {
         cost_ns: u64,
     ) {
         let mut inner = self.inner.lock().expect("result cache poisoned");
-        let stats = inner.callees.entry(callee.to_owned()).or_default();
+        let stats = inner.callee_stats(callee);
         stats.computed += 1;
         stats.compute_ns += cost_ns;
         if result.len() > MAX_RESULT_BYTES || result.len() > self.max_bytes {
@@ -300,13 +362,16 @@ impl ResultCache {
             return;
         }
         stats.stored += 1;
-        let key = key(callee, entry, argc, payload, kernels);
+        let key = key(&self.identity, callee, entry, argc, payload, kernels);
         // Values over the persistence limit stay in memory only.
         let persist_new = result.len() <= persist::MAX_VALUE_BYTES;
         if let Some(old) = inner.map.remove(&key) {
             inner.order.remove(&order_key(old.priority, old.seq));
             inner.bytes -= old.bytes.len();
-            if old.persisted && !persist_new && let Some(persistence) = &self.persist {
+            if old.persisted
+                && !persist_new
+                && let Some(persistence) = &self.persist
+            {
                 persistence.delete(key.digest);
             }
             if let Some(stats) = inner.callees.get_mut(callee) {
@@ -320,10 +385,15 @@ impl ResultCache {
                 break;
             };
             let victim_key = inner.order.remove(&first).expect("first key present");
-            let victim = inner.map.remove(&victim_key).expect("ordered entry present");
+            let victim = inner
+                .map
+                .remove(&victim_key)
+                .expect("ordered entry present");
             inner.clock = victim.priority.max(inner.clock);
             inner.bytes -= victim.bytes.len();
-            if victim.persisted && let Some(persistence) = &self.persist {
+            if victim.persisted
+                && let Some(persistence) = &self.persist
+            {
                 persistence.delete(victim_key.digest);
             }
             if let Some(stats) = inner.callees.get_mut(&victim_key.callee) {
@@ -353,7 +423,9 @@ impl ResultCache {
             });
             value.persisted = true;
         }
-        inner.order.insert(order_key(value.priority, seq), key.clone());
+        inner
+            .order
+            .insert(order_key(value.priority, seq), key.clone());
         inner.bytes += result.len();
         if let Some(stats) = inner.callees.get_mut(callee) {
             stats.bytes += result.len() as u64;
@@ -368,6 +440,20 @@ impl ResultCache {
     /// already changes its hash; this is for a result that must not be reused
     /// though its inputs are unchanged.
     pub(crate) fn clear(&self, callee: Option<&str>) -> usize {
+        let dropped = self.clear_memory(callee);
+        // Sent after `inner` is released: the send may wait for room, and a stuck
+        // writer must not stall every `get` and `put`. A store that slipped in
+        // between is a new result whose row this clear deletes, which only costs a
+        // future miss; every row that existed before the clear is behind it in the
+        // queue. It waits for room because a cleared result must not return after a
+        // restart.
+        if let Some(persistence) = &self.persist {
+            persistence.clear(callee);
+        }
+        dropped
+    }
+
+    fn clear_memory(&self, callee: Option<&str>) -> usize {
         let mut inner = self.inner.lock().expect("result cache poisoned");
         let doomed: Vec<Key> = inner
             .map
@@ -386,11 +472,6 @@ impl ResultCache {
                 stats.bytes = 0;
             }
         }
-        // Sent under the lock so it lands after every store it must remove, and
-        // waits for room: a cleared result must not return after a restart.
-        if let Some(persistence) = &self.persist {
-            persistence.clear(callee);
-        }
         doomed.len()
     }
 
@@ -404,22 +485,29 @@ impl ResultCache {
             bytes: inner.bytes,
             evictions: self.evictions.load(Ordering::Relaxed),
             skipped_cheap: self.skipped_cheap.load(Ordering::Relaxed),
-            saved_ns: inner.callees.values().map(|stats| stats.saved_ns).sum(),
+            saved_ns: inner.saved_ns,
             persisted_entries: self.persist.as_ref().map_or(0, |p| p.entries() as usize),
             loaded_at_start: self.loaded_at_start,
         }
     }
 
-    /// Per-callee accounting, the callees that saved the most time first.
+    /// Per-callee accounting of the [`TOP_CALLEES`] callees that saved the most
+    /// time, the most first.
     pub(crate) fn by_callee(&self) -> Vec<(String, CalleeStats)> {
         let inner = self.inner.lock().expect("result cache poisoned");
-        let mut all: Vec<_> = inner
-            .callees
-            .iter()
+        let mut all: Vec<(&String, &CalleeStats)> = inner.callees.iter().collect();
+        let order = |a: &(&String, &CalleeStats), b: &(&String, &CalleeStats)| {
+            b.1.saved_ns.cmp(&a.1.saved_ns).then_with(|| a.0.cmp(b.0))
+        };
+        // Partition the top out in linear time, then sort only those.
+        if all.len() > TOP_CALLEES {
+            all.select_nth_unstable_by(TOP_CALLEES, order);
+            all.truncate(TOP_CALLEES);
+        }
+        all.sort_by(order);
+        all.into_iter()
             .map(|(name, stats)| (name.clone(), stats.clone()))
-            .collect();
-        all.sort_by(|a, b| b.1.saved_ns.cmp(&a.1.saved_ns).then_with(|| a.0.cmp(&b.0)));
-        all
+            .collect()
     }
 }
 

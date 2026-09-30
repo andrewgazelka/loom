@@ -22,7 +22,7 @@
 //! callee runs in its own memory and inherits no frames, and the call itself
 //! is not a `perform`. Effect-row inference labels it `"call"`.
 pub use loom_proto::isolated::{CallError, MAX_DEPTH, Target, decode_payload, encode_payload};
-use loom_proto::isolated::{Request, Response};
+use loom_proto::isolated::{MAX_BATCH, Request, Response};
 use serde::{Serialize, de::DeserializeOwned};
 use std::marker::PhantomData;
 
@@ -176,54 +176,77 @@ pub fn call<F: Invocation>(def: Def<F>, args: F::Args) -> Result<F::Output, Call
     }
 }
 
-/// Run `def` once per element of `args`, all at the same time, and return the results in order.
+/// Run `def` once per element of `args` at the same time, and return the results in order.
 ///
 /// The host runs the calls concurrently (about one per core at a time), each in its own
 /// instance with the same semantics as [`call`]: policy, depth and arity are checked per call,
 /// and a pure callee is answered from the result cache. Identical calls, in this batch or in
-/// flight elsewhere, run once. A failed call is that element's `Err`; it does not stop the others.
-/// Worth it when one call costs at least about a millisecond: each is a fresh instantiation.
+/// flight elsewhere, run once. Worth it when one call costs at least about a millisecond: each
+/// is a fresh instantiation.
+///
+/// Anything that goes wrong with one call is that element's `Err`, at its position, and does not
+/// stop the others: a callee failure, an argument that fails to encode (`CallError::Decode`), and
+/// a result the batch has no room left for (the host returns at most 64 MiB of results per batch;
+/// the calls past it report `CallError::Trapped` and which ones depends on completion order).
+/// The outer `Err` is only for a batch the host could not answer at all. More than
+/// [`MAX_BATCH`] elements go to the host in consecutive batches of that size, so they are
+/// concurrent within a batch, not across batches.
 pub fn call_map<F: Invocation>(
     def: Def<F>,
     args: impl IntoIterator<Item = F::Args>,
 ) -> Result<Vec<Result<F::Output, CallError>>, CallError> {
+    // One slot per element; an argument that does not encode is settled here, the rest (their
+    // frames, and the slot each will fill) go to the host.
+    let mut results: Vec<Option<Result<F::Output, CallError>>> = Vec::new();
     let mut frames = Vec::new();
-    let mut failures = Vec::new();
-    for (index, args) in args.into_iter().enumerate() {
+    let mut positions = Vec::new();
+    for (position, args) in args.into_iter().enumerate() {
         match F::encode_args(args) {
-            Ok(payload) => frames.push(
-                Request {
-                    target: def.target,
-                    entry: def.entry,
-                    argc: F::ARITY,
-                    payload: &payload,
-                }
-                .encode(),
-            ),
-            Err(error) => failures.push((index, error)),
+            Ok(payload) => {
+                frames.push(
+                    Request {
+                        target: def.target,
+                        entry: def.entry,
+                        argc: F::ARITY,
+                        payload: &payload,
+                    }
+                    .encode(),
+                );
+                positions.push(position);
+                results.push(None);
+            }
+            Err(error) => results.push(Some(Err(error))),
         }
     }
-    if let Some((_, error)) = failures.into_iter().next() {
-        return Err(error);
+    for (frames, positions) in frames.chunks(MAX_BATCH).zip(positions.chunks(MAX_BATCH)) {
+        let response =
+            crate::core::isolated_batch(&loom_proto::isolated::batch_frame(frames), &def.hash())?;
+        let responses =
+            loom_proto::isolated::parse_batch(&response).map_err(|message| CallError::Decode {
+                message: format!("malformed isolated batch response: {message}"),
+            })?;
+        if responses.len() != frames.len() {
+            return Err(CallError::Decode {
+                message: format!(
+                    "batch of {} calls answered with {}",
+                    frames.len(),
+                    responses.len()
+                ),
+            });
+        }
+        for (&position, frame) in positions.iter().zip(responses) {
+            results[position] = Some(match Response::parse(frame) {
+                Ok(Ok(result)) => decode_payload(result),
+                Ok(Err(error)) => Err(error),
+                Err(message) => Err(CallError::Decode {
+                    message: format!("malformed isolated response frame: {message}"),
+                }),
+            });
+        }
     }
-    let response = crate::core::isolated_batch(&loom_proto::isolated::batch_frame(&frames), &def.hash())?;
-    let responses = loom_proto::isolated::parse_batch(&response).map_err(|message| CallError::Decode {
-        message: format!("malformed isolated batch response: {message}"),
-    })?;
-    if responses.len() != frames.len() {
-        return Err(CallError::Decode {
-            message: format!("batch of {} calls answered with {}", frames.len(), responses.len()),
-        });
-    }
-    Ok(responses
+    Ok(results
         .into_iter()
-        .map(|frame| match Response::parse(frame) {
-            Ok(Ok(result)) => decode_payload(result),
-            Ok(Err(error)) => Err(error),
-            Err(message) => Err(CallError::Decode {
-                message: format!("malformed isolated response frame: {message}"),
-            }),
-        })
+        .map(|result| result.expect("every element was either refused at encoding or answered"))
         .collect())
 }
 
@@ -279,6 +302,26 @@ mod tests {
         ));
         let copied = THIS;
         assert_eq!(copied.entry_name(), THIS.entry_name());
+    }
+
+    #[test]
+    fn an_argument_that_fails_to_encode_is_that_elements_error_not_the_whole_calls() {
+        struct Unencodable;
+        impl Serialize for Unencodable {
+            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("refused"))
+            }
+        }
+        const DEF: Def<fn(Unencodable) -> u8> = Def::this();
+        // Nothing encodes, so nothing is sent to the host (which this native build has none of).
+        let results = call_map(DEF, [Unencodable, Unencodable, Unencodable]).unwrap();
+        assert_eq!(results.len(), 3);
+        assert!(
+            results
+                .iter()
+                .all(|result| matches!(result, Err(CallError::Decode { .. })))
+        );
+        assert!(call_map(DEF, std::iter::empty()).unwrap().is_empty());
     }
 
     #[test]

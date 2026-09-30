@@ -7,6 +7,61 @@
 //! `CallError`. The payload is never decoded; only its hash is ever computed.
 use super::*;
 use loom_proto::isolated::{CallError, MAX_DEPTH, Request, Target};
+use std::sync::atomic::AtomicUsize;
+
+/// Most result bytes one `call_many` batch hands back: the reply a guest is asked to hold. A call
+/// that would push the batch past it is that call's own `CallError::Trapped`, not a trap of the
+/// whole execution.
+pub(crate) const BATCH_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+
+/// One identical pure call in flight. The callers that joined it (subscribed while it ran) wait on
+/// it; the leader publishes its outcome into it, or drops it and leaves them with nothing.
+pub(crate) type Flight = tokio::sync::watch::Sender<Option<Result<Vec<u8>, CallError>>>;
+
+/// A run of a callee, and whether it was clean: it recorded no effect under its scope and no
+/// kernel failed while it ran, so its outcome depends on its inputs alone. Only a clean outcome is
+/// cached or handed to other callers.
+struct Ran {
+    result: Result<Vec<u8>, CallError>,
+    clean: bool,
+}
+
+/// The caller that runs a single-flight call. It owns the in-flight entry: the entry is removed
+/// when the leader publishes, finishes, or is dropped mid-run (a cancelled caller or batch), and
+/// only while it is still the leader's own (a later flight under the same key stays).
+struct Leader<'a> {
+    inflight: &'a Mutex<HashMap<InflightKey, Arc<Flight>>>,
+    key: InflightKey,
+    flight: Arc<Flight>,
+}
+impl Leader<'_> {
+    fn remove(&self) {
+        let mut inflight = self
+            .inflight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if inflight
+            .get(&self.key)
+            .is_some_and(|kept| Arc::ptr_eq(kept, &self.flight))
+        {
+            inflight.remove(&self.key);
+        }
+    }
+    /// Give `outcome` to the callers already waiting. The entry goes first, so a caller that
+    /// arrives from now on starts a flight of its own instead of inheriting this outcome.
+    fn publish(&self, outcome: &Result<Vec<u8>, CallError>) {
+        self.remove();
+        // Nobody can subscribe once the entry is gone, so the count is final: no waiter, no copy.
+        if self.flight.receiver_count() > 0 {
+            self.flight.send_replace(Some(outcome.clone()));
+        }
+    }
+}
+impl Drop for Leader<'_> {
+    fn drop(&mut self) {
+        self.remove();
+    }
+}
 
 /// A definition lookup that found nothing, typed so the isolated boundary
 /// reports `CallError::NotFound` structurally instead of matching a message.
@@ -102,12 +157,16 @@ impl Runtime {
         if !cacheable {
             return self
                 .run_isolated(&hash, &request, scope, occurrence, effects, false, &kernels)
-                .await;
+                .await
+                .result;
         }
-        // Single flight: identical pure calls in flight at once run once. The first computes; the
-        // others wait on the same cell and take its bytes exactly as a cache hit would (no child
-        // trace of their own). A failed first run leaves the cell empty and the next waiter runs
-        // its own attempt.
+        // Single flight: identical pure calls in flight at once run once. The first (the leader)
+        // computes; the others wait on its flight and take its outcome exactly as a cache hit
+        // would (no child trace of their own), but only a clean one: a run that recorded an effect
+        // or saw a kernel failure is not evidence for anyone else (a waiter's policy may differ,
+        // and its trace must hold its own record), so each waiter then runs its own attempt. A
+        // clean failure is shared with the waiters that joined before it, instead of being retried
+        // serially by each; the next separate request starts afresh.
         let key = (
             hash.clone(),
             request.entry.to_owned(),
@@ -115,32 +174,70 @@ impl Runtime {
             *blake3::hash(request.payload).as_bytes(),
             kernels,
         );
-        let cell = self
-            .inner
-            .inflight
-            .lock()
-            .expect("inflight poisoned")
-            .entry(key.clone())
-            .or_default()
-            .clone();
-        let result = cell
-            .get_or_try_init(|| {
-                self.run_isolated(&hash, &request, scope, occurrence, effects, true, &kernels)
-            })
-            .await
-            .cloned();
-        {
+        let leader = {
             let mut inflight = self.inner.inflight.lock().expect("inflight poisoned");
-            if inflight.get(&key).is_some_and(|kept| Arc::ptr_eq(kept, &cell)) {
-                inflight.remove(&key);
+            if let Some(flight) = inflight.get(&key) {
+                Err(flight.subscribe())
+            } else {
+                // The first receiver is dropped at once: the flight's receivers are its waiters.
+                let (flight, _) = tokio::sync::watch::channel(None);
+                let flight = Arc::new(flight);
+                inflight.insert(key.clone(), flight.clone());
+                Ok(Leader {
+                    inflight: &self.inner.inflight,
+                    key,
+                    flight,
+                })
+            }
+        };
+        match leader {
+            Err(mut waiting) => {
+                // `changed` fails when the leader left without publishing; the value says which.
+                let _ = waiting.changed().await;
+                let shared = waiting.borrow().clone();
+                match shared {
+                    Some(outcome) => outcome,
+                    None => {
+                        self.run_isolated(
+                            &hash, &request, scope, occurrence, effects, true, &kernels,
+                        )
+                        .await
+                        .result
+                    }
+                }
+            }
+            Ok(leader) => {
+                let ran = self
+                    .run_isolated(&hash, &request, scope, occurrence, effects, true, &kernels)
+                    .await;
+                // A depth refusal depends on where the caller sits, not on the call.
+                if ran.clean && !matches!(ran.result, Err(CallError::DepthExceeded { .. })) {
+                    leader.publish(&ran.result);
+                }
+                ran.result
             }
         }
-        result
     }
 
-    /// Run a batch of request frames concurrently (about one per core at a time) as siblings of
-    /// one execution: call `i` takes occurrence `base + i`, so each child's trace scope is fixed
-    /// before any runs, and outcomes are returned in request order.
+    /// Run a batch of request frames concurrently as siblings of one execution: call `i` takes
+    /// occurrence `base + i`, so each child's trace scope is fixed before any runs, and outcomes
+    /// are returned in request order.
+    ///
+    /// Concurrency is lanes, each taking the next unstarted call when it is free, so one slow call
+    /// holds up only its own lane. The first lane is always there; up to one per core in all
+    /// (`width`) are added by taking a slot from the runtime-wide `batch_lanes` (four per core for
+    /// every batch together) without waiting. A batch that finds no slot runs its calls on the
+    /// lane it has. Nothing in the host ever waits for a lane, and the unconditional lane always
+    /// makes progress, so nested batches cannot deadlock however deep they go, while the live
+    /// instances a fan-out creates are bounded by the slots plus one per level instead of
+    /// `width ^ depth`. (A plain semaphore held around running a callee would deadlock: a parent
+    /// sits inside `run_isolated` for as long as its children run, because the guest suspends in
+    /// the host call. What a suspended parent releases is the execution's own guest slot, taken
+    /// back in the `loom.call_many` import, not anything held here.)
+    ///
+    /// Results are also budgeted: once the batch's results reach [`BATCH_RESPONSE_BYTES`], calls
+    /// not yet started are not run and a result that would overflow is dropped, each an `Err`
+    /// for its own position. Which calls those are depends on completion order.
     pub(crate) async fn isolated_batch(
         &self,
         frames: &[&[u8]],
@@ -148,25 +245,76 @@ impl Runtime {
         base: i64,
         effects: &EffectContext,
     ) -> Vec<Result<Vec<u8>, CallError>> {
-        use futures::StreamExt;
-        let width = std::thread::available_parallelism().map_or(4, |n| n.get());
-        futures::stream::iter(0..frames.len())
-            .map(|index| async move {
-                match Request::parse(frames[index]) {
-                    Ok(request) => {
-                        self.isolated_call(request, scope, base + index as i64, effects)
-                            .await
-                    }
-                    Err(error) => Err(error),
-                }
-            })
-            .buffered(width)
+        let width = std::thread::available_parallelism()
+            .map_or(4, |n| n.get())
+            .max(2);
+        let mut slots = Vec::new();
+        for _ in 1..width.min(frames.len()) {
+            match self.inner.batch_lanes.clone().try_acquire_owned() {
+                Ok(slot) => slots.push(slot),
+                Err(_) => break,
+            }
+        }
+        let next = AtomicUsize::new(0);
+        let spent = AtomicUsize::new(0);
+        let (next, spent) = (&next, &spent);
+        let lanes = (0..=slots.len()).map(|_| async move {
+            let mut done = Vec::new();
+            loop {
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                let Some(frame) = frames.get(index) else {
+                    break;
+                };
+                let outcome = self
+                    .batch_element(frame, scope, base + index as i64, effects, spent)
+                    .await;
+                done.push((index, outcome));
+            }
+            done
+        });
+        let finished = futures::future::join_all(lanes).await;
+        drop(slots);
+        let mut outcomes: Vec<Option<Result<Vec<u8>, CallError>>> =
+            (0..frames.len()).map(|_| None).collect();
+        for (index, outcome) in finished.into_iter().flatten() {
+            outcomes[index] = Some(outcome);
+        }
+        outcomes
+            .into_iter()
+            .map(|outcome| outcome.expect("each index is taken by exactly one lane"))
             .collect()
-            .await
+    }
+
+    /// One call of a batch, charged against the batch's byte budget `spent`.
+    async fn batch_element(
+        &self,
+        frame: &[u8],
+        scope: &str,
+        occurrence: i64,
+        effects: &EffectContext,
+        spent: &AtomicUsize,
+    ) -> Result<Vec<u8>, CallError> {
+        let request = Request::parse(frame)?;
+        let over_budget = |what: &str| CallError::Trapped {
+            hash: request.target.label(),
+            message: format!("the batch's results exceed {BATCH_RESPONSE_BYTES} bytes: {what}"),
+        };
+        if spent.load(Ordering::Relaxed) >= BATCH_RESPONSE_BYTES {
+            return Err(over_budget("this call was not run"));
+        }
+        let bytes = self
+            .isolated_call(request, scope, occurrence, effects)
+            .await?;
+        // Its response frame is a tag byte and a length prefix around the bytes.
+        let cost = bytes.len() + 5;
+        if spent.fetch_add(cost, Ordering::Relaxed) + cost > BATCH_RESPONSE_BYTES {
+            return Err(over_budget("this call ran but its result was dropped"));
+        }
+        Ok(bytes)
     }
 
     /// Instantiate the callee and run it; store the result when `cacheable` and the call
-    /// did nothing but compute.
+    /// did nothing but compute (the run is then `clean`).
     #[allow(clippy::too_many_arguments)]
     async fn run_isolated(
         &self,
@@ -177,7 +325,7 @@ impl Runtime {
         effects: &EffectContext,
         cacheable: bool,
         kernels: &[u8; 32],
-    ) -> Result<Vec<u8>, CallError> {
+    ) -> Ran {
         let entry = (!request.entry.is_empty()).then_some(request.entry);
         let child_scope = format!("{scope}/call:{occurrence}");
         let child = EffectContext {
@@ -206,30 +354,30 @@ impl Runtime {
         }
         let result = outcome
             .map(|call| call.output.bytes)
-            .map_err(|error| host_failure(hash, error))?;
-        // Stored only when the call really did nothing but compute: the static row
-        // can undercount, the trace cannot.
-        // A kernel failure (denied, missing blob, I/O) is recorded nowhere else and depends on
-        // host state, so a call during which one happened is not stored. Another call's failure
-        // in the same window only makes this conservative.
-        if cacheable
+            .map_err(|error| host_failure(hash, error));
+        // Clean: the call really did nothing but compute. The static row can undercount, the
+        // trace cannot. A kernel failure (denied, missing blob, I/O) is recorded nowhere else and
+        // depends on host state, so a call during which one happened is not clean either; another
+        // call's failure in the same window only makes this conservative. Without a trace there
+        // is nothing to prove it with.
+        let clean = cacheable
             && self.kernel_failures() == kernel_failures
             && effects
                 .trace
                 .as_ref()
-                .is_some_and(|trace| !trace.has_effects_under(&child_scope))
-        {
+                .is_some_and(|trace| !trace.has_effects_under(&child_scope));
+        if clean && let Ok(bytes) = &result {
             self.inner.call_results.put(
                 hash,
                 request.entry,
                 request.argc,
                 request.payload,
                 kernels,
-                &result,
+                bytes,
                 u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
             );
         }
-        Ok(result)
+        Ran { result, clean }
     }
 
     /// Whether the stored signature says `entry` of `hash` has a fully known
@@ -247,7 +395,11 @@ impl Runtime {
         let selected = if entry.is_empty() {
             (definition.sig.exports.len() == 1).then(|| &definition.sig.exports[0])
         } else {
-            definition.sig.exports.iter().find(|export| export.name == entry)
+            definition
+                .sig
+                .exports
+                .iter()
+                .find(|export| export.name == entry)
         };
         let export = selected?;
         (!export.effects.unknown && export.effects.labels.iter().all(|label| label == "kernel"))

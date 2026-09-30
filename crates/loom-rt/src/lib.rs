@@ -4,12 +4,14 @@ pub use sandbox::WasmSandbox;
 mod compilation_cache;
 mod kernel;
 mod stream;
+pub use stream::CallStream;
+mod host_identity;
 mod result_cache;
 mod shared_copy;
-pub use kernel::{Handle, HostKernel, KernelContext};
-pub use result_cache::{CalleeStats, ResultCacheStats};
 pub use call::{CallEffects, GuestFailure};
 pub use compilation_cache::{CompilationCacheStats, LoomCompilationCache};
+pub use kernel::{Handle, HostKernel, KernelContext};
+pub use result_cache::{CalleeStats, ResultCacheStats};
 mod calls;
 mod commands;
 mod filesystem;
@@ -89,7 +91,10 @@ struct Inner {
     /// Results of isolated calls to pure callees; see `result_cache`.
     call_results: result_cache::ResultCache,
     /// Identical pure isolated calls in flight, so they run once; see `isolated.rs`.
-    inflight: Mutex<HashMap<InflightKey, Arc<tokio::sync::OnceCell<Vec<u8>>>>>,
+    inflight: Mutex<HashMap<InflightKey, Arc<isolated::Flight>>>,
+    /// Extra concurrent lanes all batches together may use beyond their first; see
+    /// `Runtime::isolated_batch` for why a batch never waits for one.
+    batch_lanes: Arc<tokio::sync::Semaphore>,
     /// Native ops guests may call; see `kernel`.
     kernels: kernel::Kernels,
     component_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
@@ -330,6 +335,9 @@ impl Runtime {
                 core_modules: Mutex::new(ModuleCache::default()),
                 call_results,
                 inflight: Mutex::new(HashMap::new()),
+                batch_lanes: Arc::new(tokio::sync::Semaphore::new(
+                    4 * std::thread::available_parallelism().map_or(4, |n| n.get()),
+                )),
                 kernels: kernel::Kernels::default(),
                 component_locks: Mutex::new(HashMap::new()),
                 effect_locks: Mutex::new(HashMap::new()),

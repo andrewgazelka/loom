@@ -8,10 +8,17 @@
 //!
 //! * **Write-behind.** The caller's thread never touches SQLite. A store, a hit and
 //!   an eviction are messages to one writer thread over a bounded channel; when the
-//!   channel is full the message is dropped (a lost store is a future miss, a lost
-//!   hit bump is a slightly stale priority, a lost delete leaves a row that the next
-//!   load trims). Clearing is the exception: it waits for room, because a result
-//!   that was cleared on purpose must not come back after a restart.
+//!   channel is full, or the values queued or being written pass 64 MiB, the
+//!   message is dropped (a lost store is a future miss, a lost hit bump is a
+//!   slightly stale priority, a lost delete leaves a row that the next load trims).
+//!   Clearing is the exception: it waits for room, and if its transaction fails the
+//!   writer keeps it and retries it ahead of the next batch, because a result that
+//!   was cleared on purpose must not come back after a restart.
+//! * **Rows belong to one host build.** Each row carries the host identity of the
+//!   runtime that wrote it and a BLAKE3 checksum of its value. Load deletes the
+//!   rows of any other identity before ranking (they could never be hit, and must
+//!   not crowd out fresh ones) and the rows whose value does not match its
+//!   checksum.
 //! * **Batched hits.** Hit bumps are summed in the writer and written in one
 //!   transaction per 1000 bumps or 5 seconds, whichever comes first. Stores and
 //!   deletes share the transaction of the batch they arrive in.
@@ -23,18 +30,19 @@
 //!   cap and deletes the rest. Loading everything is bounded by the cache's own
 //!   128 MiB and keeps `get` free of disk reads; a lazy `OnDisk` entry would save
 //!   start-up time at the price of a second entry state on the hit path.
-//! * **Never fatal.** A file that cannot be opened, is of another format version
-//!   or fails to read is deleted and replaced by an empty one, with one warning on
-//!   stderr. If even that fails the cache runs without persistence. A file another
-//!   process holds locked is left alone and the cache runs without persistence.
-use anyhow::{Context, Result, ensure};
+//! * **Never fatal.** A file that is corrupt (SQLite says corrupt or not a
+//!   database) or of another format version is deleted and replaced by an empty
+//!   one, with one warning on stderr. Any other failure (locked, permissions, disk
+//!   full, I/O) leaves the file alone, since another runtime may have it open, and
+//!   the cache runs without persistence.
+use anyhow::{Context, Result};
 use rusqlite::{Connection, Transaction, params};
 use std::{
     collections::HashMap,
     path::Path,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         mpsc::{self, RecvTimeoutError, SyncSender},
     },
     thread,
@@ -49,9 +57,11 @@ pub(super) const MAX_VALUE_BYTES: usize = 1 << 20;
 const FILE: &str = "cache.db";
 /// Stored in `PRAGMA user_version`. A different value means an older or newer
 /// layout, and the file is replaced.
-const FORMAT_VERSION: i64 = 1;
+const FORMAT_VERSION: i64 = 2;
 /// Messages waiting for the writer before new ones are dropped.
 const QUEUE: usize = 4096;
+/// Bytes of values queued or being written before new stores are dropped.
+const MAX_QUEUED_BYTES: usize = 64 << 20;
 /// Messages applied in one transaction, at most.
 const BATCH: usize = 512;
 const HIT_BATCH: u64 = 1000;
@@ -59,6 +69,39 @@ const HIT_INTERVAL: Duration = Duration::from_secs(5);
 /// How long `Drop` waits for the writer to flush before giving up on it.
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
 const VACUUM_PAGES: u32 = 256;
+
+/// A count of bytes that may not pass a limit: stores reserve their value's size
+/// before they are queued and the writer releases it once they are written.
+pub(super) struct ByteBudget {
+    used: AtomicUsize,
+    max: usize,
+}
+
+impl ByteBudget {
+    pub(super) fn new(max: usize) -> Self {
+        Self {
+            used: AtomicUsize::new(0),
+            max,
+        }
+    }
+
+    /// Take `bytes` if they fit under the limit.
+    pub(super) fn reserve(&self, bytes: usize) -> bool {
+        self.used
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                used.checked_add(bytes).filter(|total| *total <= self.max)
+            })
+            .is_ok()
+    }
+
+    pub(super) fn release(&self, bytes: usize) {
+        self.used.fetch_sub(bytes, Ordering::AcqRel);
+    }
+
+    pub(super) fn used(&self) -> usize {
+        self.used.load(Ordering::Acquire)
+    }
+}
 
 /// One result to remember.
 pub(super) struct Row {
@@ -89,21 +132,37 @@ enum Msg {
     Shutdown,
 }
 
+impl Msg {
+    /// Bytes of value this message keeps alive while it waits.
+    fn weight(&self) -> usize {
+        match self {
+            Msg::Put(row) => row.value.len(),
+            _ => 0,
+        }
+    }
+}
+
 /// The handle the cache holds; dropping it flushes and stops the writer.
 pub(super) struct Persistence {
     tx: SyncSender<Msg>,
     entries: Arc<AtomicU64>,
+    /// Bytes of values queued or being written.
+    budget: Arc<ByteBudget>,
     /// The writer thread and the channel that says it finished. A mutex only so
     /// the handle is `Sync`; `Drop` has it to itself.
     writer: Mutex<Option<(thread::JoinHandle<()>, mpsc::Receiver<()>)>>,
 }
 
-/// Open (or replace) `cache.db` in `dir`. Returns the handle and the results to
-/// put back in memory, at most `max_bytes` of them. `None` means run without
-/// persistence.
-pub(super) fn open(dir: &Path, max_bytes: usize) -> Option<(Persistence, Vec<Loaded>)> {
+/// Open (or replace) `cache.db` in `dir` for the host build `identity`. Returns the
+/// handle and the results to put back in memory, at most `max_bytes` of them, all
+/// written by that build. `None` means run without persistence.
+pub(super) fn open(
+    dir: &Path,
+    max_bytes: usize,
+    identity: &Digest,
+) -> Option<(Persistence, Vec<Loaded>)> {
     let path = dir.join(FILE);
-    let (connection, loaded) = match try_open(&path, max_bytes) {
+    let (connection, loaded) = match try_open(&path, max_bytes, identity) {
         Ok(opened) => opened,
         Err(error) if is_locked(&error) => {
             eprintln!(
@@ -112,9 +171,9 @@ pub(super) fn open(dir: &Path, max_bytes: usize) -> Option<(Persistence, Vec<Loa
             );
             return None;
         }
-        Err(first) => {
+        Err(first) if is_corrupt(&first) => {
             remove_files(&path);
-            match try_open(&path, max_bytes) {
+            match try_open(&path, max_bytes, identity) {
                 Ok(opened) => {
                     eprintln!(
                         "loom: result cache {} was unusable ({first:#}); replaced it with an empty one",
@@ -123,7 +182,6 @@ pub(super) fn open(dir: &Path, max_bytes: usize) -> Option<(Persistence, Vec<Loa
                     opened
                 }
                 Err(second) => {
-                    remove_files(&path);
                     eprintln!(
                         "loom: result cache {} is unusable ({first:#}; then {second:#}); running without persistence",
                         path.display()
@@ -132,13 +190,24 @@ pub(super) fn open(dir: &Path, max_bytes: usize) -> Option<(Persistence, Vec<Loa
                 }
             }
         }
+        Err(error) => {
+            eprintln!(
+                "loom: result cache {} cannot be used ({error:#}); left in place, running without persistence",
+                path.display()
+            );
+            return None;
+        }
     };
     let entries = Arc::new(AtomicU64::new(loaded.len() as u64));
+    let budget = Arc::new(ByteBudget::new(MAX_QUEUED_BYTES));
     let (tx, rx) = mpsc::sync_channel(QUEUE);
     let (done_tx, done_rx) = mpsc::channel();
     let mut writer = Writer {
         connection,
+        identity: *identity,
         entries: entries.clone(),
+        budget: budget.clone(),
+        pending_clears: Vec::new(),
         hits: HashMap::new(),
         bumps: 0,
         last_flush: Instant::now(),
@@ -155,15 +224,53 @@ pub(super) fn open(dir: &Path, max_bytes: usize) -> Option<(Persistence, Vec<Loa
             Persistence {
                 tx,
                 entries,
+                budget,
                 writer: Mutex::new(Some((handle, done_rx))),
             },
             loaded,
         )),
         Err(error) => {
-            eprintln!("loom: result cache writer thread failed to start ({error}); running without persistence");
+            eprintln!(
+                "loom: result cache writer thread failed to start ({error}); running without persistence"
+            );
             None
         }
     }
+}
+
+/// A file on which this build read a format it does not write.
+#[derive(Debug)]
+struct FormatMismatch {
+    found: i64,
+}
+
+impl std::fmt::Display for FormatMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "format version {}, this build reads {FORMAT_VERSION}",
+            self.found
+        )
+    }
+}
+
+impl std::error::Error for FormatMismatch {}
+
+/// Whether `error` says the file itself is bad (another format, or SQLite's
+/// corrupt and not-a-database codes) and replacing it is the cure. Anything else
+/// may be a condition of the moment, or a file someone else is using.
+pub(super) fn is_corrupt(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.is::<FormatMismatch>()
+            || matches!(
+                cause.downcast_ref::<rusqlite::Error>(),
+                Some(rusqlite::Error::SqliteFailure(failure, _))
+                    if matches!(
+                        failure.code,
+                        rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase
+                    )
+            )
+    })
 }
 
 fn is_locked(error: &anyhow::Error) -> bool {
@@ -191,7 +298,7 @@ fn sql(value: u64) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
 }
 
-fn try_open(path: &Path, max_bytes: usize) -> Result<(Connection, Vec<Loaded>)> {
+fn try_open(path: &Path, max_bytes: usize, identity: &Digest) -> Result<(Connection, Vec<Loaded>)> {
     let mut connection = Connection::open(path).context("open")?;
     connection.busy_timeout(Duration::from_secs(5))?;
     // `auto_vacuum` only takes effect before the first table exists.
@@ -206,20 +313,21 @@ fn try_open(path: &Path, max_bytes: usize) -> Result<(Connection, Vec<Loaded>)> 
     let version: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .context("format version")?;
-    ensure!(
-        version == 0 || version == FORMAT_VERSION,
-        "format version {version}, this build reads {FORMAT_VERSION}"
-    );
+    if version != 0 && version != FORMAT_VERSION {
+        return Err(FormatMismatch { found: version }.into());
+    }
     connection
         .execute_batch(
             "CREATE TABLE IF NOT EXISTS results(
                  key BLOB PRIMARY KEY,
+                 identity BLOB NOT NULL,
                  callee TEXT NOT NULL,
                  entry TEXT NOT NULL,
                  argc INTEGER NOT NULL,
                  cost_ns INTEGER NOT NULL,
                  hits INTEGER NOT NULL,
                  size INTEGER NOT NULL,
+                 checksum BLOB NOT NULL,
                  value BLOB NOT NULL
              );",
         )
@@ -227,15 +335,18 @@ fn try_open(path: &Path, max_bytes: usize) -> Result<(Connection, Vec<Loaded>)> 
     if version == 0 {
         connection.execute_batch(&format!("PRAGMA user_version={FORMAT_VERSION}"))?;
     }
-    let loaded = load(&mut connection, max_bytes).context("load")?;
+    let loaded = load(&mut connection, max_bytes, identity).context("load")?;
     Ok((connection, loaded))
 }
 
-/// Read back the rows worth most per byte until `max_bytes` is used, and delete the
-/// rest (rows that no longer fit, rows over the value limit, rows whose size
-/// disagrees with their value). Metadata is read first so values are read only for
-/// the rows kept.
-fn load(connection: &mut Connection, max_bytes: usize) -> Result<Vec<Loaded>> {
+/// Delete the rows of any other host identity, then read back the rows worth most
+/// per byte until `max_bytes` is used, and delete the rest (rows that no longer
+/// fit, rows over the value limit, rows whose size or checksum disagrees with their
+/// value). Metadata is read first so values are read only for the rows kept.
+fn load(connection: &mut Connection, max_bytes: usize, identity: &Digest) -> Result<Vec<Loaded>> {
+    // Before ranking: rows no build like this one can hit must not take a place
+    // from rows it can.
+    let foreign = connection.execute("DELETE FROM results WHERE identity != ?", [&identity[..]])?;
     struct Meta {
         key: Vec<u8>,
         callee: String,
@@ -262,7 +373,7 @@ fn load(connection: &mut Connection, max_bytes: usize) -> Result<Vec<Loaded>> {
     let mut loaded = Vec::new();
     let mut doomed: Vec<Vec<u8>> = Vec::new();
     {
-        let mut read = connection.prepare("SELECT value FROM results WHERE key = ?")?;
+        let mut read = connection.prepare("SELECT value, checksum FROM results WHERE key = ?")?;
         for meta in metas {
             let size = usize::try_from(meta.size).unwrap_or(usize::MAX);
             let digest = Digest::try_from(meta.key.as_slice()).ok();
@@ -271,8 +382,9 @@ fn load(connection: &mut Connection, max_bytes: usize) -> Result<Vec<Loaded>> {
                 doomed.push(meta.key);
                 continue;
             };
-            let value: Vec<u8> = read.query_row([&meta.key], |row| row.get(0))?;
-            if value.len() != size {
+            let (value, checksum): (Vec<u8>, Vec<u8>) =
+                read.query_row([&meta.key], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            if value.len() != size || blake3::hash(&value).as_bytes()[..] != checksum[..] {
                 doomed.push(meta.key);
                 continue;
             }
@@ -286,7 +398,7 @@ fn load(connection: &mut Connection, max_bytes: usize) -> Result<Vec<Loaded>> {
             });
         }
     }
-    if !doomed.is_empty() {
+    if !doomed.is_empty() || foreign > 0 {
         let tx = connection.transaction()?;
         {
             let mut delete = tx.prepare("DELETE FROM results WHERE key = ?")?;
@@ -301,9 +413,21 @@ fn load(connection: &mut Connection, max_bytes: usize) -> Result<Vec<Loaded>> {
 }
 
 impl Persistence {
-    /// Remember a result. Dropped when the writer is behind.
+    /// Remember a result. Dropped when the writer is behind, by count or by bytes.
     pub(super) fn put(&self, row: Row) {
-        self.offer(Msg::Put(row));
+        let bytes = row.value.len();
+        if !self.budget.reserve(bytes) {
+            return;
+        }
+        if self.tx.try_send(Msg::Put(row)).is_err() {
+            self.budget.release(bytes);
+        }
+    }
+
+    /// Bytes of values queued or being written.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn queued_bytes(&self) -> usize {
+        self.budget.used()
     }
 
     /// Count a hit on a persisted result. Dropped when the writer is behind.
@@ -364,7 +488,12 @@ impl Drop for Persistence {
 
 struct Writer {
     connection: Connection,
+    /// The host identity written into every row.
+    identity: Digest,
     entries: Arc<AtomicU64>,
+    budget: Arc<ByteBudget>,
+    /// Clears whose transaction failed, retried ahead of the next batch.
+    pending_clears: Vec<Option<String>>,
     /// Hits not yet written, by result.
     hits: HashMap<Digest, u64>,
     /// Hit messages since the last time hits were written.
@@ -399,7 +528,9 @@ impl Writer {
                     other => ops.push(other),
                 }
             }
+            let weight: usize = ops.iter().map(Msg::weight).sum();
             self.apply(ops, closing || !acks.is_empty());
+            self.budget.release(weight);
             for ack in acks {
                 let _ = ack.send(());
             }
@@ -409,7 +540,20 @@ impl Writer {
         }
     }
 
-    fn apply(&mut self, ops: Vec<Msg>, force: bool) {
+    fn apply(&mut self, arrived: Vec<Msg>, force: bool) {
+        // A clear that failed earlier comes before anything that arrived since.
+        let mut ops: Vec<Msg> = std::mem::take(&mut self.pending_clears)
+            .into_iter()
+            .map(Msg::Clear)
+            .collect();
+        ops.extend(arrived);
+        let clears: Vec<Option<String>> = ops
+            .iter()
+            .filter_map(|op| match op {
+                Msg::Clear(scope) => Some(scope.clone()),
+                _ => None,
+            })
+            .collect();
         let timer = self.last_flush.elapsed() >= HIT_INTERVAL;
         let due = force || timer;
         if ops.is_empty() && !(due && !self.hits.is_empty()) {
@@ -430,6 +574,7 @@ impl Writer {
         }
         match result {
             Ok(()) => {
+                self.warned = false;
                 if changes_rows {
                     self.count();
                 }
@@ -441,6 +586,7 @@ impl Writer {
             }
             Err(error) => {
                 self.hits.clear();
+                self.keep_for_retry(clears);
                 if !self.warned {
                     self.warned = true;
                     eprintln!("loom: result cache write failed ({error:#}); entries may be lost");
@@ -449,27 +595,47 @@ impl Writer {
         }
     }
 
+    /// Remember clears whose transaction failed. A full clear covers the others.
+    fn keep_for_retry(&mut self, clears: Vec<Option<String>>) {
+        for scope in clears {
+            if !self.pending_clears.contains(&scope) {
+                self.pending_clears.push(scope);
+            }
+        }
+        if self.pending_clears.contains(&None) {
+            self.pending_clears.retain(Option::is_none);
+        }
+    }
+
     fn transaction(&mut self, ops: Vec<Msg>, write_hits_now: bool) -> Result<()> {
         // Fields are used separately so the open transaction can borrow the
         // connection while the hit map is updated.
-        let Self { connection, hits, bumps, .. } = self;
+        let Self {
+            connection,
+            identity,
+            hits,
+            bumps,
+            ..
+        } = self;
         let tx = connection.transaction()?;
         for op in ops {
             match op {
                 Msg::Put(row) => {
                     hits.remove(&row.digest);
                     tx.prepare_cached(
-                        "INSERT OR REPLACE INTO results(key, callee, entry, argc, cost_ns, hits, size, value)
-                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        "INSERT OR REPLACE INTO results(key, identity, callee, entry, argc, cost_ns, hits, size, checksum, value)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     )?
                     .execute(params![
                         &row.digest[..],
+                        &identity[..],
                         row.callee,
                         row.entry,
                         row.argc,
                         sql(row.cost_ns),
                         sql(row.hits),
                         row.value.len() as i64,
+                        &blake3::hash(&row.value).as_bytes()[..],
                         &row.value[..],
                     ])?;
                 }
@@ -504,7 +670,9 @@ impl Writer {
     fn count(&self) {
         if let Ok(count) = self
             .connection
-            .query_row("SELECT count(*) FROM results", [], |row| row.get::<_, i64>(0))
+            .query_row("SELECT count(*) FROM results", [], |row| {
+                row.get::<_, i64>(0)
+            })
         {
             self.entries.store(count.max(0) as u64, Ordering::Relaxed);
         }

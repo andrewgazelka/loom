@@ -44,7 +44,12 @@ pub trait HostKernel: Send + Sync {
     fn ops(&self) -> &[&'static str];
     /// Run `op` (without the family prefix) on `args`, the guest's gather list of
     /// buffers, in order. `Err` is delivered to the guest as a kernel error.
-    fn call(&self, context: &KernelContext<'_>, op: &str, args: &[&[u8]]) -> Result<Vec<u8>, String>;
+    fn call(
+        &self,
+        context: &KernelContext<'_>,
+        op: &str,
+        args: &[&[u8]],
+    ) -> Result<Vec<u8>, String>;
 }
 
 /// What a kernel may use of the runtime while it runs.
@@ -66,10 +71,12 @@ impl KernelContext<'_> {
 
 fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write;
-    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut out, byte| {
-        let _ = write!(out, "{byte:02x}");
-        out
-    })
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut out, byte| {
+            let _ = write!(out, "{byte:02x}");
+            out
+        })
 }
 
 fn unhex(text: &str) -> Option<Handle> {
@@ -128,7 +135,10 @@ impl Kernels {
             !family.is_empty() && family != "loom" && !family.contains('.'),
             "kernel family {family:?} is reserved or malformed"
         );
-        let _one_at_a_time = self.registering.lock().expect("kernel registration poisoned");
+        let _one_at_a_time = self
+            .registering
+            .lock()
+            .expect("kernel registration poisoned");
         let current = self.snapshot.load_full();
         anyhow::ensure!(
             !current.versions.contains_key(&family),
@@ -181,18 +191,28 @@ impl Runtime {
 
     /// How many kernel calls have failed on this runtime.
     pub(crate) fn kernel_failures(&self) -> u64 {
-        self.inner.kernels.failures.load(std::sync::atomic::Ordering::Relaxed)
+        self.inner
+            .kernels
+            .failures
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Note a failure that happened before a kernel ran (a denied permit, a bad call).
     pub(crate) fn note_kernel_failure(&self) {
-        self.inner.kernels.failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.inner
+            .kernels
+            .failures
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// [`Self::call_kernel`] on a blocking thread, at most one per core at a time.
     /// This is what the `loom.kernel` import uses: a kernel call cannot be interrupted,
     /// so it must not run on (or hold) a guest executor thread.
-    pub(crate) async fn call_kernel_blocking(&self, op: String, args: Vec<Vec<u8>>) -> Result<Vec<u8>, String> {
+    pub(crate) async fn call_kernel_blocking(
+        &self,
+        op: String,
+        args: Vec<Vec<u8>>,
+    ) -> Result<Vec<u8>, String> {
         let slot = self
             .inner
             .kernels

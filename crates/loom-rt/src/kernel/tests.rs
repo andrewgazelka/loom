@@ -11,10 +11,21 @@ impl HostKernel for Test {
     fn ops(&self) -> &[&'static str] {
         &["echo", "sum", "blob_len", "boom"]
     }
-    fn call(&self, context: &KernelContext<'_>, op: &str, args: &[&[u8]]) -> Result<Vec<u8>, String> {
+    fn call(
+        &self,
+        context: &KernelContext<'_>,
+        op: &str,
+        args: &[&[u8]],
+    ) -> Result<Vec<u8>, String> {
         match op {
             "echo" => Ok(args.concat()),
-            "sum" => Ok(args.iter().flat_map(|part| part.iter()).map(|b| *b as u64).sum::<u64>().to_le_bytes().to_vec()),
+            "sum" => Ok(args
+                .iter()
+                .flat_map(|part| part.iter())
+                .map(|b| *b as u64)
+                .sum::<u64>()
+                .to_le_bytes()
+                .to_vec()),
             "blob_len" => {
                 let handle: Handle = args
                     .first()
@@ -38,9 +49,20 @@ fn runtime() -> Runtime {
 #[test]
 fn a_registered_op_runs_on_its_gather_list_in_order() {
     let runtime = runtime();
-    assert_eq!(runtime.call_kernel("test.echo", &[b"ab", b"", b"cd"]).unwrap(), b"abcd");
     assert_eq!(
-        u64::from_le_bytes(runtime.call_kernel("test.sum", &[&[1, 2], &[3]]).unwrap().try_into().unwrap()),
+        runtime
+            .call_kernel("test.echo", &[b"ab", b"", b"cd"])
+            .unwrap(),
+        b"abcd"
+    );
+    assert_eq!(
+        u64::from_le_bytes(
+            runtime
+                .call_kernel("test.sum", &[&[1, 2], &[3]])
+                .unwrap()
+                .try_into()
+                .unwrap()
+        ),
         6
     );
 }
@@ -48,9 +70,19 @@ fn a_registered_op_runs_on_its_gather_list_in_order() {
 #[test]
 fn unknown_ops_errors_and_panics_reach_the_caller_as_errors_not_crashes() {
     let runtime = runtime();
-    assert!(runtime.call_kernel("test.nope", &[]).unwrap_err().contains("no kernel op"));
+    assert!(
+        runtime
+            .call_kernel("test.nope", &[])
+            .unwrap_err()
+            .contains("no kernel op")
+    );
     assert!(runtime.call_kernel("other.echo", &[]).is_err());
-    assert!(runtime.call_kernel("test.boom", &[]).unwrap_err().contains("panicked"));
+    assert!(
+        runtime
+            .call_kernel("test.boom", &[])
+            .unwrap_err()
+            .contains("panicked")
+    );
     // The runtime is intact after a kernel bug.
     assert!(runtime.call_kernel("test.echo", &[b"x"]).is_ok());
 }
@@ -59,25 +91,40 @@ fn unknown_ops_errors_and_panics_reach_the_caller_as_errors_not_crashes() {
 fn put_returns_the_content_hash_and_a_kernel_can_read_the_bytes_back_by_it() {
     let runtime = runtime();
     let bytes: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
-    let handle = runtime.call_kernel("loom.put", &[&bytes[..40_000], &bytes[40_000..]]).unwrap();
-    assert_eq!(handle, blake3::hash(&bytes).as_bytes().to_vec(), "the handle is the BLAKE3 hash of the bytes");
+    let handle = runtime
+        .call_kernel("loom.put", &[&bytes[..40_000], &bytes[40_000..]])
+        .unwrap();
+    assert_eq!(
+        handle,
+        blake3::hash(&bytes).as_bytes().to_vec(),
+        "the handle is the BLAKE3 hash of the bytes"
+    );
     // Storing the same bytes again names the same handle.
     assert_eq!(runtime.call_kernel("loom.put", &[&bytes]).unwrap(), handle);
     let length = runtime.call_kernel("test.blob_len", &[&handle]).unwrap();
     assert_eq!(u64::from_le_bytes(length.try_into().unwrap()), 100_000);
     // A hash this host never stored is an error, not a crash.
     let unknown = [9u8; 32];
-    assert!(runtime.call_kernel("test.blob_len", &[&unknown]).unwrap_err().contains("unknown handle"));
+    assert!(
+        runtime
+            .call_kernel("test.blob_len", &[&unknown])
+            .unwrap_err()
+            .contains("unknown handle")
+    );
 }
 
 #[test]
-fn registration_refuses_reserved_malformed_and_duplicate_families_and_versions_move_the_fingerprint() {
+fn registration_refuses_reserved_malformed_and_duplicate_families_and_versions_move_the_fingerprint()
+ {
     let runtime = Runtime::new(Store::memory().unwrap()).unwrap();
     let empty = runtime.kernel_fingerprint();
     runtime.register_kernel(Arc::new(Test)).unwrap();
     let with_test = runtime.kernel_fingerprint();
     assert_ne!(empty, with_test);
-    assert!(runtime.register_kernel(Arc::new(Test)).is_err(), "a family registers once");
+    assert!(
+        runtime.register_kernel(Arc::new(Test)).is_err(),
+        "a family registers once"
+    );
 
     struct Reserved(&'static str);
     impl HostKernel for Reserved {
@@ -95,9 +142,16 @@ fn registration_refuses_reserved_malformed_and_duplicate_families_and_versions_m
         }
     }
     for family in ["loom", "", "a.b"] {
-        assert!(runtime.register_kernel(Arc::new(Reserved(family))).is_err(), "{family:?}");
+        assert!(
+            runtime.register_kernel(Arc::new(Reserved(family))).is_err(),
+            "{family:?}"
+        );
     }
-    assert_eq!(runtime.kernel_fingerprint(), with_test, "refused registrations change nothing");
+    assert_eq!(
+        runtime.kernel_fingerprint(),
+        with_test,
+        "refused registrations change nothing"
+    );
 
     let bumped = Runtime::new(Store::memory().unwrap()).unwrap();
     struct V4;
@@ -116,19 +170,38 @@ fn registration_refuses_reserved_malformed_and_duplicate_families_and_versions_m
         }
     }
     bumped.register_kernel(Arc::new(V4)).unwrap();
-    assert_ne!(bumped.kernel_fingerprint(), with_test, "the same family at another version differs");
+    assert_ne!(
+        bumped.kernel_fingerprint(),
+        with_test,
+        "the same family at another version differs"
+    );
 }
 
 #[test]
 fn a_handle_names_only_what_put_stored_not_other_objects_in_the_store() {
     let runtime = runtime();
-    let other = runtime.inner.store.put("definition", b"secret source").unwrap();
+    let other = runtime
+        .inner
+        .store
+        .put("definition", b"secret source")
+        .unwrap();
     let handle = unhex(&other).unwrap();
-    let error = runtime.call_kernel("test.blob_len", &[&handle]).unwrap_err();
-    assert_eq!(error, "unknown handle", "an object of another kind looks like a missing one");
+    let error = runtime
+        .call_kernel("test.blob_len", &[&handle])
+        .unwrap_err();
+    assert_eq!(
+        error, "unknown handle",
+        "an object of another kind looks like a missing one"
+    );
     let put = runtime.call_kernel("loom.put", &[b"mesh bytes"]).unwrap();
     assert_eq!(
-        u64::from_le_bytes(runtime.call_kernel("test.blob_len", &[&put]).unwrap().try_into().unwrap()),
+        u64::from_le_bytes(
+            runtime
+                .call_kernel("test.blob_len", &[&put])
+                .unwrap()
+                .try_into()
+                .unwrap()
+        ),
         10
     );
 }
@@ -147,12 +220,18 @@ fn a_failed_call_moves_the_failure_counter_and_a_successful_one_does_not() {
 #[tokio::test]
 async fn blocking_calls_run_off_the_caller_thread_and_return_the_same_bytes() {
     let runtime = runtime();
-    let reply = runtime.call_kernel_blocking("test.echo".into(), vec![b"ab".to_vec(), b"cd".to_vec()]).await;
+    let reply = runtime
+        .call_kernel_blocking("test.echo".into(), vec![b"ab".to_vec(), b"cd".to_vec()])
+        .await;
     assert_eq!(reply.unwrap(), b"abcd");
     let many: Vec<_> = (0..64)
         .map(|i| {
             let runtime = runtime.clone();
-            tokio::spawn(async move { runtime.call_kernel_blocking("test.echo".into(), vec![vec![i as u8]]).await })
+            tokio::spawn(async move {
+                runtime
+                    .call_kernel_blocking("test.echo".into(), vec![vec![i as u8]])
+                    .await
+            })
         })
         .collect();
     for (i, task) in many.into_iter().enumerate() {

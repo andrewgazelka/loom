@@ -279,13 +279,26 @@ impl ExecutionTrace {
     /// Whether any effect was recorded at `scope` or below it. A call that
     /// recorded none did nothing but compute.
     pub fn has_effects_under(&self, scope: &str) -> bool {
+        // Entries sort by (scope, occurrence), so the scopes starting with `{scope}/` are one
+        // contiguous run and the entries at exactly `scope` are another: one seek for each, not a
+        // scan of the whole trace under the lock.
         let prefix = format!("{scope}/");
-        self.state
-            .lock()
-            .unwrap()
-            .entries
-            .keys()
-            .any(|key| key.scope == scope || key.scope.starts_with(&prefix))
+        let first_from = |state: &TraceState, start: &str| {
+            state
+                .entries
+                .range(
+                    TraceKey {
+                        scope: start.to_owned(),
+                        occurrence: i64::MIN,
+                    }..,
+                )
+                .next()
+                .map(|(key, _)| key.scope.clone())
+        };
+        let guard = self.state.lock().unwrap();
+        let state: &TraceState = &guard;
+        first_from(state, scope).is_some_and(|found| found == scope)
+            || first_from(state, &prefix).is_some_and(|found| found.starts_with(&prefix))
     }
     /// After all workers in an execution have drained, cancelled occurrences
     /// need no replay result. Successful and failed occurrences must be consumed.
@@ -625,6 +638,38 @@ mod tests {
         assert_eq!(event["outcome"]["status"], "cancelled");
         assert!(event["elapsed_ms"].is_u64(), "{event}");
         assert!(event["entry"].is_null(), "{event}");
+        Ok(())
+    }
+    #[test]
+    fn effects_under_a_scope_match_that_scope_and_its_children_only() -> Result<()> {
+        let trace = ExecutionTrace::fresh("root");
+        let desc = json!({"op":"random"});
+        for scope in [
+            "root/call:10",
+            "root/call:1/call:0",
+            "root-x/call:5",
+            "root/call:1-",
+        ] {
+            record(&trace, scope, 0, &desc, &EffectOutput::value(&Value::Null))?;
+        }
+        assert!(trace.has_effects_under("root/call:10"), "exact scope");
+        assert!(trace.has_effects_under("root/call:1"), "a child scope");
+        assert!(trace.has_effects_under("root"), "a deeper descendant");
+        assert!(trace.has_effects_under("root-x"));
+        assert!(
+            trace.has_effects_under("root/call:1-"),
+            "a sibling that sorts between"
+        );
+        assert!(!trace.has_effects_under("root/call:2"));
+        assert!(
+            !trace.has_effects_under("root/call:100"),
+            "a longer name is not a child"
+        );
+        assert!(
+            !trace.has_effects_under("root/cal"),
+            "a shorter prefix is not a scope"
+        );
+        assert!(!trace.has_effects_under("root/call:10/call:0"));
         Ok(())
     }
     #[test]

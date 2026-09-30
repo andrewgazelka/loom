@@ -29,8 +29,12 @@ pub(crate) fn read(cells: &[UnsafeCell<u8>], start: usize, length: usize) -> Res
         }
         while at + 32 <= length {
             for lane in 0..4 {
-                let word = AtomicU64::from_ptr(source.add(at + lane * 8).cast()).load(Ordering::Relaxed);
-                target.add(at + lane * 8).cast::<u64>().write_unaligned(word);
+                let word =
+                    AtomicU64::from_ptr(source.add(at + lane * 8).cast()).load(Ordering::Relaxed);
+                target
+                    .add(at + lane * 8)
+                    .cast::<u64>()
+                    .write_unaligned(word);
             }
             at += 32;
         }
@@ -68,7 +72,8 @@ pub(crate) fn write(cells: &[UnsafeCell<u8>], start: usize, bytes: &[u8]) -> Res
         while at + 32 <= length {
             for lane in 0..4 {
                 let word = source.add(at + lane * 8).cast::<u64>().read_unaligned();
-                AtomicU64::from_ptr(target.add(at + lane * 8).cast()).store(word, Ordering::Relaxed);
+                AtomicU64::from_ptr(target.add(at + lane * 8).cast())
+                    .store(word, Ordering::Relaxed);
             }
             at += 32;
         }
@@ -90,7 +95,9 @@ mod tests {
     use super::*;
 
     fn memory(size: usize) -> Vec<UnsafeCell<u8>> {
-        (0..size).map(|i| UnsafeCell::new((i * 7 + 3) as u8)).collect()
+        (0..size)
+            .map(|i| UnsafeCell::new((i * 7 + 3) as u8))
+            .collect()
     }
 
     #[test]
@@ -102,7 +109,10 @@ mod tests {
                 if start + length > 256 {
                     continue;
                 }
-                assert_eq!(read(&cells, start, length).unwrap(), plain[start..start + length]);
+                assert_eq!(
+                    read(&cells, start, length).unwrap(),
+                    plain[start..start + length]
+                );
             }
         }
         for start in 0..17 {
@@ -112,8 +122,16 @@ mod tests {
                 write(&cells, start, &source).unwrap();
                 let after = read(&cells, 0, 256).unwrap();
                 assert_eq!(&after[start..start + length], &source[..]);
-                assert_eq!(&after[..start], &plain[..start], "bytes before the write are untouched");
-                assert_eq!(&after[start + length..], &plain[start + length..], "bytes after too");
+                assert_eq!(
+                    &after[..start],
+                    &plain[..start],
+                    "bytes before the write are untouched"
+                );
+                assert_eq!(
+                    &after[start + length..],
+                    &plain[start + length..],
+                    "bytes after too"
+                );
             }
         }
     }

@@ -118,12 +118,7 @@ impl Runtime {
             .or_default()
             .clone();
         let compile_guard = compile_lock.lock().await;
-        let cached = self
-            .inner
-            .core_modules
-            .lock()
-            .unwrap()
-            .get(&artifact);
+        let cached = self.inner.core_modules.lock().unwrap().get(&artifact);
         let module_cached = cached.is_some();
         let module = if let Some(module) = cached {
             module

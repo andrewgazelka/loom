@@ -6,7 +6,7 @@ Status: host and guest half built (2026-09-30, commit 20ea501); guest-side consu
 
 Every host import in `crates/loom-rt/src/sharedcore/linker.rs` is an async host function (`func_wrap_async`), so a guest
 already suspends inside a host call and its thread is free while it waits (`perform`, `call`, `kernel`). A generator is
-that mechanism with a channel behind it: the guest calls a `loom.yield` import, the host hands the value to the consumer
+that mechanism with a channel behind it: the guest calls a `loom.yield_value` import, the host hands the value to the consumer
 and does not return to the guest until the consumer asks for the next one. No stack switching or new wasm feature is needed.
 
 ## Shape (as built)
@@ -15,10 +15,20 @@ and does not return to the guest until the consumer asks for the next one. No st
   room; `Err(StreamError::Cancelled)` means the consumer is gone and the entry should return. The entry's return value is
   the stream's result, delivered by `CallStream::finish`. A free function rather than a `Yield` parameter, so entries keep
   the one ABI (arguments decoded from the entry's own parameter types).
-* Host: `Runtime::call_stream(hash, entry, args) -> CallStream` with `next()`, `next_bytes()` and `finish()`. The channel
-  holds 4 values; a full channel suspends the guest inside `loom.yield_value` (its execution slot is released meanwhile).
-  Dropping the `CallStream` closes the channel and aborts the task. Yield codes: 0 accepted, 1 consumer gone, 2 not started
-  as a stream (a plain `call_def` of the same entry works and yields nothing), 3 `yield` not allowed by the row.
+* Host: `Runtime::call_stream(hash, entry, args) -> Result<CallStream>` (an error outside a tokio runtime, not a panic)
+  with `next()`, `next_bytes()` and `finish()`; `CallStream` is re-exported from the crate root. The channel holds 4 values;
+  a full channel suspends the guest inside `loom.yield_value` (its execution slot is released meanwhile). Dropping the
+  `CallStream` closes the channel and aborts the task; it is the way to stop a stream early. `finish()` does not cancel: it
+  reads and discards what is left and waits for the entry to return, so it gives the entry's real result, and on a long
+  generator it waits as long as the entry runs. A dropped `finish()` future drops the stream, which aborts the task.
+  Yield codes: 0 accepted, 1 consumer gone (or the execution was cancelled or hit its deadline while parked), 2 not started
+  as a stream (a plain `call_def` of the same entry works and yields nothing), 3 `yield` not allowed by the row, 4 the item
+  is larger than 16 MiB and was refused unqueued (SDK: `StreamError::TooLarge`; an unknown code is `StreamError::Unknown`).
+* Limits. The queue is bounded in items (4) and bytes (4 x 16 MiB at most), so a stalled consumer pins at most 64 MiB plus
+  the producer's own memory. The whole stream is one execution and runs under the 30 s `EXECUTION_SECONDS` deadline
+  (`sharedcore.rs`), waits for a slow consumer included: a producer parked on a full channel is woken at the deadline or on
+  cancellation and its call traps, so a consumer that holds a `CallStream` without polling cannot keep the instance past
+  30 s. A stream that must outlive that has to be split into several calls (resumable entries are not built).
 * Only the stream root yields: `EffectContext::delegated` clears the sink, so an isolated callee never yields into its caller.
 * Effect label: the fixed label `yield` (driver: `stream::emit`), so a yielding callee is never result-cached and its callers must
   allow `yield`.
@@ -45,5 +55,5 @@ blob, the stream is `[item hashes]`. Consequences:
 
 ## Order of work
 
-`loom.yield` import + `Yield` in the guest SDK + `Runtime::call_stream` (bounded channel, cancel on drop) with a wat-guest
+`loom.yield_value` import + `Yield` in the guest SDK + `Runtime::call_stream` (bounded channel, cancel on drop) with a wat-guest
 test; then the Merkle-list result cache entry; then the guest-side `isolated::stream`; then the HTTP streaming form.

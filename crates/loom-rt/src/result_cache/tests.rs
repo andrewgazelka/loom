@@ -19,7 +19,10 @@ fn a_result_is_found_by_callee_entry_arity_and_arguments_only() {
         assert!(cache.get(callee, entry, argc, payload, &K).is_none());
     }
     let stats = cache.stats();
-    assert_eq!((stats.hits, stats.misses, stats.stores, stats.entries), (1, 5, 1, 1));
+    assert_eq!(
+        (stats.hits, stats.misses, stats.stores, stats.entries),
+        (1, 5, 1, 1)
+    );
     assert_eq!(stats.saved_ns, MS);
 }
 
@@ -39,7 +42,10 @@ fn a_computation_cheaper_than_a_lookup_is_not_stored() {
     assert_eq!((stats.skipped_cheap, stats.stores), (1, 1));
     let by = cache.by_callee();
     let cheap = by.iter().find(|(name, _)| name == "cheap").unwrap();
-    assert_eq!((cheap.1.computed, cheap.1.skipped_cheap, cheap.1.stored), (1, 1, 0));
+    assert_eq!(
+        (cheap.1.computed, cheap.1.skipped_cheap, cheap.1.stored),
+        (1, 1, 0)
+    );
 }
 
 #[test]
@@ -50,8 +56,14 @@ fn eviction_drops_the_result_worth_least_per_byte() {
     cache.put("f", "main", 0, &payload(1), &K, &[0; 400], 20 * MS); // 50,000 ns per byte
     cache.put("f", "main", 0, &payload(2), &K, &[0; 400], MS / 5); // 500 ns per byte
     cache.put("f", "main", 0, &payload(3), &K, &[0; 400], 10 * MS); // forces one out
-    assert!(cache.get("f", "main", 0, &payload(1), &K).is_some(), "the 20 ms result stays");
-    assert!(cache.get("f", "main", 0, &payload(2), &K).is_none(), "the 0.2 ms result goes");
+    assert!(
+        cache.get("f", "main", 0, &payload(1), &K).is_some(),
+        "the 20 ms result stays"
+    );
+    assert!(
+        cache.get("f", "main", 0, &payload(2), &K).is_none(),
+        "the 0.2 ms result goes"
+    );
     assert!(cache.get("f", "main", 0, &payload(3), &K).is_some());
     assert_eq!(cache.stats().evictions, 1);
     assert!(cache.stats().bytes <= 900);
@@ -67,7 +79,10 @@ fn an_entry_that_keeps_hitting_outlives_a_costlier_one_that_never_does() {
         assert!(cache.get("f", "main", 0, &payload(1), &K).is_some());
     }
     cache.put("f", "main", 0, &payload(3), &K, &[0; 400], 2 * MS);
-    assert!(cache.get("f", "main", 0, &payload(1), &K).is_some(), "eight hits outweigh a 4x cost");
+    assert!(
+        cache.get("f", "main", 0, &payload(1), &K).is_some(),
+        "eight hits outweigh a 4x cost"
+    );
     assert!(cache.get("f", "main", 0, &payload(2), &K).is_none());
 }
 
@@ -88,7 +103,15 @@ fn clearing_one_callee_leaves_the_others_and_clearing_all_empties() {
 #[test]
 fn an_oversized_result_is_not_kept() {
     let cache = ResultCache::default();
-    cache.put("f", "main", 0, b"big", &K, &vec![0; MAX_RESULT_BYTES + 1], 10_000 * MS);
+    cache.put(
+        "f",
+        "main",
+        0,
+        b"big",
+        &K,
+        &vec![0; MAX_RESULT_BYTES + 1],
+        10_000 * MS,
+    );
     assert_eq!(cache.stats().entries, 0);
 }
 
@@ -102,7 +125,12 @@ struct Lru {
 
 impl Lru {
     fn new(max: usize, skip_cheap: bool) -> Self {
-        Self { map: lru::LruCache::new(NonZeroUsize::new(1 << 20).unwrap()), bytes: 0, max, skip_cheap }
+        Self {
+            map: lru::LruCache::new(NonZeroUsize::new(1 << 20).unwrap()),
+            bytes: 0,
+            max,
+            skip_cheap,
+        }
     }
     fn get(&mut self, key: u32) -> bool {
         self.map.get(&key).is_some()
@@ -112,7 +140,9 @@ impl Lru {
             return;
         }
         while self.bytes + size > self.max {
-            let Some((_, old)) = self.map.pop_lru() else { break };
+            let Some((_, old)) = self.map.pop_lru() else {
+                break;
+            };
             self.bytes -= old;
         }
         self.map.put(key, size);
@@ -163,7 +193,10 @@ fn cost_aware_eviction_saves_more_compute_than_lru_at_the_same_memory() {
     let payload = |k: u32| k.to_le_bytes();
 
     let mut report = Vec::new();
-    for (name, skip_cheap) in [("LRU, stores everything", false), ("LRU, skips cheap", true)] {
+    for (name, skip_cheap) in [
+        ("LRU, stores everything", false),
+        ("LRU, skips cheap", true),
+    ] {
         let mut cache = Lru::new(budget, skip_cheap);
         let (mut hits, mut saved) = (0u64, 0u64);
         for &k in &requests {
@@ -192,7 +225,12 @@ fn cost_aware_eviction_saves_more_compute_than_lru_at_the_same_memory() {
     }
     report.push(("GDSF, skips cheap", hits, saved));
 
-    println!("workload: {KEYS} distinct calls, {} requests, {} MB cache, {:.1} s of compute if nothing is cached", requests.len(), budget >> 20, never_cached as f64 / 1e9);
+    println!(
+        "workload: {KEYS} distinct calls, {} requests, {} MB cache, {:.1} s of compute if nothing is cached",
+        requests.len(),
+        budget >> 20,
+        never_cached as f64 / 1e9
+    );
     for (name, hits, saved) in &report {
         println!(
             "{name:26} hit rate {:5.1}%   compute saved {:5.1}%  ({:.2} s)",
@@ -233,7 +271,14 @@ fn results_survive_a_restart() {
     assert_eq!(second.get("g", "main", 0, b"y", &K).unwrap(), b"43");
     assert!(second.get("f", "main", 1, b"other", &K).is_none());
     let stats = second.stats();
-    assert_eq!((stats.loaded_at_start, stats.persisted_entries, stats.entries), (2, 2, 2));
+    assert_eq!(
+        (
+            stats.loaded_at_start,
+            stats.persisted_entries,
+            stats.entries
+        ),
+        (2, 2, 2)
+    );
     assert_eq!(stats.bytes, 4);
     // A hit on a loaded result saves what its computation cost the first time.
     assert_eq!(stats.saved_ns, 2 * MS);
@@ -245,7 +290,14 @@ fn a_cache_without_a_directory_stays_in_memory() {
     cache.put("f", "main", 0, b"x", &K, b"1", MS);
     cache.flush_persisted();
     let stats = cache.stats();
-    assert_eq!((stats.entries, stats.persisted_entries, stats.loaded_at_start), (1, 0, 0));
+    assert_eq!(
+        (
+            stats.entries,
+            stats.persisted_entries,
+            stats.loaded_at_start
+        ),
+        (1, 0, 0)
+    );
 }
 
 #[test]
@@ -260,11 +312,17 @@ fn eviction_removes_the_persisted_row() {
     cache.put("f", "main", 0, &payload(3), &K, &[0; 400], 10 * MS); // evicts payload 2
     cache.flush_persisted();
     let stats = cache.stats();
-    assert_eq!((stats.evictions, stats.entries, stats.persisted_entries), (1, 2, 2));
+    assert_eq!(
+        (stats.evictions, stats.entries, stats.persisted_entries),
+        (1, 2, 2)
+    );
     drop(cache);
     let again = reopen(&dir, 900);
     assert!(again.get("f", "main", 0, &payload(1), &K).is_some());
-    assert!(again.get("f", "main", 0, &payload(2), &K).is_none(), "the evicted result does not return");
+    assert!(
+        again.get("f", "main", 0, &payload(2), &K).is_none(),
+        "the evicted result does not return"
+    );
     assert!(again.get("f", "main", 0, &payload(3), &K).is_some());
 }
 
@@ -285,19 +343,33 @@ fn clearing_removes_persisted_rows_including_ones_not_in_memory() {
     assert_eq!(second.clear(None), 1);
     drop(second);
     let third = reopen(&dir, MAX_BYTES);
-    assert_eq!((third.stats().entries, third.stats().loaded_at_start), (0, 0));
+    assert_eq!(
+        (third.stats().entries, third.stats().loaded_at_start),
+        (0, 0)
+    );
 }
 
 #[test]
 fn a_corrupt_file_is_replaced_and_the_cache_starts_empty() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("cache.db"), b"this is not a sqlite database, at all").unwrap();
+    std::fs::write(
+        dir.path().join("cache.db"),
+        b"this is not a sqlite database, at all",
+    )
+    .unwrap();
     let cache = reopen(&dir, MAX_BYTES);
-    assert_eq!((cache.stats().entries, cache.stats().loaded_at_start), (0, 0));
+    assert_eq!(
+        (cache.stats().entries, cache.stats().loaded_at_start),
+        (0, 0)
+    );
     cache.put("f", "main", 0, b"a", &K, b"1", MS);
     drop(cache);
     let again = reopen(&dir, MAX_BYTES);
-    assert_eq!(again.get("f", "main", 0, b"a", &K).unwrap(), b"1", "the replacement file works");
+    assert_eq!(
+        again.get("f", "main", 0, b"a", &K).unwrap(),
+        b"1",
+        "the replacement file works"
+    );
 }
 
 #[test]
@@ -352,12 +424,22 @@ fn a_smaller_cache_keeps_the_rows_worth_most_per_byte_and_trims_the_rest() {
     cache.put("f", "main", 0, &payload(2), &K, &[0; 400], 20 * MS); // 50,000 ns per byte
     drop(cache);
     let small = reopen(&dir, 500);
-    assert_eq!((small.stats().loaded_at_start, small.stats().persisted_entries), (1, 1));
+    assert_eq!(
+        (
+            small.stats().loaded_at_start,
+            small.stats().persisted_entries
+        ),
+        (1, 1)
+    );
     assert!(small.get("f", "main", 0, &payload(2), &K).is_some());
     assert!(small.get("f", "main", 0, &payload(1), &K).is_none());
     drop(small);
     let big = reopen(&dir, MAX_BYTES);
-    assert_eq!(big.stats().loaded_at_start, 1, "the trimmed row is gone from the file");
+    assert_eq!(
+        big.stats().loaded_at_start,
+        1,
+        "the trimmed row is gone from the file"
+    );
 }
 
 #[test]
@@ -372,6 +454,174 @@ fn hits_are_written_in_the_batch_and_change_what_a_smaller_cache_keeps() {
     }
     drop(cache); // pending hit bumps are written on shutdown
     let small = reopen(&dir, 500);
-    assert!(small.get("f", "main", 0, &payload(1), &K).is_some(), "nine hits outweigh a 4x cost");
+    assert!(
+        small.get("f", "main", 0, &payload(1), &K).is_some(),
+        "nine hits outweigh a 4x cost"
+    );
     assert!(small.get("f", "main", 0, &payload(2), &K).is_none());
+}
+
+fn rows_in_file(dir: &tempfile::TempDir) -> i64 {
+    rusqlite::Connection::open(dir.path().join("cache.db"))
+        .unwrap()
+        .query_row("SELECT count(*) FROM results", [], |row| row.get(0))
+        .unwrap()
+}
+
+#[test]
+fn another_host_identity_is_another_key_and_its_rows_are_dropped_at_load() {
+    let (a, b) = ([1u8; 32], [2u8; 32]);
+    assert_ne!(
+        key(&a, "f", "main", 0, b"x", &K).digest,
+        key(&b, "f", "main", 0, b"x", &K).digest,
+        "a rebuilt host must not match a previous build's key"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let first = ResultCache::persistent_as(MAX_BYTES, dir.path(), a);
+    first.put("f", "main", 0, b"x", &K, b"42", MS);
+    drop(first);
+    assert_eq!(rows_in_file(&dir), 1);
+    let same = ResultCache::persistent_as(MAX_BYTES, dir.path(), a);
+    assert_eq!(same.get("f", "main", 0, b"x", &K).unwrap(), b"42");
+    drop(same);
+    let other = ResultCache::persistent_as(MAX_BYTES, dir.path(), b);
+    assert_eq!(other.stats().loaded_at_start, 0);
+    assert!(other.get("f", "main", 0, b"x", &K).is_none());
+    drop(other);
+    assert_eq!(
+        rows_in_file(&dir),
+        0,
+        "the other build's row was deleted at load"
+    );
+}
+
+#[test]
+fn a_value_that_does_not_match_its_checksum_is_dropped_at_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = reopen(&dir, MAX_BYTES);
+    cache.put("f", "main", 0, b"a", &K, b"42", MS);
+    cache.put("g", "main", 0, b"a", &K, b"43", MS);
+    drop(cache);
+    // Same length, other bytes: the size check alone would accept it.
+    rusqlite::Connection::open(dir.path().join("cache.db"))
+        .unwrap()
+        .execute("UPDATE results SET value = x'3434' WHERE callee = 'f'", [])
+        .unwrap();
+    let again = reopen(&dir, MAX_BYTES);
+    assert_eq!(again.stats().loaded_at_start, 1);
+    assert!(again.get("f", "main", 0, b"a", &K).is_none());
+    assert_eq!(again.get("g", "main", 0, b"a", &K).unwrap(), b"43");
+    drop(again);
+    assert_eq!(rows_in_file(&dir), 1, "the damaged row was deleted");
+}
+
+#[test]
+fn a_clear_that_fails_is_retried_before_anything_else() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = reopen(&dir, MAX_BYTES);
+    cache.put("f", "main", 0, b"a", &K, b"1", MS);
+    cache.put("g", "main", 0, b"a", &K, b"2", MS);
+    cache.flush_persisted();
+    assert_eq!(cache.stats().persisted_entries, 2);
+    // Another connection makes every delete fail, as a full disk or a lock would.
+    let db = rusqlite::Connection::open(dir.path().join("cache.db")).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER refuse BEFORE DELETE ON results BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+    )
+    .unwrap();
+    assert_eq!(cache.clear(None), 2);
+    cache.flush_persisted();
+    assert_eq!(
+        cache.stats().persisted_entries,
+        2,
+        "the failed clear changed nothing on disk"
+    );
+    db.execute_batch("DROP TRIGGER refuse").unwrap();
+    cache.flush_persisted(); // the writer retries the clear with this batch
+    assert_eq!(cache.stats().persisted_entries, 0);
+    drop(cache);
+    drop(db);
+    let again = reopen(&dir, MAX_BYTES);
+    assert_eq!(
+        (again.stats().entries, again.stats().loaded_at_start),
+        (0, 0)
+    );
+}
+
+#[test]
+fn queued_values_are_bounded_by_bytes_and_released_once_written() {
+    let budget = persist::ByteBudget::new(10);
+    assert!(budget.reserve(6));
+    assert!(
+        !budget.reserve(5),
+        "a store that would pass the limit is refused"
+    );
+    assert_eq!(budget.used(), 6);
+    budget.release(6);
+    assert!(budget.reserve(10));
+    assert!(!budget.reserve(1));
+
+    let dir = tempfile::tempdir().unwrap();
+    let cache = reopen(&dir, MAX_BYTES);
+    let value = vec![5u8; 256 << 10];
+    for n in 0..8u8 {
+        cache.put("f", "main", 0, &[n], &K, &value, 1_000 * MS);
+    }
+    cache.flush_persisted();
+    let queued = cache.persist.as_ref().unwrap().queued_bytes();
+    assert_eq!(queued, 0, "the writer released what it wrote");
+    assert_eq!(cache.stats().persisted_entries, 8);
+}
+
+#[test]
+fn only_corruption_and_format_mismatch_justify_deleting_the_file() {
+    let failure = |code| {
+        anyhow::Error::new(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(code),
+            None,
+        ))
+        .context("pragmas")
+    };
+    assert!(persist::is_corrupt(&failure(rusqlite::ffi::SQLITE_CORRUPT)));
+    assert!(persist::is_corrupt(&failure(rusqlite::ffi::SQLITE_NOTADB)));
+    for code in [
+        rusqlite::ffi::SQLITE_BUSY,
+        rusqlite::ffi::SQLITE_LOCKED,
+        rusqlite::ffi::SQLITE_CANTOPEN,
+        rusqlite::ffi::SQLITE_FULL,
+        rusqlite::ffi::SQLITE_IOERR,
+        rusqlite::ffi::SQLITE_READONLY,
+    ] {
+        assert!(
+            !persist::is_corrupt(&failure(code)),
+            "code {code} must leave the file alone"
+        );
+    }
+    assert!(!persist::is_corrupt(&anyhow::anyhow!("something else")));
+}
+
+#[test]
+fn callee_statistics_are_capped_and_keep_the_callees_that_saved_most() {
+    let cache = ResultCache::default();
+    cache.put("hot", "main", 0, b"a", &K, b"1", MS);
+    for _ in 0..3 {
+        assert!(cache.get("hot", "main", 0, b"a", &K).is_some());
+    }
+    for n in 0..MAX_CALLEES + 100 {
+        cache.put(&format!("callee-{n}"), "main", 0, b"a", &K, b"1", MS);
+    }
+    assert!(cache.inner.lock().unwrap().callees.len() <= MAX_CALLEES);
+    let top = cache.by_callee();
+    assert_eq!(top.len(), TOP_CALLEES);
+    assert_eq!(top[0].0, "hot");
+    assert_eq!(top[0].1.saved_ns, 3 * MS);
+    assert!(
+        top.windows(2)
+            .all(|pair| pair[0].1.saved_ns >= pair[1].1.saved_ns)
+    );
+    assert_eq!(
+        cache.stats().saved_ns,
+        3 * MS,
+        "the total does not depend on which callees are kept"
+    );
 }

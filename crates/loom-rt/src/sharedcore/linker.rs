@@ -135,7 +135,10 @@ pub(super) fn linker(
         .map_err(error)?;
     // A value from a generator (`stream.rs`). The value goes into the consumer's bounded channel;
     // the guest resumes once it is accepted. Result: 0 accepted, 1 the consumer is gone (the guest
-    // should stop), 2 this execution is not a stream, 3 the `yield` effect is not allowed here.
+    // should stop), 2 this execution is not a stream, 3 the `yield` effect is not allowed here,
+    // 4 the value is larger than `stream::MAX_ITEM_BYTES` (refused, not queued). A guest parked on
+    // a full channel is woken by cancellation and by the execution deadline, like every other wait
+    // in this file, so a consumer that holds its stream without reading cannot pin the instance.
     linker
         .func_wrap_async(
             "loom",
@@ -144,19 +147,38 @@ pub(super) fn linker(
                 Box::new(async move {
                     let result: Result<i32> = async {
                         let execution = caller.data().execution.clone();
-                        anyhow::ensure!(!execution.pure, "yield is forbidden in pure core execution");
+                        anyhow::ensure!(
+                            !execution.pure,
+                            "yield is forbidden in pure core execution"
+                        );
                         if !execution.effects.permits("yield") {
                             return Ok(3);
                         }
                         let Some(sink) = execution.stream.clone() else {
                             return Ok(2);
                         };
+                        if length as u32 as usize > crate::stream::MAX_ITEM_BYTES {
+                            return Ok(4);
+                        }
                         let bytes = copy_out(&execution.memory, pointer as u32, length as u32)?;
+                        let cancelled = execution.cancellation.notified();
+                        execution.check()?;
                         // A full channel makes the guest wait; give its execution slot back meanwhile.
                         caller.data_mut().permit.take();
-                        let sent = sink.send(bytes).await;
+                        let sent = tokio::select! {
+                            sent = sink.send(bytes) => Some(sent.is_ok()),
+                            _ = cancelled => None,
+                            _ = tokio::time::sleep_until(execution.deadline.into()) => None,
+                        };
                         caller.data_mut().permit = Some(execution.permit().await?);
-                        Ok(if sent.is_ok() { 0 } else { 1 })
+                        Ok(match sent {
+                            Some(true) => 0,
+                            Some(false) => 1,
+                            None => {
+                                execution.check()?;
+                                1
+                            }
+                        })
                     }
                     .await;
                     result.map_err(host_error)
@@ -194,6 +216,13 @@ pub(super) fn linker(
                             .await;
                         caller.data_mut().permit.take();
                         caller.data_mut().permit = Some(execution.permit().await?);
+                        // As `loom.call`: a failed call is the last effect error a later trap
+                        // reports; the last one in batch order stands for the batch.
+                        caller.data_mut().last_effect_error = outcomes
+                            .iter()
+                            .rev()
+                            .find_map(|outcome| outcome.as_ref().err())
+                            .map(|error| error.to_string());
                         let responses: Vec<Vec<u8>> = outcomes
                             .iter()
                             .map(|outcome| {
@@ -228,18 +257,28 @@ pub(super) fn linker(
         .func_wrap_async(
             "loom",
             "kernel",
-            |mut caller: Caller<'_, Guest>, (op_ptr, op_len, iov_ptr, count): (i32, i32, i32, i32)| {
+            |mut caller: Caller<'_, Guest>,
+             (op_ptr, op_len, iov_ptr, count): (i32, i32, i32, i32)| {
                 Box::new(async move {
                     let result: Result<i64> = async {
                         let execution = caller.data().execution.clone();
                         let prepared: Result<(String, Vec<Vec<u8>>), String> = (|| {
-                            anyhow::ensure!(!execution.pure, "kernel calls are forbidden in pure core execution");
+                            anyhow::ensure!(
+                                !execution.pure,
+                                "kernel calls are forbidden in pure core execution"
+                            );
                             anyhow::ensure!(
                                 execution.effects.permits("kernel"),
                                 "the kernel effect is not allowed here"
                             );
-                            anyhow::ensure!((0..=64).contains(&count), "kernel call with {count} buffers");
-                            anyhow::ensure!((0..=256).contains(&op_len), "kernel op name of {op_len} bytes");
+                            anyhow::ensure!(
+                                (0..=64).contains(&count),
+                                "kernel call with {count} buffers"
+                            );
+                            anyhow::ensure!(
+                                (0..=256).contains(&op_len),
+                                "kernel op name of {op_len} bytes"
+                            );
                             let op = crate::shared_copy::read(
                                 execution.memory.data(),
                                 op_ptr as u32 as usize,
@@ -255,9 +294,13 @@ pub(super) fn linker(
                             let mut total = 0usize;
                             for pair in table.chunks_exact(8) {
                                 let pointer = u32::from_le_bytes(pair[..4].try_into().unwrap());
-                                let length = u32::from_le_bytes(pair[4..].try_into().unwrap()) as usize;
+                                let length =
+                                    u32::from_le_bytes(pair[4..].try_into().unwrap()) as usize;
                                 total += length;
-                                anyhow::ensure!(total <= KERNEL_MAX_BYTES, "kernel arguments exceed {KERNEL_MAX_BYTES} bytes");
+                                anyhow::ensure!(
+                                    total <= KERNEL_MAX_BYTES,
+                                    "kernel arguments exceed {KERNEL_MAX_BYTES} bytes"
+                                );
                                 buffers.push(crate::shared_copy::read(
                                     execution.memory.data(),
                                     pointer as usize,
@@ -265,20 +308,22 @@ pub(super) fn linker(
                                 )?);
                             }
                             Ok((op, buffers))
-                        })()
+                        })(
+                        )
                         .map_err(|error: anyhow::Error| format!("{error:#}"));
                         let outcome: Result<Vec<u8>, String> = match prepared {
-                            Ok((op, buffers)) => execution.runtime.call_kernel_blocking(op, buffers).await,
+                            Ok((op, buffers)) => {
+                                execution.runtime.call_kernel_blocking(op, buffers).await
+                            }
                             Err(message) => {
                                 execution.runtime.note_kernel_failure();
                                 Err(message)
                             }
                         };
-                        execution
-                            .runtime
-                            .inner
-                            .effect_wire_bytes
-                            .fetch_add(outcome.as_ref().map_or(0, |bytes| bytes.len() as u64), Ordering::Relaxed);
+                        execution.runtime.inner.effect_wire_bytes.fetch_add(
+                            outcome.as_ref().map_or(0, |bytes| bytes.len() as u64),
+                            Ordering::Relaxed,
+                        );
                         let (tag, bytes) = match outcome {
                             Ok(bytes) => (0u8, bytes),
                             Err(message) => (1u8, message.into_bytes()),

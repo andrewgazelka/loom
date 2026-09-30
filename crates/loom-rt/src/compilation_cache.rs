@@ -2,7 +2,11 @@
 use anyhow::{Context, Result, ensure};
 use loom_store::Store;
 use rusqlite::{OptionalExtension, params};
-use std::{borrow::Cow, collections::HashMap, sync::{Arc, Mutex}};
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 use wasmtime::{CacheStore, Config};
 
 /// Candidate hits count CAS reads; Cranelift can still reject a serialized value.
@@ -181,10 +185,15 @@ impl LoomCompilationCache {
     }
 
     fn read_blob(&self, hash: &str) -> Result<Vec<u8>> {
-        let bytes = self
-            .store
-            .get(hash)?
-            .ok_or_else(|| CacheFailure::Missing(hash.into()))?;
+        // The store verifies what it reads; its integrity failure is this cache's corrupt-blob
+        // diagnostic, distinct from a blob that is missing.
+        let bytes = match self.store.get(hash) {
+            Ok(bytes) => bytes.ok_or_else(|| CacheFailure::Missing(hash.into()))?,
+            Err(error) if format!("{error:#}").contains("content hash mismatch") => {
+                return Err(CacheFailure::Corrupt(hash.into()).into());
+            }
+            Err(error) => return Err(error),
+        };
         if blake3::hash(&bytes).to_hex().as_str() != hash {
             return Err(CacheFailure::Corrupt(hash.into()).into());
         }

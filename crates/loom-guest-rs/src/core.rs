@@ -91,7 +91,9 @@ pub(crate) fn yield_value(bytes: &[u8]) -> Result<(), crate::stream::StreamError
             0 => Ok(()),
             1 => Err(crate::stream::StreamError::Cancelled),
             2 => Err(crate::stream::StreamError::NotStreaming),
-            _ => Err(crate::stream::StreamError::Denied),
+            3 => Err(crate::stream::StreamError::Denied),
+            4 => Err(crate::stream::StreamError::TooLarge),
+            other => Err(crate::stream::StreamError::Unknown(other)),
         }
     }
     #[cfg(not(target_arch = "wasm32"))]

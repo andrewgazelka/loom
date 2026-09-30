@@ -298,7 +298,8 @@ pub fn decode_payload<T: DeserializeOwned>(payload: &[u8]) -> Result<T, CallErro
     Ok(value)
 }
 
-/// Most calls in one `call_many` batch.
+/// Most calls in one `call_many` batch. The host refuses a larger batch (a protocol violation that
+/// traps the execution); the guest SDK's `call_map` splits longer inputs into batches of this size.
 pub const MAX_BATCH: usize = 4096;
 
 /// `[count u32 LE]` then each frame as `[len u32 LE][bytes]`. The same shape carries a batch

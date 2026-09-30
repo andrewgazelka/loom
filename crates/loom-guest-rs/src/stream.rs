@@ -27,6 +27,11 @@ pub enum StreamError {
     Denied,
     /// The value could not be encoded.
     Encode,
+    /// The encoded value is larger than the host accepts for one item (16 MiB); it was not sent.
+    /// Split it into several items, or store it and send a handle.
+    TooLarge,
+    /// The host answered with a yield code this SDK does not know: an SDK older than its host.
+    Unknown(i32),
 }
 
 impl std::fmt::Display for StreamError {
@@ -36,6 +41,8 @@ impl std::fmt::Display for StreamError {
             Self::NotStreaming => "this execution was not started as a stream",
             Self::Denied => "the yield effect is not allowed here",
             Self::Encode => "the value could not be encoded",
+            Self::TooLarge => "the value is larger than one stream item may be",
+            Self::Unknown(_) => "the host answered the yield with an unknown code",
         })
     }
 }
