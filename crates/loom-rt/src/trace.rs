@@ -276,6 +276,17 @@ impl ExecutionTrace {
             finished: false,
         }))
     }
+    /// Whether any effect was recorded at `scope` or below it. A call that
+    /// recorded none did nothing but compute.
+    pub fn has_effects_under(&self, scope: &str) -> bool {
+        let prefix = format!("{scope}/");
+        self.state
+            .lock()
+            .unwrap()
+            .entries
+            .keys()
+            .any(|key| key.scope == scope || key.scope.starts_with(&prefix))
+    }
     /// After all workers in an execution have drained, cancelled occurrences
     /// need no replay result. Successful and failed occurrences must be consumed.
     pub fn finish_scope(&self, scope: &str) {

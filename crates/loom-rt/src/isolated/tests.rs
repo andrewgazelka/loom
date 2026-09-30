@@ -365,3 +365,106 @@ async fn isolated_call_payload_benchmark() -> Result<()> {
     );
     Ok(())
 }
+
+/// A core module whose `main` returns a fixed success frame and touches nothing.
+fn constant_module(result: u8) -> Result<Vec<u8>> {
+    let mut artifact = wat::parse_str(format!(
+        r#"(module
+        (import "env" "memory" (memory 1 1 shared))
+        (global (export "__stack_pointer") (mut i32) (i32.const 65536))
+        (global (export "__loom_stack_low") (mut i32) (i32.const 32768))
+        (global (export "__loom_stack_high") (mut i32) (i32.const 65536))
+        (func (export "loom_alloc") (param i32 i32) (result i32) i32.const 8192)
+        (func (export "loom_dealloc") (param i32 i32 i32))
+        (data (i32.const 1024) "\00\{result:02x}")
+        (func (export "loom_call_main") (param i32 i32) (result i64)
+            i64.const 2 i64.const 32 i64.shl i64.const 1024 i64.or)
+    )"#
+    ))?;
+    loom_proto::core_protocol::stamp(&mut artifact);
+    Ok(artifact)
+}
+
+fn traced() -> EffectContext {
+    EffectContext {
+        trace: Some(trace::ExecutionTrace::fresh("root")),
+        ..EffectContext::default()
+    }
+}
+
+async fn call_main(
+    runtime: &Runtime,
+    hash: &str,
+    payload: &[u8],
+    occurrence: i64,
+    effects: &EffectContext,
+) -> Result<Vec<u8>, CallError> {
+    runtime
+        .isolated_call(
+            Request {
+                target: Target::Hash(loom_proto::isolated::parse_digest(hash).unwrap()),
+                entry: "main",
+                argc: 0,
+                payload,
+            },
+            "root",
+            occurrence,
+            effects,
+        )
+        .await
+}
+
+#[tokio::test]
+async fn a_pure_callee_runs_once_per_arguments_and_the_cache_answers_the_rest() -> Result<()> {
+    let store = Store::memory()?;
+    let pure = register(&store, &constant_module(7)?, &[("main", 0)], &[])?;
+    let runtime = Runtime::new(store)?;
+    let effects = traced();
+
+    let first = call_main(&runtime, &pure, &[0x80], 0, &effects).await.unwrap();
+    assert_eq!(runtime.call_result_stats().stores, 1);
+    let second = call_main(&runtime, &pure, &[0x80], 1, &effects).await.unwrap();
+    assert_eq!(first, second);
+    let stats = runtime.call_result_stats();
+    assert_eq!((stats.hits, stats.stores, stats.entries), (1, 1, 1));
+
+    // Different arguments are a different call: a miss, then its own entry.
+    call_main(&runtime, &pure, &[0x81], 2, &effects).await.unwrap();
+    assert_eq!(runtime.call_result_stats().entries, 2);
+
+    // Dropping the callee's results makes the next identical call run again.
+    assert_eq!(runtime.clear_call_results(Some(&pure)), 2);
+    call_main(&runtime, &pure, &[0x80], 3, &effects).await.unwrap();
+    assert_eq!(runtime.call_result_stats().stores, 3);
+    Ok(())
+}
+
+#[tokio::test]
+async fn nothing_is_cached_without_a_trace_or_for_a_callee_with_effects() -> Result<()> {
+    let store = Store::memory()?;
+    let pure = register(&store, &constant_module(7)?, &[("main", 0)], &[])?;
+    let effectful = register(&store, &constant_module(8)?, &[("main", 0)], &["now"])?;
+    let runtime = Runtime::new(store)?;
+
+    // No trace to prove the call did nothing else: run, do not remember.
+    call_main(&runtime, &pure, &[0x80], 0, &EffectContext::default()).await.unwrap();
+    // A row that names an effect is never eligible, whatever the callee did.
+    call_main(&runtime, &effectful, &[0x80], 0, &traced()).await.unwrap();
+    assert_eq!(runtime.call_result_stats().stores, 0);
+    assert_eq!(runtime.call_result_stats().hits, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_call_that_recorded_an_effect_is_not_stored_even_when_its_row_is_empty() -> Result<()> {
+    // The static row can undercount; the trace decides. A callee declared pure that
+    // performs `now` records an entry under its call scope, so its result is not kept.
+    let store = Store::memory()?;
+    let descriptor = loom_proto::encode(&json!({"op":"now","args":null})).map_err(anyhow::Error::msg)?;
+    let hidden = register(&store, &perform_module(&descriptor)?, &[("main", 0)], &[])?;
+    let runtime = Runtime::new(store)?;
+    let effects = traced();
+    let _ = call_main(&runtime, &hidden, &[0x80], 0, &effects).await;
+    assert_eq!(runtime.call_result_stats().stores, 0, "no effect-touching call is remembered");
+    Ok(())
+}

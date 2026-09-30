@@ -172,7 +172,7 @@ pub fn command_scope(command: &str) -> Scope {
         "cas.list" | "cas.inspect" | "trace.effects" | "defs" | "events" | "resolve" | "deps"
         | "build" | "stats" | "process.list" | "process.status" => Scope::Read,
         "machine.create" | "process.start" | "model.state" | "model.list" => Scope::Host,
-        "backup" | "gc" | "cache_evict" => Scope::Admin,
+        "backup" | "gc" | "cache_evict" | "result_cache_clear" => Scope::Admin,
         _ => Scope::Execute,
     }
 }

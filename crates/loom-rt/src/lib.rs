@@ -2,6 +2,8 @@ mod call;
 mod sandbox;
 pub use sandbox::WasmSandbox;
 mod compilation_cache;
+mod result_cache;
+pub use result_cache::ResultCacheStats;
 pub use call::{CallEffects, GuestFailure};
 pub use compilation_cache::{CompilationCacheStats, LoomCompilationCache};
 mod calls;
@@ -80,6 +82,8 @@ struct Inner {
     compilation_cache: Arc<LoomCompilationCache>,
     core_executor: futures::executor::ThreadPool,
     core_modules: Mutex<ModuleCache>,
+    /// Results of isolated calls to pure callees; see `result_cache`.
+    call_results: result_cache::ResultCache,
     component_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     effect_locks: Mutex<HashMap<String, Weak<AsyncMutex<()>>>>,
     handler_round_trip_us: Mutex<HandlerMeasurements>,
@@ -259,6 +263,15 @@ impl Runtime {
         self.inner.processes.clone()
     }
     /// Candidate function-cache hits and native compiler storage diagnostics.
+    /// Hits, misses and stored entries of the isolated-call result cache.
+    pub fn call_result_stats(&self) -> ResultCacheStats {
+        self.inner.call_results.stats()
+    }
+    /// Forget the cached results of one callee (by definition hash) or all of
+    /// them; returns how many were dropped.
+    pub fn clear_call_results(&self, callee: Option<&str>) -> usize {
+        self.inner.call_results.clear(callee)
+    }
     pub fn compilation_cache_stats(&self) -> CompilationCacheStats {
         self.inner.compilation_cache.stats()
     }
@@ -294,6 +307,7 @@ impl Runtime {
                     .name_prefix("loom-guest-")
                     .create()?,
                 core_modules: Mutex::new(ModuleCache::default()),
+                call_results: result_cache::ResultCache::default(),
                 component_locks: Mutex::new(HashMap::new()),
                 effect_locks: Mutex::new(HashMap::new()),
                 handler_round_trip_us: Mutex::new(HandlerMeasurements::default()),

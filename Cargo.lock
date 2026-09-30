@@ -2973,6 +2973,7 @@ dependencies = [
  "loom-sandbox",
  "loom-store",
  "loom-v8",
+ "lru",
  "mach2",
  "rusqlite",
  "serde",

@@ -143,6 +143,8 @@ impl Service {
                     json!(self.last_reply_storage_nanos.load(Ordering::Relaxed));
                 stats["effect_wire_bytes"] = json!(self.runtime.effect_wire_bytes());
                 stats["handler_round_trip_us"] = self.runtime.handler_round_trip_us();
+                let results = self.runtime.call_result_stats();
+                stats["call_results"] = json!({"hits":results.hits,"misses":results.misses,"stores":results.stores,"entries":results.entries});
                 Ok(stats)
             }
             "gc" => Ok(serde_json::to_value(
@@ -154,6 +156,10 @@ impl Service {
                         .try_into()?,
                 )?,
             )?),
+            // Forget cached isolated-call results: one callee's (`hash`) or all.
+            "result_cache_clear" => Ok(json!({"dropped": self.runtime.clear_call_results(
+                args.get("hash").and_then(Value::as_str),
+            )})),
             "cache_evict" => Ok(serde_json::to_value(
                 loom_maintenance::evict_build_cache(
                     &self.builder,

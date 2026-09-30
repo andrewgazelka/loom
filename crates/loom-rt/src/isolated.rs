@@ -81,6 +81,16 @@ impl Runtime {
             });
         }
         let entry = (!request.entry.is_empty()).then_some(request.entry);
+        // A pure callee's answer for these arguments, when it was computed before.
+        let cacheable = effects.trace.is_some() && self.callee_is_pure(&hash, request.entry);
+        if cacheable
+            && let Some(bytes) =
+                self.inner
+                    .call_results
+                    .get(&hash, request.entry, request.argc, request.payload)
+        {
+            return Ok(bytes);
+        }
         let child_scope = format!("{scope}/call:{occurrence}");
         let child = EffectContext {
             depth: effects.depth + 1,
@@ -104,9 +114,44 @@ impl Runtime {
             }
             samples.push(started.elapsed().as_secs_f64() * 1_000_000.0);
         }
-        outcome
+        let result = outcome
             .map(|call| call.output.bytes)
-            .map_err(|error| host_failure(&hash, error))
+            .map_err(|error| host_failure(&hash, error))?;
+        // Stored only when the call really did nothing but compute: the static row
+        // can undercount, the trace cannot.
+        if cacheable
+            && effects
+                .trace
+                .as_ref()
+                .is_some_and(|trace| !trace.has_effects_under(&child_scope))
+        {
+            self.inner.call_results.put(
+                &hash,
+                request.entry,
+                request.argc,
+                request.payload,
+                &result,
+            );
+        }
+        Ok(result)
+    }
+
+    /// Whether the stored signature says `entry` of `hash` has an empty, fully
+    /// known effect row. A missing definition, a JavaScript one, or an unnamed
+    /// entry on a definition with several, is not pure for this purpose.
+    fn callee_is_pure(&self, hash: &str, entry: &str) -> bool {
+        let Ok(Some(definition)) = self.inner.store.executable_definition(hash) else {
+            return false;
+        };
+        if definition.lang.is_v8() {
+            return false;
+        }
+        let selected = if entry.is_empty() {
+            (definition.sig.exports.len() == 1).then(|| &definition.sig.exports[0])
+        } else {
+            definition.sig.exports.iter().find(|export| export.name == entry)
+        };
+        selected.is_some_and(|export| export.effects.labels.is_empty() && !export.effects.unknown)
     }
 
     /// A denied call is an effect the trace records (a permitted one is not:
