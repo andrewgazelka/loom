@@ -160,7 +160,7 @@ code at native speed, and payloads of tens of megabytes crossing calls.
 `docs/design/host-kernels.md` is now implemented for the pure triangle-soup queries, and
 `rgb-host-kernels/` here is the adapter over rgb's real `TriBvh` (rgb's `geom.rs` and `check/tol.rs` are
 included by path, unmodified). Results: every op bit-equal to a direct `TriBvh` call; 0.3 us per wasm-to-host
-call; a batch of 1000 rays 2.6x faster than rgb's native single-thread loop, 100,000 rays 32x; a mesh crosses
+call; a batch of 1000 rays 2.6x faster than rgb's native single-thread loop on this loaded Mac (best of N; the parallel gain, not measured on a quiet machine, is most of it); a mesh crosses
 the boundary once as a 32-byte handle. Numbers and limits in section 7 of the design doc.
 
 To use it: rgb embeds `loom-rt`, registers `rgb_host_kernels::RgbHost::default()` with

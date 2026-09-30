@@ -4,6 +4,8 @@ Design, 2026-09-29, with the first slice built (see **Status**). It answers the 
 (docs/spikes/rgb-forge, section 4) using rgb's real APIs, read at `/Volumes/Projects/andrewgazelka/rgb`
 (paths below are in that repo).
 
+> Sections 2 to 5 are the design as first written. What was built differs: handles are BLAKE3 content hashes, a resident BVH is a 16-entry LRU keyed by handle, ops are named `family.op` with string errors, and a kernel adds the fixed effect label `kernel` (versions in the result-cache key). Sections 7 to 8 describe the code.
+
 ## Status
 
 Built and tested in Loom (commit `c2fd573`): `HostKernel` and `Runtime::register_kernel`
@@ -138,7 +140,10 @@ wrapper to a row label `pure:tribvh_ray@1`.
 ## 7. Costs, measured
 
 `docs/spikes/rgb-forge/rgb-host-kernels/examples/bench.rs`, release build, this Mac (M5 Max, 18 cores) with
-other agents holding the load average at 56, so read every figure as a worst case.
+other agents holding the load average at 56 to 69. Each figure is the best of 5 to 30 runs, so it is a
+best case for this loaded machine, not a worst case; no medians or spreads were recorded and none of it was taken on a
+quiet machine. The "via kernel" rows call `Runtime::call_kernel` from Rust: they include the argument copy in
+and the reply copy out, not the 0.3 us wasm boundary, which is the first table's second row and adds to every call.
 
 | what | measured |
 |---|---|
@@ -160,14 +165,35 @@ Ray batches against that mesh, native `TriBvh::ray` on one thread versus the ker
 | 10,000 | 31.1 ms | 3.10 ms | 0.10x |
 | 100,000 | 649 ms | 20.3 ms | 0.03x |
 
-The acceptance bar was "under 10% overhead at a batch of 1000 rays": the kernel is 2.6x faster there, since the
-host spreads the batch over the machine's cores and the boundary costs about a third of a microsecond a call. The
-native column is one thread, as the forge calls it today; a forge that parallelised its own loop would close some
-of that gap, not the boundary cost. Single queries cost about 20% over native, so single queries stay in the guest.
+The acceptance bar was "under 10% overhead at a batch of 1000 rays". It is met only because the kernel spreads a
+batch over cores while the native column is one thread, as the forge calls it today. The 32x at 100,000 rays on 18
+cores is more than the core count, so it is mostly a scheduler artifact of comparing one thread against a pool on a
+machine at load 56 to 69; the parallel gain is real but its size is not measured here. To measure it, run the same
+batch with a 1-thread pool and an N-thread pool on a quiet machine. At equal threading the overhead is the copy
+plus the boundary: one ray costs about 0.67 us in the kernel plus 0.3 us at the wasm boundary, against 0.54 us
+native, so single queries stay in the guest.
 
 The first query on a mesh (323 ms) is more than the native build (140 ms): about 180 ms is fetching 17.9 MB back
 from the store, verifying its hash, and parsing it into triangles. It is a one-time cost per mesh and not yet
 optimized (the parse copies through an intermediate `Vec<f64>`).
+
+## 7a. Limits of the built slice
+
+Found by the review of the first slice; fixed and not fixed.
+
+Fixed: a handle names only bytes `loom.put` stored (a hash of any other object looks missing); kernel calls run on a
+blocking thread behind one slot per core, not on the guest pool; the import is refused in pure executions; an
+oversize reply or op name is an error the guest sees, not a trap; a call during which any kernel failed is not
+stored in the result cache; the rgb adapter no longer caches failed lookups, hashes its source and lockfile into its
+version, checks shapes before building a mesh, bounds a call to 2^20 queries and an `overlapping` reply to 64 MB, and
+rejects a NaN, negative or malformed radius.
+
+Not fixed: a running kernel call cannot be interrupted, so the execution deadline does not stop it (the slots bound
+how many run, and the adapter bounds the queries per call); blobs from `loom.put` are never collected and have no
+quota; a kernel call leaves no trace entry, so replaying a recorded execution on a host with different kernels
+diverges instead of failing (the kernel fingerprint should go in the trace); a cache hit answers a caller whose row
+lacks `kernel` where a real run would be denied; the resident BVH cache holds 16 meshes whatever their size; the
+adapter's first-query cost includes a redundant copy of the mesh bytes.
 
 ## 8. Slices
 

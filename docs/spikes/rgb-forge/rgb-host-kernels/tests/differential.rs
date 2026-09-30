@@ -192,3 +192,55 @@ fn bad_input_is_an_error_message_not_a_crash_and_the_host_keeps_working() {
     let empty = runtime.call_kernel("loom.put", &[&[]]).unwrap();
     assert!(runtime.call_kernel("rgb-host.contains", &[&empty, &f64_bytes([0.0; 3])]).unwrap_err().contains("no triangles"));
 }
+
+#[test]
+fn a_failed_lookup_is_not_remembered_once_the_bytes_arrive() {
+    let (runtime, _, _) = setup();
+    let mesh = bytes_of(&sphere(16, 8));
+    let future = *blake3::hash(&mesh).as_bytes();
+    let point = f64_bytes([0.0; 3]);
+    assert!(runtime.call_kernel("rgb-host.contains", &[&future, &point]).unwrap_err().contains("never stored"));
+    let stored = runtime.call_kernel("loom.put", &[&mesh]).unwrap();
+    assert_eq!(stored, future);
+    assert!(runtime.call_kernel("rgb-host.contains", &[&future, &point]).is_ok());
+}
+
+#[test]
+fn a_radius_that_is_not_a_distance_is_an_error_and_extra_bytes_are_refused() {
+    let (runtime, handle, _) = setup();
+    let point = f64_bytes([0.0; 3]);
+    for bad in [f64::NAN, -1.0, f64::NEG_INFINITY] {
+        let error = runtime.call_kernel("rgb-host.nearest", &[&handle, &point, &bad.to_le_bytes()]).unwrap_err();
+        assert!(error.contains("radius"), "{bad}: {error}");
+    }
+    assert!(runtime.call_kernel("rgb-host.nearest", &[&handle, &point, &f64_bytes([1.0, 2.0])]).is_err());
+    assert!(runtime.call_kernel("rgb-host.nearest", &[&handle, &point, &0.0f64.to_le_bytes()]).is_ok());
+}
+
+#[test]
+fn a_malformed_call_never_builds_the_mesh_and_an_empty_batch_is_empty() {
+    let (runtime, handle, _) = setup();
+    let unknown = [9u8; 32];
+    // Arity and sizes are checked first: this error is about the shape, not the missing mesh.
+    let error = runtime.call_kernel("rgb-host.ray", &[&unknown, &[0u8; 7]]).unwrap_err();
+    assert!(error.contains("whole number"), "{error}");
+    assert!(runtime.call_kernel("rgb-host.nope", &[&unknown]).unwrap_err().contains("no kernel op"));
+    assert!(runtime.call_kernel("rgb-host.contains", &[&handle, &[], &[]]).unwrap_err().contains("takes 2"));
+    assert_eq!(runtime.call_kernel("rgb-host.contains", &[&handle, &[]]).unwrap(), Vec::<u8>::new());
+    assert_eq!(runtime.call_kernel("rgb-host.overlapping", &[&handle, &[]]).unwrap(), vec![0, 0, 0, 0]);
+}
+
+#[test]
+fn the_overlapping_reply_is_bounded_and_the_version_follows_the_source() {
+    let (runtime, handle, _) = setup();
+    // 24k triangles per box, 4 bytes each: a few hundred boxes over the whole sphere is under the cap,
+    // a hundred thousand is not.
+    let whole = [-2.0, -2.0, -2.0, 2.0, 2.0, 2.0];
+    let many = f64_bytes(std::iter::repeat_n(whole, 100_000).flatten());
+    let error = runtime.call_kernel("rgb-host.overlapping", &[&handle, &many]).unwrap_err();
+    assert!(error.contains("exceed"), "{error}");
+    let few = f64_bytes(std::iter::repeat_n(whole, 4).flatten());
+    assert!(runtime.call_kernel("rgb-host.overlapping", &[&handle, &few]).is_ok());
+    // The version is a digest, not a literal: it changes the kernel fingerprint.
+    assert_ne!(RgbHost::default().version_for_tests(), 1);
+}

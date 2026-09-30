@@ -24,8 +24,11 @@ use arc_swap::ArcSwap;
 use std::{
     collections::{BTreeMap, HashMap},
     panic::AssertUnwindSafe,
-    sync::Mutex,
+    sync::{Mutex, atomic::AtomicU64},
 };
+
+/// The store kind `loom.put` writes and `KernelContext::blob` reads.
+const BLOB_KIND: &str = "kernel-blob";
 
 /// A content handle: the BLAKE3 hash of the bytes it names.
 pub type Handle = [u8; 32];
@@ -51,10 +54,12 @@ pub struct KernelContext<'a> {
 
 impl KernelContext<'_> {
     /// The bytes a handle names (`loom.put`), or `None` when this host never
-    /// stored them.
+    /// stored them through `loom.put`. A hash of anything else in the store (a
+    /// definition, a component) is `None` too, so a handle cannot read what the
+    /// guest could not already have written.
     pub fn blob(&self, handle: &Handle) -> Result<Option<Vec<u8>>, String> {
         self.store
-            .get(&hex(handle))
+            .get_of_kind(&hex(handle), BLOB_KIND)
             .map_err(|error| format!("reading kernel blob: {error:#}"))
     }
 }
@@ -90,11 +95,30 @@ struct Snapshot {
     fingerprint: [u8; 32],
 }
 
-#[derive(Default)]
 pub(crate) struct Kernels {
     snapshot: ArcSwap<Snapshot>,
     /// Serializes registrations; readers never take it.
     registering: Mutex<()>,
+    /// Kernel calls running at once. They run off the guest thread pool (a slow one
+    /// must not stall every guest), and this bounds how many native threads and how
+    /// much transient memory they take together.
+    slots: Arc<tokio::sync::Semaphore>,
+    /// Kernel calls that failed, ever. A kernel failure depends on host state (a
+    /// missing blob, a denied permit) and is recorded nowhere else, so a caller that
+    /// saw this move during a call does not store that call's result.
+    failures: AtomicU64,
+}
+
+impl Default for Kernels {
+    fn default() -> Self {
+        let slots = std::thread::available_parallelism().map_or(4, |n| n.get());
+        Self {
+            snapshot: ArcSwap::default(),
+            registering: Mutex::new(()),
+            slots: Arc::new(tokio::sync::Semaphore::new(slots)),
+            failures: AtomicU64::new(0),
+        }
+    }
 }
 
 impl Kernels {
@@ -155,18 +179,62 @@ impl Runtime {
         self.inner.kernels.fingerprint()
     }
 
+    /// How many kernel calls have failed on this runtime.
+    pub(crate) fn kernel_failures(&self) -> u64 {
+        self.inner.kernels.failures.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Note a failure that happened before a kernel ran (a denied permit, a bad call).
+    pub(crate) fn note_kernel_failure(&self) {
+        self.inner.kernels.failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// [`Self::call_kernel`] on a blocking thread, at most one per core at a time.
+    /// This is what the `loom.kernel` import uses: a kernel call cannot be interrupted,
+    /// so it must not run on (or hold) a guest executor thread.
+    pub(crate) async fn call_kernel_blocking(&self, op: String, args: Vec<Vec<u8>>) -> Result<Vec<u8>, String> {
+        let slot = self
+            .inner
+            .kernels
+            .slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| "kernel slots closed".to_owned())?;
+        let runtime = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let _slot = slot;
+            let slices: Vec<&[u8]> = args.iter().map(Vec::as_slice).collect();
+            runtime.call_kernel(&op, &slices)
+        })
+        .await
+        .map_err(|error| format!("kernel task failed: {error}"))?
+    }
+
     /// Run kernel op `op` (`family.name`, or the built-in `loom.put`) on the
     /// gather list `args`. This is what the `loom.kernel` import does.
     pub fn call_kernel(&self, op: &str, args: &[&[u8]]) -> Result<Vec<u8>, String> {
+        let outcome = self.call_kernel_inner(op, args);
+        if outcome.is_err() {
+            self.note_kernel_failure();
+        }
+        outcome
+    }
+
+    fn call_kernel_inner(&self, op: &str, args: &[&[u8]]) -> Result<Vec<u8>, String> {
         if op == "loom.put" {
-            let mut bytes = Vec::with_capacity(args.iter().map(|part| part.len()).sum());
-            for part in args {
-                bytes.extend_from_slice(part);
-            }
+            let joined;
+            let bytes: &[u8] = match args {
+                [single] => single,
+                _ => {
+                    joined = args.concat();
+                    &joined
+                }
+            };
             let stored = self
                 .inner
                 .store
-                .put("kernel-blob", &bytes)
+                .put(BLOB_KIND, bytes)
                 .map_err(|error| format!("storing kernel blob: {error:#}"))?;
             return unhex(&stored)
                 .map(|handle| handle.to_vec())

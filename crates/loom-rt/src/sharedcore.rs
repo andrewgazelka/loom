@@ -237,8 +237,15 @@ const KERNEL_MAX_BYTES: usize = 256 * 1024 * 1024;
 /// Write `bytes` then `tag` into one fresh guest allocation and return it packed
 /// as `length << 32 | pointer` (the length includes the tag).
 async fn respond_tagged(caller: &mut Caller<'_, Guest>, bytes: Vec<u8>, tag: u8) -> Result<i64> {
+    // A reply the guest cannot hold is an error the guest can see, not a trap.
+    let (bytes, tag) = if bytes.len() + 1 > KERNEL_MAX_BYTES {
+        let message = format!("kernel reply of {} bytes exceeds {KERNEL_MAX_BYTES}", bytes.len());
+        caller.data().execution.runtime.note_kernel_failure();
+        (message.into_bytes(), 1)
+    } else {
+        (bytes, tag)
+    };
     let total = bytes.len() + 1;
-    anyhow::ensure!(total <= KERNEL_MAX_BYTES, "kernel reply too large");
     let pointer = allocate(caller, total.try_into()?, 1).await?;
     let memory = caller.data().execution.memory.clone();
     crate::shared_copy::write(memory.data(), pointer as usize, &bytes)?;

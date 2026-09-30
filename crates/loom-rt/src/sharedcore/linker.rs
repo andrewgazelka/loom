@@ -148,16 +148,18 @@ pub(super) fn linker(
                 Box::new(async move {
                     let result: Result<i64> = async {
                         let execution = caller.data().execution.clone();
-                        let outcome: Result<Vec<u8>, String> = (|| {
+                        let prepared: Result<(String, Vec<Vec<u8>>), String> = (|| {
+                            anyhow::ensure!(!execution.pure, "kernel calls are forbidden in pure core execution");
                             anyhow::ensure!(
                                 execution.effects.permits("kernel"),
                                 "the kernel effect is not allowed here"
                             );
                             anyhow::ensure!((0..=64).contains(&count), "kernel call with {count} buffers");
+                            anyhow::ensure!((0..=256).contains(&op_len), "kernel op name of {op_len} bytes");
                             let op = crate::shared_copy::read(
                                 execution.memory.data(),
                                 op_ptr as u32 as usize,
-                                (op_len as u32).min(256) as usize,
+                                op_len as usize,
                             )?;
                             let op = String::from_utf8(op)?;
                             let table = crate::shared_copy::read(
@@ -178,11 +180,16 @@ pub(super) fn linker(
                                     length,
                                 )?);
                             }
-                            let slices: Vec<&[u8]> = buffers.iter().map(Vec::as_slice).collect();
-                            Ok(execution.runtime.call_kernel(&op, &slices))
+                            Ok((op, buffers))
                         })()
-                        .map_err(|error: anyhow::Error| format!("{error:#}"))
-                        .and_then(|result| result);
+                        .map_err(|error: anyhow::Error| format!("{error:#}"));
+                        let outcome: Result<Vec<u8>, String> = match prepared {
+                            Ok((op, buffers)) => execution.runtime.call_kernel_blocking(op, buffers).await,
+                            Err(message) => {
+                                execution.runtime.note_kernel_failure();
+                                Err(message)
+                            }
+                        };
                         execution
                             .runtime
                             .inner

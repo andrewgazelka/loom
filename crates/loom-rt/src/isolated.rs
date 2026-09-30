@@ -101,6 +101,7 @@ impl Runtime {
             ..effects.clone()
         };
         let started = Instant::now();
+        let kernel_failures = self.kernel_failures();
         let outcome = self
             .core_call_entry(
                 &hash,
@@ -123,7 +124,11 @@ impl Runtime {
             .map_err(|error| host_failure(&hash, error))?;
         // Stored only when the call really did nothing but compute: the static row
         // can undercount, the trace cannot.
+        // A kernel failure (denied, missing blob, I/O) is recorded nowhere else and depends on
+        // host state, so a call during which one happened is not stored. Another call's failure
+        // in the same window only makes this conservative.
         if cacheable
+            && self.kernel_failures() == kernel_failures
             && effects
                 .trace
                 .as_ref()

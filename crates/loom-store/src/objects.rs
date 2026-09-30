@@ -5,6 +5,19 @@ impl Store {
         self.recording.barrier(false)?;
         put(&*self.lock()?, kind, bytes)
     }
+    /// The bytes at `hash` when they were stored with `kind`; `None` for a missing hash
+    /// and for one stored as anything else, so a caller cannot tell the two apart.
+    pub fn get_of_kind(&self, hash: &str, kind: &str) -> Result<Option<Vec<u8>>> {
+        self.recording.barrier(false)?;
+        let stored: Option<String> = self
+            .lock()?
+            .query_row("SELECT kind FROM cas WHERE hash=?", [hash], |row| row.get(0))
+            .optional()?;
+        if stored.as_deref() != Some(kind) {
+            return Ok(None);
+        }
+        self.get(hash)
+    }
     pub fn get(&self, hash: &str) -> Result<Option<Vec<u8>>> {
         self.recording.barrier(false)?;
         let address = if hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()) {

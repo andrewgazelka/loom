@@ -118,3 +118,44 @@ fn registration_refuses_reserved_malformed_and_duplicate_families_and_versions_m
     bumped.register_kernel(Arc::new(V4)).unwrap();
     assert_ne!(bumped.kernel_fingerprint(), with_test, "the same family at another version differs");
 }
+
+#[test]
+fn a_handle_names_only_what_put_stored_not_other_objects_in_the_store() {
+    let runtime = runtime();
+    let other = runtime.inner.store.put("definition", b"secret source").unwrap();
+    let handle = unhex(&other).unwrap();
+    let error = runtime.call_kernel("test.blob_len", &[&handle]).unwrap_err();
+    assert_eq!(error, "unknown handle", "an object of another kind looks like a missing one");
+    let put = runtime.call_kernel("loom.put", &[b"mesh bytes"]).unwrap();
+    assert_eq!(
+        u64::from_le_bytes(runtime.call_kernel("test.blob_len", &[&put]).unwrap().try_into().unwrap()),
+        10
+    );
+}
+
+#[test]
+fn a_failed_call_moves_the_failure_counter_and_a_successful_one_does_not() {
+    let runtime = runtime();
+    let before = runtime.kernel_failures();
+    runtime.call_kernel("test.echo", &[b"x"]).unwrap();
+    assert_eq!(runtime.kernel_failures(), before);
+    runtime.call_kernel("nope.op", &[]).unwrap_err();
+    runtime.call_kernel("test.boom", &[]).unwrap_err();
+    assert_eq!(runtime.kernel_failures(), before + 2);
+}
+
+#[tokio::test]
+async fn blocking_calls_run_off_the_caller_thread_and_return_the_same_bytes() {
+    let runtime = runtime();
+    let reply = runtime.call_kernel_blocking("test.echo".into(), vec![b"ab".to_vec(), b"cd".to_vec()]).await;
+    assert_eq!(reply.unwrap(), b"abcd");
+    let many: Vec<_> = (0..64)
+        .map(|i| {
+            let runtime = runtime.clone();
+            tokio::spawn(async move { runtime.call_kernel_blocking("test.echo".into(), vec![vec![i as u8]]).await })
+        })
+        .collect();
+    for (i, task) in many.into_iter().enumerate() {
+        assert_eq!(task.await.unwrap().unwrap(), vec![i as u8]);
+    }
+}
