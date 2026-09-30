@@ -214,6 +214,15 @@ pub struct TimedCall {
     pub value: Value,
     pub timing: RuntimeTiming,
 }
+/// The answer of [`Runtime::call_entry_cached`].
+#[derive(Debug)]
+pub struct CachedCall {
+    pub value: Value,
+    /// Served from the result cache: nothing ran.
+    pub cache_hit: bool,
+    /// Wall time of the lookup or the run.
+    pub run_ms: f64,
+}
 fn elapsed_ms(start: Instant) -> f64 {
     start.elapsed().as_secs_f64() * 1000.0
 }

@@ -181,6 +181,18 @@ pub static VERBS: &[Verb] = &[
             arg!(call_id, String, optional)
         ]
     ),
+    // Many `run`s at once, answered from the result cache where the callee is pure: `calls` is an array of
+    // `{target, args}`, `parallel` bounds how many run together.
+    verb!(
+        run_many,
+        Definition,
+        Execute,
+        [
+            arg!(calls, Json),
+            arg!(parallel, Integer, optional),
+            arg!(call_id, String, optional)
+        ]
+    ),
     // Stops the running `run` or `eval` that was given this `call_id`; not an error when none is running.
     verb!(cancel, Definition, Execute, [arg!(call_id, String)]),
     // Define: it compiles source. The handler also requires the execute scope,

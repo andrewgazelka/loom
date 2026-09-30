@@ -359,6 +359,7 @@ fn command_returns_direct(command: &str) -> bool {
             | "diff"
             | "run"
             | "eval"
+            | "run_many"
             | "cancel"
             | "find"
             | "dependents"

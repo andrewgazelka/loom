@@ -79,6 +79,7 @@ in-process result; that exercises `StoreRef` and `map_object` on real data.
   32-byte handle) and `Runtime::map_blob` (the embedder maps that result). `crates/loom-rt/src/kernel.rs`.
 * `loom_proto::StoreRef { hash, len }`: the wire form of "a result that lives in the store".
 * Cancellation: `run` and `eval` take `call_id`; `cancel {call_id}` drops the running call (`crates/loom-api/src/call_cancel.rs`). Measured: a wasm loop of 40 billion iterations at 99% CPU was cancelled after 1.5 s, the reply came back at once and the daemon was at 0% CPU within 2 s.
+* Batch: `run_many` (verb) over `Runtime::call_many_cached`: pure callees answered from the result cache, misses stored, duplicates in a batch run once. 200 distinct skin-weld calls cold 649 ms, the same 200 cached 59 ms (parallel 8, load ~35).
 * Not done: SDK sugar for guests to build and return a `StoreRef`, and a verb to map from outside the process.
 
 ## Order of work (proposed)

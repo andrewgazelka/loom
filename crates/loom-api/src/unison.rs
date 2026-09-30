@@ -180,6 +180,75 @@ impl Service {
         Ok(json!({"old":old.hash,"new":new.hash,"added":added,"removed":removed,"changed":changed}))
     }
     /// Call `entry` of `def` with `args` and report its output and effects.
+    /// `run_many`: each call resolved like `run`, then the whole batch through the runtime's cached path.
+    async fn run_many(&self, args: &Value) -> Result<Value> {
+        const MAX_CALLS: usize = 4096;
+        let started = Instant::now();
+        let calls = args
+            .get("calls")
+            .and_then(Value::as_array)
+            .context("calls must be an array of {target, args}")?;
+        ensure!(calls.len() <= MAX_CALLS, "run_many takes at most {MAX_CALLS} calls");
+        let parallel = match args.get("parallel").filter(|value| !value.is_null()) {
+            Some(value) => usize::try_from(value.as_u64().context("parallel must be a positive integer")?)?,
+            None => 16,
+        };
+        ensure!((1..=64).contains(&parallel), "parallel is 1 to 64");
+        let mut resolved = Vec::with_capacity(calls.len());
+        let mut refused: Vec<Option<String>> = Vec::with_capacity(calls.len());
+        for call in calls {
+            let outcome = (|| -> Result<(String, String, Value)> {
+                let target = field(call, "target")?;
+                let def = self.resolve_run_target(target)?;
+                let selected = self.store.resolve_entry(target)?;
+                let entry = match &selected {
+                    Some(entry) => entry.name.clone(),
+                    None => select_entry(&def, target)?.to_owned(),
+                };
+                Ok((
+                    def.hash.clone(),
+                    entry,
+                    call.get("args").cloned().unwrap_or_else(|| json!([])),
+                ))
+            })();
+            match outcome {
+                Ok(call) => {
+                    resolved.push(call);
+                    refused.push(None);
+                }
+                Err(error) => refused.push(Some(format!("{error:#}"))),
+            }
+        }
+        let mut outcomes = self.runtime.call_many_cached(resolved, parallel).await.into_iter();
+        let (mut hits, mut misses, mut failures) = (0u32, 0u32, 0u32);
+        let results: Vec<Value> = refused
+            .into_iter()
+            .map(|refusal| {
+                if let Some(error) = refusal {
+                    failures += 1;
+                    return json!({"ok": false, "error": error});
+                }
+                match outcomes.next().expect("one outcome per resolved call") {
+                    Ok(call) => {
+                        if call.cache_hit { hits += 1 } else { misses += 1 }
+                        json!({"ok": true, "output": call.value, "cache_hit": call.cache_hit, "ms": call.run_ms})
+                    }
+                    Err(error) => {
+                        failures += 1;
+                        json!({"ok": false, "error": format!("{error:#}")})
+                    }
+                }
+            })
+            .collect();
+        Ok(json!({
+            "results": results,
+            "hits": hits,
+            "misses": misses,
+            "failures": failures,
+            "wall_ms": started.elapsed().as_secs_f64() * 1000.0,
+        }))
+    }
+
     pub(super) async fn run_entry(
         &self,
         def: &Def,
@@ -311,6 +380,7 @@ impl Service {
                 ))
                 .await
             }
+            "run_many" => self.cancellable(args, self.run_many(args)).await,
             "eval" => self.cancellable(args, self.eval(args)).await,
             "cancel" => self.cancel_call(args),
             "find" => {

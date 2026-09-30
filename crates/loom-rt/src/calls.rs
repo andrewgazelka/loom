@@ -40,7 +40,7 @@ impl Runtime {
     ) -> Result<(TimedCall, Vec<Vec<u64>>)> {
         let scope = format!("call:{}", uuid::Uuid::new_v4());
         let sites: SiteLog = Arc::default();
-        let call = self
+        let (call, _) = self
             .call_traced_entry_inner(
                 hash,
                 Some(entry),
@@ -54,6 +54,94 @@ impl Runtime {
         let lines = std::mem::take(&mut *sites.lock().unwrap());
         Ok((call, lines))
     }
+    /// Run one entry for an embedder, answered from the result cache when the callee is pure (no effect
+    /// but `kernel`) and these exact arguments were computed before under the same kernel versions. A
+    /// miss runs the call and stores its result, so the next identical call costs a lookup. `entry` is
+    /// empty for a definition with one export.
+    pub async fn call_entry_cached(&self, hash: &str, entry: &str, args: Value) -> Result<CachedCall> {
+        let (argc, payload) = positional_payload(&args)?;
+        let kernels = self.kernel_fingerprint();
+        // An embedder may use kernels, so a kernel-using callee is cacheable too.
+        let cacheable = self.callee_purity(hash, entry).is_some();
+        let started = Instant::now();
+        if cacheable
+            && let Some(bytes) = self.inner.call_results.get(hash, entry, argc, &payload, &kernels)
+        {
+            let value = loom_proto::decode(&bytes).map_err(anyhow::Error::msg)?;
+            return Ok(CachedCall { value, cache_hit: true, run_ms: elapsed_ms(started) });
+        }
+        let scope = format!("call:{}", uuid::Uuid::new_v4());
+        let (call, bytes) = self
+            .call_traced_entry_inner(
+                hash,
+                (!entry.is_empty()).then_some(entry),
+                args,
+                &scope,
+                trace::ExecutionTrace::fresh(&scope),
+                None,
+                None,
+            )
+            .await?;
+        let cost = started.elapsed();
+        if cacheable {
+            self.inner
+                .call_results
+                .put(hash, entry, argc, &payload, &kernels, &bytes, cost.as_nanos() as u64);
+        }
+        Ok(CachedCall { value: call.value, cache_hit: false, run_ms: cost.as_secs_f64() * 1000.0 })
+    }
+
+    /// [`Self::call_entry_cached`] over a batch, `parallel` at a time. Identical calls in one batch run
+    /// once. One result per call, in order; a failure is that call's alone.
+    pub async fn call_many_cached(
+        &self,
+        calls: Vec<(String, String, Value)>,
+        parallel: usize,
+    ) -> Vec<Result<CachedCall>> {
+        use futures::StreamExt;
+        let mut unique: Vec<usize> = Vec::new();
+        let mut first_of: HashMap<(String, String, String), usize> = HashMap::new();
+        let mut owner = Vec::with_capacity(calls.len());
+        let mut repeats = Vec::with_capacity(calls.len());
+        for (index, (hash, entry, args)) in calls.iter().enumerate() {
+            let key = (hash.clone(), entry.clone(), args.to_string());
+            let mut repeat = true;
+            let slot = *first_of.entry(key).or_insert_with(|| {
+                repeat = false;
+                unique.push(index);
+                unique.len() - 1
+            });
+            owner.push(slot);
+            repeats.push(repeat);
+        }
+        let calls = Arc::new(calls);
+        let mut outcomes: Vec<Option<Result<CachedCall, String>>> = (0..unique.len()).map(|_| None).collect();
+        let mut running = futures::stream::iter(unique.iter().copied().enumerate().map(|(slot, index)| {
+            let calls = calls.clone();
+            async move {
+                let (hash, entry, args) = &calls[index];
+                (slot, self.call_entry_cached(hash, entry, args.clone()).await.map_err(|e| format!("{e:#}")))
+            }
+        }))
+        .buffer_unordered(parallel.clamp(1, 256));
+        while let Some((slot, outcome)) = running.next().await {
+            outcomes[slot] = Some(outcome);
+        }
+        owner
+            .into_iter()
+            .zip(repeats)
+            .map(|(slot, repeat)| match outcomes[slot].as_ref().expect("every unique call ran") {
+                // A repeat inside the batch took the first call's answer: nothing ran for it either.
+                Ok(call) => Ok(CachedCall {
+                    value: call.value.clone(),
+                    cache_hit: call.cache_hit || repeat,
+                    run_ms: if repeat { 0.0 } else { call.run_ms },
+                }),
+                Err(message) => Err(anyhow::anyhow!("{message}")),
+            })
+            .collect()
+    }
+
     /// A borrowed-effects call (`call_with_effects`): the caller owns the
     /// root handler, so no trace identity is recorded here.
     pub(super) async fn call_scoped(
@@ -138,6 +226,7 @@ impl Runtime {
     ) -> Result<TimedCall> {
         self.call_traced_entry_inner(hash, entry, args, scope, execution, stream, None)
             .await
+            .map(|(call, _)| call)
     }
     #[allow(clippy::too_many_arguments)]
     async fn call_traced_entry_inner(
@@ -149,7 +238,7 @@ impl Runtime {
         execution: Arc<trace::ExecutionTrace>,
         stream: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
         sites: Option<SiteLog>,
-    ) -> Result<TimedCall> {
+    ) -> Result<(TimedCall, Vec<u8>)> {
         let (argc, payload) = positional_payload(&args)?;
         execution.identity(hash, &payload)?;
         let session = trace::TraceSession::new(self.inner.store.clone(), execution.clone(), entry);
@@ -168,10 +257,13 @@ impl Runtime {
         };
         session.finish(&outcome)?;
         let call = result?;
-        Ok(TimedCall {
-            scope: scope.into(),
-            value: call.output.decode()?,
-            timing: call.timing,
-        })
+        Ok((
+            TimedCall {
+                scope: scope.into(),
+                value: call.output.decode()?,
+                timing: call.timing,
+            },
+            call.output.bytes,
+        ))
     }
 }

@@ -190,3 +190,42 @@ mod tests {
         assert!(service.cancellable(&json!({"call_id": ""}), async { Ok(4) }).await.is_err());
     }
 }
+
+#[cfg(test)]
+mod run_many_tests {
+    use super::*;
+
+    fn service() -> Service {
+        Service::new(
+            Store::memory().unwrap(),
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
+            vec![],
+        )
+        .unwrap()
+    }
+    async fn run_many(service: &Service, args: Value) -> loom_proto::Response {
+        service
+            .command(loom_proto::CommandRequest { session: None, command: "run_many".into(), args })
+            .await
+    }
+
+    #[tokio::test]
+    async fn run_many_isolates_failures_per_call_and_validates_the_batch() {
+        let service = service();
+        // Two calls that name nothing: each fails on its own, the batch still answers.
+        let reply = run_many(&service, json!({"calls": [{"target": "nope", "args": []}, {"target": "also-nope"}]})).await;
+        assert!(reply.ok, "{reply:?}");
+        assert_eq!(reply.result["failures"], 2);
+        assert_eq!(reply.result["results"].as_array().unwrap().len(), 2);
+        assert_eq!(reply.result["results"][0]["ok"], false);
+        // An empty batch is an empty answer.
+        let reply = run_many(&service, json!({"calls": []})).await;
+        assert!(reply.ok && reply.result["results"].as_array().unwrap().is_empty(), "{reply:?}");
+        // Shape and bounds are errors for the whole request.
+        assert!(!run_many(&service, json!({"calls": "x"})).await.ok);
+        assert!(!run_many(&service, json!({"calls": [], "parallel": 0})).await.ok);
+        assert!(!run_many(&service, json!({"calls": [], "parallel": 65})).await.ok);
+        let too_many: Vec<Value> = (0..4097).map(|_| json!({"target": "x"})).collect();
+        assert!(!run_many(&service, json!({"calls": too_many})).await.ok);
+    }
+}

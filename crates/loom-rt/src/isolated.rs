@@ -474,7 +474,7 @@ impl Runtime {
     /// record nothing in the trace; the kernel versions are in the cache key). A missing definition, a JavaScript one, or an unnamed
     /// entry on a definition with several, is not pure for this purpose.
     /// `Some(uses_kernel)` when it is pure in that sense, `None` when it is not.
-    fn callee_purity(&self, hash: &str, entry: &str) -> Option<bool> {
+    pub(crate) fn callee_purity(&self, hash: &str, entry: &str) -> Option<bool> {
         let Ok(Some(definition)) = self.inner.store.executable_definition(hash) else {
             return None;
         };
