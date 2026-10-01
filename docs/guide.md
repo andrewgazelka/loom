@@ -166,6 +166,23 @@ reduction (it would reorder the additions), so write the lanes and accumulators 
 program is not always vector-shaped: the engine's skin weld (scalar f64 graph and topology code) ran 142 ms median
 without the features and 147 ms with them, no change.
 
+### Fast math in cells: `loom::fast`
+
+The compiler never reorders float arithmetic, and Rust has no global fast-math switch (LLVM removed
+`-enable-unsafe-fp-math`; `-fp-contract=fast` changes nothing here, tested on the pinned nightly 2026-08-23). What
+stable Rust has is per-operation algebraic arithmetic (`f32::algebraic_add`, `algebraic_mul`, ..., stable since 1.98):
+the compiler may treat each as associative, distributive and contractible. `loom::fast` wraps it so ordinary operators
+use it: `F32` and `F64` (newtypes with `+ - * /`, assign forms, `Sum`, `mul_add`) and `fast::{sum, dot, axpy}` over
+slices. A reduction over them vectorizes four lanes wide, and `a * b + c` fuses to `f32x4.relaxed_madd`. Checked in the
+generated assembly on the pinned nightly: the plain `dot` loop has 0 vector instructions, the algebraic one has them
+plus a `relaxed_madd`; plain `axpy` vectorizes but never fuses, the algebraic one fuses.
+
+Measured 2026-09-30 (load ~12 to 25, release daemon, 1M f32 dot product x 64 passes, min of 7): plain `f32` loop 51.6
+ms, the same loop on `F32` 24.9 ms (2.1x), `fast::dot` 23.1 ms (2.2x), hand-written four-lane `f32x4_relaxed_madd`
+19.3 ms (earlier run). Sums come out different in the last bits (and the plain f32 accumulator saturates earlier
+than a vectorized one), a NaN or an infinity is not guaranteed to propagate, and the order is not fixed across
+builds: use it for geometry, shading and simulation, not for equality tests or values compared across machines.
+
 Turning the features on changes the strict version hash of every crate a definition names (the SDK included), so a
 definition's hash differs from the same source built before 2026-09-30: re-export `loom.lock` after upgrading.
 

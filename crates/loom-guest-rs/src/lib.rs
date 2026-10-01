@@ -2,6 +2,7 @@
 #![cfg_attr(target_arch = "wasm32", feature(allow_internal_unsafe))]
 #[doc(hidden)]
 pub mod core;
+pub mod fast;
 mod detached;
 mod scoped;
 pub use detached::{JoinHandle, spawn};
