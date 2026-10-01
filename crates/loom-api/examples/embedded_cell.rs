@@ -52,7 +52,7 @@ async fn main() -> anyhow::Result<()> {
     let mut times = Vec::new();
     for i in 0..7u8 {
         let mut copy = input.clone();
-        let at = copy.len() - 1 - i as usize * 4;
+        let at = std::env::var("FLIP_AT").ok().and_then(|v| v.parse::<usize>().ok()).map_or(copy.len() - 1 - i as usize * 4, |base| base + i as usize * 12);
         copy[at] ^= 1;
         let h = rt.put_blob(&copy)?;
         let t = Instant::now();
