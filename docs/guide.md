@@ -154,6 +154,21 @@ Item hashes describe compiler-resolved definitions. Renaming a local variable or
 
 The `stats` command (read scope) answers counters for a report. `calls.verbs.run`, `run_many` and `eval` each give `requests`, `failed`, `wall_ms_total`, `wall_ms_mean` and `wall_ms_slowest`; `run_many` adds `calls`, `cache_hits`, `cache_misses` and `call_failures` over its batches; `calls.since_seconds` is the daemon's age. The counters only grow, so subtract two snapshots for an interval. The result cache's own counts and the time it saved are in the same reply under `call_results` (`hits`, `misses`, `saved_ns`, and `by_callee` with each callee's computed and saved time), and `compilation_cache` counts compiled-module hits.
 
+### SIMD in cells
+
+Guests are built with `+simd128,+relaxed-simd` (`rustc/build.sh`), so a cell may use `core::arch::wasm32` vector
+intrinsics (`v128`, `f32x4_*`, `f32x4_relaxed_madd`) and LLVM may vectorize loops. Relaxed SIMD (fused multiply-add,
+lane-select variants) may round differently on another host or CPU; results are repeatable on one machine, which is
+all the result cache needs. Measured 2026-09-30 (load ~44, release daemon, same cell, 1M f32 dot product x 64
+passes, 7 runs each): scalar one-accumulator loop 57.6 ms min (62.5 median), four-accumulator `f32x4_relaxed_madd`
+loop 19.3 ms min (24.5 median), about 3x, near memory bandwidth. Automatic vectorization does not rewrite a float
+reduction (it would reorder the additions), so write the lanes and accumulators yourself where it matters. A real
+program is not always vector-shaped: the engine's skin weld (scalar f64 graph and topology code) ran 142 ms median
+without the features and 147 ms with them, no change.
+
+Turning the features on changes the strict version hash of every crate a definition names (the SDK included), so a
+definition's hash differs from the same source built before 2026-09-30: re-export `loom.lock` after upgrading.
+
 ### Build profile: what optimizes and what does not
 
 `add` and `update` always build at `-C opt-level=2` (the `standard` profile). `eval` builds at `-C opt-level=0` (`interactive`) so a REPL cell compiles sooner, unless you pass `profile: "standard"` (or the older `optimize: true`). The difference is large for compute: the engine's skin-weld cell runs in 17 to 18 ms interactive and 3.3 to 3.9 ms standard (native 2.8 ms). `-C opt-level=3` was tried and is no faster than 2 on that cell (3.9 to 4.5 ms, within noise), so there is no third profile. An `eval` of a cell you mean to call repeatedly should pass `profile: "standard"`; the two profiles are cached separately.

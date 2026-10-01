@@ -257,6 +257,13 @@ impl Runtime {
         unhex(&stored).context("the store returned a malformed hash")
     }
 
+    /// Store `bytes` as a kernel blob and return its handle: [`Self::put_blob_file`] for an embedder that already
+    /// holds the bytes in memory.
+    pub fn put_blob(&self, bytes: &[u8]) -> Result<Handle> {
+        let stored = self.inner.store.put(BLOB_KIND, bytes)?;
+        unhex(&stored).context("the store returned a malformed hash")
+    }
+
     /// The largest blob a cell can read back with `loom.get` (and so the largest the HTTP upload accepts).
     pub const MAX_BLOB_BYTES: usize = crate::sharedcore::KERNEL_MAX_BYTES;
 
